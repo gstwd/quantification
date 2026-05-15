@@ -106,3 +106,14 @@ Services are wired to PostgreSQL and real external clients. All 13 tables exist 
 - **Sync blocking in uvicorn**: Services use synchronous `urlopen` for external APIs. FastAPI runs sync routes in a thread pool (default 40 threads). Concurrent cold-start requests can exhaust the pool and cause timeouts — use a per-resource `threading.Lock` to serialize first-fetch, then read from DB on subsequent requests.
 - **ECharts + TypeScript**: `echarts/index.d.ts` triggers TS1203 with `vue-tsc`. Fix: add `"skipLibCheck": true` to `apps/web/tsconfig.json`.
 - **Backend venv on Windows**: Executables are at `apps/api/.venv/Scripts/` (e.g. `.venv/Scripts/alembic`, `.venv/Scripts/python`).
+
+## Coding Standards
+
+**Before generating or modifying any code, read [`docs/CODING_STANDARDS.md`](docs/CODING_STANDARDS.md).**
+
+Key rules (details in the doc):
+- All comments and docstrings must be in **Chinese**
+- Every Python class/function/method must have a Chinese Google-style docstring
+- Every TypeScript function must have a Chinese JSDoc comment
+- When refactoring, **update** existing comments — never delete them
+- No `any` types in TypeScript; use semantic HTTP status codes in routers
