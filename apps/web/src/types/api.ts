@@ -10,6 +10,10 @@ export interface EtfDetail {
   fund_company?: string | null
 }
 
+export interface EtfCreatePayload {
+  etf_code: string
+}
+
 export interface StrategyDetail {
   strategy_id: string
   display_name: string

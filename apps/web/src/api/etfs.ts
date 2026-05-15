@@ -1,5 +1,5 @@
 import { apiClient } from './client'
-import type { DailyBar, EtfDetail, ShareSnapshot } from '../types/api'
+import type { DailyBar, EtfCreatePayload, EtfDetail, ShareSnapshot } from '../types/api'
 
 export async function fetchEtfs(): Promise<EtfDetail[]> {
   const { data } = await apiClient.get<EtfDetail[]>('/etfs')
@@ -9,6 +9,15 @@ export async function fetchEtfs(): Promise<EtfDetail[]> {
 export async function fetchEtfDetail(etfCode: string): Promise<EtfDetail> {
   const { data } = await apiClient.get<EtfDetail>(`/etfs/${etfCode}`)
   return data
+}
+
+export async function createEtf(payload: EtfCreatePayload): Promise<EtfDetail> {
+  const { data } = await apiClient.post<{ etf: EtfDetail; message: string }>('/etfs', payload)
+  return data.etf
+}
+
+export async function deleteEtf(etfCode: string): Promise<void> {
+  await apiClient.delete(`/etfs/${etfCode}`)
 }
 
 export async function fetchDailyBars(etfCode: string, limit = 60): Promise<DailyBar[]> {

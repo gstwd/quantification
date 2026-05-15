@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.clients.eastmoney import EastmoneyClient
 from quant_etf_api.infra.clients.tencent import TencentClient
-from quant_etf_api.infra.db.models.core import EtfDailyBarModel, EtfDailyShareModel
+from quant_etf_api.infra.db.models.core import EtfDailyBarModel, EtfDailyShareModel, EtfUniverseModel
 from quant_etf_api.schemas.market_data import DailyBar, ShareSnapshot
 
 logger = logging.getLogger(__name__)
@@ -166,7 +166,9 @@ class IngestService:
                     return [_share_row_to_schema(r) for r in reversed(rows)]
 
                 # DB 无数据，从东方财富拉取快照并持久化
-                snapshot = EastmoneyClient().fetch_share_snapshot(etf_code)
+                etf_row = self._db.get(EtfUniverseModel, etf_code)
+                exchange = etf_row.exchange if etf_row else None
+                snapshot = EastmoneyClient().fetch_share_snapshot(etf_code, exchange=exchange)
                 if snapshot is not None:
                     stmt = insert(EtfDailyShareModel).values(
                         [

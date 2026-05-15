@@ -10,6 +10,7 @@
         <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input v-model="query" class="search-input" placeholder="搜索代码或名称..." />
       </div>
+      <button class="btn-add" @click="openAddModal">+ 添加 ETF</button>
     </div>
 
     <div class="table-wrap">
@@ -23,6 +24,7 @@
             <th>跟踪指数</th>
             <th>类别</th>
             <th>状态</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -40,10 +42,43 @@
               <span class="status-dot" :class="etf.is_active ? 'dot-active' : 'dot-inactive'"></span>
               <span class="text-muted">{{ etf.is_active ? '活跃' : '下架' }}</span>
             </td>
+            <td>
+              <button class="btn-delete" @click.stop="handleDelete(etf.etf_code)">下架</button>
+            </td>
           </tr>
         </tbody>
       </table>
       <div v-if="!store.loading && filtered.length === 0" class="empty">未找到匹配的 ETF</div>
+    </div>
+
+    <!-- 添加 ETF 弹窗 -->
+    <div v-if="showAddModal" class="modal-overlay" @click.self="closeAddModal">
+      <div class="modal">
+        <div class="modal-header">
+          <h2 class="modal-title">添加 ETF</h2>
+          <button class="modal-close" @click="closeAddModal">✕</button>
+        </div>
+        <form class="modal-body" @submit.prevent="submitAdd">
+          <div class="form-group">
+            <label class="form-label">ETF 代码 <span class="required">*</span></label>
+            <input
+              v-model="addCode"
+              class="form-input"
+              placeholder="6 位数字，如 510300"
+              maxlength="6"
+              autofocus
+            />
+            <span class="form-hint">基金名称、跟踪指数等信息将自动从东方财富获取</span>
+          </div>
+          <div v-if="addError" class="form-error">{{ addError }}</div>
+          <div class="modal-footer">
+            <button type="button" class="btn-cancel" @click="closeAddModal">取消</button>
+            <button type="submit" class="btn-submit" :disabled="addLoading">
+              {{ addLoading ? '获取信息中...' : '添加' }}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   </div>
 </template>
@@ -63,6 +98,50 @@ const filtered = computed(() => {
 })
 
 onMounted(() => store.loadAll())
+
+// --- 添加 ETF ---
+const showAddModal = ref(false)
+const addCode = ref('')
+const addError = ref('')
+const addLoading = ref(false)
+
+function openAddModal() {
+  addError.value = ''
+  showAddModal.value = true
+}
+
+function closeAddModal() {
+  showAddModal.value = false
+  addCode.value = ''
+  addError.value = ''
+}
+
+async function submitAdd() {
+  addError.value = ''
+  if (!/^\d{6}$/.test(addCode.value)) {
+    addError.value = 'ETF 代码必须为 6 位数字'
+    return
+  }
+  addLoading.value = true
+  try {
+    await store.addEtf({ etf_code: addCode.value })
+    closeAddModal()
+  } catch (e: any) {
+    addError.value = e?.response?.data?.detail ?? '添加失败，请重试'
+  } finally {
+    addLoading.value = false
+  }
+}
+
+// --- 下架 ETF ---
+async function handleDelete(etfCode: string) {
+  if (!window.confirm(`确认下架 ETF ${etfCode}？此操作可通过重新添加撤销。`)) return
+  try {
+    await store.removeEtf(etfCode)
+  } catch (e: any) {
+    alert(e?.response?.data?.detail ?? '操作失败，请重试')
+  }
+}
 </script>
 
 <style scoped>
@@ -78,7 +157,7 @@ onMounted(() => store.loadAll())
   border-radius: 20px;
 }
 
-.toolbar { display: flex; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; }
 .search-wrap { position: relative; display: flex; align-items: center; }
 .search-icon { position: absolute; left: 10px; color: var(--text-muted); pointer-events: none; }
 .search-input {
@@ -93,6 +172,19 @@ onMounted(() => store.loadAll())
 }
 .search-input:focus { border-color: var(--accent); }
 .search-input::placeholder { color: var(--text-muted); }
+
+.btn-add {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.btn-add:hover { opacity: 0.85; }
 
 .table-wrap {
   background: var(--surface);
@@ -133,4 +225,92 @@ onMounted(() => store.loadAll())
 .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 .dot-active { background: var(--success); }
 .dot-inactive { background: var(--text-muted); }
+
+.btn-delete {
+  background: transparent;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #f87171;
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-delete:hover { background: rgba(239, 68, 68, 0.1); }
+
+/* Modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 420px;
+  max-width: 90vw;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-title { font-size: 16px; font-weight: 700; }
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.modal-close:hover { color: var(--text); }
+.modal-body { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.form-group { display: flex; flex-direction: column; gap: 6px; }
+.form-label { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.required { color: #f87171; }
+.form-input {
+  background: var(--surface-2, rgba(255,255,255,0.05));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 8px 12px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.form-input:focus { border-color: var(--accent); }
+.form-error { font-size: 13px; color: #f87171; padding: 6px 10px; background: rgba(239, 68, 68, 0.1); border-radius: var(--radius-sm); }
+.form-hint { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.modal-footer { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }
+.btn-cancel {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn-cancel:hover { color: var(--text); }
+.btn-submit {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 8px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.btn-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-submit:not(:disabled):hover { opacity: 0.85; }
 </style>

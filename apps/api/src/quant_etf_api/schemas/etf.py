@@ -1,6 +1,7 @@
+import re
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class EtfSummary(BaseModel):
@@ -21,3 +22,19 @@ class EtfDetail(EtfSummary):
     is_a_share_etf: bool = True
     data_source: str = "seed"
     updated_at: datetime | None = None
+
+
+class EtfCreateRequest(BaseModel):
+    etf_code: str
+
+    @field_validator("etf_code")
+    @classmethod
+    def validate_code(cls, v: str) -> str:
+        if not re.fullmatch(r"\d{6}", v):
+            raise ValueError("ETF 代码必须为 6 位数字")
+        return v
+
+
+class EtfCreateResponse(BaseModel):
+    etf: EtfDetail
+    message: str
