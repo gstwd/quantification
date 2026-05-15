@@ -28,7 +28,9 @@ class TencentClient:
         request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urlopen(request, timeout=15) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        series = payload.get("data", {}).get(f"{prefix}{code}", {}).get("day", [])
+        series = payload.get("data", {}).get(f"{prefix}{code}", {})
+        # API returns "qfqday" for forward-adjusted data, "day" as fallback
+        rows = series.get("qfqday") or series.get("day") or []
         return [
             TencentDailyBar(
                 trade_date=row[0],
@@ -38,6 +40,6 @@ class TencentClient:
                 low_price=float(row[4]),
                 volume=float(row[5]),
             )
-            for row in series
+            for row in rows
             if len(row) >= 6 and row[0]
         ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import date, datetime
 
 from sqlalchemy.dialects.postgresql import insert
@@ -12,6 +13,17 @@ from quant_etf_api.infra.db.models.core import EtfDailyBarModel, EtfDailyShareMo
 from quant_etf_api.schemas.market_data import DailyBar, ShareSnapshot
 
 logger = logging.getLogger(__name__)
+
+# Prevent concurrent fetches for the same ETF from hammering external APIs
+_fetch_locks: dict[str, threading.Lock] = {}
+_fetch_locks_meta = threading.Lock()
+
+
+def _get_lock(key: str) -> threading.Lock:
+    with _fetch_locks_meta:
+        if key not in _fetch_locks:
+            _fetch_locks[key] = threading.Lock()
+        return _fetch_locks[key]
 
 
 def _bar_row_to_schema(row: EtfDailyBarModel) -> DailyBar:
@@ -63,26 +75,8 @@ class IngestService:
             if rows:
                 return [_bar_row_to_schema(r) for r in reversed(rows)]
 
-            bars = TencentClient().fetch_daily_bars(etf_code, limit)
-            if bars:
-                stmt = insert(EtfDailyBarModel).values(
-                    [
-                        {
-                            "trade_date": b.trade_date,
-                            "etf_code": etf_code,
-                            "open_price": b.open_price,
-                            "high_price": b.high_price,
-                            "low_price": b.low_price,
-                            "close_price": b.close_price,
-                            "volume": b.volume,
-                            "source": "tencent",
-                            "ingested_at": datetime.utcnow(),
-                        }
-                        for b in bars
-                    ]
-                ).on_conflict_do_nothing(constraint="uq_etf_daily_bar")
-                self._db.execute(stmt)
-                self._db.commit()
+            with _get_lock(f"bars:{etf_code}"):
+                # Re-check after acquiring lock — another thread may have fetched already
                 rows = (
                     self._db.query(EtfDailyBarModel)
                     .filter(EtfDailyBarModel.etf_code == etf_code)
@@ -90,7 +84,37 @@ class IngestService:
                     .limit(limit)
                     .all()
                 )
-                return [_bar_row_to_schema(r) for r in reversed(rows)]
+                if rows:
+                    return [_bar_row_to_schema(r) for r in reversed(rows)]
+
+                bars = TencentClient().fetch_daily_bars(etf_code, limit)
+                if bars:
+                    stmt = insert(EtfDailyBarModel).values(
+                        [
+                            {
+                                "trade_date": b.trade_date,
+                                "etf_code": etf_code,
+                                "open_price": b.open_price,
+                                "high_price": b.high_price,
+                                "low_price": b.low_price,
+                                "close_price": b.close_price,
+                                "volume": b.volume,
+                                "source": "tencent",
+                                "ingested_at": datetime.utcnow(),
+                            }
+                            for b in bars
+                        ]
+                    ).on_conflict_do_nothing(constraint="uq_etf_daily_bar")
+                    self._db.execute(stmt)
+                    self._db.commit()
+                    rows = (
+                        self._db.query(EtfDailyBarModel)
+                        .filter(EtfDailyBarModel.etf_code == etf_code)
+                        .order_by(EtfDailyBarModel.trade_date.desc())
+                        .limit(limit)
+                        .all()
+                    )
+                    return [_bar_row_to_schema(r) for r in reversed(rows)]
         except Exception:
             logger.warning("get_daily_bars failed for %s, returning stub", etf_code, exc_info=True)
             self._db.rollback()
@@ -124,23 +148,7 @@ class IngestService:
             if rows:
                 return [_share_row_to_schema(r) for r in reversed(rows)]
 
-            snapshot = EastmoneyClient().fetch_share_snapshot(etf_code)
-            if snapshot is not None:
-                stmt = insert(EtfDailyShareModel).values(
-                    [
-                        {
-                            "trade_date": date.today(),
-                            "etf_code": etf_code,
-                            "shares_total": snapshot.shares_total,
-                            "aum": snapshot.aum,
-                            "nav": round(snapshot.price, 3),
-                            "source": "eastmoney",
-                            "ingested_at": datetime.utcnow(),
-                        }
-                    ]
-                ).on_conflict_do_nothing(constraint="uq_etf_daily_share")
-                self._db.execute(stmt)
-                self._db.commit()
+            with _get_lock(f"shares:{etf_code}"):
                 rows = (
                     self._db.query(EtfDailyShareModel)
                     .filter(EtfDailyShareModel.etf_code == etf_code)
@@ -148,7 +156,34 @@ class IngestService:
                     .limit(limit)
                     .all()
                 )
-                return [_share_row_to_schema(r) for r in reversed(rows)]
+                if rows:
+                    return [_share_row_to_schema(r) for r in reversed(rows)]
+
+                snapshot = EastmoneyClient().fetch_share_snapshot(etf_code)
+                if snapshot is not None:
+                    stmt = insert(EtfDailyShareModel).values(
+                        [
+                            {
+                                "trade_date": date.today(),
+                                "etf_code": etf_code,
+                                "shares_total": snapshot.shares_total,
+                                "aum": snapshot.aum,
+                                "nav": round(snapshot.price, 3),
+                                "source": "eastmoney",
+                                "ingested_at": datetime.utcnow(),
+                            }
+                        ]
+                    ).on_conflict_do_nothing(constraint="uq_etf_daily_share")
+                    self._db.execute(stmt)
+                    self._db.commit()
+                    rows = (
+                        self._db.query(EtfDailyShareModel)
+                        .filter(EtfDailyShareModel.etf_code == etf_code)
+                        .order_by(EtfDailyShareModel.trade_date.desc())
+                        .limit(limit)
+                        .all()
+                    )
+                    return [_share_row_to_schema(r) for r in reversed(rows)]
         except Exception:
             logger.warning("get_share_history failed for %s, returning stub", etf_code, exc_info=True)
             self._db.rollback()
