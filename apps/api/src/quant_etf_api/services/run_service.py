@@ -18,6 +18,7 @@ class RunService:
 
     def list_runs(self) -> list[ResearchRunSummary]:
         try:
+            # 取最近 50 条运行记录，按开始时间倒序
             rows = (
                 self._db.query(ResearchRunModel)
                 .order_by(ResearchRunModel.started_at.desc())
@@ -41,6 +42,7 @@ class RunService:
         except Exception:
             logger.warning("list_runs DB query failed", exc_info=True)
 
+        # DB 无数据时返回占位运行记录
         return [
             ResearchRunSummary(
                 run_id=str(uuid4()),
@@ -71,6 +73,7 @@ class RunService:
             self._db.rollback()
             logger.warning("create_run DB insert failed", exc_info=True)
 
+        # 无论 DB 写入是否成功，都返回 pending 状态的摘要（异步执行场景）
         return ResearchRunSummary(
             run_id=run_id,
             run_type=run_type,

@@ -16,6 +16,7 @@ class VolumeBreakoutDailyPlugin:
         return {"type": "object", "properties": {"min_volume_ratio": {"type": "number", "default": 1.2}}}
 
     def required_inputs(self) -> list[str]:
+        # 仅依赖日频行情数据，是最轻量的基线策略
         return ["etf_daily_bar"]
 
     def factor_definitions(self) -> list[dict]:
@@ -25,6 +26,7 @@ class VolumeBreakoutDailyPlugin:
         return {"signal_id": "volume_breakout_signal", "name": "量能突破信号"}
 
     def prepare_context(self, trade_date: date, params: dict | None = None) -> StrategyContextData:
+        # 当前使用硬编码的模拟数据；后续接入真实 DB 查询后替换此处
         return StrategyContextData(extra={"volume_ratios": {"510300": 1.92, "510050": 1.28, "510500": 0.88, "159919": 1.57}})
 
     def run_for_universe(self, trade_date: date, universe: list[dict], context: StrategyContextData, params: dict | None = None) -> list[StrategyResult]:
@@ -32,6 +34,7 @@ class VolumeBreakoutDailyPlugin:
         ratios = context.extra.get("volume_ratios", {})
         for item in universe:
             code = item["etf_code"]
+            # 未知 ETF 默认量比 1.0（平量）
             ratio = ratios.get(code, 1.0)
             score = round(volume_probability(ratio), 1)
             level, label = signal_level(score)

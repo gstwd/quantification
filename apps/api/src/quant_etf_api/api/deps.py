@@ -11,6 +11,7 @@ def settings_dependency() -> Settings:
 
 
 def get_db() -> Generator[Session, None, None]:
+    # 每次请求创建独立 Session，请求结束后关闭，避免连接泄漏
     db = SessionLocal()
     try:
         yield db

@@ -11,6 +11,7 @@ from quant_etf_api.schemas.etf import EtfDetail
 
 logger = logging.getLogger(__name__)
 
+# 内置种子 ETF，覆盖四只主流宽基 ETF，应用启动时自动 upsert 到 DB
 SEED_ETFS = [
     {
         "etf_code": "510300",
@@ -75,6 +76,7 @@ class UniverseService:
 
     def _seed(self) -> None:
         try:
+            # on_conflict_do_nothing 保证幂等：已存在的 ETF 不会被覆盖
             stmt = insert(EtfUniverseModel).values(
                 [
                     {
@@ -98,11 +100,13 @@ class UniverseService:
         try:
             rows = self._db.query(EtfUniverseModel).filter(EtfUniverseModel.is_active.is_(True)).order_by(EtfUniverseModel.etf_code).all()
             if not rows:
+                # DB 为空时触发一次种子数据写入（首次部署场景）
                 self._seed()
                 rows = self._db.query(EtfUniverseModel).filter(EtfUniverseModel.is_active.is_(True)).order_by(EtfUniverseModel.etf_code).all()
             return [_row_to_detail(r) for r in rows]
         except Exception:
             logger.warning("DB query failed, returning stub ETF list", exc_info=True)
+            # DB 不可用时降级返回内存中的种子数据
             return [
                 EtfDetail(
                     fund_full_name=item["name_cn"],
@@ -122,6 +126,7 @@ class UniverseService:
             return _row_to_detail(row) if row else None
         except Exception:
             logger.warning("DB query failed for etf_code=%s", etf_code, exc_info=True)
+            # DB 不可用时从种子数据中查找
             match = next((item for item in SEED_ETFS if item["etf_code"] == etf_code), None)
             if match is None:
                 return None

@@ -10,11 +10,13 @@ from quant_etf_api.plugins.registry import StrategyRegistry, build_default_regis
 from quant_etf_api.services.universe_service import UniverseService
 
 settings = get_settings()
+# 策略注册表在进程启动时构建一次，所有请求共享同一实例
 registry: StrategyRegistry = build_default_registry()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 应用启动时写入种子 ETF，保证 DB 中始终有基础数据
     db = SessionLocal()
     try:
         UniverseService(db)._seed()

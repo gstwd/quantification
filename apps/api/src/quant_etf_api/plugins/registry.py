@@ -1,5 +1,3 @@
-from dataclasses import asdict
-
 from quant_etf_api.plugins.base import StrategyPlugin
 from quant_etf_api.plugins.builtins.share_flow_monitor.plugin import ShareFlowMonitorPlugin
 from quant_etf_api.plugins.builtins.three_factor.plugin import ThreeFactorGuardPlugin
@@ -8,6 +6,7 @@ from quant_etf_api.plugins.builtins.volume_breakout.plugin import VolumeBreakout
 
 class StrategyRegistry:
     def __init__(self) -> None:
+        # 以 strategy_id 为 key 存储所有已注册插件
         self._plugins: dict[str, StrategyPlugin] = {}
 
     def register(self, plugin: StrategyPlugin) -> None:
@@ -20,6 +19,7 @@ class StrategyRegistry:
         return self._plugins.get(strategy_id)
 
     def as_summaries(self) -> list[dict]:
+        # 将所有插件元数据序列化为字典列表，供 API 层返回给前端
         summaries = []
         for plugin in self.all():
             summaries.append(
@@ -40,6 +40,7 @@ class StrategyRegistry:
 
 
 def build_default_registry() -> StrategyRegistry:
+    # 注册三个内置策略插件，应用启动时调用一次
     registry = StrategyRegistry()
     registry.register(ThreeFactorGuardPlugin())
     registry.register(ShareFlowMonitorPlugin())

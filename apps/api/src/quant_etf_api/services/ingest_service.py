@@ -14,12 +14,13 @@ from quant_etf_api.schemas.market_data import DailyBar, ShareSnapshot
 
 logger = logging.getLogger(__name__)
 
-# Prevent concurrent fetches for the same ETF from hammering external APIs
+# 每个 ETF 独立一把锁，防止并发冷启动时多线程重复拉取同一 ETF 的外部 API
 _fetch_locks: dict[str, threading.Lock] = {}
-_fetch_locks_meta = threading.Lock()
+_fetch_locks_meta = threading.Lock()  # 保护 _fetch_locks 字典本身的并发写入
 
 
 def _get_lock(key: str) -> threading.Lock:
+    # 双重检查：先不加锁快速判断，再加锁安全创建
     with _fetch_locks_meta:
         if key not in _fetch_locks:
             _fetch_locks[key] = threading.Lock()
@@ -65,6 +66,7 @@ class IngestService:
 
     def get_daily_bars(self, etf_code: str, limit: int = 30) -> list[DailyBar]:
         try:
+            # 先查 DB，有数据直接返回，避免不必要的外部 API 调用
             rows = (
                 self._db.query(EtfDailyBarModel)
                 .filter(EtfDailyBarModel.etf_code == etf_code)
@@ -76,7 +78,7 @@ class IngestService:
                 return [_bar_row_to_schema(r) for r in reversed(rows)]
 
             with _get_lock(f"bars:{etf_code}"):
-                # Re-check after acquiring lock — another thread may have fetched already
+                # 加锁后再次查询，防止另一线程已完成入库
                 rows = (
                     self._db.query(EtfDailyBarModel)
                     .filter(EtfDailyBarModel.etf_code == etf_code)
@@ -87,6 +89,7 @@ class IngestService:
                 if rows:
                     return [_bar_row_to_schema(r) for r in reversed(rows)]
 
+                # DB 无数据，从腾讯拉取并持久化
                 bars = TencentClient().fetch_daily_bars(etf_code, limit)
                 if bars:
                     stmt = insert(EtfDailyBarModel).values(
@@ -104,7 +107,7 @@ class IngestService:
                             }
                             for b in bars
                         ]
-                    ).on_conflict_do_nothing(constraint="uq_etf_daily_bar")
+                    ).on_conflict_do_nothing(constraint="uq_etf_daily_bar")  # 幂等写入，重复日期跳过
                     self._db.execute(stmt)
                     self._db.commit()
                     rows = (
@@ -119,6 +122,7 @@ class IngestService:
             logger.warning("get_daily_bars failed for %s, returning stub", etf_code, exc_info=True)
             self._db.rollback()
 
+        # 外部 API 和 DB 均失败时返回占位数据，保证接口可用
         today = date.today()
         return [
             DailyBar(
@@ -138,6 +142,7 @@ class IngestService:
 
     def get_share_history(self, etf_code: str, limit: int = 30) -> list[ShareSnapshot]:
         try:
+            # 先查 DB，有数据直接返回
             rows = (
                 self._db.query(EtfDailyShareModel)
                 .filter(EtfDailyShareModel.etf_code == etf_code)
@@ -149,6 +154,7 @@ class IngestService:
                 return [_share_row_to_schema(r) for r in reversed(rows)]
 
             with _get_lock(f"shares:{etf_code}"):
+                # 加锁后再次查询，防止另一线程已完成入库
                 rows = (
                     self._db.query(EtfDailyShareModel)
                     .filter(EtfDailyShareModel.etf_code == etf_code)
@@ -159,6 +165,7 @@ class IngestService:
                 if rows:
                     return [_share_row_to_schema(r) for r in reversed(rows)]
 
+                # DB 无数据，从东方财富拉取快照并持久化
                 snapshot = EastmoneyClient().fetch_share_snapshot(etf_code)
                 if snapshot is not None:
                     stmt = insert(EtfDailyShareModel).values(
@@ -168,7 +175,7 @@ class IngestService:
                                 "etf_code": etf_code,
                                 "shares_total": snapshot.shares_total,
                                 "aum": snapshot.aum,
-                                "nav": round(snapshot.price, 3),
+                                "nav": round(snapshot.price, 3),  # 用当前价格近似 NAV
                                 "source": "eastmoney",
                                 "ingested_at": datetime.utcnow(),
                             }
@@ -188,6 +195,7 @@ class IngestService:
             logger.warning("get_share_history failed for %s, returning stub", etf_code, exc_info=True)
             self._db.rollback()
 
+        # 外部 API 和 DB 均失败时返回占位数据
         today = date.today()
         return [
             ShareSnapshot(

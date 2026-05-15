@@ -4,6 +4,7 @@ from quant_etf_api.schemas.strategy import StrategyDetail
 from quant_etf_api.services.strategy_service import StrategyService
 
 router = APIRouter(tags=["strategies"])
+# 模块级单例：策略注册表在进程生命周期内不变，无需每次请求重建
 service = StrategyService()
 
 

@@ -16,6 +16,7 @@ class ShareFlowMonitorPlugin:
         return {"type": "object", "properties": {}}
 
     def required_inputs(self) -> list[str]:
+        # 仅依赖份额数据，不需要行情数据
         return ["etf_daily_share"]
 
     def factor_definitions(self) -> list[dict]:
@@ -25,12 +26,14 @@ class ShareFlowMonitorPlugin:
         return {"signal_id": "share_flow_signal", "name": "份额流信号"}
 
     def prepare_context(self, trade_date: date, params: dict | None = None) -> StrategyContextData:
+        # 当前使用硬编码的模拟数据；后续接入真实 DB 查询后替换此处
         return StrategyContextData(share_changes={"510300": {"share_delta_pct": 2.4}, "510050": {"share_delta_pct": 0.4}, "510500": {"share_delta_pct": -1.8}, "159919": {"share_delta_pct": 3.1}})
 
     def run_for_universe(self, trade_date: date, universe: list[dict], context: StrategyContextData, params: dict | None = None) -> list[StrategyResult]:
         results = []
         for item in universe:
             code = item["etf_code"]
+            # 东方财富未覆盖的 ETF 份额变化率为 None，share_probability 返回 None 时默认 0
             delta_pct = context.share_changes.get(code, {}).get("share_delta_pct")
             score = float(share_probability(delta_pct) or 0.0)
             level, label = signal_level(score)

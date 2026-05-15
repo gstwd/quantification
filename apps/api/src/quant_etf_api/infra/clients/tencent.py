@@ -20,16 +20,18 @@ class TencentClient:
 
     @staticmethod
     def market_prefix(code: str) -> str:
+        # 上交所 ETF 代码以 51、56 或 0 开头，其余为深交所
         return "sh" if code.startswith(("51", "56", "0")) else "sz"
 
     def fetch_daily_bars(self, code: str, limit: int = 60) -> list[TencentDailyBar]:
         prefix = self.market_prefix(code)
+        # qfq 参数表示前复权，保证历史价格可比
         url = f"{self.base_url}?param={prefix}{code},day,,,{limit},qfq"
         request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urlopen(request, timeout=15) as response:
             payload = json.loads(response.read().decode("utf-8"))
         series = payload.get("data", {}).get(f"{prefix}{code}", {})
-        # API returns "qfqday" for forward-adjusted data, "day" as fallback
+        # API 返回前复权数据用 "qfqday" 键，无前复权时回退到 "day"
         rows = series.get("qfqday") or series.get("day") or []
         return [
             TencentDailyBar(
@@ -41,5 +43,5 @@ class TencentClient:
                 volume=float(row[5]),
             )
             for row in rows
-            if len(row) >= 6 and row[0]
+            if len(row) >= 6 and row[0]  # 过滤字段不足或日期为空的异常行
         ]

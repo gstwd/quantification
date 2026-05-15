@@ -10,6 +10,7 @@ router = APIRouter(tags=["etfs"])
 
 @router.get("/etfs", response_model=list[EtfDetail])
 def list_etfs(db: Session = Depends(get_db)) -> list[EtfDetail]:
+    # 仅返回 is_active=True 的 ETF，退市标的不展示
     return UniverseService(db).list_etfs()
 
 

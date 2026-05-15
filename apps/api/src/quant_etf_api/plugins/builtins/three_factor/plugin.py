@@ -42,6 +42,7 @@ class ThreeFactorGuardPlugin:
         return {"signal_id": "three_factor_signal", "name": "三因子综合信号"}
 
     def prepare_context(self, trade_date: date, params: dict | None = None) -> StrategyContextData:
+        # 当前使用硬编码的模拟数据；后续接入真实 DB 查询后替换此处
         return StrategyContextData(
             benchmark_changes={"000300": -0.42},
             share_changes={
@@ -54,6 +55,7 @@ class ThreeFactorGuardPlugin:
 
     def run_for_universe(self, trade_date: date, universe: list[dict], context: StrategyContextData, params: dict | None = None) -> list[StrategyResult]:
         results: list[StrategyResult] = []
+        # 模拟数据：后续从 DB 读取真实量比和涨跌幅
         base_volume_ratios = {
             "510300": 1.92,
             "510050": 1.28,
@@ -63,7 +65,7 @@ class ThreeFactorGuardPlugin:
         base_change_pct = {"510300": 0.8, "510050": 0.4, "510500": -0.2, "159919": 0.9}
         base_etf_5d = {"510300": 1.6, "510050": 0.5, "510500": -1.2, "159919": 1.8}
         index_change = context.benchmark_changes.get("000300", 0.0)
-        index_5d = -1.4
+        index_5d = -1.4  # 模拟大盘近 5 日收益率
 
         for item in universe:
             code = item["etf_code"]
@@ -72,6 +74,7 @@ class ThreeFactorGuardPlugin:
             etf_5d = base_etf_5d.get(code, 0.0)
             volume_prob = round(volume_probability(volume_ratio), 1)
             direction_prob_value = direction_probability(change_pct, etf_5d, index_5d, volume_ratio, index_change)
+            # 从上下文取份额变化率，东方财富未覆盖的 ETF 返回 None
             share_delta_pct = context.share_changes.get(code, {}).get("share_delta_pct")
             share_prob_value = share_probability(share_delta_pct)
             score = composite_probability(volume_prob, direction_prob_value, share_prob_value)

@@ -18,6 +18,7 @@ class SignalService:
     def latest_signals(self, strategy_id: str) -> list[SignalRow]:
         try:
             from sqlalchemy import func
+            # 先找该策略最新的交易日期，再取该日期的所有信号
             max_date = (
                 self._db.query(func.max(EtfSignalModel.trade_date))
                 .filter(EtfSignalModel.strategy_id == strategy_id)
@@ -27,7 +28,7 @@ class SignalService:
                 rows = (
                     self._db.query(EtfSignalModel)
                     .filter(EtfSignalModel.strategy_id == strategy_id, EtfSignalModel.trade_date == max_date)
-                    .order_by(EtfSignalModel.signal_score.desc())
+                    .order_by(EtfSignalModel.signal_score.desc())  # 按得分降序，高确信排前面
                     .all()
                 )
                 return [
@@ -45,6 +46,7 @@ class SignalService:
         except Exception:
             logger.warning("latest_signals DB query failed for %s", strategy_id, exc_info=True)
 
+        # DB 无数据或查询失败时返回占位信号，保证前端可渲染
         return [
             SignalRow(
                 trade_date=date.today(),
@@ -80,6 +82,7 @@ class SignalService:
         except Exception:
             logger.warning("factor_rows DB query failed", exc_info=True)
 
+        # DB 无数据时返回占位因子值
         return [
             FactorRow(
                 trade_date=trade_date,
