@@ -71,3 +71,61 @@ export interface ShareSnapshot {
   aum: number | null
   source: string
 }
+
+export interface BacktestCreateRequest {
+  strategy_id: string
+  start_date: string
+  end_date: string
+  universe_mode: 'all' | 'subset'
+  etf_codes: string[]
+  params?: Record<string, unknown> | null
+  weighting: 'equal' | 'signal_weighted'
+}
+
+export interface BacktestMetrics {
+  cumulative_return_pct: number
+  max_drawdown_pct: number
+  sharpe_ratio: number
+  win_rate_pct: number
+  signal_accuracy_pct: number
+  total_trading_days: number
+  active_days: number
+}
+
+export interface BacktestSummary {
+  backtest_id: string
+  strategy_id: string
+  start_date: string
+  end_date: string
+  status: string
+  weighting: string
+  metrics: BacktestMetrics | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  error_message: string | null
+}
+
+export interface BacktestDetail extends BacktestSummary {
+  universe_filter: Record<string, unknown>
+  params: Record<string, unknown> | null
+}
+
+export interface BacktestDailyResult {
+  trade_date: string
+  portfolio_return: number
+  cumulative_return: number
+  drawdown: number
+  high_signal_count: number
+  mid_signal_count: number
+  low_signal_count: number
+}
+
+export interface BacktestEtfResult {
+  trade_date: string
+  etf_code: string
+  signal_score: number
+  signal_level: string
+  in_portfolio: boolean
+  etf_return: number | null
+}

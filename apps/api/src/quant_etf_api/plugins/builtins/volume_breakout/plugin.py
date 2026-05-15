@@ -31,11 +31,13 @@ class VolumeBreakoutDailyPlugin:
 
     def run_for_universe(self, trade_date: date, universe: list[dict], context: StrategyContextData, params: dict | None = None) -> list[StrategyResult]:
         results = []
-        ratios = context.extra.get("volume_ratios", {})
+        # 优先从 context.extra["etf_bars"] 读取真实历史量比（回测场景），无数据时回退到 stub
+        etf_bars = context.extra.get("etf_bars", {})
+        stub_ratios = context.extra.get("volume_ratios", {"510300": 1.92, "510050": 1.28, "510500": 0.88, "159919": 1.57})
         for item in universe:
             code = item["etf_code"]
             # 未知 ETF 默认量比 1.0（平量）
-            ratio = ratios.get(code, 1.0)
+            ratio = etf_bars.get(code, {}).get("volume_ratio_20d") or stub_ratios.get(code, 1.0)
             score = round(volume_probability(ratio), 1)
             level, label = signal_level(score)
             results.append(StrategyResult(trade_date=trade_date, etf_code=code, strategy_id=self.strategy_id, signal_score=score, signal_level=level, signal_label=label, factor_values=[{"factor_id": "volume_ratio_20d", "value": ratio}, {"factor_id": "volume_breakout_score", "value": score}], payload={"volume_ratio": ratio}, tags=["volume_breakout"]))

@@ -55,7 +55,7 @@ class ThreeFactorGuardPlugin:
 
     def run_for_universe(self, trade_date: date, universe: list[dict], context: StrategyContextData, params: dict | None = None) -> list[StrategyResult]:
         results: list[StrategyResult] = []
-        # 模拟数据：后续从 DB 读取真实量比和涨跌幅
+        # 模拟数据：回测时由 BacktestService 通过 context.extra["etf_bars"] 注入真实历史数据
         base_volume_ratios = {
             "510300": 1.92,
             "510050": 1.28,
@@ -65,13 +65,17 @@ class ThreeFactorGuardPlugin:
         base_change_pct = {"510300": 0.8, "510050": 0.4, "510500": -0.2, "159919": 0.9}
         base_etf_5d = {"510300": 1.6, "510050": 0.5, "510500": -1.2, "159919": 1.8}
         index_change = context.benchmark_changes.get("000300", 0.0)
-        index_5d = -1.4  # 模拟大盘近 5 日收益率
+        # 优先从 context.extra 读取真实指数 5 日收益，无数据时使用模拟值
+        index_5d = context.extra.get("index_5d_return", {}).get("000300", -1.4)
+        etf_bars = context.extra.get("etf_bars", {})
 
         for item in universe:
             code = item["etf_code"]
-            volume_ratio = base_volume_ratios.get(code, 1.0)
-            change_pct = base_change_pct.get(code, 0.0)
-            etf_5d = base_etf_5d.get(code, 0.0)
+            bar_data = etf_bars.get(code, {})
+            # 优先使用回测注入的真实历史数据，无数据时回退到内置 stub
+            volume_ratio = bar_data.get("volume_ratio_20d") or base_volume_ratios.get(code, 1.0)
+            change_pct = bar_data.get("change_pct") if bar_data.get("change_pct") is not None else base_change_pct.get(code, 0.0)
+            etf_5d = bar_data.get("etf_5d_return") if bar_data.get("etf_5d_return") is not None else base_etf_5d.get(code, 0.0)
             volume_prob = round(volume_probability(volume_ratio), 1)
             direction_prob_value = direction_probability(change_pct, etf_5d, index_5d, volume_ratio, index_change)
             # 从上下文取份额变化率，东方财富未覆盖的 ETF 返回 None

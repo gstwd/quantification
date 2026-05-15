@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from quant_etf_api.infra.db.base import Base
@@ -191,3 +191,63 @@ class ResearchRunItemModel(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, comment="单个 ETF 处理状态：success=成功，failed=失败，skipped=跳过")
     message: Mapped[str | None] = mapped_column(Text, comment="处理结果说明或错误信息")
     metrics: Mapped[dict | None] = mapped_column(JSON, comment="单个 ETF 处理指标，如因子值、信号得分等")
+
+
+class BacktestRunModel(Base):
+    """回测任务主表，记录每次回测的配置和汇总结果。"""
+
+    __tablename__ = "backtest_run"
+
+    backtest_id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="回测唯一 ID，UUID 格式")
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="关联策略 ID")
+    start_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="回测起始日期")
+    end_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="回测结束日期")
+    universe_filter: Mapped[dict] = mapped_column(JSON, nullable=False, comment='标的过滤条件，{"mode":"all"} 或 {"mode":"subset","etf_codes":[...]}')
+    params: Mapped[dict | None] = mapped_column(JSON, comment="策略参数覆盖，NULL 表示使用默认参数")
+    weighting: Mapped[str] = mapped_column(String(32), default="equal", comment="组合加权方式：equal=等权，signal_weighted=信号加权")
+    status: Mapped[str] = mapped_column(String(32), default="pending", comment="回测状态：pending=待执行，running=执行中，success=成功，failed=失败")
+    error_message: Mapped[str | None] = mapped_column(Text, comment="失败时的错误信息")
+    metrics: Mapped[dict | None] = mapped_column(JSON, comment="汇总绩效指标，完成后写入，包含累计收益、最大回撤、夏普比率等")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, comment="回测创建时间（UTC）")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, comment="回测开始执行时间（UTC）")
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, comment="回测完成时间（UTC），NULL 表示未完成")
+
+
+class BacktestDailyResultModel(Base):
+    """回测每日组合绩效，每行对应一个交易日的组合表现。"""
+
+    __tablename__ = "backtest_daily_result"
+    __table_args__ = (
+        UniqueConstraint("backtest_id", "trade_date", name="uq_backtest_daily"),
+        Index("ix_backtest_daily_backtest_id", "backtest_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True, comment="自增主键")
+    backtest_id: Mapped[str] = mapped_column(ForeignKey("backtest_run.backtest_id"), nullable=False, comment="所属回测 ID")
+    trade_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="交易日期")
+    portfolio_return: Mapped[float] = mapped_column(Float, nullable=False, comment="当日组合收益率，单位 %")
+    cumulative_return: Mapped[float] = mapped_column(Float, nullable=False, comment="自回测起始日的累计收益率，单位 %")
+    drawdown: Mapped[float] = mapped_column(Float, nullable=False, comment="当日回撤幅度，单位 %，负值")
+    high_signal_count: Mapped[int] = mapped_column(Integer, nullable=False, comment="当日 HIGH 信号 ETF 数量")
+    mid_signal_count: Mapped[int] = mapped_column(Integer, nullable=False, comment="当日 MID 信号 ETF 数量")
+    low_signal_count: Mapped[int] = mapped_column(Integer, nullable=False, comment="当日 LOW 信号 ETF 数量")
+
+
+class BacktestEtfResultModel(Base):
+    """回测每日每只 ETF 的信号和实际收益，用于信号准确率分析。"""
+
+    __tablename__ = "backtest_etf_result"
+    __table_args__ = (
+        UniqueConstraint("backtest_id", "trade_date", "etf_code", name="uq_backtest_etf"),
+        Index("ix_backtest_etf_backtest_id", "backtest_id"),
+        Index("ix_backtest_etf_code", "backtest_id", "etf_code"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True, comment="自增主键")
+    backtest_id: Mapped[str] = mapped_column(ForeignKey("backtest_run.backtest_id"), nullable=False, comment="所属回测 ID")
+    trade_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="信号生成日期（T 日）")
+    etf_code: Mapped[str] = mapped_column(ForeignKey("etf_universe.etf_code"), nullable=False, comment="ETF 代码")
+    signal_score: Mapped[float] = mapped_column(Float, nullable=False, comment="信号综合得分，0-100")
+    signal_level: Mapped[str] = mapped_column(String(32), nullable=False, comment="信号等级：HIGH/MID/LOW")
+    in_portfolio: Mapped[bool] = mapped_column(Boolean, nullable=False, comment="是否纳入当日组合（HIGH 信号且满足加权条件）")
+    etf_return: Mapped[float | None] = mapped_column(Float, comment="T+1 日实际收益率，单位 %，末日为 NULL")
