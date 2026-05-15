@@ -115,7 +115,7 @@ async function initCharts() {
       ],
       yAxis: [
         { scale: true, splitLine: { lineStyle: { color: '#334155', type: 'dashed' } }, axisLabel: { color: '#94a3b8', fontSize: 11 }, gridIndex: 0 },
-        { scale: true, splitLine: { show: false }, axisLabel: { color: '#94a3b8', fontSize: 10 }, gridIndex: 1 },
+        { scale: true, splitNumber: 3, splitLine: { show: false }, axisLabel: { show: false }, gridIndex: 1 },
       ],
       dataZoom: [
         { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
