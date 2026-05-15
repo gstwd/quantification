@@ -102,5 +102,7 @@ Services are wired to PostgreSQL and real external clients. All 13 tables exist 
 - **DB session injection**: Services take `db: Session` in `__init__`. Routers use `Depends(get_db)` from `api/deps.py` and construct services per-request (no module-level singletons).
 - **`DailyBar.code` vs `etf_code`**: The schema field is `code` (not `etf_code`). Map `EtfDailyBarModel.etf_code → DailyBar(code=...)`.
 - **EastmoneyClient coverage**: Only 7 ETFs in `market_map`; `fetch_share_snapshot` returns `None` for unknown codes — handle gracefully.
+- **TencentClient response key**: API returns `qfqday` (not `day`) for forward-adjusted data. `fetch_daily_bars` reads `qfqday` with fallback to `day`.
+- **Sync blocking in uvicorn**: Services use synchronous `urlopen` for external APIs. FastAPI runs sync routes in a thread pool (default 40 threads). Concurrent cold-start requests can exhaust the pool and cause timeouts — use a per-resource `threading.Lock` to serialize first-fetch, then read from DB on subsequent requests.
 - **ECharts + TypeScript**: `echarts/index.d.ts` triggers TS1203 with `vue-tsc`. Fix: add `"skipLibCheck": true` to `apps/web/tsconfig.json`.
 - **Backend venv on Windows**: Executables are at `apps/api/.venv/Scripts/` (e.g. `.venv/Scripts/alembic`, `.venv/Scripts/python`).
