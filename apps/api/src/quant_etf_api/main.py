@@ -1,14 +1,29 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from quant_etf_api.api.routers import etfs, health, market_data, runs, signals, strategies, system
 from quant_etf_api.config.settings import get_settings
+from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.plugins.registry import StrategyRegistry, build_default_registry
+from quant_etf_api.services.universe_service import UniverseService
 
 settings = get_settings()
 registry: StrategyRegistry = build_default_registry()
 
-app = FastAPI(title=settings.app_name, version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db = SessionLocal()
+    try:
+        UniverseService(db)._seed()
+    finally:
+        db.close()
+    yield
+
+
+app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,

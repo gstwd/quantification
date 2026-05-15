@@ -93,4 +93,14 @@ To add a strategy: create a plugin file in `plugins/builtins/`, implement the Pr
 
 ## Current State
 
-All services return stub/hardcoded data. The external API clients and database models are fully defined — the next integration step is wiring `infra/clients/` into `services/` and persisting to the database.
+Services are wired to PostgreSQL and real external clients. All 13 tables exist (migration `0001_initial_schema`). On startup, `UniverseService._seed()` upserts the 4 seed ETFs. `IngestService` fetches from Tencent (K-lines) and Eastmoney (shares) on first request and persists to DB; subsequent requests read from DB. Signal/Run services read from DB with stub fallback when empty.
+
+## Gotchas
+
+- **Alembic**: `alembic/versions/` was empty on init — autogenerate requires a live DB connection. Hand-write the first migration if the DB is blank.
+- **SQLAlchemy**: Stack is fully **sync** (`create_engine`, `sessionmaker`). Do not introduce async.
+- **DB session injection**: Services take `db: Session` in `__init__`. Routers use `Depends(get_db)` from `api/deps.py` and construct services per-request (no module-level singletons).
+- **`DailyBar.code` vs `etf_code`**: The schema field is `code` (not `etf_code`). Map `EtfDailyBarModel.etf_code → DailyBar(code=...)`.
+- **EastmoneyClient coverage**: Only 7 ETFs in `market_map`; `fetch_share_snapshot` returns `None` for unknown codes — handle gracefully.
+- **ECharts + TypeScript**: `echarts/index.d.ts` triggers TS1203 with `vue-tsc`. Fix: add `"skipLibCheck": true` to `apps/web/tsconfig.json`.
+- **Backend venv on Windows**: Executables are at `apps/api/.venv/Scripts/` (e.g. `.venv/Scripts/alembic`, `.venv/Scripts/python`).

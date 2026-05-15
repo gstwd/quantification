@@ -43,3 +43,27 @@ export interface ResearchRunSummary {
   finished_at?: string | null
   error_message?: string | null
 }
+
+export interface DailyBar {
+  trade_date: string
+  code: string
+  open_price: number | null
+  high_price: number | null
+  low_price: number | null
+  close_price: number | null
+  change_pct: number | null
+  volume: number | null
+  turnover: number | null
+  source: string
+}
+
+export interface ShareSnapshot {
+  trade_date: string
+  etf_code: string
+  shares_total: number | null
+  shares_delta: number | null
+  shares_delta_pct: number | null
+  nav: number | null
+  aum: number | null
+  source: string
+}
