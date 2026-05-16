@@ -25,7 +25,9 @@ def volume_probability(volume_ratio: float) -> float:
     return min(100.0, 98 + (volume_ratio - 5.0) / 5.0 * 2)
 
 
-def direction_probability(change_pct: float, etf_5d: float, index_5d: float, volume_ratio: float, index_change_pct: float) -> float:
+def direction_probability(
+    change_pct: float, etf_5d: float, index_5d: float, volume_ratio: float, index_change_pct: float
+) -> float:
     # 大盘当日强势上涨时，ETF 跟涨可信度下降（追涨风险高）
     rally_discount = 1.0
     if index_change_pct > 2.0:
@@ -59,7 +61,7 @@ def direction_probability(change_pct: float, etf_5d: float, index_5d: float, vol
     elif change_pct > 0:
         f1 = 40
     elif change_pct < -1.5 and volume_ratio > 2:
-        f1 = 8   # 大幅放量下跌，恐慌抛售信号
+        f1 = 8  # 大幅放量下跌，恐慌抛售信号
     elif change_pct < -0.5 and volume_ratio > 1.5:
         f1 = 15
     else:
@@ -132,7 +134,9 @@ def share_probability(share_delta_pct: float | None) -> float | None:
     return max(0.0, 5 + (share_delta_pct + 5) / 5 * 5)
 
 
-def composite_probability(volume_prob: float, direction_prob: float, share_prob: float | None) -> float:
+def composite_probability(
+    volume_prob: float, direction_prob: float, share_prob: float | None
+) -> float:
     # 无份额数据时退化为双因子：量能 70% + 方向 30%
     if share_prob is None:
         return round(volume_prob * 0.7 + direction_prob * 0.3, 1)

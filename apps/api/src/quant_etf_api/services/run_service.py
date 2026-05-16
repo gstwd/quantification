@@ -55,7 +55,9 @@ class RunService:
             )
         ]
 
-    def create_run(self, run_type: str, strategy_id: str | None, trade_date: date) -> ResearchRunSummary:
+    def create_run(
+        self, run_type: str, strategy_id: str | None, trade_date: date
+    ) -> ResearchRunSummary:
         run_id = str(uuid4())
         now = datetime.utcnow()
         try:

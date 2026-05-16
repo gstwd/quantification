@@ -18,6 +18,7 @@ class SignalService:
     def latest_signals(self, strategy_id: str) -> list[SignalRow]:
         try:
             from sqlalchemy import func
+
             # 先找该策略最新的交易日期，再取该日期的所有信号
             max_date = (
                 self._db.query(func.max(EtfSignalModel.trade_date))
@@ -27,7 +28,10 @@ class SignalService:
             if max_date is not None:
                 rows = (
                     self._db.query(EtfSignalModel)
-                    .filter(EtfSignalModel.strategy_id == strategy_id, EtfSignalModel.trade_date == max_date)
+                    .filter(
+                        EtfSignalModel.strategy_id == strategy_id,
+                        EtfSignalModel.trade_date == max_date,
+                    )
                     .order_by(EtfSignalModel.signal_score.desc())  # 按得分降序，高确信排前面
                     .all()
                 )
@@ -63,7 +67,10 @@ class SignalService:
         try:
             rows = (
                 self._db.query(EtfFactorValueModel)
-                .filter(EtfFactorValueModel.etf_code == etf_code, EtfFactorValueModel.trade_date == trade_date)
+                .filter(
+                    EtfFactorValueModel.etf_code == etf_code,
+                    EtfFactorValueModel.trade_date == trade_date,
+                )
                 .all()
             )
             if rows:

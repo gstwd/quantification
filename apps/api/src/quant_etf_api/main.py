@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from quant_etf_api.api.routers import etfs, health, market_data, runs, signals, strategies, system
 from quant_etf_api.api.routers import backtests
 from quant_etf_api.config.settings import get_settings
+from quant_etf_api.infra.scheduler import get_scheduler
 from quant_etf_api.plugins.registry import StrategyRegistry, build_default_registry
 
 settings = get_settings()
@@ -15,7 +16,10 @@ registry: StrategyRegistry = build_default_registry()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if settings.schedule_enabled:
+        get_scheduler().start()
     yield
+    get_scheduler().stop()
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)

@@ -27,3 +27,27 @@ class ShareSnapshot(BaseModel):
     aum: float | None = None
     source: str = "stub"
     ingested_at: datetime | None = None
+
+
+class IndexValuation(BaseModel):
+    """指数估值数据（PE/PB 及历史分位）。"""
+
+    trade_date: date
+    index_code: str
+    pe: float | None = None
+    pe_percentile: float | None = None
+    pb: float | None = None
+    pb_percentile: float | None = None
+    dividend_yield: float | None = None
+    source: str = "akshare"
+
+
+class MacroIndicatorSchema(BaseModel):
+    """宏观经济指标数据。"""
+
+    indicator_code: str
+    indicator_name: str
+    period: str
+    value: float
+    unit: str | None = None
+    source: str = "akshare"

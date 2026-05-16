@@ -57,7 +57,9 @@ def get_backtest(backtest_id: str, db: Session = Depends(get_db)) -> BacktestDet
 
 
 @router.get("/backtests/{backtest_id}/daily", response_model=list[BacktestDailyResult])
-def get_backtest_daily(backtest_id: str, db: Session = Depends(get_db)) -> list[BacktestDailyResult]:
+def get_backtest_daily(
+    backtest_id: str, db: Session = Depends(get_db)
+) -> list[BacktestDailyResult]:
     """返回回测每日组合绩效，用于权益曲线和回撤图渲染。"""
     return BacktestService(db, _registry).get_daily_results(backtest_id)
 

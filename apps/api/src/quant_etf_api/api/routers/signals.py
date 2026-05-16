@@ -16,11 +16,17 @@ def latest_signals(strategy_id: str = Query(...), db: Session = Depends(get_db))
 
 
 @router.get("/signals/history", response_model=list[SignalRow])
-def signal_history(strategy_id: str = Query(...), etf_code: str = Query(...), db: Session = Depends(get_db)) -> list[SignalRow]:
+def signal_history(
+    strategy_id: str = Query(...), etf_code: str = Query(...), db: Session = Depends(get_db)
+) -> list[SignalRow]:
     # 当前实现复用 latest_signals 并在内存中过滤，后续可改为按 ETF 查历史
-    return [row for row in SignalService(db).latest_signals(strategy_id) if row.etf_code == etf_code]
+    return [
+        row for row in SignalService(db).latest_signals(strategy_id) if row.etf_code == etf_code
+    ]
 
 
 @router.get("/factors", response_model=list[FactorRow])
-def factor_rows(etf_code: str = Query(...), trade_date: date = Query(...), db: Session = Depends(get_db)) -> list[FactorRow]:
+def factor_rows(
+    etf_code: str = Query(...), trade_date: date = Query(...), db: Session = Depends(get_db)
+) -> list[FactorRow]:
     return SignalService(db).factor_rows(etf_code, trade_date)

@@ -92,7 +92,11 @@ class BacktestService:
     def get_backtest(self, backtest_id: str) -> BacktestDetail | None:
         """返回回测详情，含配置信息。"""
         try:
-            row = self._db.query(BacktestRunModel).filter(BacktestRunModel.backtest_id == backtest_id).first()
+            row = (
+                self._db.query(BacktestRunModel)
+                .filter(BacktestRunModel.backtest_id == backtest_id)
+                .first()
+            )
             if row is None:
                 return None
             return self._row_to_detail(row)
@@ -125,13 +129,19 @@ class BacktestService:
             logger.warning("get_daily_results DB query failed", exc_info=True)
             return []
 
-    def get_etf_results(self, backtest_id: str, etf_code: str | None = None) -> list[BacktestEtfResult]:
+    def get_etf_results(
+        self, backtest_id: str, etf_code: str | None = None
+    ) -> list[BacktestEtfResult]:
         """返回回测每日每 ETF 信号与收益，可按 ETF 过滤。"""
         try:
-            q = self._db.query(BacktestEtfResultModel).filter(BacktestEtfResultModel.backtest_id == backtest_id)
+            q = self._db.query(BacktestEtfResultModel).filter(
+                BacktestEtfResultModel.backtest_id == backtest_id
+            )
             if etf_code:
                 q = q.filter(BacktestEtfResultModel.etf_code == etf_code)
-            rows = q.order_by(BacktestEtfResultModel.trade_date.asc(), BacktestEtfResultModel.etf_code.asc()).all()
+            rows = q.order_by(
+                BacktestEtfResultModel.trade_date.asc(), BacktestEtfResultModel.etf_code.asc()
+            ).all()
             return [
                 BacktestEtfResult(
                     trade_date=r.trade_date,
@@ -153,7 +163,11 @@ class BacktestService:
         逐日调用策略插件，计算组合收益，写入结果表，最后更新汇总指标。
         """
         try:
-            row = self._db.query(BacktestRunModel).filter(BacktestRunModel.backtest_id == backtest_id).first()
+            row = (
+                self._db.query(BacktestRunModel)
+                .filter(BacktestRunModel.backtest_id == backtest_id)
+                .first()
+            )
             if row is None:
                 logger.error("run_backtest: backtest_id %s not found", backtest_id)
                 return
@@ -189,7 +203,9 @@ class BacktestService:
             peak = 1.0
 
             for i, trade_date in enumerate(trading_dates):
-                context = self._build_historical_context(trade_date, etf_codes, all_bars, all_shares, all_index_bars)
+                context = self._build_historical_context(
+                    trade_date, etf_codes, all_bars, all_shares, all_index_bars
+                )
                 results = plugin.run_for_universe(trade_date, universe, context, row.params)
 
                 # 计算 T+1 收益（末日无 T+1 数据，etf_return=None）
@@ -198,7 +214,7 @@ class BacktestService:
                     results, next_date, all_bars, row.weighting
                 )
 
-                cumulative *= (1 + portfolio_return / 100)
+                cumulative *= 1 + portfolio_return / 100
                 cumulative_return_pct = (cumulative - 1) * 100
                 peak = max(peak, cumulative)
                 drawdown = (cumulative / peak - 1) * 100
@@ -222,15 +238,17 @@ class BacktestService:
                     etf_ret = None
                     if next_date and in_portfolio:
                         etf_ret = self._get_etf_return(r.etf_code, trade_date, next_date, all_bars)
-                    self._db.add(BacktestEtfResultModel(
-                        backtest_id=backtest_id,
-                        trade_date=trade_date,
-                        etf_code=r.etf_code,
-                        signal_score=r.signal_score,
-                        signal_level=r.signal_level,
-                        in_portfolio=in_portfolio,
-                        etf_return=etf_ret,
-                    ))
+                    self._db.add(
+                        BacktestEtfResultModel(
+                            backtest_id=backtest_id,
+                            trade_date=trade_date,
+                            etf_code=r.etf_code,
+                            signal_score=r.signal_score,
+                            signal_level=r.signal_level,
+                            in_portfolio=in_portfolio,
+                            etf_return=etf_ret,
+                        )
+                    )
 
             self._db.flush()
 
@@ -246,7 +264,11 @@ class BacktestService:
             self._db.rollback()
             logger.exception("run_backtest failed for %s", backtest_id)
             try:
-                row = self._db.query(BacktestRunModel).filter(BacktestRunModel.backtest_id == backtest_id).first()
+                row = (
+                    self._db.query(BacktestRunModel)
+                    .filter(BacktestRunModel.backtest_id == backtest_id)
+                    .first()
+                )
                 if row:
                     row.status = "failed"
                     row.error_message = str(exc)
@@ -283,7 +305,9 @@ class BacktestService:
         )
         return [r.trade_date for r in rows]
 
-    def _load_all_bars(self, trading_dates: list[date], etf_codes: list[str]) -> dict[tuple[str, date], EtfDailyBarModel]:
+    def _load_all_bars(
+        self, trading_dates: list[date], etf_codes: list[str]
+    ) -> dict[tuple[str, date], EtfDailyBarModel]:
         """批量加载回测区间及前 25 日的行情数据，返回 (etf_code, trade_date) → row 映射。"""
         if not trading_dates:
             return {}
@@ -301,7 +325,9 @@ class BacktestService:
         )
         return {(r.etf_code, r.trade_date): r for r in rows}
 
-    def _load_all_shares(self, trading_dates: list[date], etf_codes: list[str]) -> dict[tuple[str, date], EtfDailyShareModel]:
+    def _load_all_shares(
+        self, trading_dates: list[date], etf_codes: list[str]
+    ) -> dict[tuple[str, date], EtfDailyShareModel]:
         """批量加载回测区间的份额数据，返回 (etf_code, trade_date) → row 映射。"""
         if not trading_dates:
             return {}
@@ -318,7 +344,9 @@ class BacktestService:
         )
         return {(r.etf_code, r.trade_date): r for r in rows}
 
-    def _load_all_index_bars(self, trading_dates: list[date]) -> dict[tuple[str, date], IndexDailyBarModel]:
+    def _load_all_index_bars(
+        self, trading_dates: list[date]
+    ) -> dict[tuple[str, date], IndexDailyBarModel]:
         """批量加载回测区间及前 10 日的指数行情数据。"""
         if not trading_dates:
             return {}
@@ -355,13 +383,17 @@ class BacktestService:
             if bar and bar.change_pct is not None:
                 benchmark_changes[index_code] = bar.change_pct
             # 计算指数近 5 日收益（用 close_price 差值近似）
-            index_5d_return[index_code] = self._calc_5d_return_index(index_code, trade_date, all_index_bars)
+            index_5d_return[index_code] = self._calc_5d_return_index(
+                index_code, trade_date, all_index_bars
+            )
 
         # 构建 share_changes
         share_changes: dict[str, dict[str, float | None]] = {}
         for code in etf_codes:
             share_row = all_shares.get((code, trade_date))
-            share_changes[code] = {"share_delta_pct": share_row.shares_delta_pct if share_row else None}
+            share_changes[code] = {
+                "share_delta_pct": share_row.shares_delta_pct if share_row else None
+            }
 
         # 构建 etf_bars（供插件读取真实历史量比、涨跌幅等）
         etf_bars: dict[str, dict] = {}
@@ -408,8 +440,11 @@ class BacktestService:
         if today_bar is None or today_bar.close_price is None:
             return 0.0
         past_closes = sorted(
-            [(dt, v.close_price) for (code, dt), v in all_bars.items()
-             if code == etf_code and dt < trade_date and v.close_price is not None],
+            [
+                (dt, v.close_price)
+                for (code, dt), v in all_bars.items()
+                if code == etf_code and dt < trade_date and v.close_price is not None
+            ],
             key=lambda x: x[0],
         )
         if len(past_closes) < 5:
@@ -417,14 +452,19 @@ class BacktestService:
         base_close = past_closes[-5][1]
         return round((today_bar.close_price / base_close - 1) * 100, 4) if base_close > 0 else 0.0
 
-    def _calc_5d_return_index(self, index_code: str, trade_date: date, all_index_bars: dict) -> float:
+    def _calc_5d_return_index(
+        self, index_code: str, trade_date: date, all_index_bars: dict
+    ) -> float:
         """计算指数近 5 日收益率（%）。"""
         today_bar = all_index_bars.get((index_code, trade_date))
         if today_bar is None or today_bar.close_price is None:
             return 0.0
         past_closes = sorted(
-            [(dt, v.close_price) for (code, dt), v in all_index_bars.items()
-             if code == index_code and dt < trade_date and v.close_price is not None],
+            [
+                (dt, v.close_price)
+                for (code, dt), v in all_index_bars.items()
+                if code == index_code and dt < trade_date and v.close_price is not None
+            ],
             key=lambda x: x[0],
         )
         if len(past_closes) < 5:
@@ -432,13 +472,19 @@ class BacktestService:
         base_close = past_closes[-5][1]
         return round((today_bar.close_price / base_close - 1) * 100, 4) if base_close > 0 else 0.0
 
-    def _get_etf_return(self, etf_code: str, trade_date: date, next_date: date, all_bars: dict) -> float | None:
+    def _get_etf_return(
+        self, etf_code: str, trade_date: date, next_date: date, all_bars: dict
+    ) -> float | None:
         """获取 ETF 的 T+1 日收益率（%）。"""
         today_bar = all_bars.get((etf_code, trade_date))
         next_bar = all_bars.get((etf_code, next_date))
         if today_bar is None or next_bar is None:
             return None
-        if today_bar.close_price is None or next_bar.close_price is None or today_bar.close_price == 0:
+        if (
+            today_bar.close_price is None
+            or next_bar.close_price is None
+            or today_bar.close_price == 0
+        ):
             return None
         return round((next_bar.close_price / today_bar.close_price - 1) * 100, 4)
 
@@ -510,7 +556,9 @@ class BacktestService:
         # 胜率：有持仓日中收益>0的比例
         win_rate_pct = 0.0
         if active_returns:
-            win_rate_pct = round(sum(1 for r in active_returns if r > 0) / len(active_returns) * 100, 2)
+            win_rate_pct = round(
+                sum(1 for r in active_returns if r > 0) / len(active_returns) * 100, 2
+            )
 
         # 信号准确率：从 backtest_etf_result 查询
         signal_accuracy_pct = 0.0

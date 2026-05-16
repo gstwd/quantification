@@ -11,6 +11,8 @@ from quant_etf_api.infra.db.models.core import (
     EtfDailyShareModel,
     EtfUniverseModel,
     IndexDailyBarModel,
+    IndexValuationModel,
+    MacroIndicatorModel,
     ResearchRunModel,
 )
 from quant_etf_api.schemas.run import ResearchRunSummary
@@ -55,6 +57,7 @@ class SystemService:
         model: type,
         source_name: str,
         table_name: str,
+        date_column: str = "trade_date",
     ) -> DataSourceSnapshot:
         """查询单张数据表的统计快照。
 
@@ -62,19 +65,17 @@ class SystemService:
             model: SQLAlchemy 模型类（如 EtfDailyBarModel）。
             source_name: 数据源展示名称（如 "腾讯日线行情"）。
             table_name: 数据库表名（如 "etf_daily_bar"）。
+            date_column: 用于获取最新日期的列名，默认 "trade_date"。
 
         Returns:
             DataSourceSnapshot，查询失败时返回全零值快照。
         """
         try:
-            result = (
-                self._db.query(
-                    func.count().label("cnt"),
-                    func.max(model.trade_date).label("max_date"),
-                    func.max(model.ingested_at).label("max_ingested"),
-                )
-                .one()
-            )
+            result = self._db.query(
+                func.count().label("cnt"),
+                func.max(getattr(model, date_column)).label("max_date"),
+                func.max(model.ingested_at).label("max_ingested"),
+            ).one()
             return DataSourceSnapshot(
                 source_name=source_name,
                 table_name=table_name,
@@ -160,6 +161,17 @@ class SystemService:
                 IndexDailyBarModel,
                 source_name="指数日线行情",
                 table_name="index_daily_bar",
+            ),
+            self._get_table_snapshot(
+                IndexValuationModel,
+                source_name="指数估值PE/PB",
+                table_name="index_valuation",
+            ),
+            self._get_table_snapshot(
+                MacroIndicatorModel,
+                source_name="宏观经济指标",
+                table_name="macro_indicator",
+                date_column="period",
             ),
         ]
 

@@ -259,12 +259,22 @@ class UniverseService:
                             changes.append(f"基金公司: {etf.fund_company} → {info.fund_company}")
                             etf.fund_company = info.fund_company
                             changed = True
-                        if info.tracking_index_name and info.tracking_index_name != etf.tracking_index_name:
-                            changes.append(f"跟踪指数: {etf.tracking_index_name} → {info.tracking_index_name}")
+                        if (
+                            info.tracking_index_name
+                            and info.tracking_index_name != etf.tracking_index_name
+                        ):
+                            changes.append(
+                                f"跟踪指数: {etf.tracking_index_name} → {info.tracking_index_name}"
+                            )
                             etf.tracking_index_name = info.tracking_index_name
                             changed = True
-                        if info.tracking_index_code and info.tracking_index_code != etf.tracking_index_code:
-                            changes.append(f"指数代码: {etf.tracking_index_code} → {info.tracking_index_code}")
+                        if (
+                            info.tracking_index_code
+                            and info.tracking_index_code != etf.tracking_index_code
+                        ):
+                            changes.append(
+                                f"指数代码: {etf.tracking_index_code} → {info.tracking_index_code}"
+                            )
                             etf.tracking_index_code = info.tracking_index_code
                             changed = True
 
@@ -315,7 +325,11 @@ class UniverseService:
             self._db.rollback()
             logger.warning("refresh_all 整体失败: %s", e, exc_info=True)
             try:
-                run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+                run = (
+                    self._db.query(ResearchRunModel)
+                    .filter(ResearchRunModel.run_id == run_id)
+                    .first()
+                )
                 if run is not None:
                     run.status = "failed"
                     run.finished_at = datetime.utcnow()
