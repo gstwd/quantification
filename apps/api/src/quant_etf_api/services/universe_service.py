@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.clients.eastmoney import EastmoneyClient
-from quant_etf_api.infra.db.models.core import EtfUniverseModel
+from quant_etf_api.infra.db.models.core import (
+    EtfUniverseModel,
+    ResearchRunItemModel,
+    ResearchRunModel,
+)
 from quant_etf_api.schemas.etf import EtfCreateRequest, EtfDetail
 
 logger = logging.getLogger(__name__)
@@ -192,3 +196,131 @@ class UniverseService:
             self._db.rollback()
             logger.error("Failed to remove ETF %s", etf_code, exc_info=True)
             raise
+
+    def refresh_all(self, run_id: str) -> None:
+        """遍历活跃 ETF 池，从东方财富刷新元数据并更新变更字段。
+
+        每只 ETF 的处理结果写入 ResearchRunItem，
+        全部完成后更新 research_run 状态与指标。
+        """
+        start_time = datetime.utcnow()
+        try:
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is None:
+                logger.error("refresh_all: run_id %s 不存在", run_id)
+                return
+
+            run.status = "running"
+            run.started_at = start_time
+            self._db.commit()
+
+            etfs = (
+                self._db.query(EtfUniverseModel)
+                .filter(EtfUniverseModel.is_active.is_(True))
+                .order_by(EtfUniverseModel.etf_code)
+                .all()
+            )
+
+            if not etfs:
+                run.status = "success"
+                run.finished_at = datetime.utcnow()
+                run.metrics = {"total": 0, "message": "无活跃 ETF"}
+                self._db.commit()
+                return
+
+            updated_count = 0
+            unchanged_count = 0
+            failed_count = 0
+
+            for etf in etfs:
+                etf_code = etf.etf_code
+                item_status = "success"
+                item_message = ""
+
+                try:
+                    info = EastmoneyClient().fetch_fund_info(etf_code)
+                    if info is None:
+                        item_status = "skipped"
+                        item_message = "未获取到基金信息"
+                        unchanged_count += 1
+                    else:
+                        changed = False
+                        changes = []
+
+                        if info.name_cn and info.name_cn != etf.name_cn:
+                            changes.append(f"名称: {etf.name_cn} → {info.name_cn}")
+                            etf.name_cn = info.name_cn
+                            changed = True
+                        if info.fund_full_name and info.fund_full_name != etf.fund_full_name:
+                            changes.append(f"全称: {etf.fund_full_name} → {info.fund_full_name}")
+                            etf.fund_full_name = info.fund_full_name
+                            changed = True
+                        if info.fund_company and info.fund_company != etf.fund_company:
+                            changes.append(f"基金公司: {etf.fund_company} → {info.fund_company}")
+                            etf.fund_company = info.fund_company
+                            changed = True
+                        if info.tracking_index_name and info.tracking_index_name != etf.tracking_index_name:
+                            changes.append(f"跟踪指数: {etf.tracking_index_name} → {info.tracking_index_name}")
+                            etf.tracking_index_name = info.tracking_index_name
+                            changed = True
+                        if info.tracking_index_code and info.tracking_index_code != etf.tracking_index_code:
+                            changes.append(f"指数代码: {etf.tracking_index_code} → {info.tracking_index_code}")
+                            etf.tracking_index_code = info.tracking_index_code
+                            changed = True
+
+                        if changed:
+                            etf.updated_at = datetime.utcnow()
+                            item_message = "; ".join(changes)
+                            updated_count += 1
+                        else:
+                            item_message = "无变化"
+                            unchanged_count += 1
+
+                        self._db.commit()
+                except Exception as e:
+                    self._db.rollback()
+                    item_status = "failed"
+                    item_message = str(e)[:500]
+                    failed_count += 1
+                    logger.warning("ETF %s 元数据刷新失败: %s", etf_code, e)
+
+                try:
+                    item = ResearchRunItemModel(
+                        run_id=run_id,
+                        etf_code=etf_code,
+                        status=item_status,
+                        message=item_message or None,
+                    )
+                    self._db.add(item)
+                    self._db.commit()
+                except Exception:
+                    self._db.rollback()
+                    logger.warning("写入 ResearchRunItem 失败: %s", etf_code, exc_info=True)
+
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is None:
+                return
+            run.status = "success"
+            run.finished_at = datetime.utcnow()
+            run.metrics = {
+                "total": len(etfs),
+                "updated": updated_count,
+                "unchanged": unchanged_count,
+                "failed": failed_count,
+                "duration_seconds": round((datetime.utcnow() - start_time).total_seconds(), 1),
+            }
+            self._db.commit()
+
+        except Exception as e:
+            self._db.rollback()
+            logger.warning("refresh_all 整体失败: %s", e, exc_info=True)
+            try:
+                run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+                if run is not None:
+                    run.status = "failed"
+                    run.finished_at = datetime.utcnow()
+                    run.error_message = str(e)[:1000]
+                    self._db.commit()
+            except Exception:
+                logger.warning("更新失败状态时出错", exc_info=True)
+                self._db.rollback()

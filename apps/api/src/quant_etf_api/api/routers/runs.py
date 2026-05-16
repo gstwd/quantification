@@ -22,6 +22,17 @@ def _run_ingest_bg(run_id: str) -> None:
         db.close()
 
 
+def _run_universe_refresh_bg(run_id: str) -> None:
+    """在独立 Session 中执行 ETF 池元数据刷新，避免与请求 Session 冲突。"""
+    db = SessionLocal()
+    try:
+        from quant_etf_api.services.universe_service import UniverseService
+
+        UniverseService(db).refresh_all(run_id)
+    finally:
+        db.close()
+
+
 @router.get("/runs", response_model=list[ResearchRunSummary])
 def list_runs(db: Session = Depends(get_db)) -> list[ResearchRunSummary]:
     return RunService(db).list_runs()
@@ -29,9 +40,10 @@ def list_runs(db: Session = Depends(get_db)) -> list[ResearchRunSummary]:
 
 @router.post("/runs/universe-refresh")
 def refresh_universe(db: Session = Depends(get_db)) -> dict[str, str]:
-    # 触发 ETF 标的列表刷新任务，当前为异步占位，实际执行逻辑待实现
-    RunService(db).create_run("universe_refresh", None, date.today())
-    return {"status": "accepted", "run_type": "universe_refresh"}
+    summary = RunService(db).create_run("universe_refresh", None, date.today())
+    thread = threading.Thread(target=_run_universe_refresh_bg, args=(summary.run_id,), daemon=True)
+    thread.start()
+    return {"status": "accepted", "run_type": "universe_refresh", "run_id": summary.run_id}
 
 
 @router.post("/runs/daily-ingest")
