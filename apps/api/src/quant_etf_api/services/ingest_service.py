@@ -169,7 +169,40 @@ class IngestService:
         self._db.commit()
         return bars
 
-    def get_daily_bars(self, etf_code: str, limit: int = 30) -> list[DailyBar]:
+    def _fetch_and_upsert_bars_full_history(self, etf_code: str) -> int:
+        """冷启动：拉取 ETF 全量历史日线（~320 条，覆盖约 250 个交易日）并幂等写入。
+
+        Returns:
+            写入记录数
+        """
+        bars = TencentClient().fetch_daily_bars(etf_code, limit=320)
+        if not bars:
+            return 0
+        stmt = (
+            insert(EtfDailyBarModel)
+            .values(
+                [
+                    {
+                        "trade_date": b.trade_date,
+                        "etf_code": etf_code,
+                        "open_price": b.open_price,
+                        "high_price": b.high_price,
+                        "low_price": b.low_price,
+                        "close_price": b.close_price,
+                        "volume": b.volume,
+                        "source": "tencent",
+                        "ingested_at": datetime.utcnow(),
+                    }
+                    for b in bars
+                ]
+            )
+            .on_conflict_do_nothing(constraint="uq_etf_daily_bar")
+        )
+        self._db.execute(stmt)
+        self._db.commit()
+        return len(bars)
+
+    def get_daily_bars(self, etf_code: str, limit: int = 250) -> list[DailyBar]:
         """ETF 日线读穿透缓存。"""
         try:
             rows = (
@@ -193,7 +226,7 @@ class IngestService:
                 if rows:
                     return [_bar_row_to_schema(r) for r in reversed(rows)]
 
-                self._fetch_and_upsert_bars(etf_code, limit)
+                self._fetch_and_upsert_bars_full_history(etf_code)
                 rows = (
                     self._db.query(EtfDailyBarModel)
                     .filter(EtfDailyBarModel.etf_code == etf_code)
@@ -204,32 +237,19 @@ class IngestService:
                 if rows:
                     return [_bar_row_to_schema(r) for r in reversed(rows)]
         except Exception:
-            logger.warning("get_daily_bars failed for %s, returning stub", etf_code, exc_info=True)
+            logger.warning("get_daily_bars failed for %s", etf_code, exc_info=True)
             self._db.rollback()
-
-        today = date.today()
-        return [
-            DailyBar(
-                trade_date=today,
-                code=etf_code,
-                open_price=4.0,
-                high_price=4.1,
-                low_price=3.95,
-                close_price=4.05,
-                change_pct=0.62,
-                volume=123456.0,
-                turnover=456789000.0,
-                source="stub",
-                ingested_at=datetime.utcnow(),
-            )
-        ]
+            return []
 
     # ==================================================================
     # ETF 份额
     # ==================================================================
 
     def _fetch_and_upsert_shares(self, etf_code: str, trade_date: date) -> None:
-        """从东方财富拉取 ETF 份额快照并幂等写入 DB。"""
+        """从东方财富拉取 ETF 份额快照并幂等写入 DB。
+
+        写入后自动计算与前一日份额的 delta 和 delta_pct。
+        """
         etf_row = self._db.get(EtfUniverseModel, etf_code)
         exchange = etf_row.exchange if etf_row else None
         snapshot = EastmoneyClient().fetch_share_snapshot(etf_code, exchange=exchange)
@@ -254,6 +274,29 @@ class IngestService:
         )
         self._db.execute(stmt)
         self._db.commit()
+
+        # 计算与前一日份额的差值
+        prev = (
+            self._db.query(EtfDailyShareModel)
+            .filter(
+                EtfDailyShareModel.etf_code == etf_code,
+                EtfDailyShareModel.trade_date < trade_date,
+            )
+            .order_by(EtfDailyShareModel.trade_date.desc())
+            .first()
+        )
+        if prev is not None and prev.shares_total is not None and snapshot.shares_total > 0:
+            delta = round(snapshot.shares_total - prev.shares_total, 2)
+            delta_pct = round(delta / prev.shares_total * 100, 2) if prev.shares_total > 0 else None
+            row = (
+                self._db.query(EtfDailyShareModel)
+                .filter_by(etf_code=etf_code, trade_date=trade_date)
+                .first()
+            )
+            if row is not None:
+                row.shares_delta = delta
+                row.shares_delta_pct = delta_pct
+                self._db.commit()
 
     def get_share_history(self, etf_code: str, limit: int = 30) -> list[ShareSnapshot]:
         """ETF 份额读穿透缓存。"""
@@ -290,25 +333,9 @@ class IngestService:
                 if rows:
                     return [_share_row_to_schema(r) for r in reversed(rows)]
         except Exception:
-            logger.warning(
-                "get_share_history failed for %s, returning stub", etf_code, exc_info=True
-            )
+            logger.warning("get_share_history failed for %s", etf_code, exc_info=True)
             self._db.rollback()
-
-        today = date.today()
-        return [
-            ShareSnapshot(
-                trade_date=today,
-                etf_code=etf_code,
-                shares_total=380.2,
-                shares_delta=5.1,
-                shares_delta_pct=1.36,
-                nav=4.02,
-                aum=1528.0,
-                source="stub",
-                ingested_at=datetime.utcnow(),
-            )
-        ]
+            return []
 
     # ==================================================================
     # 指数日线（AkShare）
@@ -360,7 +387,7 @@ class IngestService:
             for r in rows
         ]
 
-    def get_index_daily_bars(self, index_code: str, limit: int = 30) -> list[DailyBar]:
+    def get_index_daily_bars(self, index_code: str, limit: int = 250) -> list[DailyBar]:
         """指数日线读穿透缓存。"""
         try:
             rows = (
@@ -701,6 +728,126 @@ class IngestService:
         except Exception as e:
             self._db.rollback()
             logger.warning("run_daily_ingest 整体失败: %s", e, exc_info=True)
+            try:
+                run = (
+                    self._db.query(ResearchRunModel)
+                    .filter(ResearchRunModel.run_id == run_id)
+                    .first()
+                )
+                if run is not None:
+                    run.status = "failed"
+                    run.finished_at = datetime.utcnow()
+                    run.error_message = str(e)[:1000]
+                    self._db.commit()
+            except Exception:
+                logger.warning("更新失败状态时出错", exc_info=True)
+                self._db.rollback()
+
+    def run_cold_start(self, run_id: str) -> None:
+        """冷启动：拉取全部 ETF 和指数的全量历史数据（后台线程入口）。
+
+        与 run_daily_ingest 的区别：
+        - ETF 日线拉取全量历史（~320 条），而非仅最近 5 条
+        - 不拉取份额快照（份额为点状数据，无历史含义）
+        - 跳过周末检查（冷启动可随时执行）
+        - 指数日线/估值/宏观复用现有全量方法
+        """
+        start_time = datetime.utcnow()
+        try:
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is None:
+                logger.error("run_cold_start: run_id %s 不存在", run_id)
+                return
+
+            run.status = "running"
+            run.started_at = start_time
+            self._db.commit()
+
+            # 1. 全量 ETF 历史日线
+            etfs = (
+                self._db.query(EtfUniverseModel)
+                .filter(EtfUniverseModel.is_active.is_(True))
+                .order_by(EtfUniverseModel.etf_code)
+                .all()
+            )
+
+            etf_bar_count = 0
+            etf_failed_count = 0
+
+            for etf in etfs:
+                etf_code = etf.etf_code
+                try:
+                    n = self._fetch_and_upsert_bars_full_history(etf_code)
+                    etf_bar_count += n
+                    self._db.add(
+                        ResearchRunItemModel(
+                            run_id=run_id,
+                            etf_code=etf_code,
+                            status="success",
+                            message=f"写入 {n} 条日线",
+                        )
+                    )
+                except Exception as e:
+                    etf_failed_count += 1
+                    self._db.rollback()
+                    logger.warning("ETF %s 全量日线拉取失败: %s", etf_code, e)
+                try:
+                    self._db.commit()
+                except Exception:
+                    self._db.rollback()
+
+            # 2. 指数全量日线 + 估值
+            indexes = (
+                self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
+            )
+            index_bar_count = 0
+            index_valuation_count = 0
+
+            for idx in indexes:
+                try:
+                    index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code)
+                except Exception as e:
+                    logger.warning("指数 %s 日线拉取失败: %s", idx.index_code, e)
+
+                try:
+                    index_valuation_count += self._fetch_and_upsert_index_valuation(
+                        idx.index_code
+                    )
+                except Exception as e:
+                    logger.warning("指数 %s 估值拉取失败: %s", idx.index_code, e)
+
+            # 3. 宏观指标
+            macro_count = 0
+            try:
+                macro_count = self._fetch_and_upsert_macro()
+            except Exception as e:
+                logger.warning("宏观指标拉取失败: %s", e)
+
+            # 汇总
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is None:
+                return
+            run.status = "success"
+            run.finished_at = datetime.utcnow()
+            run.metrics = {
+                "etf": {
+                    "total": len(etfs),
+                    "bar_records": etf_bar_count,
+                    "failed": etf_failed_count,
+                },
+                "index": {
+                    "total": len(indexes),
+                    "bar_records": index_bar_count,
+                    "valuation_records": index_valuation_count,
+                },
+                "macro": {"records": macro_count},
+                "duration_seconds": round((datetime.utcnow() - start_time).total_seconds(), 1),
+            }
+            self._db.commit()
+
+        except Exception as e:
+            self._db.rollback()
+            logger.warning("run_cold_start 整体失败: %s", e, exc_info=True)
             try:
                 run = (
                     self._db.query(ResearchRunModel)

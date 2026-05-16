@@ -19,6 +19,11 @@ from quant_etf_api.infra.db.models.core import (
 )
 from quant_etf_api.plugins.base import StrategyContextData, StrategyResult
 from quant_etf_api.plugins.registry import StrategyRegistry
+from quant_etf_api.services._bar_metrics import (
+    calc_5d_return_etf,
+    calc_5d_return_index,
+    calc_volume_ratio_20d,
+)
 from quant_etf_api.schemas.backtest import (
     BacktestCreateRequest,
     BacktestDetail,
@@ -383,7 +388,7 @@ class BacktestService:
             if bar and bar.change_pct is not None:
                 benchmark_changes[index_code] = bar.change_pct
             # 计算指数近 5 日收益（用 close_price 差值近似）
-            index_5d_return[index_code] = self._calc_5d_return_index(
+            index_5d_return[index_code] = calc_5d_return_index(
                 index_code, trade_date, all_index_bars
             )
 
@@ -401,8 +406,8 @@ class BacktestService:
             bar = all_bars.get((code, trade_date))
             if bar is None:
                 continue
-            volume_ratio_20d = self._calc_volume_ratio_20d(code, trade_date, all_bars)
-            etf_5d_return = self._calc_5d_return_etf(code, trade_date, all_bars)
+            volume_ratio_20d = calc_volume_ratio_20d(code, trade_date, all_bars)
+            etf_5d_return = calc_5d_return_etf(code, trade_date, all_bars)
             etf_bars[code] = {
                 "volume_ratio_20d": volume_ratio_20d,
                 "change_pct": bar.change_pct or 0.0,
@@ -415,62 +420,6 @@ class BacktestService:
             share_changes=share_changes,
             extra={"etf_bars": etf_bars, "index_5d_return": index_5d_return},
         )
-
-    def _calc_volume_ratio_20d(self, etf_code: str, trade_date: date, all_bars: dict) -> float:
-        """计算 20 日量比：当日成交量 / 近 20 日平均成交量。"""
-        today_bar = all_bars.get((etf_code, trade_date))
-        if today_bar is None or today_bar.volume is None:
-            return 1.0
-        # 收集 trade_date 之前的 20 个交易日数据
-        past_volumes = [
-            v.volume
-            for (code, dt), v in all_bars.items()
-            if code == etf_code and dt < trade_date and v.volume is not None
-        ]
-        past_volumes.sort()
-        recent_20 = past_volumes[-20:] if len(past_volumes) >= 20 else past_volumes
-        if not recent_20:
-            return 1.0
-        avg = sum(recent_20) / len(recent_20)
-        return round(today_bar.volume / avg, 4) if avg > 0 else 1.0
-
-    def _calc_5d_return_etf(self, etf_code: str, trade_date: date, all_bars: dict) -> float:
-        """计算 ETF 近 5 日收益率（%）。"""
-        today_bar = all_bars.get((etf_code, trade_date))
-        if today_bar is None or today_bar.close_price is None:
-            return 0.0
-        past_closes = sorted(
-            [
-                (dt, v.close_price)
-                for (code, dt), v in all_bars.items()
-                if code == etf_code and dt < trade_date and v.close_price is not None
-            ],
-            key=lambda x: x[0],
-        )
-        if len(past_closes) < 5:
-            return 0.0
-        base_close = past_closes[-5][1]
-        return round((today_bar.close_price / base_close - 1) * 100, 4) if base_close > 0 else 0.0
-
-    def _calc_5d_return_index(
-        self, index_code: str, trade_date: date, all_index_bars: dict
-    ) -> float:
-        """计算指数近 5 日收益率（%）。"""
-        today_bar = all_index_bars.get((index_code, trade_date))
-        if today_bar is None or today_bar.close_price is None:
-            return 0.0
-        past_closes = sorted(
-            [
-                (dt, v.close_price)
-                for (code, dt), v in all_index_bars.items()
-                if code == index_code and dt < trade_date and v.close_price is not None
-            ],
-            key=lambda x: x[0],
-        )
-        if len(past_closes) < 5:
-            return 0.0
-        base_close = past_closes[-5][1]
-        return round((today_bar.close_price / base_close - 1) * 100, 4) if base_close > 0 else 0.0
 
     def _get_etf_return(
         self, etf_code: str, trade_date: date, next_date: date, all_bars: dict

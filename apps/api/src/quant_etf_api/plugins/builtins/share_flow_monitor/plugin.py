@@ -29,14 +29,8 @@ class ShareFlowMonitorPlugin:
         return {"signal_id": "share_flow_signal", "name": "份额流信号"}
 
     def prepare_context(self, trade_date: date, params: dict | None = None) -> StrategyContextData:
-        # 当前使用硬编码的模拟数据；后续接入真实 DB 查询后替换此处
         return StrategyContextData(
-            share_changes={
-                "510300": {"share_delta_pct": 2.4},
-                "510050": {"share_delta_pct": 0.4},
-                "510500": {"share_delta_pct": -1.8},
-                "159919": {"share_delta_pct": 3.1},
-            }
+            share_changes={},
         )
 
     def run_for_universe(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
@@ -14,46 +14,6 @@ from quant_etf_api.infra.db.models.core import (
 from quant_etf_api.schemas.etf import EtfCreateRequest, EtfDetail
 
 logger = logging.getLogger(__name__)
-
-# DB 不可用时的降级数据（不再自动写入 DB，仅作内存兜底）
-SEED_ETFS = [
-    {
-        "etf_code": "510300",
-        "exchange": "SSE",
-        "name_cn": "华泰柏瑞沪深300ETF",
-        "tracking_index_code": "000300",
-        "tracking_index_name": "沪深300",
-        "category": "broad_index",
-        "fund_company": "华泰柏瑞",
-    },
-    {
-        "etf_code": "510050",
-        "exchange": "SSE",
-        "name_cn": "华夏上证50ETF",
-        "tracking_index_code": "000016",
-        "tracking_index_name": "上证50",
-        "category": "broad_index",
-        "fund_company": "华夏基金",
-    },
-    {
-        "etf_code": "510500",
-        "exchange": "SSE",
-        "name_cn": "南方中证500ETF",
-        "tracking_index_code": "000905",
-        "tracking_index_name": "中证500",
-        "category": "broad_index",
-        "fund_company": "南方基金",
-    },
-    {
-        "etf_code": "159919",
-        "exchange": "SZSE",
-        "name_cn": "嘉实沪深300ETF",
-        "tracking_index_code": "000300",
-        "tracking_index_name": "沪深300",
-        "category": "broad_index",
-        "fund_company": "嘉实基金",
-    },
-]
 
 
 def detect_exchange(etf_code: str) -> str:
@@ -96,19 +56,8 @@ class UniverseService:
             )
             return [_row_to_detail(r) for r in rows]
         except Exception:
-            logger.warning("DB query failed, returning stub ETF list", exc_info=True)
-            return [
-                EtfDetail(
-                    fund_full_name=item["name_cn"],
-                    listing_date=date(2012, 1, 1),
-                    data_source="seed",
-                    updated_at=None,
-                    is_active=True,
-                    is_a_share_etf=True,
-                    **item,
-                )
-                for item in SEED_ETFS
-            ]
+            logger.warning("DB query failed, returning []", exc_info=True)
+            return []
 
     def get_etf(self, etf_code: str) -> EtfDetail | None:
         try:
@@ -116,18 +65,7 @@ class UniverseService:
             return _row_to_detail(row) if row else None
         except Exception:
             logger.warning("DB query failed for etf_code=%s", etf_code, exc_info=True)
-            match = next((item for item in SEED_ETFS if item["etf_code"] == etf_code), None)
-            if match is None:
-                return None
-            return EtfDetail(
-                fund_full_name=match["name_cn"],
-                listing_date=date(2012, 1, 1),
-                data_source="seed",
-                updated_at=None,
-                is_active=True,
-                is_a_share_etf=True,
-                **match,
-            )
+            return None
 
     def add_etf(self, req: EtfCreateRequest) -> EtfDetail:
         try:

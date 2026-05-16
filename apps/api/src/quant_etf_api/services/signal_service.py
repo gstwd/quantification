@@ -49,19 +49,7 @@ class SignalService:
                 ]
         except Exception:
             logger.warning("latest_signals DB query failed for %s", strategy_id, exc_info=True)
-
-        # DB 无数据或查询失败时返回占位信号，保证前端可渲染
-        return [
-            SignalRow(
-                trade_date=date.today(),
-                etf_code="510300",
-                strategy_id=strategy_id,
-                signal_score=72.5,
-                signal_level="HIGH",
-                signal_label="高确信",
-                signal_payload={"volume_prob": 82.0, "direction_prob": 61.0, "share_prob": 74.0},
-            )
-        ]
+            return []
 
     def factor_rows(self, etf_code: str, trade_date: date) -> list[FactorRow]:
         try:
@@ -88,15 +76,4 @@ class SignalService:
                 ]
         except Exception:
             logger.warning("factor_rows DB query failed", exc_info=True)
-
-        # DB 无数据时返回占位因子值
-        return [
-            FactorRow(
-                trade_date=trade_date,
-                etf_code=etf_code,
-                factor_id="volume_ratio_20d",
-                factor_value_numeric=1.86,
-                factor_payload={"window": 20},
-                strategy_id="three_factor_guard",
-            )
-        ]
+            return []

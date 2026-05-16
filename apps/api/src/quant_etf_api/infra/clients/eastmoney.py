@@ -36,13 +36,14 @@ class EastmoneyClient(BaseDataClient):
     base_url = "https://push2.eastmoney.com/api/qt/stock/get"
     fund_info_url = "https://fundmobapi.eastmoney.com/FundMApi/FundBaseInfo"
     market_map = {
-        "510300": "1",
-        "510310": "1",
-        "510330": "1",
-        "159919": "0",
-        "510050": "1",
-        "510500": "1",
-        "512100": "1",
+        # SSE ETFs
+        "510050": "1", "510300": "1", "510310": "1", "510330": "1",
+        "510500": "1", "510880": "1",
+        "512010": "1", "512100": "1", "512170": "1", "512880": "1",
+        "588000": "1",
+        # SZSE ETFs
+        "159865": "0", "159845": "0", "159915": "0", "159919": "0",
+        "159920": "0", "159949": "0", "159995": "0",
     }
 
     @staticmethod

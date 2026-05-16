@@ -41,19 +41,7 @@ class RunService:
                 ]
         except Exception:
             logger.warning("list_runs DB query failed", exc_info=True)
-
-        # DB 无数据时返回占位运行记录
-        return [
-            ResearchRunSummary(
-                run_id=str(uuid4()),
-                run_type="daily_ingest",
-                trade_date=date.today(),
-                status="pending",
-                started_at=datetime.utcnow(),
-                finished_at=None,
-                error_message=None,
-            )
-        ]
+            return []
 
     def create_run(
         self, run_type: str, strategy_id: str | None, trade_date: date
@@ -84,3 +72,21 @@ class RunService:
             status="pending",
             started_at=now,
         )
+
+    def mark_failed(self, run_id: str, error_message: str) -> None:
+        """将指定运行标记为失败状态。
+
+        Args:
+            run_id: 运行 ID
+            error_message: 错误描述
+        """
+        try:
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is not None:
+                run.status = "failed"
+                run.finished_at = datetime.utcnow()
+                run.error_message = error_message[:1000]
+                self._db.commit()
+        except Exception:
+            self._db.rollback()
+            logger.warning("mark_failed 更新失败", exc_info=True)

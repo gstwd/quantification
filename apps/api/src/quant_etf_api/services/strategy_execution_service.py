@@ -1,0 +1,260 @@
+"""策略实时执行服务，为单日策略运行构建 DB 上下文并调用插件。
+
+使用模式与 BacktestService 一致：从 DB 加载行情数据，
+构建 StrategyContextData，调用插件 run_for_universe，
+将信号和因子值写入 etf_signal 和 etf_factor_value 表。
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import date, datetime, timedelta
+
+from sqlalchemy import and_
+from sqlalchemy.orm import Session
+
+from quant_etf_api.infra.db.models.core import (
+    EtfDailyBarModel,
+    EtfDailyShareModel,
+    EtfFactorValueModel,
+    EtfSignalModel,
+    EtfUniverseModel,
+    IndexDailyBarModel,
+    ResearchRunModel,
+)
+from quant_etf_api.plugins.base import StrategyContextData, StrategyPlugin
+from quant_etf_api.services._bar_metrics import (
+    calc_5d_return_etf,
+    calc_5d_return_index,
+    calc_volume_ratio_20d,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class StrategyExecutionService:
+    """策略实时执行服务。
+
+    为指定策略的单日运行构建数据库上下文，
+    调用策略插件计算信号/因子值，并将结果持久化。
+    """
+
+    def __init__(self, db: Session) -> None:
+        self._db = db
+
+    def execute(
+        self,
+        plugin: StrategyPlugin,
+        trade_date: date,
+        run_id: str,
+        params: dict | None = None,
+    ) -> None:
+        """执行单日策略信号计算，写入 etf_signal 和 etf_factor_value。
+
+        Args:
+            plugin: 已注册的策略插件实例
+            trade_date: 运行对应的交易日
+            run_id: 研究运行 ID
+            params: 策略参数覆盖
+        """
+        etfs = (
+            self._db.query(EtfUniverseModel)
+            .filter(EtfUniverseModel.is_active.is_(True))
+            .order_by(EtfUniverseModel.etf_code)
+            .all()
+        )
+        if not etfs:
+            logger.warning("execute: 无活跃 ETF，跳过策略运行")
+            return
+
+        etf_codes = [e.etf_code for e in etfs]
+        universe = [{"etf_code": e.etf_code, "name_cn": e.name_cn} for e in etfs]
+
+        # 批量加载所需数据
+        all_bars = self._load_all_bars(trade_date, etf_codes)
+        all_shares = self._load_all_shares(trade_date, etf_codes)
+        all_index_bars = self._load_all_index_bars(trade_date)
+
+        # 构建策略上下文
+        context = self._build_live_context(
+            trade_date, etf_codes, all_bars, all_shares, all_index_bars
+        )
+
+        # 调用插件计算信号
+        try:
+            results = plugin.run_for_universe(trade_date, universe, context, params)
+        except Exception:
+            logger.exception("插件 %s 执行失败", plugin.strategy_id)
+            self._mark_run_failed(run_id, f"插件 {plugin.strategy_id} 执行异常")
+            return
+
+        # 写入信号和因子值
+        signal_count = 0
+        factor_count = 0
+        for r in results:
+            try:
+                self._db.add(
+                    EtfSignalModel(
+                        trade_date=r.trade_date,
+                        etf_code=r.etf_code,
+                        strategy_id=r.strategy_id,
+                        signal_score=r.signal_score,
+                        signal_level=r.signal_level,
+                        signal_label=r.signal_label,
+                        signal_payload=r.payload,
+                        run_id=run_id,
+                    )
+                )
+                signal_count += 1
+            except Exception:
+                self._db.rollback()
+                logger.warning("写入信号失败: %s %s", r.etf_code, r.strategy_id)
+
+            for fv in r.factor_values:
+                try:
+                    self._db.add(
+                        EtfFactorValueModel(
+                            trade_date=r.trade_date,
+                            etf_code=r.etf_code,
+                            factor_id=fv["factor_id"],
+                            factor_value_numeric=fv.get("value"),
+                            factor_value_text=fv.get("text"),
+                            factor_payload=fv.get("payload"),
+                            strategy_id=r.strategy_id,
+                        )
+                    )
+                    factor_count += 1
+                except Exception:
+                    self._db.rollback()
+                    logger.warning("写入因子值失败: %s %s %s", r.etf_code, fv["factor_id"])
+
+        self._db.commit()
+
+        # 更新运行状态
+        run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+        if run is not None:
+            run.status = "success"
+            run.finished_at = datetime.utcnow()
+            run.metrics = {
+                "etf_count": len(etfs),
+                "signal_count": signal_count,
+                "factor_count": factor_count,
+            }
+            self._db.commit()
+        logger.info("策略执行完成: %s signals=%d factors=%d", plugin.strategy_id, signal_count, factor_count)
+
+    def _mark_run_failed(self, run_id: str, message: str) -> None:
+        try:
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is not None:
+                run.status = "failed"
+                run.finished_at = datetime.utcnow()
+                run.error_message = message[:1000]
+                self._db.commit()
+        except Exception:
+            self._db.rollback()
+            logger.warning("更新失败状态时出错", exc_info=True)
+
+    # ── 数据加载 ──────────────────────────────────────────────────────────────
+
+    def _load_all_bars(
+        self, trade_date: date, etf_codes: list[str]
+    ) -> dict[tuple[str, date], EtfDailyBarModel]:
+        """批量加载交易日及前 25 日的 ETF 日线。"""
+        lookback_start = trade_date - timedelta(days=35)
+        rows = (
+            self._db.query(EtfDailyBarModel)
+            .filter(
+                and_(
+                    EtfDailyBarModel.trade_date >= lookback_start,
+                    EtfDailyBarModel.trade_date <= trade_date,
+                    EtfDailyBarModel.etf_code.in_(etf_codes),
+                )
+            )
+            .all()
+        )
+        return {(r.etf_code, r.trade_date): r for r in rows}
+
+    def _load_all_shares(
+        self, trade_date: date, etf_codes: list[str]
+    ) -> dict[str, EtfDailyShareModel]:
+        """加载指定交易日的 ETF 份额快照，返回 {etf_code: row} 映射。"""
+        rows = (
+            self._db.query(EtfDailyShareModel)
+            .filter(
+                and_(
+                    EtfDailyShareModel.trade_date == trade_date,
+                    EtfDailyShareModel.etf_code.in_(etf_codes),
+                )
+            )
+            .all()
+        )
+        return {r.etf_code: r for r in rows}
+
+    def _load_all_index_bars(
+        self, trade_date: date
+    ) -> dict[tuple[str, date], IndexDailyBarModel]:
+        """批量加载交易日及前 10 日的指数日线。"""
+        lookback_start = trade_date - timedelta(days=15)
+        rows = (
+            self._db.query(IndexDailyBarModel)
+            .filter(
+                and_(
+                    IndexDailyBarModel.trade_date >= lookback_start,
+                    IndexDailyBarModel.trade_date <= trade_date,
+                )
+            )
+            .all()
+        )
+        return {(r.index_code, r.trade_date): r for r in rows}
+
+    # ── 上下文构建 ────────────────────────────────────────────────────────────
+
+    def _build_live_context(
+        self,
+        trade_date: date,
+        etf_codes: list[str],
+        all_bars: dict,
+        all_shares: dict,
+        all_index_bars: dict,
+    ) -> StrategyContextData:
+        """从 DB 数据构建单日策略上下文，与 BacktestService._build_historical_context 模式一致。"""
+        # 基准指数涨跌幅和 5 日收益
+        benchmark_changes: dict[str, float] = {}
+        index_5d_return: dict[str, float] = {}
+        for index_code in ("000300", "000016", "000905"):
+            bar = all_index_bars.get((index_code, trade_date))
+            if bar is not None and bar.change_pct is not None:
+                benchmark_changes[index_code] = bar.change_pct
+            index_5d_return[index_code] = calc_5d_return_index(
+                index_code, trade_date, all_index_bars
+            )
+
+        # ETF 份额变化
+        share_changes: dict[str, dict[str, float | None]] = {}
+        for code in etf_codes:
+            share_row = all_shares.get(code)
+            share_changes[code] = {
+                "share_delta_pct": share_row.shares_delta_pct if share_row else None
+            }
+
+        # ETF K 线衍生指标
+        etf_bars: dict[str, dict] = {}
+        for code in etf_codes:
+            bar = all_bars.get((code, trade_date))
+            if bar is None:
+                continue
+            volume_ratio_20d = calc_volume_ratio_20d(code, trade_date, all_bars)
+            etf_5d_return = calc_5d_return_etf(code, trade_date, all_bars)
+            etf_bars[code] = {
+                "volume_ratio_20d": volume_ratio_20d,
+                "change_pct": bar.change_pct or 0.0,
+                "etf_5d_return": etf_5d_return,
+                "close_price": bar.close_price,
+            }
+
+        return StrategyContextData(
+            benchmark_changes=benchmark_changes,
+            share_changes=share_changes,
+            extra={"etf_bars": etf_bars, "index_5d_return": index_5d_return},
+        )

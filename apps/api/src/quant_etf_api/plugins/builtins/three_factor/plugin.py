@@ -42,15 +42,9 @@ class ThreeFactorGuardPlugin:
         return {"signal_id": "three_factor_signal", "name": "三因子综合信号"}
 
     def prepare_context(self, trade_date: date, params: dict | None = None) -> StrategyContextData:
-        # 当前使用硬编码的模拟数据；后续接入真实 DB 查询后替换此处
         return StrategyContextData(
-            benchmark_changes={"000300": -0.42},
-            share_changes={
-                "510300": {"share_delta_pct": 1.8},
-                "510050": {"share_delta_pct": 0.6},
-                "510500": {"share_delta_pct": -0.4},
-                "159919": {"share_delta_pct": 2.2},
-            },
+            benchmark_changes={},
+            share_changes={},
         )
 
     def run_for_universe(

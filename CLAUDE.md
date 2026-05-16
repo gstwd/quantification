@@ -37,6 +37,12 @@ npm run build
 npm run lint
 ```
 
+```bash
+# ruff (installed globally on Windows, not in .venv)
+D:\CoreSoftware\python3.11.8\Scripts\ruff.exe check .
+D:\CoreSoftware\python3.11.8\Scripts\ruff.exe format .
+```
+
 ### Database migrations
 
 ```bash
@@ -54,19 +60,21 @@ HTTP → api/routers/ → services/ → infra/ → PostgreSQL
 ```
 
 - **`api/routers/`** — 8 route groups: `health`, `system`, `etfs`, `market_data`, `strategies`, `signals`, `runs`, `backtests`
-- **`services/`** — Business logic; currently return stub data (real data integration pending)
-- **`infra/db/`** — SQLAlchemy 2 ORM models (`infra/db/models/core.py` has all 16 tables)
-- **`infra/clients/`** — External API wrappers: `tencent.py` (K-lines), `eastmoney.py` (shares), `exchange_reference.py` — defined but not yet wired into services
-- **`infra/scheduler/`** — Task scheduling
+- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert)
+- **`infra/db/`** — SQLAlchemy 2 ORM models (`infra/db/models/core.py` has all 18 tables)
+- **`infra/clients/`** — 6 data source clients, all inherit from `base.py`:
+  - `tencent.py` (ETF K-line), `eastmoney.py` (ETF shares/info), `exchange_reference.py` (exchange ref)
+  - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
+- **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends
 - **`plugins/`** — Strategy plugin system (see below)
 - **`config/`** — Pydantic settings loaded from `.env`
 
-### Database schema (13 tables)
+### Database schema (18 tables, migration 0003)
 
 | Group | Tables |
 |---|---|
 | Reference | `etf_universe`, `benchmark_index` |
-| Market data | `etf_daily_bar`, `index_daily_bar`, `etf_daily_share`, `source_payload_log` |
+| Market data | `etf_daily_bar`, `index_daily_bar`, `etf_daily_share`, `index_valuation`, `macro_indicator`, `source_payload_log` |
 | Analytics | `factor_definition`, `etf_factor_value`, `signal_definition`, `etf_signal` |
 | Runtime | `strategy_plugin`, `research_run`, `research_run_item` |
 | Backtest | `backtest_run`, `backtest_daily_result`, `backtest_etf_result` |
@@ -87,14 +95,15 @@ To add a strategy: create a plugin file in `plugins/builtins/`, implement the Pr
 
 ### Frontend
 
-- **Pages** (`src/pages/`): Dashboard, ETF list, ETF detail, Strategy list, Strategy detail, Runs, Data status, Backtest list, Backtest create, Backtest detail
-- **State** (`src/stores/`): 4 Pinia stores — `etfs`, `strategies`, `signals`, `backtests`; components interact with stores only, never call API directly
-- **API layer** (`src/api/`): Axios wrappers; stores call these
-- Charts use ECharts 5
+- **Pages** (`src/pages/`): Dashboard, ETF list, ETF detail, Index list, Index detail, Macro, Strategy list, Strategy detail, Runs, Data status, Backtest list, Backtest create, Backtest detail
+- **State** (`src/stores/`): 4 Pinia stores — `etfs`, `strategies`, `signals`, `backtests`; stores are for mutable shared state only
+- **API layer** (`src/api/`): Axios wrappers; `etfs.ts`, `strategies.ts`, `signals.ts`, `backtests.ts`, `runs.ts`, `market_data.ts`
+- **Read-only data pages** (index/macro): Fetch data **inline** via `ref()` + `onMounted`, no Pinia store — lighter pattern for static data views
+- Charts use ECharts 5 (dynamic `import('echarts')`, `watch` with `flush: 'post'`, `dispose()` in `onUnmounted`)
 
 ## Current State
 
-Services are wired to PostgreSQL and real external clients. 16 tables exist across migrations `0001_initial_schema`, `ac0cbcadbda1_add_column_comments`, `0002_add_backtest_tables`. Backtest engine is in `services/backtest_service.py`; router at `api/routers/backtests.py`. On startup, `UniverseService._seed()` upserts the 4 seed ETFs. `IngestService` fetches from Tencent (K-lines) and Eastmoney (shares) on first request and persists to DB; subsequent requests read from DB. Signal/Run services read from DB with stub fallback when empty.
+Services fully wired to PostgreSQL. 18 tables across 4 migrations (0001→0002→0002_backtest→0003_index_macro). Each data type has exactly **one** source: ETF K-line→Tencent, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh.
 
 ## Gotchas
 
@@ -109,6 +118,10 @@ Services are wired to PostgreSQL and real external clients. 16 tables exist acro
 - **Backend venv on Windows**: Executables are at `apps/api/.venv/Scripts/` (e.g. `.venv/Scripts/alembic`, `.venv/Scripts/python`).
 - **`strategy_plugin` table is always empty** — strategies are managed by the in-memory `StrategyRegistry`. Never add a FK referencing `strategy_plugin`; it will silently reject all inserts due to FK violation.
 - **Backtest `context.extra["etf_bars"]`**: `BacktestService` injects real historical bar data here before calling `plugin.run_for_universe()`. Plugins check this key first and fall back to stubs when absent (live runs).
+- **Ruff on Windows**: Installed globally at `D:\CoreSoftware\python3.11.8\Scripts\ruff.exe`, NOT in the project `.venv`.
+- **AkShare index valuation**: Only 沪深300(000300), 上证50(000016), 中证500(000905) return PE/PB from legulegu.com. Other indexes (000688/399001/399006) return empty — must handle gracefully in frontend.
+- **Backend GET endpoints never return 500**: External API failures are caught/logged, returning `[]`. A 200 OK with empty array can mean either "no data yet" or "upstream error".
+- **AkShare API instability**: Upstream network errors (ConnectionResetError, AttributeError) are common. Tests use `_retry_fetch()` with 3 attempts. Frontend pages catch errors silently and show "暂无数据".
 
 ## Coding Standards
 
