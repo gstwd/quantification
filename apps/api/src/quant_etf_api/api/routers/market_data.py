@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
 from quant_etf_api.schemas.market_data import (
+    BenchmarkIndex,
     DailyBar,
     IndexValuation,
     MacroIndicatorSchema,
@@ -11,6 +12,14 @@ from quant_etf_api.schemas.market_data import (
 from quant_etf_api.services.ingest_service import IngestService
 
 router = APIRouter(tags=["market-data"])
+
+
+@router.get("/market-data/indexes", response_model=list[BenchmarkIndex])
+def list_benchmark_indexes(
+    db: Session = Depends(get_db),
+) -> list[BenchmarkIndex]:
+    """列出所有基准指数。"""
+    return IngestService(db).get_benchmark_indexes()
 
 
 @router.get("/market-data/etfs/{etf_code}/daily-bars", response_model=list[DailyBar])

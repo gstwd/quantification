@@ -8,6 +8,9 @@ import DataStatusPage from '../pages/DataStatusPage.vue'
 import EtfDetailPage from '../pages/EtfDetailPage.vue'
 import EtfUniversePage from '../pages/EtfUniversePage.vue'
 import RunsPage from '../pages/RunsPage.vue'
+import IndexDetailPage from '../pages/IndexDetailPage.vue'
+import IndexListPage from '../pages/IndexListPage.vue'
+import MacroPage from '../pages/MacroPage.vue'
 import StrategiesPage from '../pages/StrategiesPage.vue'
 import StrategyDetailPage from '../pages/StrategyDetailPage.vue'
 
@@ -17,6 +20,9 @@ const router = createRouter({
     { path: '/', component: DashboardPage },
     { path: '/etfs', component: EtfUniversePage },
     { path: '/etfs/:etfCode', component: EtfDetailPage, props: true },
+    { path: '/indexes', component: IndexListPage },
+    { path: '/indexes/:indexCode', component: IndexDetailPage, props: true },
+    { path: '/macro', component: MacroPage },
     { path: '/strategies', component: StrategiesPage },
     { path: '/strategies/:strategyId', component: StrategyDetailPage, props: true },
     { path: '/runs', component: RunsPage },

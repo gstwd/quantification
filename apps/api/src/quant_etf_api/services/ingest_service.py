@@ -23,6 +23,7 @@ from quant_etf_api.infra.db.models.core import (
     ResearchRunModel,
 )
 from quant_etf_api.schemas.market_data import (
+    BenchmarkIndex,
     DailyBar,
     IndexValuation,
     MacroIndicatorSchema,
@@ -346,6 +347,18 @@ class IngestService:
         self._db.execute(stmt)
         self._db.commit()
         return len(bars)
+
+    def get_benchmark_indexes(self) -> list[BenchmarkIndex]:
+        """返回所有基准指数（从种子表读取）。"""
+        rows = (
+            self._db.query(BenchmarkIndexModel)
+            .order_by(BenchmarkIndexModel.index_code)
+            .all()
+        )
+        return [
+            BenchmarkIndex(index_code=r.index_code, index_name=r.name_cn)
+            for r in rows
+        ]
 
     def get_index_daily_bars(self, index_code: str, limit: int = 30) -> list[DailyBar]:
         """指数日线读穿透缓存。"""

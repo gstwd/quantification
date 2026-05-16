@@ -51,3 +51,10 @@ class MacroIndicatorSchema(BaseModel):
     value: float
     unit: str | None = None
     source: str = "akshare"
+
+
+class BenchmarkIndex(BaseModel):
+    """基准指数基本信息。"""
+
+    index_code: str
+    index_name: str

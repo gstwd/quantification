@@ -150,3 +150,28 @@ export interface BacktestEtfResult {
   in_portfolio: boolean
   etf_return: number | null
 }
+
+export interface IndexValuation {
+  trade_date: string
+  index_code: string
+  pe: number | null
+  pe_percentile: number | null
+  pb: number | null
+  pb_percentile: number | null
+  dividend_yield: number | null
+  source: string
+}
+
+export interface MacroIndicator {
+  indicator_code: string
+  indicator_name: string
+  period: string
+  value: number
+  unit: string | null
+  source: string
+}
+
+export interface BenchmarkIndex {
+  index_code: string
+  index_name: string
+}
