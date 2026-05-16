@@ -1,14 +1,184 @@
+from __future__ import annotations
+
+import logging
 from datetime import date
+
+from sqlalchemy import func, text
+from sqlalchemy.orm import Session
+
+from quant_etf_api.infra.db.models.core import (
+    EtfDailyBarModel,
+    EtfDailyShareModel,
+    EtfUniverseModel,
+    IndexDailyBarModel,
+    ResearchRunModel,
+)
+from quant_etf_api.schemas.run import ResearchRunSummary
+from quant_etf_api.schemas.system import DataSourceSnapshot, SystemStatusResponse
+
+logger = logging.getLogger(__name__)
 
 
 class SystemService:
-    def status(self) -> dict:
-        # 返回平台基本配置信息，供前端展示系统状态
-        return {
-            "asset_scope": "a_share_etf",       # 仅覆盖 A 股 ETF，不含个股
-            "frequency": "daily",               # 日频策略，不支持分钟级
-            "latest_trade_date": str(date.today()),
-            "data_sources": ["tencent", "eastmoney"],
-            "frontend": "vue3",
-            "database": "postgresql",
-        }
+    """系统状态查询服务。
+
+    从数据库各表中聚合数据概览、数据源新鲜度、最近运行记录和连接状态，
+    供前端"数据状态"页面展示。
+    """
+
+    def __init__(self, db: Session) -> None:
+        self._db = db
+
+    def _check_db_connection(self) -> bool:
+        """通过执行轻量查询检测数据库是否可达。"""
+        try:
+            self._db.execute(text("SELECT 1"))
+            return True
+        except Exception:
+            logger.warning("数据库连接检测失败", exc_info=True)
+            return False
+
+    def _get_active_etf_count(self) -> int:
+        """查询当前活跃 ETF 数量。"""
+        try:
+            return (
+                self._db.query(EtfUniverseModel)
+                .filter(EtfUniverseModel.is_active.is_(True))
+                .count()
+            )
+        except Exception:
+            logger.warning("活跃ETF数量查询失败", exc_info=True)
+            return 0
+
+    def _get_table_snapshot(
+        self,
+        model: type,
+        source_name: str,
+        table_name: str,
+    ) -> DataSourceSnapshot:
+        """查询单张数据表的统计快照。
+
+        Args:
+            model: SQLAlchemy 模型类（如 EtfDailyBarModel）。
+            source_name: 数据源展示名称（如 "腾讯日线行情"）。
+            table_name: 数据库表名（如 "etf_daily_bar"）。
+
+        Returns:
+            DataSourceSnapshot，查询失败时返回全零值快照。
+        """
+        try:
+            result = (
+                self._db.query(
+                    func.count().label("cnt"),
+                    func.max(model.trade_date).label("max_date"),
+                    func.max(model.ingested_at).label("max_ingested"),
+                )
+                .one()
+            )
+            return DataSourceSnapshot(
+                source_name=source_name,
+                table_name=table_name,
+                record_count=result.cnt or 0,
+                latest_trade_date=result.max_date,
+                latest_ingested_at=result.max_ingested,
+            )
+        except Exception:
+            logger.warning("表 %s 快照查询失败", table_name, exc_info=True)
+            return DataSourceSnapshot(
+                source_name=source_name,
+                table_name=table_name,
+                record_count=0,
+                latest_trade_date=None,
+                latest_ingested_at=None,
+            )
+
+    def _get_recent_runs(self, limit: int = 5) -> list[ResearchRunSummary]:
+        """获取最近 N 条研究运行记录。"""
+        try:
+            rows = (
+                self._db.query(ResearchRunModel)
+                .order_by(ResearchRunModel.started_at.desc())
+                .limit(limit)
+                .all()
+            )
+            return [
+                ResearchRunSummary(
+                    run_id=r.run_id,
+                    run_type=r.run_type,
+                    strategy_id=r.strategy_id,
+                    trade_date=r.trade_date,
+                    status=r.status,
+                    started_at=r.started_at,
+                    finished_at=r.finished_at,
+                    error_message=r.error_message,
+                )
+                for r in rows
+            ]
+        except Exception:
+            logger.warning("最近运行记录查询失败", exc_info=True)
+            return []
+
+    def status(self) -> SystemStatusResponse:
+        """聚合系统运行状态快照。
+
+        并行收集各维度数据：数据库连接、ETF数量、各表快照、
+        最近运行记录。任一查询失败不影响其他查询结果，
+        对应字段返回零值或空列表。
+
+        Returns:
+            包含完整系统状态的响应对象。
+        """
+        db_connected = self._check_db_connection()
+
+        if not db_connected:
+            # 数据库不可达时直接返回降级状态，不再尝试后续查询
+            return SystemStatusResponse(
+                active_etf_count=0,
+                latest_trade_date=None,
+                data_sources=[],
+                recent_runs=[],
+                asset_scope="a_share_etf",
+                frequency="daily",
+                database="postgresql",
+                db_connected=False,
+            )
+
+        active_etf_count = self._get_active_etf_count()
+
+        data_sources = [
+            self._get_table_snapshot(
+                EtfDailyBarModel,
+                source_name="腾讯日线行情",
+                table_name="etf_daily_bar",
+            ),
+            self._get_table_snapshot(
+                EtfDailyShareModel,
+                source_name="东方财富份额",
+                table_name="etf_daily_share",
+            ),
+            self._get_table_snapshot(
+                IndexDailyBarModel,
+                source_name="指数日线行情",
+                table_name="index_daily_bar",
+            ),
+        ]
+
+        # 全局最新交易日：取各表中非 None 的最大值
+        latest_trade_date: date | None = None
+        for s in data_sources:
+            if s.latest_trade_date is not None:
+                if latest_trade_date is None or s.latest_trade_date > latest_trade_date:
+                    latest_trade_date = s.latest_trade_date
+
+        recent_runs = self._get_recent_runs(limit=5)
+
+        return SystemStatusResponse(
+            active_etf_count=active_etf_count,
+            latest_trade_date=latest_trade_date,
+            data_sources=data_sources,
+            recent_runs=recent_runs,
+            asset_scope="a_share_etf",
+            frequency="daily",
+            database="postgresql",
+            db_connected=True,
+        )

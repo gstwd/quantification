@@ -48,6 +48,27 @@ export interface ResearchRunSummary {
   error_message?: string | null
 }
 
+/** 单个数据表/数据源的快照信息 */
+export interface DataSourceSnapshot {
+  source_name: string
+  table_name: string
+  record_count: number
+  latest_trade_date: string | null
+  latest_ingested_at: string | null
+}
+
+/** 系统运行状态完整响应 */
+export interface SystemStatusResponse {
+  active_etf_count: number
+  latest_trade_date: string | null
+  data_sources: DataSourceSnapshot[]
+  recent_runs: ResearchRunSummary[]
+  asset_scope: string
+  frequency: string
+  database: string
+  db_connected: boolean
+}
+
 export interface DailyBar {
   trade_date: string
   code: string

@@ -1,59 +1,240 @@
 <template>
   <div class="page">
+    <!-- 页头：标题 + 数据库连接指示灯 + 操作按钮 -->
     <div class="page-header">
-      <h1 class="page-title">数据状态</h1>
+      <div class="header-left">
+        <h1 class="page-title">数据状态</h1>
+        <span
+          class="connection-dot"
+          :class="status?.db_connected ? 'connected' : 'disconnected'"
+          :title="status?.db_connected ? '数据库已连接' : '数据库连接异常'"
+        ></span>
+      </div>
       <button class="btn btn-primary" :disabled="triggering" @click="triggerIngest">
         {{ triggering ? '触发中...' : '触发数据摄取' }}
       </button>
     </div>
 
+    <!-- 加载 / 错误状态 -->
     <div v-if="loading" class="loading">加载中...</div>
-    <div v-else class="status-grid">
-      <div v-for="(val, key) in status" :key="key" class="status-card">
-        <div class="status-key">{{ key }}</div>
-        <div class="status-val">{{ formatVal(val) }}</div>
+    <div v-else-if="error" class="error-tip">{{ error }}</div>
+
+    <template v-else-if="status">
+      <!-- 区域一：数据概览 stat grid -->
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div class="stat-label">活跃 ETF 数</div>
+          <div class="stat-value">{{ status.active_etf_count }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">最新交易日</div>
+          <div class="stat-value">{{ status.latest_trade_date ?? '—' }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">日线总条数</div>
+          <div class="stat-value">{{ totalBars.toLocaleString() }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">份额记录数</div>
+          <div class="stat-value">{{ sharesSnapshot.record_count.toLocaleString() }}</div>
+        </div>
       </div>
-    </div>
+
+      <!-- 区域二：数据源状态 -->
+      <div class="section">
+        <div class="section-header">
+          <h2 class="section-title">数据源状态</h2>
+        </div>
+        <div class="source-grid">
+          <div v-for="src in status.data_sources" :key="src.table_name" class="source-card">
+            <div class="source-name">{{ src.source_name }}</div>
+            <div class="source-table mono text-muted">{{ src.table_name }}</div>
+            <div class="source-stats">
+              <div class="source-stat">
+                <span class="source-stat-label">记录数</span>
+                <span class="source-stat-val">{{ src.record_count.toLocaleString() }}</span>
+              </div>
+              <div class="source-stat">
+                <span class="source-stat-label">最新日期</span>
+                <span class="source-stat-val">{{ src.latest_trade_date ?? '—' }}</span>
+              </div>
+              <div class="source-stat">
+                <span class="source-stat-label">最近入库</span>
+                <span class="source-stat-val mono">{{ formatTime(src.latest_ingested_at) }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 区域三：最近运行 -->
+      <div class="section">
+        <div class="section-header">
+          <h2 class="section-title">最近运行</h2>
+          <span class="section-badge">最近 {{ status.recent_runs.length }} 条</span>
+        </div>
+        <div v-if="status.recent_runs.length === 0" class="empty">暂无运行记录</div>
+        <table v-else class="data-table">
+          <thead>
+            <tr>
+              <th>Run ID</th>
+              <th>类型</th>
+              <th>策略</th>
+              <th>交易日</th>
+              <th>状态</th>
+              <th>开始时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in status.recent_runs" :key="item.run_id">
+              <td class="mono text-muted">{{ item.run_id.slice(0, 8) }}...</td>
+              <td>
+                <span class="type-badge">{{ formatRunType(item.run_type) }}</span>
+              </td>
+              <td class="text-muted mono">{{ item.strategy_id ?? '—' }}</td>
+              <td class="text-muted mono">{{ item.trade_date ?? '—' }}</td>
+              <td>
+                <span class="status-badge" :class="'status-' + item.status">{{ formatStatus(item.status) }}</span>
+              </td>
+              <td class="text-muted">{{ formatTime(item.started_at) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 区域四：系统信息 -->
+      <div class="status-strip">
+        <div class="status-chip">
+          <span class="chip-key">asset_scope</span>
+          <span class="chip-val">{{ status.asset_scope }}</span>
+        </div>
+        <div class="status-chip">
+          <span class="chip-key">frequency</span>
+          <span class="chip-val">{{ status.frequency }}</span>
+        </div>
+        <div class="status-chip">
+          <span class="chip-key">database</span>
+          <span class="chip-val">{{ status.database }}</span>
+        </div>
+      </div>
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+/**
+ * 数据状态页面。
+ *
+ * 展示系统数据概览、各数据表新鲜度、最近运行记录和平台配置信息。
+ * 支持手动触发全量 ETF 日频数据摄取。
+ */
+
+import { computed, onMounted, ref } from 'vue'
 
 import { fetchSystemStatus, triggerDailyIngest } from '../api/runs'
+import type { SystemStatusResponse } from '../types/api'
 
-const status = ref<Record<string, unknown>>({})
+const status = ref<SystemStatusResponse | null>(null)
 const loading = ref(false)
+const error = ref<string | null>(null)
 const triggering = ref(false)
 
-function formatVal(val: unknown): string {
-  if (val === null || val === undefined) return '—'
-  if (typeof val === 'object') return JSON.stringify(val)
-  return String(val)
+/** 汇总日线表记录数（etf_daily_bar + index_daily_bar） */
+const totalBars = computed(() => {
+  if (!status.value) return 0
+  return status.value.data_sources
+    .filter(s => s.table_name === 'etf_daily_bar' || s.table_name === 'index_daily_bar')
+    .reduce((sum, s) => sum + s.record_count, 0)
+})
+
+/** 份额表快照引用 */
+const sharesSnapshot = computed(() => {
+  if (!status.value) return { record_count: 0 }
+  return status.value.data_sources.find(s => s.table_name === 'etf_daily_share')
+    ?? { record_count: 0 }
+})
+
+/** 格式化 ISO 时间戳为简短中文友好格式 */
+function formatTime(ts: string | null | undefined): string {
+  if (!ts) return '—'
+  return new Date(ts).toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
+/** 运行类型中文映射 */
+function formatRunType(runType: string): string {
+  const map: Record<string, string> = {
+    daily_ingest: '日频入库',
+    strategy_run: '策略运行',
+    universe_refresh: '标的刷新',
+  }
+  return map[runType] ?? runType
+}
+
+/** 运行状态中文映射 */
+function formatStatus(status: string): string {
+  const map: Record<string, string> = {
+    pending: '待执行',
+    running: '执行中',
+    success: '成功',
+    failed: '失败',
+  }
+  return map[status] ?? status
+}
+
+/** 加载系统状态 */
+async function loadStatus() {
+  loading.value = true
+  error.value = null
+  try {
+    status.value = await fetchSystemStatus()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '加载失败，请稍后重试'
+  } finally {
+    loading.value = false
+  }
+}
+
+/** 触发数据摄取，完成后自动刷新状态 */
 async function triggerIngest() {
   triggering.value = true
   try {
     await triggerDailyIngest()
-    status.value = await fetchSystemStatus()
+    await loadStatus()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '触发摄取失败'
   } finally {
     triggering.value = false
   }
 }
 
-onMounted(async () => {
-  loading.value = true
-  try { status.value = await fetchSystemStatus() } finally { loading.value = false }
-})
+onMounted(loadStatus)
 </script>
 
 <style scoped>
-.page { display: flex; flex-direction: column; gap: 20px; }
+/* === 页面布局 === */
+.page { display: flex; flex-direction: column; gap: 24px; }
 
+/* === 页头 === */
 .page-header { display: flex; align-items: center; justify-content: space-between; }
+.header-left { display: flex; align-items: center; gap: 10px; }
 .page-title { font-size: 22px; font-weight: 700; }
 
+/* 数据库连接状态指示器 */
+.connection-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  transition: background 0.3s;
+}
+.connection-dot.connected { background: var(--success); }
+.connection-dot.disconnected { background: var(--danger); }
+
+/* === 按钮（复用项目约定） === */
 .btn {
   padding: 8px 16px;
   border-radius: var(--radius-sm);
@@ -66,33 +247,132 @@ onMounted(async () => {
 .btn-primary:hover { background: var(--accent-hover); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.loading { padding: 60px; text-align: center; color: var(--text-muted); }
-
-.status-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
+/* === 加载 / 空 / 错误状态 === */
+.loading, .empty { padding: 60px; text-align: center; color: var(--text-muted); }
+.error-tip {
+  padding: 16px 20px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: var(--radius);
+  color: var(--danger);
+  font-size: 13px;
 }
 
-.status-card {
+/* === 数据概览 stat grid（复用 DashboardPage） === */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+.stat-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  padding: 20px;
+}
+.stat-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+.stat-value { font-size: 28px; font-weight: 700; color: var(--text); }
+
+/* === Section 容器（复用 DashboardPage） === */
+.section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.section-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.section-title { font-size: 15px; font-weight: 600; }
+.section-badge {
+  font-size: 11px;
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent);
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-family: monospace;
+}
+
+/* === 数据源卡片网格 === */
+.source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
   padding: 16px 20px;
 }
-
-.status-key {
-  font-size: 11px;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-bottom: 6px;
+.source-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  display: flex; flex-direction: column; gap: 12px;
 }
+.source-name { font-size: 14px; font-weight: 600; color: var(--text); }
+.source-table { font-size: 11px; }
+.source-stats { display: flex; flex-direction: column; gap: 6px; }
+.source-stat { display: flex; justify-content: space-between; align-items: center; }
+.source-stat-label { font-size: 12px; color: var(--text-muted); }
+.source-stat-val { font-size: 13px; font-weight: 500; color: var(--text); }
 
-.status-val {
-  font-size: 14px;
-  font-weight: 500;
-  word-break: break-all;
+/* === 表格（复用 DashboardPage / RunsPage） === */
+.data-table { width: 100%; border-collapse: collapse; }
+.data-table th {
+  text-align: left; padding: 10px 20px;
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  background: rgba(0,0,0,0.1);
+}
+.data-table td { padding: 12px 20px; border-bottom: 1px solid rgba(51,65,85,0.5); }
+.data-table tr:last-child td { border-bottom: none; }
+.data-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+/* === 徽章（复用 RunsPage） === */
+.type-badge {
+  font-size: 11px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  padding: 2px 8px;
+  border-radius: 20px;
   font-family: monospace;
+}
+.status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+}
+.status-pending  { background: rgba(148,163,184,0.15); color: var(--text-muted); }
+.status-running  { background: rgba(59,130,246,0.15); color: #60a5fa; }
+.status-success  { background: rgba(34,197,94,0.15); color: var(--success); }
+.status-failed   { background: rgba(239,68,68,0.15); color: var(--danger); }
+
+/* === 系统信息条（复用 DashboardPage） === */
+.status-strip {
+  display: flex; flex-wrap: wrap; gap: 8px;
+}
+.status-chip {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+.chip-key { color: var(--text-muted); }
+.chip-val { color: var(--text); font-weight: 500; }
+
+/* === 通用工具类 === */
+.mono { font-family: monospace; font-size: 12px; }
+.text-muted { color: var(--text-muted); }
+
+/* === 响应式 === */
+@media (max-width: 640px) {
+  .stat-grid { grid-template-columns: repeat(2, 1fr); }
+  .source-grid { grid-template-columns: 1fr; }
+  .stat-value { font-size: 22px; }
 }
 </style>

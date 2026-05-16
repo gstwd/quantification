@@ -2,7 +2,7 @@
   <div class="page">
     <div class="page-header">
       <h1 class="page-title">研究总览</h1>
-      <span class="page-subtitle">{{ systemStatus.latest_trade_date ? '最新交易日 ' + systemStatus.latest_trade_date : '' }}</span>
+      <span class="page-subtitle">{{ systemStatus?.latest_trade_date ? '最新交易日 ' + systemStatus?.latest_trade_date : '' }}</span>
     </div>
 
     <div class="stat-grid">
@@ -20,7 +20,7 @@
       </div>
       <div class="stat-card">
         <div class="stat-label">数据频率</div>
-        <div class="stat-value">{{ systemStatus.frequency || 'daily' }}</div>
+        <div class="stat-value">{{ systemStatus?.frequency || 'daily' }}</div>
       </div>
     </div>
 
@@ -64,7 +64,7 @@
       </table>
     </div>
 
-    <div class="status-strip" v-if="Object.keys(systemStatus).length">
+    <div class="status-strip" v-if="systemStatus">
       <div v-for="(val, key) in statusChips" :key="key" class="status-chip">
         <span class="chip-key">{{ key }}</span>
         <span class="chip-val">{{ val }}</span>
@@ -77,23 +77,26 @@
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
+import type { SystemStatusResponse } from '../types/api'
 import { fetchSystemStatus } from '../api/runs'
 import { useEtfStore } from '../stores/etfs'
 import { useSignalStore } from '../stores/signals'
 import { useStrategyStore } from '../stores/strategies'
 
-const systemStatus = ref<Record<string, unknown>>({})
+const systemStatus = ref<SystemStatusResponse | null>(null)
 const signalStore = useSignalStore()
 const etfStore = useEtfStore()
 const strategyStore = useStrategyStore()
 const signals = computed(() => signalStore.items)
 
 const statusChips = computed(() => {
-  const s = systemStatus.value as Record<string, unknown>
+  const s = systemStatus.value
+  if (!s) return {}
   const keys = ['asset_scope', 'frequency', 'database'] as const
   const result: Record<string, string> = {}
   for (const k of keys) {
-    if (s[k] !== undefined) result[k] = String(s[k])
+    const v = s[k]
+    if (v !== undefined) result[k] = String(v)
   }
   return result
 })
