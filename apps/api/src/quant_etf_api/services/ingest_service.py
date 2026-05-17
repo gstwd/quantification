@@ -8,10 +8,9 @@ from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from quant_etf_api.infra.clients.akshare_fund import AkShareFundClient
 from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
 from quant_etf_api.infra.clients.akshare_macro import AkShareMacroClient
-from quant_etf_api.infra.clients.eastmoney import EastmoneyClient
-from quant_etf_api.infra.clients.tencent import TencentClient
 from quant_etf_api.infra.db.models.core import (
     BenchmarkIndexModel,
     EtfDailyBarModel,
@@ -142,16 +141,24 @@ class IngestService:
     # ==================================================================
 
     def _fetch_and_upsert_bars_full_history(self, etf_code: str) -> int:
-        """冷启动：拉取 ETF 从成立至今的全量历史日线并幂等写入。
+        """冷启动：一次性拉取 ETF 全量历史日线并幂等写入。
 
-        limit 设为 10000，覆盖任何 A 股 ETF 的完整上市历史（最长约 20 年 / 5000 交易日）。
+        使用新浪后端（fund_etf_hist_sina），单次调用返回从上市至今的全量数据，
+        无需按年分批（约 425ms 完成，不受东方财富代理封锁影响）。
 
         Returns:
             写入记录数
         """
-        bars = TencentClient().fetch_daily_bars(etf_code, limit=10000)
+        client = AkShareFundClient()
+        try:
+            bars = client.fetch_etf_daily_bars(etf_code)
+        except Exception as exc:
+            logger.warning("ETF %s 全量日线拉取失败: %s", etf_code, exc)
+            return 0
+
         if not bars:
             return 0
+
         stmt = (
             insert(EtfDailyBarModel)
             .values(
@@ -164,7 +171,10 @@ class IngestService:
                         "low_price": b.low_price,
                         "close_price": b.close_price,
                         "volume": b.volume,
-                        "source": "tencent",
+                        "turnover": b.turnover,
+                        "change_pct": b.change_pct,
+                        "amplitude": b.amplitude,
+                        "source": "akshare",
                         "ingested_at": datetime.now(timezone.utc),
                     }
                     for b in bars
@@ -206,9 +216,10 @@ class IngestService:
             )
             return str(refreshed) if refreshed else ""
 
-        # 有历史数据，按缺口天数计算拉取条数并增量写入
-        limit = (today - max_date).days + 5
-        bars = TencentClient().fetch_daily_bars(etf_code, limit=limit)
+        # 有历史数据，拉取 max_date 到今日的缺口数据
+        start_str = (max_date - timedelta(days=1)).strftime("%Y%m%d")
+        end_str = today.strftime("%Y%m%d")
+        bars = AkShareFundClient().fetch_etf_daily_bars(etf_code, start_date=start_str, end_date=end_str)
         if not bars:
             return str(max_date)
         stmt = (
@@ -223,7 +234,10 @@ class IngestService:
                         "low_price": b.low_price,
                         "close_price": b.close_price,
                         "volume": b.volume,
-                        "source": "tencent",
+                        "turnover": b.turnover,
+                        "change_pct": b.change_pct,
+                        "amplitude": b.amplitude,
+                        "source": "akshare",
                         "ingested_at": datetime.now(timezone.utc),
                     }
                     for b in bars
@@ -233,7 +247,7 @@ class IngestService:
         )
         self._db.execute(stmt)
         self._db.commit()
-        return bars[-1].trade_date
+        return str(bars[-1].trade_date)
 
     def _query_etf_bars(
         self,
@@ -284,20 +298,18 @@ class IngestService:
         except Exception:
             logger.warning("get_daily_bars failed for %s", etf_code, exc_info=True)
             self._db.rollback()
-            return []
+        return []
 
     # ==================================================================
     # ETF 份额
     # ==================================================================
 
     def _fetch_and_upsert_shares(self, etf_code: str, trade_date: date) -> None:
-        """从东方财富拉取 ETF 份额快照并幂等写入 DB。
+        """从 AkShare 拉取 ETF 份额快照并幂等写入 DB。
 
         写入后自动计算与前一日份额的 delta 和 delta_pct。
         """
-        etf_row = self._db.get(EtfUniverseModel, etf_code)
-        exchange = etf_row.exchange if etf_row else None
-        snapshot = EastmoneyClient().fetch_share_snapshot(etf_code, exchange=exchange)
+        snapshot = AkShareFundClient().fetch_share_snapshot(etf_code)
         if snapshot is None:
             raise ValueError(f"无法获取 {etf_code} 的份额数据")
         stmt = (
@@ -310,7 +322,7 @@ class IngestService:
                         "shares_total": snapshot.shares_total,
                         "aum": snapshot.aum,
                         "nav": round(snapshot.price, 3),
-                        "source": "eastmoney",
+                        "source": "akshare",
                         "ingested_at": datetime.now(timezone.utc),
                     }
                 ]
@@ -389,7 +401,7 @@ class IngestService:
         except Exception:
             logger.warning("get_share_history failed for %s", etf_code, exc_info=True)
             self._db.rollback()
-            return []
+        return []
 
     # ==================================================================
     # 指数日线（AkShare）
@@ -1212,7 +1224,8 @@ class IngestService:
             macro_latest_ingest: datetime | None = (
                 self._db.query(func.max(MacroIndicatorModel.ingested_at)).scalar()
             )
-            macro_stale_threshold = datetime.now(timezone.utc) - timedelta(days=5)
+            # DateTime 列返回 naive datetime，去掉 tzinfo 后再比较
+            macro_stale_threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=5)
             macro_count = 0
             if macro_latest_ingest is None or macro_latest_ingest < macro_stale_threshold:
                 try:
