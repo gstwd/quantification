@@ -51,7 +51,9 @@ class EastmoneyClient(BaseDataClient):
         return "1" if exchange == "SSE" else "0"
 
     def fetch_fund_info(self, code: str) -> EastmoneyFundInfo | None:
-        """拉取 ETF 基金基本信息。
+        """拉取 ETF 基金基本信息（已废弃，上游 API 返回 404）。
+
+        请使用 AkShareFundClient.fetch_etf_info() 替代。
 
         Args:
             code: ETF 代码，如 510300
@@ -108,8 +110,7 @@ class EastmoneyClient(BaseDataClient):
         else:
             market = self.market_map.get(code)
         if market is None:
-            self._logger.warning("无法推断 %s 的市场编码", code)
-            return None
+            market = "1" if code.startswith(("5", "6")) else "0"
         url = f"{self.base_url}?secid={market}.{code}&fields=f43,f57,f58,f116"
         self._log_request(endpoint, {"code": code, "market": market})
         start = time.perf_counter()

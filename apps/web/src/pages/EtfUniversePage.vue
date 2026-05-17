@@ -68,7 +68,7 @@
               maxlength="6"
               autofocus
             />
-            <span class="form-hint">基金名称、跟踪指数等信息将自动从东方财富获取</span>
+            <span class="form-hint">基金名称、跟踪指数等信息将自动从数据源获取</span>
           </div>
           <div v-if="addError" class="form-error">{{ addError }}</div>
           <div class="modal-footer">

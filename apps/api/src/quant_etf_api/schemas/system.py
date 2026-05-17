@@ -5,6 +5,35 @@ from pydantic import BaseModel
 from quant_etf_api.schemas.run import ResearchRunSummary
 
 
+class DataFreshnessItem(BaseModel):
+    """单个 ETF 或指数的数据新鲜度。"""
+
+    code: str
+    name: str
+    latest_date: date | None = None
+    is_stale: bool = False
+
+
+class DataFreshnessGroup(BaseModel):
+    """数据表维度的新鲜度汇总。"""
+
+    total: int
+    up_to_date: int
+    stale: list[DataFreshnessItem] = []
+    missing: list[DataFreshnessItem] = []
+    latest_date: date | None = None
+
+
+class DataQualityResponse(BaseModel):
+    """数据质量总览。"""
+
+    etf_bars: DataFreshnessGroup
+    etf_shares: DataFreshnessGroup
+    index_bars: DataFreshnessGroup
+    index_valuation: DataFreshnessGroup
+    checked_at: datetime
+
+
 class DataSourceSnapshot(BaseModel):
     """单个数据表/数据源的快照信息。
 

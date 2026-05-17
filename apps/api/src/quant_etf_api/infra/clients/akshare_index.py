@@ -57,13 +57,81 @@ def _index_code_to_ak_symbol(index_code: str) -> str:
     return f"sz{index_code}"
 
 
+_INDEX_NAME_CACHE: dict[str, str] | None = None
+
+
 class AkShareIndexClient(BaseDataClient):
     """指数行情与估值客户端（基于 AkShare SDK）。
 
-    封装 akshare 的指数日线（腾讯源）和指数 PE/PB 估值（乐股乐源）接口。
+    封装 akshare 的指数日线（腾讯源）和指数 PE/PB 估值（乐股乐源）接口，
+    以及指数名称查询（聚宽数据源）。
     """
 
     source_name = "akshare_index"
+
+    # ------------------------------------------------------------------
+    # 指数名称查询
+    # ------------------------------------------------------------------
+
+    def fetch_index_name(self, index_code: str) -> str | None:
+        """根据指数代码查询中文名称。
+
+        使用 akshare index_stock_info（聚宽数据源）获取全量指数列表，
+        结果缓存在模块级变量中，进程生命周期内有效。
+
+        Args:
+            index_code: 指数代码，如 '000300'
+
+        Returns:
+            指数中文名称（如 '沪深300'），未找到时返回 None
+        """
+        global _INDEX_NAME_CACHE
+        if _INDEX_NAME_CACHE is None:
+            endpoint = "index_stock_info"
+            self._log_request(endpoint, {})
+            start = time.perf_counter()
+            try:
+                df = ak.index_stock_info()
+                _INDEX_NAME_CACHE = dict(zip(df["index_code"], df["display_name"]))
+                elapsed = (time.perf_counter() - start) * 1000
+                self._log_response(endpoint, len(_INDEX_NAME_CACHE), elapsed)
+            except Exception as e:
+                elapsed = (time.perf_counter() - start) * 1000
+                self._log_error(endpoint, e, elapsed)
+                return None
+        return _INDEX_NAME_CACHE.get(index_code)
+
+    def find_index_code_by_name(self, name: str) -> str | None:
+        """根据指数名称反查指数代码。
+
+        对输入名称去除常见后缀（如 '指数'、'(价格)'）后进行模糊匹配。
+
+        Args:
+            name: 指数名称，如 '沪深300指数' 或 '创业板指数(价格)'
+
+        Returns:
+            匹配到的指数代码，未找到时返回 None
+        """
+        global _INDEX_NAME_CACHE
+        if _INDEX_NAME_CACHE is None:
+            self.fetch_index_name("000001")
+        if _INDEX_NAME_CACHE is None:
+            return None
+
+        import re
+        cleaned = re.sub(r"[（(].*?[）)]", "", name).replace("指数", "").strip()
+        if not cleaned:
+            return None
+
+        for code, display_name in _INDEX_NAME_CACHE.items():
+            if display_name == cleaned or display_name == name:
+                return code
+
+        for code, display_name in _INDEX_NAME_CACHE.items():
+            if cleaned in display_name or display_name in cleaned:
+                return code
+
+        return None
 
     # ------------------------------------------------------------------
     # 指数日线

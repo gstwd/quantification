@@ -1,19 +1,41 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
-from quant_etf_api.infra.clients.eastmoney import EastmoneyClient
+from quant_etf_api.infra.clients.akshare_fund import (
+    AkShareFundClient,
+    map_fund_type_to_category,
+)
+from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
 from quant_etf_api.infra.db.models.core import (
     EtfUniverseModel,
     ResearchRunItemModel,
     ResearchRunModel,
 )
 from quant_etf_api.schemas.etf import EtfCreateRequest, EtfDetail
+from quant_etf_api.services.index_service import IndexService
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_date(date_str: str | None) -> date | None:
+    """将 'YYYY-MM-DD' 格式字符串解析为 date 对象。
+
+    Args:
+        date_str: 日期字符串
+
+    Returns:
+        date 对象，解析失败时返回 None
+    """
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
 
 
 def detect_exchange(etf_code: str) -> str:
@@ -68,23 +90,48 @@ class UniverseService:
             return None
 
     def add_etf(self, req: EtfCreateRequest) -> EtfDetail:
+        """添加 ETF 到研究池。
+
+        自动从 AkShare 获取基金档案信息（名称、公司、成立日期、跟踪指数等），
+        获取失败时使用代码作为名称兜底。如果获取到跟踪指数，会自动将其加入基准指数表。
+
+        Args:
+            req: 包含 etf_code 的创建请求
+
+        Returns:
+            新增的 EtfDetail
+
+        Raises:
+            ValueError: ETF 已存在或代码格式不合法
+        """
         try:
             row = self._db.get(EtfUniverseModel, req.etf_code)
             if row and row.is_active:
                 raise ValueError(f"ETF {req.etf_code} 已存在")
 
-            # 从东方财富拉取基金基本信息，失败时使用代码作为名称兜底
+            # 从 AkShare 拉取基金档案信息，失败时使用代码作为名称兜底
             try:
-                info = EastmoneyClient().fetch_fund_info(req.etf_code)
+                info = AkShareFundClient().fetch_etf_info(req.etf_code)
             except Exception:
-                logger.warning("Failed to fetch fund info for %s, using defaults", req.etf_code)
+                logger.warning("获取 %s 基金信息失败，使用默认值", req.etf_code)
                 info = None
 
             name_cn = info.name_cn if info else req.etf_code
             fund_full_name = info.fund_full_name if info else req.etf_code
             fund_company = info.fund_company if info else None
             tracking_index_name = info.tracking_index_name or "未知指数" if info else "未知指数"
-            tracking_index_code = info.tracking_index_code if info else None
+            category = map_fund_type_to_category(info.fund_type) if info else "broad_index"
+            listing_date = _parse_date(info.establishment_date) if info else None
+
+            # 通过跟踪指数名称反查指数代码
+            tracking_index_code: str | None = None
+            if info and info.tracking_index_name:
+                try:
+                    tracking_index_code = AkShareIndexClient().find_index_code_by_name(
+                        info.tracking_index_name
+                    )
+                except Exception:
+                    logger.warning("反查跟踪指数代码失败: %s", info.tracking_index_name)
 
             if row:
                 # 重新激活已下架的 ETF 并更新信息
@@ -94,6 +141,8 @@ class UniverseService:
                 row.fund_company = fund_company
                 row.tracking_index_name = tracking_index_name
                 row.tracking_index_code = tracking_index_code
+                row.category = category
+                row.listing_date = listing_date
                 row.data_source = "manual"
             else:
                 exchange = detect_exchange(req.etf_code)
@@ -105,7 +154,8 @@ class UniverseService:
                     tracking_index_name=tracking_index_name,
                     tracking_index_code=tracking_index_code,
                     fund_company=fund_company,
-                    category="broad_index",
+                    category=category,
+                    listing_date=listing_date,
                     is_active=True,
                     is_a_share_etf=True,
                     data_source="manual",
@@ -113,12 +163,24 @@ class UniverseService:
                 self._db.add(row)
             self._db.commit()
             self._db.refresh(row)
+
+            # 自动将跟踪指数加入基准指数表
+            if row.tracking_index_code:
+                try:
+                    IndexService(self._db).ensure_index_exists(
+                        row.tracking_index_code, row.tracking_index_name
+                    )
+                except Exception:
+                    logger.warning(
+                        "自动关联跟踪指数 %s 失败", row.tracking_index_code, exc_info=True
+                    )
+
             return _row_to_detail(row)
         except ValueError:
             raise
         except Exception:
             self._db.rollback()
-            logger.error("Failed to add ETF %s", req.etf_code, exc_info=True)
+            logger.error("添加 ETF %s 失败", req.etf_code, exc_info=True)
             raise
 
     def remove_etf(self, etf_code: str) -> None:
@@ -136,7 +198,7 @@ class UniverseService:
             raise
 
     def refresh_all(self, run_id: str) -> None:
-        """遍历活跃 ETF 池，从东方财富刷新元数据并更新变更字段。
+        """遍历活跃 ETF 池，从 AkShare 刷新元数据并更新变更字段。
 
         每只 ETF 的处理结果写入 ResearchRunItem，
         全部完成后更新 research_run 状态与指标。
@@ -176,14 +238,14 @@ class UniverseService:
                 item_message = ""
 
                 try:
-                    info = EastmoneyClient().fetch_fund_info(etf_code)
+                    info = AkShareFundClient().fetch_etf_info(etf_code)
                     if info is None:
                         item_status = "skipped"
                         item_message = "未获取到基金信息"
                         unchanged_count += 1
                     else:
                         changed = False
-                        changes = []
+                        changes: list[str] = []
 
                         if info.name_cn and info.name_cn != etf.name_cn:
                             changes.append(f"名称: {etf.name_cn} → {info.name_cn}")
@@ -206,14 +268,19 @@ class UniverseService:
                             )
                             etf.tracking_index_name = info.tracking_index_name
                             changed = True
-                        if (
-                            info.tracking_index_code
-                            and info.tracking_index_code != etf.tracking_index_code
-                        ):
+
+                        new_category = map_fund_type_to_category(info.fund_type)
+                        if new_category != "other" and new_category != etf.category:
+                            changes.append(f"类别: {etf.category} → {new_category}")
+                            etf.category = new_category
+                            changed = True
+
+                        new_listing_date = _parse_date(info.establishment_date)
+                        if new_listing_date and new_listing_date != etf.listing_date:
                             changes.append(
-                                f"指数代码: {etf.tracking_index_code} → {info.tracking_index_code}"
+                                f"成立日期: {etf.listing_date} → {new_listing_date}"
                             )
-                            etf.tracking_index_code = info.tracking_index_code
+                            etf.listing_date = new_listing_date
                             changed = True
 
                         if changed:

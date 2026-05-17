@@ -3,8 +3,17 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from quant_etf_api.api.routers import etfs, health, market_data, runs, signals, strategies, system
-from quant_etf_api.api.routers import backtests
+from quant_etf_api.api.routers import (
+    backtests,
+    etfs,
+    health,
+    indexes,
+    market_data,
+    runs,
+    signals,
+    strategies,
+    system,
+)
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.infra.scheduler import get_scheduler
 from quant_etf_api.plugins.registry import StrategyRegistry, build_default_registry
@@ -34,6 +43,7 @@ app.add_middleware(
 app.include_router(health.router, prefix=settings.api_prefix)
 app.include_router(system.router, prefix=settings.api_prefix)
 app.include_router(etfs.router, prefix=settings.api_prefix)
+app.include_router(indexes.router, prefix=settings.api_prefix)
 app.include_router(market_data.router, prefix=settings.api_prefix)
 app.include_router(strategies.router, prefix=settings.api_prefix)
 app.include_router(signals.router, prefix=settings.api_prefix)

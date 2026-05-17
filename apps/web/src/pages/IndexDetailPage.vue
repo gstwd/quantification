@@ -28,8 +28,21 @@
 
       <div class="chart-card">
         <div class="card-header">
-          <span class="card-title">K 线图（近 60 日）</span>
-          <span class="card-sub text-muted">来源: {{ bars[0]?.source ?? '—' }}</span>
+          <span class="card-title">K 线图</span>
+          <div class="range-controls">
+            <button
+              v-for="preset in rangePresets"
+              :key="preset.label"
+              class="range-btn"
+              :class="{ active: activePreset === preset.label }"
+              @click="applyPreset(preset)"
+            >{{ preset.label }}</button>
+            <span class="range-sep">|</span>
+            <input type="date" class="date-input" v-model="barStartDate" :min="dateRange.min_date ?? undefined" :max="dateRange.max_date ?? undefined" />
+            <span class="range-tilde">~</span>
+            <input type="date" class="date-input" v-model="barEndDate" :min="dateRange.min_date ?? undefined" :max="dateRange.max_date ?? undefined" />
+            <button class="range-btn" @click="applyCustomRange">查询</button>
+          </div>
         </div>
         <div v-if="barsLoading" class="chart-placeholder">加载中...</div>
         <div v-else-if="bars.length === 0" class="chart-placeholder">暂无行情数据</div>
@@ -39,7 +52,15 @@
       <div class="chart-card">
         <div class="card-header">
           <span class="card-title">PE / PB 估值</span>
-          <span class="card-sub text-muted">来源: {{ valuation[0]?.source ?? '—' }}</span>
+          <div class="range-controls">
+            <button
+              v-for="preset in rangePresets"
+              :key="'v-' + preset.label"
+              class="range-btn"
+              :class="{ active: valuationActivePreset === preset.label }"
+              @click="applyValuationPreset(preset)"
+            >{{ preset.label }}</button>
+          </div>
         </div>
         <div v-if="valuationLoading" class="chart-placeholder">加载中...</div>
         <div v-else-if="valuation.length === 0" class="chart-placeholder">暂无估值数据（仅沪深300/上证50/中证500 支持）</div>
@@ -52,8 +73,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
-import { fetchBenchmarkIndexes, fetchIndexDailyBars, fetchIndexValuation } from '../api/market_data'
-import type { DailyBar, IndexValuation } from '../types/api'
+import {
+  fetchBenchmarkIndexes,
+  fetchIndexDailyBars,
+  fetchIndexDateRange,
+  fetchIndexValuation,
+} from '../api/market_data'
+import type { DailyBar, DateRange, IndexValuation } from '../types/api'
 
 const props = defineProps<{ indexCode: string }>()
 
@@ -75,25 +101,94 @@ const latestValuation = computed(() =>
   valuation.value.length ? valuation.value[valuation.value.length - 1] : null,
 )
 
-async function loadData() {
+/** 日期范围元数据 */
+const dateRange = ref<DateRange>({ min_date: null, max_date: null })
+
+/** K 线日期选择器 */
+const barStartDate = ref('')
+const barEndDate = ref('')
+const activePreset = ref('近60日')
+
+/** 估值图快捷切换 */
+const valuationActivePreset = ref('近60日')
+
+/** 快捷按钮配置 */
+const rangePresets = [
+  { label: '近30日', days: 30 },
+  { label: '近60日', days: 60 },
+  { label: '近半年', days: 180 },
+  { label: '近1年', days: 365 },
+  { label: '全部', days: 0 },
+]
+
+/** 格式化日期为 YYYY-MM-DD */
+function formatDate(d: Date): string {
+  return d.toISOString().slice(0, 10)
+}
+
+/** 计算日期范围 */
+function calcRange(days: number): { startDate?: string; endDate?: string; limit?: number } {
+  if (days === 0) {
+    if (dateRange.value.min_date && dateRange.value.max_date) {
+      return { startDate: dateRange.value.min_date, endDate: dateRange.value.max_date }
+    }
+    return { limit: 2000 }
+  }
+  const end = new Date()
+  const start = new Date()
+  start.setDate(start.getDate() - days)
+  return { startDate: formatDate(start), endDate: formatDate(end) }
+}
+
+/** 应用 K 线快捷日期范围 */
+async function applyPreset(preset: { label: string; days: number }) {
+  activePreset.value = preset.label
+  const range = calcRange(preset.days)
+  barStartDate.value = range.startDate ?? ''
+  barEndDate.value = range.endDate ?? ''
+  await loadBars()
+}
+
+/** 应用自定义日期范围 */
+async function applyCustomRange() {
+  activePreset.value = ''
+  await loadBars()
+}
+
+/** 应用估值快捷日期范围 */
+async function applyValuationPreset(preset: { label: string; days: number }) {
+  valuationActivePreset.value = preset.label
+  await loadValuation(calcRange(preset.days))
+}
+
+/** 加载 K 线数据 */
+async function loadBars() {
   barsLoading.value = true
-  valuationLoading.value = true
   try {
-    const [indexes, barsData, valuationData] = await Promise.all([
-      fetchBenchmarkIndexes(),
-      fetchIndexDailyBars(props.indexCode, 60),
-      fetchIndexValuation(props.indexCode, 60),
-    ])
-    const found = indexes.find(i => i.index_code === props.indexCode)
-    if (found) indexName.value = found.index_name
-    bars.value = barsData
-    valuation.value = valuationData
+    if (barStartDate.value && barEndDate.value) {
+      bars.value = await fetchIndexDailyBars(props.indexCode, {
+        startDate: barStartDate.value,
+        endDate: barEndDate.value,
+      })
+    } else {
+      bars.value = await fetchIndexDailyBars(props.indexCode, { limit: 60 })
+    }
   } catch {
-    // 数据拉取失败时保持空状态，由模板展示占位
+    bars.value = []
   } finally {
     barsLoading.value = false
+  }
+}
+
+/** 加载估值数据 */
+async function loadValuation(params: { limit?: number; startDate?: string; endDate?: string } = { limit: 60 }) {
+  valuationLoading.value = true
+  try {
+    valuation.value = await fetchIndexValuation(props.indexCode, params)
+  } catch {
+    valuation.value = []
+  } finally {
     valuationLoading.value = false
-    loading.value = false
   }
 }
 
@@ -165,7 +260,28 @@ watch([bars, valuation, chartEl, valuationChartEl], () => {
   if (!barsLoading.value && !valuationLoading.value) initCharts()
 }, { flush: 'post' })
 
-onMounted(loadData)
+onMounted(async () => {
+  try {
+    const [indexes, dr] = await Promise.all([
+      fetchBenchmarkIndexes(),
+      fetchIndexDateRange(props.indexCode).catch(() => ({ min_date: null, max_date: null })),
+    ])
+    const found = indexes.find(i => i.index_code === props.indexCode)
+    if (found) indexName.value = found.index_name
+    dateRange.value = dr
+  } catch {
+    // 元数据获取失败不影响主流程
+  }
+
+  const end = new Date()
+  const start = new Date()
+  start.setDate(start.getDate() - 60)
+  barStartDate.value = formatDate(start)
+  barEndDate.value = formatDate(end)
+
+  await Promise.all([loadBars(), loadValuation({ limit: 60 })])
+  loading.value = false
+})
 
 onUnmounted(() => {
   chartInstance?.dispose()
@@ -221,10 +337,48 @@ onUnmounted(() => {
   gap: 10px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
 }
 .card-title { font-size: 14px; font-weight: 600; }
 .card-sub { font-size: 12px; }
 .text-muted { color: var(--text-muted); }
+
+.range-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.range-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.range-btn:hover { color: var(--text); border-color: var(--accent); }
+.range-btn.active { background: rgba(59, 130, 246, 0.15); color: var(--accent); border-color: var(--accent); }
+
+.range-sep { color: var(--border); font-size: 14px; margin: 0 2px; }
+.range-tilde { color: var(--text-muted); font-size: 12px; }
+
+.date-input {
+  background: var(--surface-2, rgba(255,255,255,0.05));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 3px 8px;
+  font-size: 12px;
+  outline: none;
+  width: 130px;
+  color-scheme: dark;
+}
+.date-input:focus { border-color: var(--accent); }
 
 .chart-placeholder { padding: 60px; text-align: center; color: var(--text-muted); }
 .chart-container { width: 100%; height: 380px; padding: 8px; }

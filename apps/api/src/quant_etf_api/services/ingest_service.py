@@ -4,6 +4,7 @@ import logging
 import threading
 from datetime import date, datetime
 
+from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -202,40 +203,52 @@ class IngestService:
         self._db.commit()
         return len(bars)
 
-    def get_daily_bars(self, etf_code: str, limit: int = 250) -> list[DailyBar]:
-        """ETF 日线读穿透缓存。"""
-        try:
-            rows = (
-                self._db.query(EtfDailyBarModel)
-                .filter(EtfDailyBarModel.etf_code == etf_code)
-                .order_by(EtfDailyBarModel.trade_date.desc())
-                .limit(limit)
+    def _query_etf_bars(
+        self,
+        etf_code: str,
+        limit: int,
+        start_date: date | None,
+        end_date: date | None,
+    ) -> list[EtfDailyBarModel]:
+        """构建 ETF 日线查询（日期范围模式或 limit 模式）。"""
+        q = self._db.query(EtfDailyBarModel).filter(EtfDailyBarModel.etf_code == etf_code)
+        if start_date and end_date:
+            return (
+                q.filter(
+                    EtfDailyBarModel.trade_date >= start_date,
+                    EtfDailyBarModel.trade_date <= end_date,
+                )
+                .order_by(EtfDailyBarModel.trade_date.asc())
                 .all()
             )
+        rows = q.order_by(EtfDailyBarModel.trade_date.desc()).limit(limit).all()
+        return list(reversed(rows))
+
+    def get_daily_bars(
+        self,
+        etf_code: str,
+        limit: int = 250,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> list[DailyBar]:
+        """ETF 日线读穿透缓存。
+
+        提供 start_date/end_date 时使用日期范围查询，否则使用 limit。
+        """
+        try:
+            rows = self._query_etf_bars(etf_code, limit, start_date, end_date)
             if rows:
-                return [_bar_row_to_schema(r) for r in reversed(rows)]
+                return [_bar_row_to_schema(r) for r in rows]
 
             with _get_lock(f"bars:{etf_code}"):
-                rows = (
-                    self._db.query(EtfDailyBarModel)
-                    .filter(EtfDailyBarModel.etf_code == etf_code)
-                    .order_by(EtfDailyBarModel.trade_date.desc())
-                    .limit(limit)
-                    .all()
-                )
+                rows = self._query_etf_bars(etf_code, limit, start_date, end_date)
                 if rows:
-                    return [_bar_row_to_schema(r) for r in reversed(rows)]
+                    return [_bar_row_to_schema(r) for r in rows]
 
                 self._fetch_and_upsert_bars_full_history(etf_code)
-                rows = (
-                    self._db.query(EtfDailyBarModel)
-                    .filter(EtfDailyBarModel.etf_code == etf_code)
-                    .order_by(EtfDailyBarModel.trade_date.desc())
-                    .limit(limit)
-                    .all()
-                )
+                rows = self._query_etf_bars(etf_code, limit, start_date, end_date)
                 if rows:
-                    return [_bar_row_to_schema(r) for r in reversed(rows)]
+                    return [_bar_row_to_schema(r) for r in rows]
         except Exception:
             logger.warning("get_daily_bars failed for %s", etf_code, exc_info=True)
             self._db.rollback()
@@ -298,40 +311,49 @@ class IngestService:
                 row.shares_delta_pct = delta_pct
                 self._db.commit()
 
-    def get_share_history(self, etf_code: str, limit: int = 30) -> list[ShareSnapshot]:
-        """ETF 份额读穿透缓存。"""
-        try:
-            rows = (
-                self._db.query(EtfDailyShareModel)
-                .filter(EtfDailyShareModel.etf_code == etf_code)
-                .order_by(EtfDailyShareModel.trade_date.desc())
-                .limit(limit)
+    def _query_shares(
+        self,
+        etf_code: str,
+        limit: int,
+        start_date: date | None,
+        end_date: date | None,
+    ) -> list[EtfDailyShareModel]:
+        """构建 ETF 份额查询（日期范围模式或 limit 模式）。"""
+        q = self._db.query(EtfDailyShareModel).filter(EtfDailyShareModel.etf_code == etf_code)
+        if start_date and end_date:
+            return (
+                q.filter(
+                    EtfDailyShareModel.trade_date >= start_date,
+                    EtfDailyShareModel.trade_date <= end_date,
+                )
+                .order_by(EtfDailyShareModel.trade_date.asc())
                 .all()
             )
+        rows = q.order_by(EtfDailyShareModel.trade_date.desc()).limit(limit).all()
+        return list(reversed(rows))
+
+    def get_share_history(
+        self,
+        etf_code: str,
+        limit: int = 30,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> list[ShareSnapshot]:
+        """ETF 份额读穿透缓存。"""
+        try:
+            rows = self._query_shares(etf_code, limit, start_date, end_date)
             if rows:
-                return [_share_row_to_schema(r) for r in reversed(rows)]
+                return [_share_row_to_schema(r) for r in rows]
 
             with _get_lock(f"shares:{etf_code}"):
-                rows = (
-                    self._db.query(EtfDailyShareModel)
-                    .filter(EtfDailyShareModel.etf_code == etf_code)
-                    .order_by(EtfDailyShareModel.trade_date.desc())
-                    .limit(limit)
-                    .all()
-                )
+                rows = self._query_shares(etf_code, limit, start_date, end_date)
                 if rows:
-                    return [_share_row_to_schema(r) for r in reversed(rows)]
+                    return [_share_row_to_schema(r) for r in rows]
 
                 self._fetch_and_upsert_shares(etf_code, date.today())
-                rows = (
-                    self._db.query(EtfDailyShareModel)
-                    .filter(EtfDailyShareModel.etf_code == etf_code)
-                    .order_by(EtfDailyShareModel.trade_date.desc())
-                    .limit(limit)
-                    .all()
-                )
+                rows = self._query_shares(etf_code, limit, start_date, end_date)
                 if rows:
-                    return [_share_row_to_schema(r) for r in reversed(rows)]
+                    return [_share_row_to_schema(r) for r in rows]
         except Exception:
             logger.warning("get_share_history failed for %s", etf_code, exc_info=True)
             self._db.rollback()
@@ -377,50 +399,52 @@ class IngestService:
 
     def get_benchmark_indexes(self) -> list[BenchmarkIndex]:
         """返回所有基准指数（从种子表读取）。"""
-        rows = (
-            self._db.query(BenchmarkIndexModel)
-            .order_by(BenchmarkIndexModel.index_code)
-            .all()
-        )
-        return [
-            BenchmarkIndex(index_code=r.index_code, index_name=r.name_cn)
-            for r in rows
-        ]
+        rows = self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
+        return [BenchmarkIndex(index_code=r.index_code, index_name=r.name_cn) for r in rows]
 
-    def get_index_daily_bars(self, index_code: str, limit: int = 250) -> list[DailyBar]:
-        """指数日线读穿透缓存。"""
-        try:
-            rows = (
-                self._db.query(IndexDailyBarModel)
-                .filter(IndexDailyBarModel.index_code == index_code)
-                .order_by(IndexDailyBarModel.trade_date.desc())
-                .limit(limit)
+    def _query_index_bars(
+        self,
+        index_code: str,
+        limit: int,
+        start_date: date | None,
+        end_date: date | None,
+    ) -> list[IndexDailyBarModel]:
+        """构建指数日线查询（日期范围模式或 limit 模式）。"""
+        q = self._db.query(IndexDailyBarModel).filter(IndexDailyBarModel.index_code == index_code)
+        if start_date and end_date:
+            return (
+                q.filter(
+                    IndexDailyBarModel.trade_date >= start_date,
+                    IndexDailyBarModel.trade_date <= end_date,
+                )
+                .order_by(IndexDailyBarModel.trade_date.asc())
                 .all()
             )
+        rows = q.order_by(IndexDailyBarModel.trade_date.desc()).limit(limit).all()
+        return list(reversed(rows))
+
+    def get_index_daily_bars(
+        self,
+        index_code: str,
+        limit: int = 250,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> list[DailyBar]:
+        """指数日线读穿透缓存。"""
+        try:
+            rows = self._query_index_bars(index_code, limit, start_date, end_date)
             if rows:
-                return [_index_bar_row_to_schema(r) for r in reversed(rows)]
+                return [_index_bar_row_to_schema(r) for r in rows]
 
             with _get_lock(f"index_bars:{index_code}"):
-                rows = (
-                    self._db.query(IndexDailyBarModel)
-                    .filter(IndexDailyBarModel.index_code == index_code)
-                    .order_by(IndexDailyBarModel.trade_date.desc())
-                    .limit(limit)
-                    .all()
-                )
+                rows = self._query_index_bars(index_code, limit, start_date, end_date)
                 if rows:
-                    return [_index_bar_row_to_schema(r) for r in reversed(rows)]
+                    return [_index_bar_row_to_schema(r) for r in rows]
 
                 self._fetch_and_upsert_index_bars(index_code)
-                rows = (
-                    self._db.query(IndexDailyBarModel)
-                    .filter(IndexDailyBarModel.index_code == index_code)
-                    .order_by(IndexDailyBarModel.trade_date.desc())
-                    .limit(limit)
-                    .all()
-                )
+                rows = self._query_index_bars(index_code, limit, start_date, end_date)
                 if rows:
-                    return [_index_bar_row_to_schema(r) for r in reversed(rows)]
+                    return [_index_bar_row_to_schema(r) for r in rows]
         except Exception:
             logger.warning(
                 "get_index_daily_bars failed for %s, returning []", index_code, exc_info=True
@@ -466,40 +490,52 @@ class IngestService:
         self._db.commit()
         return len(valuations)
 
-    def get_index_valuation(self, index_code: str, limit: int = 30) -> list[IndexValuation]:
-        """指数估值读穿透缓存。"""
-        try:
-            rows = (
-                self._db.query(IndexValuationModel)
-                .filter(IndexValuationModel.index_code == index_code)
-                .order_by(IndexValuationModel.trade_date.desc())
-                .limit(limit)
+    def _query_index_valuation(
+        self,
+        index_code: str,
+        limit: int,
+        start_date: date | None,
+        end_date: date | None,
+    ) -> list[IndexValuationModel]:
+        """构建指数估值查询（日期范围模式或 limit 模式）。"""
+        q = self._db.query(IndexValuationModel).filter(IndexValuationModel.index_code == index_code)
+        if start_date and end_date:
+            return (
+                q.filter(
+                    IndexValuationModel.trade_date >= start_date,
+                    IndexValuationModel.trade_date <= end_date,
+                )
+                .order_by(IndexValuationModel.trade_date.asc())
                 .all()
             )
+        rows = q.order_by(IndexValuationModel.trade_date.desc()).limit(limit).all()
+        return list(reversed(rows))
+
+    def get_index_valuation(
+        self,
+        index_code: str,
+        limit: int = 30,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> list[IndexValuation]:
+        """指数估值读穿透缓存。
+
+        提供 start_date/end_date 时使用日期范围查询，否则使用 limit。
+        """
+        try:
+            rows = self._query_index_valuation(index_code, limit, start_date, end_date)
             if rows:
-                return [_index_valuation_row_to_schema(r) for r in reversed(rows)]
+                return [_index_valuation_row_to_schema(r) for r in rows]
 
             with _get_lock(f"index_valuation:{index_code}"):
-                rows = (
-                    self._db.query(IndexValuationModel)
-                    .filter(IndexValuationModel.index_code == index_code)
-                    .order_by(IndexValuationModel.trade_date.desc())
-                    .limit(limit)
-                    .all()
-                )
+                rows = self._query_index_valuation(index_code, limit, start_date, end_date)
                 if rows:
-                    return [_index_valuation_row_to_schema(r) for r in reversed(rows)]
+                    return [_index_valuation_row_to_schema(r) for r in rows]
 
                 self._fetch_and_upsert_index_valuation(index_code)
-                rows = (
-                    self._db.query(IndexValuationModel)
-                    .filter(IndexValuationModel.index_code == index_code)
-                    .order_by(IndexValuationModel.trade_date.desc())
-                    .limit(limit)
-                    .all()
-                )
+                rows = self._query_index_valuation(index_code, limit, start_date, end_date)
                 if rows:
-                    return [_index_valuation_row_to_schema(r) for r in reversed(rows)]
+                    return [_index_valuation_row_to_schema(r) for r in rows]
         except Exception:
             logger.warning(
                 "get_index_valuation failed for %s, returning []", index_code, exc_info=True
@@ -507,6 +543,34 @@ class IngestService:
             self._db.rollback()
 
         return []
+
+    # ==================================================================
+    # 日期范围元数据
+    # ==================================================================
+
+    def get_etf_date_range(self, etf_code: str) -> tuple[date | None, date | None]:
+        """查询 ETF 日线数据的最早和最晚日期。"""
+        row = (
+            self._db.query(
+                func.min(EtfDailyBarModel.trade_date),
+                func.max(EtfDailyBarModel.trade_date),
+            )
+            .filter(EtfDailyBarModel.etf_code == etf_code)
+            .one()
+        )
+        return row[0], row[1]
+
+    def get_index_date_range(self, index_code: str) -> tuple[date | None, date | None]:
+        """查询指数日线数据的最早和最晚日期。"""
+        row = (
+            self._db.query(
+                func.min(IndexDailyBarModel.trade_date),
+                func.max(IndexDailyBarModel.trade_date),
+            )
+            .filter(IndexDailyBarModel.index_code == index_code)
+            .one()
+        )
+        return row[0], row[1]
 
     # ==================================================================
     # 宏观指标（AkShare）
@@ -586,6 +650,193 @@ class IngestService:
             self._db.rollback()
 
         return []
+
+    # ==================================================================
+    # 数据质量检查
+    # ==================================================================
+
+    def check_data_freshness(self) -> dict:
+        """检查各数据表的新鲜度和覆盖率。
+
+        针对每个活跃 ETF / 基准指数，检查对应数据表中是否有记录、
+        最新数据日期距今是否超过 3 个自然日（节假日容忍），返回汇总结果。
+        """
+        from datetime import timedelta
+
+        today = date.today()
+        stale_threshold = today - timedelta(days=3)
+        result: dict = {}
+
+        etfs = (
+            self._db.query(EtfUniverseModel)
+            .filter(EtfUniverseModel.is_active.is_(True))
+            .order_by(EtfUniverseModel.etf_code)
+            .all()
+        )
+
+        # --- ETF 日线 ---
+        bar_stale = []
+        bar_missing = []
+        bar_latest: date | None = None
+        for etf in etfs:
+            max_d = (
+                self._db.query(func.max(EtfDailyBarModel.trade_date))
+                .filter(EtfDailyBarModel.etf_code == etf.etf_code)
+                .scalar()
+            )
+            if max_d is None:
+                bar_missing.append(
+                    {
+                        "code": etf.etf_code,
+                        "name": etf.name_cn,
+                        "latest_date": None,
+                        "is_stale": True,
+                    }
+                )
+            else:
+                if bar_latest is None or max_d > bar_latest:
+                    bar_latest = max_d
+                if max_d < stale_threshold:
+                    bar_stale.append(
+                        {
+                            "code": etf.etf_code,
+                            "name": etf.name_cn,
+                            "latest_date": str(max_d),
+                            "is_stale": True,
+                        }
+                    )
+
+        result["etf_bars"] = {
+            "total": len(etfs),
+            "up_to_date": len(etfs) - len(bar_stale) - len(bar_missing),
+            "stale": bar_stale,
+            "missing": bar_missing,
+            "latest_date": str(bar_latest) if bar_latest else None,
+        }
+
+        # --- ETF 份额 ---
+        share_stale = []
+        share_missing = []
+        share_latest: date | None = None
+        for etf in etfs:
+            max_d = (
+                self._db.query(func.max(EtfDailyShareModel.trade_date))
+                .filter(EtfDailyShareModel.etf_code == etf.etf_code)
+                .scalar()
+            )
+            if max_d is None:
+                share_missing.append(
+                    {
+                        "code": etf.etf_code,
+                        "name": etf.name_cn,
+                        "latest_date": None,
+                        "is_stale": True,
+                    }
+                )
+            else:
+                if share_latest is None or max_d > share_latest:
+                    share_latest = max_d
+                if max_d < stale_threshold:
+                    share_stale.append(
+                        {
+                            "code": etf.etf_code,
+                            "name": etf.name_cn,
+                            "latest_date": str(max_d),
+                            "is_stale": True,
+                        }
+                    )
+
+        result["etf_shares"] = {
+            "total": len(etfs),
+            "up_to_date": len(etfs) - len(share_stale) - len(share_missing),
+            "stale": share_stale,
+            "missing": share_missing,
+            "latest_date": str(share_latest) if share_latest else None,
+        }
+
+        # --- 指数日线 ---
+        indexes = self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
+        idx_bar_stale = []
+        idx_bar_missing = []
+        idx_bar_latest: date | None = None
+        for idx in indexes:
+            max_d = (
+                self._db.query(func.max(IndexDailyBarModel.trade_date))
+                .filter(IndexDailyBarModel.index_code == idx.index_code)
+                .scalar()
+            )
+            if max_d is None:
+                idx_bar_missing.append(
+                    {
+                        "code": idx.index_code,
+                        "name": idx.name_cn,
+                        "latest_date": None,
+                        "is_stale": True,
+                    }
+                )
+            else:
+                if idx_bar_latest is None or max_d > idx_bar_latest:
+                    idx_bar_latest = max_d
+                if max_d < stale_threshold:
+                    idx_bar_stale.append(
+                        {
+                            "code": idx.index_code,
+                            "name": idx.name_cn,
+                            "latest_date": str(max_d),
+                            "is_stale": True,
+                        }
+                    )
+
+        result["index_bars"] = {
+            "total": len(indexes),
+            "up_to_date": len(indexes) - len(idx_bar_stale) - len(idx_bar_missing),
+            "stale": idx_bar_stale,
+            "missing": idx_bar_missing,
+            "latest_date": str(idx_bar_latest) if idx_bar_latest else None,
+        }
+
+        # --- 指数估值 ---
+        idx_val_stale = []
+        idx_val_missing = []
+        idx_val_latest: date | None = None
+        for idx in indexes:
+            max_d = (
+                self._db.query(func.max(IndexValuationModel.trade_date))
+                .filter(IndexValuationModel.index_code == idx.index_code)
+                .scalar()
+            )
+            if max_d is None:
+                idx_val_missing.append(
+                    {
+                        "code": idx.index_code,
+                        "name": idx.name_cn,
+                        "latest_date": None,
+                        "is_stale": True,
+                    }
+                )
+            else:
+                if idx_val_latest is None or max_d > idx_val_latest:
+                    idx_val_latest = max_d
+                if max_d < stale_threshold:
+                    idx_val_stale.append(
+                        {
+                            "code": idx.index_code,
+                            "name": idx.name_cn,
+                            "latest_date": str(max_d),
+                            "is_stale": True,
+                        }
+                    )
+
+        result["index_valuation"] = {
+            "total": len(indexes),
+            "up_to_date": len(indexes) - len(idx_val_stale) - len(idx_val_missing),
+            "stale": idx_val_stale,
+            "missing": idx_val_missing,
+            "latest_date": str(idx_val_latest) if idx_val_latest else None,
+        }
+
+        result["checked_at"] = datetime.utcnow().isoformat()
+        return result
 
     # ==================================================================
     # 全量日频摄取（后台线程入口）
@@ -810,9 +1061,7 @@ class IngestService:
                     logger.warning("指数 %s 日线拉取失败: %s", idx.index_code, e)
 
                 try:
-                    index_valuation_count += self._fetch_and_upsert_index_valuation(
-                        idx.index_code
-                    )
+                    index_valuation_count += self._fetch_and_upsert_index_valuation(idx.index_code)
                 except Exception as e:
                     logger.warning("指数 %s 估值拉取失败: %s", idx.index_code, e)
 

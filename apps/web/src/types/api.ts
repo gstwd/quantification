@@ -175,3 +175,13 @@ export interface BenchmarkIndex {
   index_code: string
   index_name: string
 }
+
+export interface IndexCreatePayload {
+  index_code: string
+  name_cn?: string
+}
+
+export interface DateRange {
+  min_date: string | null
+  max_date: string | null
+}

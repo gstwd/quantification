@@ -58,3 +58,24 @@ class BenchmarkIndex(BaseModel):
 
     index_code: str
     index_name: str
+
+
+class DateRangeResponse(BaseModel):
+    """日线数据日期范围响应。"""
+
+    min_date: date | None = None
+    max_date: date | None = None
+
+
+class IndexCreateRequest(BaseModel):
+    """添加基准指数请求。"""
+
+    index_code: str
+    name_cn: str | None = None
+
+
+class IndexCreateResponse(BaseModel):
+    """添加基准指数响应。"""
+
+    index: BenchmarkIndex
+    message: str
