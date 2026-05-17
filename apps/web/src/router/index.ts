@@ -7,6 +7,8 @@ import DashboardPage from '../pages/DashboardPage.vue'
 import DataStatusPage from '../pages/DataStatusPage.vue'
 import EtfDetailPage from '../pages/EtfDetailPage.vue'
 import EtfUniversePage from '../pages/EtfUniversePage.vue'
+import FactorDetailPage from '../pages/FactorDetailPage.vue'
+import FactorsPage from '../pages/FactorsPage.vue'
 import RunsPage from '../pages/RunsPage.vue'
 import IndexDetailPage from '../pages/IndexDetailPage.vue'
 import IndexListPage from '../pages/IndexListPage.vue'
@@ -25,6 +27,8 @@ const router = createRouter({
     { path: '/macro', component: MacroPage },
     { path: '/strategies', component: StrategiesPage },
     { path: '/strategies/:strategyId', component: StrategyDetailPage, props: true },
+    { path: '/factors', component: FactorsPage },
+    { path: '/factors/:factorId', component: FactorDetailPage, props: true },
     { path: '/runs', component: RunsPage },
     { path: '/data-status', component: DataStatusPage },
     { path: '/backtests', component: BacktestListPage },

@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from quant_etf_api.api.routers import (
     backtests,
     etfs,
+    factors,
     health,
     indexes,
     market_data,
@@ -18,6 +19,7 @@ from quant_etf_api.api.routers import (
     system,
 )
 from quant_etf_api.config.settings import get_settings
+from quant_etf_api.factors.registry import FactorRegistry, build_default_factor_registry
 from quant_etf_api.infra.scheduler import get_scheduler
 from quant_etf_api.plugins.registry import StrategyRegistry, build_default_registry
 
@@ -26,6 +28,8 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 # 策略注册表在进程启动时构建一次，所有请求共享同一实例
 registry: StrategyRegistry = build_default_registry()
+# 因子注册表在进程启动时构建一次，所有请求共享同一实例
+factor_registry: FactorRegistry = build_default_factor_registry()
 
 
 def _trigger_startup_fill() -> None:
@@ -73,6 +77,7 @@ app.include_router(indexes.router, prefix=settings.api_prefix)
 app.include_router(market_data.router, prefix=settings.api_prefix)
 app.include_router(strategies.router, prefix=settings.api_prefix)
 app.include_router(signals.router, prefix=settings.api_prefix)
+app.include_router(factors.router, prefix=settings.api_prefix)
 app.include_router(runs.router, prefix=settings.api_prefix)
 app.include_router(backtests.router, prefix=settings.api_prefix)
 

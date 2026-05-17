@@ -212,8 +212,12 @@ class FactorDefinitionModel(Base):
     version: Mapped[str] = mapped_column(
         String(32), default="1.0.0", comment="因子版本号，遵循语义化版本"
     )
-    owner_plugin: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="定义该因子的策略插件 ID"
+    owner_plugin: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="定义该因子的策略插件 ID，NULL 表示独立因子"
+    )
+    category: Mapped[str | None] = mapped_column(
+        String(32), nullable=True,
+        comment="因子类别：volume/momentum/volatility/flow/valuation",
     )
 
 

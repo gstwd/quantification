@@ -19,7 +19,7 @@ uvicorn quant_etf_api.main:app --reload --port 8000  # dev server
 ```
 
 ```bash
-pytest                           # run all tests (22 unit tests for three-factor model)
+pytest                           # run all tests (38 unit tests: three-factor model + factor computers)
 pytest tests/path/to/test.py     # run single test file
 ruff check .                     # lint
 ruff format .                    # format
@@ -59,13 +59,14 @@ alembic upgrade head                               # apply
 HTTP → api/routers/ → services/ → infra/ → PostgreSQL
 ```
 
-- **`api/routers/`** — 8 route groups: `health`, `system`, `etfs`, `market_data`, `strategies`, `signals`, `runs`, `backtests`
+- **`api/routers/`** — 9 route groups: `health`, `system`, `etfs`, `market_data`, `strategies`, `signals`, `factors`, `runs`, `backtests`
 - **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert)
 - **`infra/db/`** — SQLAlchemy 2 ORM models (`infra/db/models/core.py` has all 18 tables)
 - **`infra/clients/`** — 4 data source clients, all inherit from `base.py`:
   - `akshare_fund.py` (ETF K-line via Sina + shares/AUM via fund_etf_spot_em), `exchange_reference.py` (exchange ref)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
 - **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends
+- **`factors/`** — Independent factor layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry + build_default_factor_registry), `service.py` (FactorService), `builtins/` (6 built-in computers). Pattern mirrors `plugins/`. Context key format: `(etf_code, date)` dict, same as `_bar_metrics.py`.
 - **`plugins/`** — Strategy plugin system (see below)
 - **`config/`** — Pydantic settings loaded from `.env`
 
@@ -103,7 +104,7 @@ To add a strategy: create a plugin file in `plugins/builtins/`, implement the Pr
 
 ## Current State
 
-Services fully wired to PostgreSQL. 18 tables across 4 migrations (0001→0002→0002_backtest→0003_index_macro). Each data type has exactly **one** source: ETF K-line→Tencent, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh.
+Services fully wired to PostgreSQL. 18 tables across 6 migrations (0001→0002→0002_backtest→0003_index_macro→0004→0005_factor_layer). Each data type has exactly **one** source: ETF K-line→Tencent, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh.
 
 ## Gotchas
 
@@ -121,6 +122,10 @@ Services fully wired to PostgreSQL. 18 tables across 4 migrations (0001→0002�
 - **AkShare index valuation**: Only 沪深300(000300), 上证50(000016), 中证500(000905) return PE/PB from legulegu.com. Other indexes (000688/399001/399006) return empty — must handle gracefully in frontend.
 - **Backend GET endpoints never return 500**: External API failures are caught/logged, returning `[]`. A 200 OK with empty array can mean either "no data yet" or "upstream error".
 - **AkShare API instability**: Upstream network errors (ConnectionResetError, AttributeError) are common. Tests use `_retry_fetch()` with 3 attempts. Frontend pages catch errors silently and show "暂无数据".
+- **PostgreSQL NULL uniqueness in `etf_factor_value`**: `NULL != NULL` means `(trade_date, etf_code, factor_id, strategy_id=NULL)` won't prevent duplicates via the composite unique constraint. Solved by partial unique index `uq_etf_factor_value_builtin` on `(trade_date, etf_code, factor_id) WHERE strategy_id IS NULL` (migration 0005). SQLAlchemy upsert uses `index_where=EtfFactorValueModel.strategy_id.is_(None)` to reference it.
+- **`main.py` circular import via `factor_registry`**: `api/deps.py::get_factor_registry()` and `infra/scheduler/__init__.py` both import `factor_registry` from `main.py` using deferred `from quant_etf_api.main import factor_registry` inside the function body — never at module level, or a circular import will occur.
+- **`FactorRow` (schemas/signal.py) is reused for factor API responses** — no separate factor value schema exists. `schemas/factor.py` only defines `FactorSpecResponse`.
+- **`factor_definition.owner_plugin` is nullable** (migration 0005): independent built-in factors use `owner_plugin=NULL, strategy_id=NULL`. Plugins still set `owner_plugin` to their `strategy_id`.
 
 ## Coding Standards
 

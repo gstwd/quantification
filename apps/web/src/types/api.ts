@@ -211,3 +211,20 @@ export interface DateRange {
   min_date: string | null
   max_date: string | null
 }
+
+export interface FactorSpec {
+  factor_id: string
+  name: string
+  category: string
+  version: string
+  description: string
+  required_data: string[]
+}
+
+export interface FactorRow {
+  trade_date: string
+  etf_code: string
+  factor_id: string
+  factor_value_numeric: number | null
+  factor_value_text: string | null
+}

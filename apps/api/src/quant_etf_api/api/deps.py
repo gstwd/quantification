@@ -17,3 +17,14 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def get_factor_registry():
+    """返回 main.py 模块级 factor_registry 全局实例。
+
+    通过 deferred import 获取，避免模块初始化时的循环依赖。
+    使用 Depends 注入而非直接 import，方便测试时替换为 mock 注册表。
+    """
+    from quant_etf_api.main import factor_registry  # noqa: PLC0415
+
+    return factor_registry

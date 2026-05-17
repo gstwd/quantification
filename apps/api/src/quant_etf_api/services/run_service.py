@@ -73,6 +73,22 @@ class RunService:
             started_at=now,
         )
 
+    def mark_success(self, run_id: str) -> None:
+        """将指定运行标记为成功状态。
+
+        Args:
+            run_id: 运行 ID
+        """
+        try:
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is not None:
+                run.status = "success"
+                run.finished_at = datetime.now(timezone.utc)
+                self._db.commit()
+        except Exception:
+            self._db.rollback()
+            logger.warning("mark_success 更新失败", exc_info=True)
+
     def mark_failed(self, run_id: str, error_message: str) -> None:
         """将指定运行标记为失败状态。
 

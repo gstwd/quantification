@@ -74,6 +74,28 @@ class DailyIngestScheduler:
             summary = RunService(db).create_run("daily_ingest", None, today)
             IngestService(db).run_daily_ingest(summary.run_id)
             logger.info("调度器: 日频入库完成 run_id=%s", summary.run_id)
+
+            # 摄取完成后触发因子计算，失败不影响已完成的摄取
+            try:
+                from quant_etf_api.factors.service import FactorService  # noqa: PLC0415
+                from quant_etf_api.main import factor_registry  # noqa: PLC0415
+
+                run_svc = RunService(db)
+                factor_run = run_svc.create_run("factor_computation", None, today)
+                try:
+                    result = FactorService(db, factor_registry).compute_and_store(today)
+                    run_svc.mark_success(factor_run.run_id)
+                    logger.info(
+                        "调度器: 因子计算完成 run_id=%s result=%s",
+                        factor_run.run_id,
+                        result,
+                    )
+                except Exception as exc:
+                    run_svc.mark_failed(factor_run.run_id, str(exc))
+                    logger.exception("调度器: 因子计算失败，不影响摄取结果")
+            except Exception:
+                logger.exception("调度器: 因子计算初始化失败，不影响摄取结果")
+
         except Exception:
             logger.exception("调度器: 日频入库失败")
         finally:

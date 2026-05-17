@@ -1,4 +1,5 @@
 from .etf import EtfDetail, EtfSummary
+from .factor import FactorSpecResponse
 from .market_data import DailyBar, IndexValuation, MacroIndicatorSchema, ShareSnapshot
 from .run import ResearchRunSummary
 from .signal import FactorRow, SignalRow
@@ -11,6 +12,7 @@ __all__ = [
     "EtfDetail",
     "EtfSummary",
     "FactorRow",
+    "FactorSpecResponse",
     "IndexValuation",
     "MacroIndicatorSchema",
     "ResearchRunSummary",
