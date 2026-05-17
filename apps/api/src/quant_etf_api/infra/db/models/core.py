@@ -108,7 +108,7 @@ class EtfDailyBarModel(Base):
     turnover: Mapped[float | None] = mapped_column(Float, comment="成交额，单位 元")
     amplitude: Mapped[float | None] = mapped_column(Float, comment="振幅，单位 %")
     source: Mapped[str] = mapped_column(
-        String(32), default="stub", comment="数据来源，tencent=腾讯，stub=占位数据"
+        String(32), default="stub", comment="数据来源，akshare=AkShare，stub=占位数据"
     )
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc), comment="数据入库时间（UTC）"
@@ -165,7 +165,7 @@ class EtfDailyShareModel(Base):
     nav: Mapped[float | None] = mapped_column(Float, comment="单位净值，单位 元/份")
     aum: Mapped[float | None] = mapped_column(Float, comment="资产管理规模（AUM），单位 亿元")
     source: Mapped[str] = mapped_column(
-        String(32), default="stub", comment="数据来源，eastmoney=东方财富，stub=占位数据"
+        String(32), default="stub", comment="数据来源，akshare=AkShare，stub=占位数据"
     )
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc), comment="数据入库时间（UTC）"
@@ -179,7 +179,7 @@ class SourcePayloadLogModel(Base):
         Integer, primary_key=True, autoincrement=True, comment="自增主键"
     )
     source_name: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="数据源名称，如 tencent、eastmoney"
+        String(64), nullable=False, comment="数据源名称，如 akshare、akshare_index"
     )
     resource_type: Mapped[str] = mapped_column(
         String(64), nullable=False, comment="资源类型，如 daily_bar、share_snapshot"
