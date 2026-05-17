@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
 from quant_etf_api.infra.clients.akshare_macro import AkShareMacroClient
 from quant_etf_api.infra.clients.eastmoney import EastmoneyClient
-from quant_etf_api.infra.clients.tencent import TencentClient, TencentDailyBar
+from quant_etf_api.infra.clients.tencent import TencentClient
 from quant_etf_api.infra.db.models.core import (
     BenchmarkIndexModel,
     EtfDailyBarModel,
@@ -141,42 +141,15 @@ class IngestService:
     # ETF 日线
     # ==================================================================
 
-    def _fetch_and_upsert_bars(self, etf_code: str, limit: int = 5) -> list[TencentDailyBar]:
-        """从腾讯拉取 ETF K 线数据并幂等写入 DB。"""
-        bars = TencentClient().fetch_daily_bars(etf_code, limit)
-        if not bars:
-            return []
-        stmt = (
-            insert(EtfDailyBarModel)
-            .values(
-                [
-                    {
-                        "trade_date": b.trade_date,
-                        "etf_code": etf_code,
-                        "open_price": b.open_price,
-                        "high_price": b.high_price,
-                        "low_price": b.low_price,
-                        "close_price": b.close_price,
-                        "volume": b.volume,
-                        "source": "tencent",
-                        "ingested_at": datetime.now(timezone.utc),
-                    }
-                    for b in bars
-                ]
-            )
-            .on_conflict_do_nothing(constraint="uq_etf_daily_bar")
-        )
-        self._db.execute(stmt)
-        self._db.commit()
-        return bars
-
     def _fetch_and_upsert_bars_full_history(self, etf_code: str) -> int:
-        """冷启动：拉取 ETF 全量历史日线（~320 条，覆盖约 250 个交易日）并幂等写入。
+        """冷启动：拉取 ETF 从成立至今的全量历史日线并幂等写入。
+
+        limit 设为 10000，覆盖任何 A 股 ETF 的完整上市历史（最长约 20 年 / 5000 交易日）。
 
         Returns:
             写入记录数
         """
-        bars = TencentClient().fetch_daily_bars(etf_code, limit=320)
+        bars = TencentClient().fetch_daily_bars(etf_code, limit=10000)
         if not bars:
             return 0
         stmt = (
@@ -202,6 +175,65 @@ class IngestService:
         self._db.execute(stmt)
         self._db.commit()
         return len(bars)
+
+    def _fetch_and_upsert_bars_incremental(self, etf_code: str) -> str:
+        """增量补全 ETF 日线：仅拉取 DB 最新日期之后的缺失数据。
+
+        若 DB 已有当日（或更新）数据则直接跳过 API 调用，避免重复拉取。
+        若 DB 无任何历史数据则触发全量拉取。
+
+        Returns:
+            API 返回的最新交易日日期字符串；无数据时返回空字符串
+        """
+        today = date.today()
+        max_date: date | None = (
+            self._db.query(func.max(EtfDailyBarModel.trade_date))
+            .filter(EtfDailyBarModel.etf_code == etf_code)
+            .scalar()
+        )
+
+        # DB 已有当日或更新的数据，无需拉取
+        if max_date is not None and max_date >= today:
+            return str(max_date)
+
+        # 无历史数据，走全量拉取
+        if max_date is None:
+            self._fetch_and_upsert_bars_full_history(etf_code)
+            refreshed: date | None = (
+                self._db.query(func.max(EtfDailyBarModel.trade_date))
+                .filter(EtfDailyBarModel.etf_code == etf_code)
+                .scalar()
+            )
+            return str(refreshed) if refreshed else ""
+
+        # 有历史数据，按缺口天数计算拉取条数并增量写入
+        limit = (today - max_date).days + 5
+        bars = TencentClient().fetch_daily_bars(etf_code, limit=limit)
+        if not bars:
+            return str(max_date)
+        stmt = (
+            insert(EtfDailyBarModel)
+            .values(
+                [
+                    {
+                        "trade_date": b.trade_date,
+                        "etf_code": etf_code,
+                        "open_price": b.open_price,
+                        "high_price": b.high_price,
+                        "low_price": b.low_price,
+                        "close_price": b.close_price,
+                        "volume": b.volume,
+                        "source": "tencent",
+                        "ingested_at": datetime.now(timezone.utc),
+                    }
+                    for b in bars
+                ]
+            )
+            .on_conflict_do_nothing(constraint="uq_etf_daily_bar")
+        )
+        self._db.execute(stmt)
+        self._db.commit()
+        return bars[-1].trade_date
 
     def _query_etf_bars(
         self,
@@ -661,8 +693,6 @@ class IngestService:
         针对每个活跃 ETF / 基准指数，检查对应数据表中是否有记录、
         最新数据日期距今是否超过 3 个自然日（节假日容忍），返回汇总结果。
         """
-        from datetime import timedelta
-
         today = date.today()
         stale_threshold = today - timedelta(days=3)
         result: dict = {}
@@ -891,22 +921,20 @@ class IngestService:
                     item_message = ""
 
                     try:
-                        bars = self._fetch_and_upsert_bars(etf_code, limit=5)
-                        if bars:
-                            latest_bar_date = bars[-1].trade_date
-                            if latest_bar_date != str(today):
-                                item_status = "skipped"
-                                item_message = f"非交易日，最新行情日期为 {latest_bar_date}"
-                                etf_skipped += 1
-                            else:
-                                try:
-                                    self._fetch_and_upsert_shares(etf_code, today)
-                                except Exception:
-                                    item_message = "份额数据拉取失败"
-                                etf_success += 1
-                        else:
+                        latest_bar_date = self._fetch_and_upsert_bars_incremental(etf_code)
+                        if not latest_bar_date:
                             item_status = "skipped"
                             item_message = "未获取到 K 线数据"
+                            etf_skipped += 1
+                        elif latest_bar_date == str(today):
+                            try:
+                                self._fetch_and_upsert_shares(etf_code, today)
+                            except Exception:
+                                item_message = "份额数据拉取失败"
+                            etf_success += 1
+                        else:
+                            item_status = "skipped"
+                            item_message = f"非交易日，最新行情日期为 {latest_bar_date}"
                             etf_skipped += 1
                     except Exception as e:
                         item_status = "failed"
@@ -1097,6 +1125,125 @@ class IngestService:
         except Exception as e:
             self._db.rollback()
             logger.warning("run_cold_start 整体失败: %s", e, exc_info=True)
+            try:
+                run = (
+                    self._db.query(ResearchRunModel)
+                    .filter(ResearchRunModel.run_id == run_id)
+                    .first()
+                )
+                if run is not None:
+                    run.status = "failed"
+                    run.finished_at = datetime.now(timezone.utc)
+                    run.error_message = str(e)[:1000]
+                    self._db.commit()
+            except Exception:
+                logger.warning("更新失败状态时出错", exc_info=True)
+                self._db.rollback()
+
+    def run_startup_fill(self, run_id: str) -> None:
+        """启动补全：检查所有 ETF 和指数的数据缺口并按需补全（系统启动时自动调用）。
+
+        与 run_cold_start 的区别：
+        - ETF 日线使用增量方法，已有当日数据的 ETF 直接跳过，避免重复 API 调用
+        - 指数/宏观数据仅在超过 5 天未更新时才重新拉取
+        """
+        start_time = datetime.now(timezone.utc)
+        stale_threshold = date.today() - timedelta(days=5)
+
+        try:
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is None:
+                logger.error("run_startup_fill: run_id %s 不存在", run_id)
+                return
+
+            run.status = "running"
+            run.started_at = start_time
+            self._db.commit()
+
+            # 1. ETF 日线增量补全（已是最新则跳过）
+            etfs = (
+                self._db.query(EtfUniverseModel)
+                .filter(EtfUniverseModel.is_active.is_(True))
+                .order_by(EtfUniverseModel.etf_code)
+                .all()
+            )
+            etf_filled = 0
+            etf_skipped = 0
+            etf_failed = 0
+
+            for etf in etfs:
+                etf_code = etf.etf_code
+                try:
+                    latest = self._fetch_and_upsert_bars_incremental(etf_code)
+                    if latest == str(date.today()):
+                        etf_skipped += 1
+                    else:
+                        etf_filled += 1
+                except Exception as e:
+                    etf_failed += 1
+                    self._db.rollback()
+                    logger.warning("ETF %s 启动补全失败: %s", etf_code, e)
+
+            # 2. 指数日线 + 估值（超过 5 天未更新才重新拉取）
+            indexes = (
+                self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
+            )
+            index_bar_count = 0
+            index_val_count = 0
+
+            for idx in indexes:
+                idx_max = (
+                    self._db.query(func.max(IndexDailyBarModel.trade_date))
+                    .filter(IndexDailyBarModel.index_code == idx.index_code)
+                    .scalar()
+                )
+                if idx_max is None or idx_max <= stale_threshold:
+                    try:
+                        index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code)
+                    except Exception as e:
+                        logger.warning("指数 %s 日线补全失败: %s", idx.index_code, e)
+
+                    try:
+                        index_val_count += self._fetch_and_upsert_index_valuation(idx.index_code)
+                    except Exception as e:
+                        logger.warning("指数 %s 估值补全失败: %s", idx.index_code, e)
+
+            # 3. 宏观指标（超过 5 天未入库才重新拉取）
+            macro_latest_ingest: datetime | None = (
+                self._db.query(func.max(MacroIndicatorModel.ingested_at)).scalar()
+            )
+            macro_stale_threshold = datetime.now(timezone.utc) - timedelta(days=5)
+            macro_count = 0
+            if macro_latest_ingest is None or macro_latest_ingest < macro_stale_threshold:
+                try:
+                    macro_count = self._fetch_and_upsert_macro()
+                except Exception as e:
+                    logger.warning("宏观指标补全失败: %s", e)
+
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is None:
+                return
+            run.status = "success"
+            run.finished_at = datetime.now(timezone.utc)
+            run.metrics = {
+                "etf": {
+                    "total": len(etfs),
+                    "filled": etf_filled,
+                    "skipped": etf_skipped,
+                    "failed": etf_failed,
+                },
+                "index": {
+                    "bar_records": index_bar_count,
+                    "valuation_records": index_val_count,
+                },
+                "macro": {"records": macro_count},
+                "duration_seconds": round((datetime.now(timezone.utc) - start_time).total_seconds(), 1),
+            }
+            self._db.commit()
+
+        except Exception as e:
+            self._db.rollback()
+            logger.warning("run_startup_fill 整体失败: %s", e, exc_info=True)
             try:
                 run = (
                     self._db.query(ResearchRunModel)

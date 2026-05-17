@@ -84,10 +84,10 @@ def daily_ingest(db: Session = Depends(get_db)) -> dict[str, str]:
 
 @router.post("/runs/cold-start")
 def cold_start(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发冷启动：拉取全部 ETF 和指数的全量历史日线数据。
+    """触发冷启动：拉取全部 ETF 和指数从成立至今的全量历史日线数据。
 
-    与 /runs/daily-ingest 的区别在于 ETF 日线拉取全量历史（~320 条）
-    而非仅最近 5 条，适用于首次部署或数据回补场景。
+    与 /runs/daily-ingest 的区别在于 ETF 日线拉取完整历史（ETF 上市日至今），
+    适用于首次部署或数据回补场景。
     """
     summary = RunService(db).create_run("cold_start", None, date.today())
     thread = threading.Thread(target=_run_cold_start_bg, args=(summary.run_id,), daemon=True)

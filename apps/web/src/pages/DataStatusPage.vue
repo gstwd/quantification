@@ -10,9 +10,14 @@
           :title="status?.db_connected ? '数据库已连接' : '数据库连接异常'"
         ></span>
       </div>
-      <button class="btn btn-primary" :disabled="triggering" @click="triggerIngest">
-        {{ triggering ? '触发中...' : '触发数据摄取' }}
-      </button>
+      <div class="header-actions">
+        <button class="btn btn-secondary" :disabled="triggeringColdStart" @click="triggerColdStartFn">
+          {{ triggeringColdStart ? '执行中...' : '历史回补' }}
+        </button>
+        <button class="btn btn-primary" :disabled="triggering" @click="triggerIngest">
+          {{ triggering ? '触发中...' : '触发数据摄取' }}
+        </button>
+      </div>
     </div>
 
     <!-- 加载 / 错误状态 -->
@@ -167,7 +172,7 @@
 
 import { computed, onMounted, ref } from 'vue'
 
-import { fetchDataQuality, fetchSystemStatus, triggerDailyIngest } from '../api/runs'
+import { fetchDataQuality, fetchSystemStatus, triggerColdStart, triggerDailyIngest } from '../api/runs'
 import type { DataQualityResponse, SystemStatusResponse } from '../types/api'
 
 const status = ref<SystemStatusResponse | null>(null)
@@ -176,6 +181,7 @@ const loading = ref(false)
 const qualityLoading = ref(false)
 const error = ref<string | null>(null)
 const triggering = ref(false)
+const triggeringColdStart = ref(false)
 
 /** 汇总日线表记录数（etf_daily_bar + index_daily_bar） */
 const totalBars = computed(() => {
@@ -210,6 +216,8 @@ function formatRunType(runType: string): string {
     daily_ingest: '日频入库',
     strategy_run: '策略运行',
     universe_refresh: '标的刷新',
+    cold_start: '历史回补',
+    startup_fill: '启动补全',
   }
   return map[runType] ?? runType
 }
@@ -261,6 +269,19 @@ async function loadQuality() {
   }
 }
 
+/** 触发全量历史回补（cold_start），完成后自动刷新 */
+async function triggerColdStartFn() {
+  triggeringColdStart.value = true
+  try {
+    await triggerColdStart()
+    await Promise.all([loadStatus(), loadQuality()])
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '触发历史回补失败'
+  } finally {
+    triggeringColdStart.value = false
+  }
+}
+
 /** 触发数据摄取，完成后自动刷新状态和质量 */
 async function triggerIngest() {
   triggering.value = true
@@ -297,16 +318,20 @@ onMounted(() => Promise.all([loadStatus(), loadQuality()]))
 .connection-dot.disconnected { background: var(--danger); }
 
 /* === 按钮（复用项目约定） === */
+.header-actions { display: flex; gap: 8px; }
 .btn {
   padding: 8px 16px;
   border-radius: var(--radius-sm);
   border: none;
   font-size: 13px;
   font-weight: 500;
+  cursor: pointer;
   transition: background 0.15s;
 }
 .btn-primary { background: var(--accent); color: #fff; }
 .btn-primary:hover { background: var(--accent-hover); }
+.btn-secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+.btn-secondary:hover { background: var(--surface); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* === 加载 / 空 / 错误状态 === */

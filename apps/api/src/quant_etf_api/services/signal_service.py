@@ -25,28 +25,29 @@ class SignalService:
                 .filter(EtfSignalModel.strategy_id == strategy_id)
                 .scalar()
             )
-            if max_date is not None:
-                rows = (
-                    self._db.query(EtfSignalModel)
-                    .filter(
-                        EtfSignalModel.strategy_id == strategy_id,
-                        EtfSignalModel.trade_date == max_date,
-                    )
-                    .order_by(EtfSignalModel.signal_score.desc())  # 按得分降序，高确信排前面
-                    .all()
+            if max_date is None:
+                return []
+            rows = (
+                self._db.query(EtfSignalModel)
+                .filter(
+                    EtfSignalModel.strategy_id == strategy_id,
+                    EtfSignalModel.trade_date == max_date,
                 )
-                return [
-                    SignalRow(
-                        trade_date=r.trade_date,
-                        etf_code=r.etf_code,
-                        strategy_id=r.strategy_id,
-                        signal_score=r.signal_score,
-                        signal_level=r.signal_level,
-                        signal_label=r.signal_label,
-                        signal_payload=r.signal_payload or {},
-                    )
-                    for r in rows
-                ]
+                .order_by(EtfSignalModel.signal_score.desc())  # 按得分降序，高确信排前面
+                .all()
+            )
+            return [
+                SignalRow(
+                    trade_date=r.trade_date,
+                    etf_code=r.etf_code,
+                    strategy_id=r.strategy_id,
+                    signal_score=r.signal_score,
+                    signal_level=r.signal_level,
+                    signal_label=r.signal_label,
+                    signal_payload=r.signal_payload or {},
+                )
+                for r in rows
+            ]
         except Exception:
             logger.warning("latest_signals DB query failed for %s", strategy_id, exc_info=True)
             return []
@@ -61,19 +62,18 @@ class SignalService:
                 )
                 .all()
             )
-            if rows:
-                return [
-                    FactorRow(
-                        trade_date=r.trade_date,
-                        etf_code=r.etf_code,
-                        factor_id=r.factor_id,
-                        factor_value_numeric=r.factor_value_numeric,
-                        factor_value_text=r.factor_value_text,
-                        factor_payload=r.factor_payload or {},
-                        strategy_id=r.strategy_id,
-                    )
-                    for r in rows
-                ]
+            return [
+                FactorRow(
+                    trade_date=r.trade_date,
+                    etf_code=r.etf_code,
+                    factor_id=r.factor_id,
+                    factor_value_numeric=r.factor_value_numeric,
+                    factor_value_text=r.factor_value_text,
+                    factor_payload=r.factor_payload or {},
+                    strategy_id=r.strategy_id,
+                )
+                for r in rows
+            ]
         except Exception:
             logger.warning("factor_rows DB query failed", exc_info=True)
             return []

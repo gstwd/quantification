@@ -24,6 +24,10 @@ export async function triggerDailyIngest(): Promise<void> {
   await apiClient.post('/runs/daily-ingest')
 }
 
+export async function triggerColdStart(): Promise<void> {
+  await apiClient.post('/runs/cold-start')
+}
+
 export async function triggerStrategyRun(strategyId: string): Promise<void> {
   await apiClient.post(`/runs/strategies/${strategyId}/run`)
 }

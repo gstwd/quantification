@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import date, datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -10,6 +11,7 @@ from quant_etf_api.infra.clients.akshare_fund import (
     map_fund_type_to_category,
 )
 from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
+from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.infra.db.models.core import (
     EtfUniverseModel,
     ResearchRunItemModel,
@@ -174,6 +176,22 @@ class UniverseService:
                     logger.warning(
                         "自动关联跟踪指数 %s 失败", row.tracking_index_code, exc_info=True
                     )
+
+            # 后台拉取该 ETF 从成立至今的全量历史日线，不阻塞 HTTP 响应
+            etf_code_for_bg = req.etf_code
+
+            def _fetch_history_bg() -> None:
+                from quant_etf_api.services.ingest_service import IngestService
+
+                db = SessionLocal()
+                try:
+                    IngestService(db)._fetch_and_upsert_bars_full_history(etf_code_for_bg)
+                except Exception:
+                    logger.warning("后台拉取 %s 全量历史日线失败", etf_code_for_bg, exc_info=True)
+                finally:
+                    db.close()
+
+            threading.Thread(target=_fetch_history_bg, daemon=True).start()
 
             return _row_to_detail(row)
         except ValueError:
