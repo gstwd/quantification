@@ -69,6 +69,32 @@ export interface SystemStatusResponse {
   db_connected: boolean
 }
 
+/** 单个 ETF / 指数的数据新鲜度 */
+export interface DataFreshnessItem {
+  code: string
+  name: string
+  latest_date: string | null
+  is_stale: boolean
+}
+
+/** 单个数据表的新鲜度汇总 */
+export interface DataFreshnessGroup {
+  total: number
+  up_to_date: number
+  stale: DataFreshnessItem[]
+  missing: DataFreshnessItem[]
+  latest_date: string | null
+}
+
+/** 数据质量总览响应 */
+export interface DataQualityResponse {
+  etf_bars: DataFreshnessGroup
+  etf_shares: DataFreshnessGroup
+  index_bars: DataFreshnessGroup
+  index_valuation: DataFreshnessGroup
+  checked_at: string
+}
+
 export interface DailyBar {
   trade_date: string
   code: string

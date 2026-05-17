@@ -1,5 +1,5 @@
 import { apiClient } from './client'
-import type { ResearchRunSummary, SystemStatusResponse } from '../types/api'
+import type { DataQualityResponse, ResearchRunSummary, SystemStatusResponse } from '../types/api'
 
 export async function fetchRuns(): Promise<ResearchRunSummary[]> {
   const { data } = await apiClient.get<ResearchRunSummary[]>('/runs')
@@ -8,6 +8,11 @@ export async function fetchRuns(): Promise<ResearchRunSummary[]> {
 
 export async function fetchSystemStatus(): Promise<SystemStatusResponse> {
   const { data } = await apiClient.get<SystemStatusResponse>('/system/status')
+  return data
+}
+
+export async function fetchDataQuality(): Promise<DataQualityResponse> {
+  const { data } = await apiClient.get<DataQualityResponse>('/system/data-quality')
   return data
 }
 

@@ -67,7 +67,43 @@
         </div>
       </div>
 
-      <!-- 区域三：最近运行 -->
+      <!-- 区域三：数据质量 -->
+      <div class="section">
+        <div class="section-header">
+          <h2 class="section-title">数据质量</h2>
+          <span v-if="quality" class="section-badge">{{ formatTime(quality.checked_at) }} 检查</span>
+          <span v-if="qualityLoading" class="section-badge">检查中...</span>
+        </div>
+        <div v-if="qualityLoading" class="quality-loading">检查中...</div>
+        <div v-else-if="quality" class="quality-grid">
+          <div
+            v-for="group in qualityGroups"
+            :key="group.key"
+            class="quality-card"
+            :class="{ 'quality-card-warn': group.data.stale.length > 0 || group.data.missing.length > 0 }"
+          >
+            <div class="quality-card-header">
+              <span class="quality-name">{{ group.label }}</span>
+              <span class="quality-ratio" :class="group.data.up_to_date === group.data.total ? 'ratio-ok' : 'ratio-warn'">
+                {{ group.data.up_to_date }}/{{ group.data.total }}
+              </span>
+            </div>
+            <div class="quality-date">最新: {{ group.data.latest_date ?? '—' }}</div>
+            <div v-if="group.data.stale.length" class="quality-issues">
+              <span class="issue-label warn">过期 {{ group.data.stale.length }}</span>
+              <span v-for="item in group.data.stale.slice(0, 3)" :key="item.code" class="issue-item" :title="item.name + ' ' + item.latest_date">{{ item.code }}</span>
+              <span v-if="group.data.stale.length > 3" class="issue-more">+{{ group.data.stale.length - 3 }}</span>
+            </div>
+            <div v-if="group.data.missing.length" class="quality-issues">
+              <span class="issue-label danger">缺失 {{ group.data.missing.length }}</span>
+              <span v-for="item in group.data.missing.slice(0, 3)" :key="item.code" class="issue-item" :title="item.name">{{ item.code }}</span>
+              <span v-if="group.data.missing.length > 3" class="issue-more">+{{ group.data.missing.length - 3 }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 区域四：最近运行 -->
       <div class="section">
         <div class="section-header">
           <h2 class="section-title">最近运行</h2>
@@ -131,11 +167,13 @@
 
 import { computed, onMounted, ref } from 'vue'
 
-import { fetchSystemStatus, triggerDailyIngest } from '../api/runs'
-import type { SystemStatusResponse } from '../types/api'
+import { fetchDataQuality, fetchSystemStatus, triggerDailyIngest } from '../api/runs'
+import type { DataQualityResponse, SystemStatusResponse } from '../types/api'
 
 const status = ref<SystemStatusResponse | null>(null)
+const quality = ref<DataQualityResponse | null>(null)
 const loading = ref(false)
+const qualityLoading = ref(false)
 const error = ref<string | null>(null)
 const triggering = ref(false)
 
@@ -186,6 +224,17 @@ function formatStatus(status: string): string {
   return map[status] ?? status
 }
 
+/** 数据质量分组配置 */
+const qualityGroups = computed(() => {
+  if (!quality.value) return []
+  return [
+    { key: 'etf_bars', label: 'ETF 日线', data: quality.value.etf_bars },
+    { key: 'etf_shares', label: 'ETF 份额', data: quality.value.etf_shares },
+    { key: 'index_bars', label: '指数日线', data: quality.value.index_bars },
+    { key: 'index_valuation', label: '指数估值', data: quality.value.index_valuation },
+  ]
+})
+
 /** 加载系统状态 */
 async function loadStatus() {
   loading.value = true
@@ -199,12 +248,24 @@ async function loadStatus() {
   }
 }
 
-/** 触发数据摄取，完成后自动刷新状态 */
+/** 加载数据质量报告 */
+async function loadQuality() {
+  qualityLoading.value = true
+  try {
+    quality.value = await fetchDataQuality()
+  } catch {
+    // 数据质量检查失败不影响主页面
+  } finally {
+    qualityLoading.value = false
+  }
+}
+
+/** 触发数据摄取，完成后自动刷新状态和质量 */
 async function triggerIngest() {
   triggering.value = true
   try {
     await triggerDailyIngest()
-    await loadStatus()
+    await Promise.all([loadStatus(), loadQuality()])
   } catch (e) {
     error.value = e instanceof Error ? e.message : '触发摄取失败'
   } finally {
@@ -212,7 +273,7 @@ async function triggerIngest() {
   }
 }
 
-onMounted(loadStatus)
+onMounted(() => Promise.all([loadStatus(), loadQuality()]))
 </script>
 
 <style scoped>
@@ -364,6 +425,42 @@ onMounted(loadStatus)
 }
 .chip-key { color: var(--text-muted); }
 .chip-val { color: var(--text); font-weight: 500; }
+
+/* === 数据质量 === */
+.quality-loading { padding: 24px 20px; color: var(--text-muted); font-size: 13px; }
+.quality-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  padding: 16px 20px;
+}
+.quality-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.quality-card-warn { border-color: rgba(245,158,11,0.4); }
+.quality-card-header { display: flex; align-items: center; justify-content: space-between; }
+.quality-name { font-size: 13px; font-weight: 600; }
+.quality-ratio { font-size: 13px; font-weight: 700; font-family: monospace; }
+.ratio-ok { color: var(--success); }
+.ratio-warn { color: #f59e0b; }
+.quality-date { font-size: 11px; color: var(--text-muted); }
+.quality-issues { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.issue-label {
+  font-size: 10px; font-weight: 600; padding: 1px 6px;
+  border-radius: 20px; white-space: nowrap;
+}
+.issue-label.warn { background: rgba(245,158,11,0.15); color: #f59e0b; }
+.issue-label.danger { background: rgba(239,68,68,0.15); color: var(--danger); }
+.issue-item {
+  font-family: monospace; font-size: 11px; color: var(--text-muted);
+  background: rgba(0,0,0,0.2); border-radius: 4px; padding: 1px 5px;
+  cursor: default;
+}
+.issue-more { font-size: 11px; color: var(--text-muted); }
 
 /* === 通用工具类 === */
 .mono { font-family: monospace; font-size: 12px; }
