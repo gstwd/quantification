@@ -93,8 +93,8 @@ HTTP请求 → api/routers/ → services/ → infra/ → PostgreSQL
 
 | 数据源 | 客户端 | 提供数据 | 覆盖范围 |
 |--------|--------|---------|---------|
-| 腾讯财经 | `tencent.py` | ETF日线行情 | 18只ETF |
-| 东方财富 | `eastmoney.py` | ETF份额/净值/规模 | 7只ETF |
+| AkShare（新浪后端） | `akshare_fund.py` | ETF日线行情（前复权） | etf_universe 全部活跃ETF |
+| AkShare（东财行情缓存） | `akshare_fund.py` | ETF份额/净值/规模 | 全量（10分钟缓存）|
 | AkShare | `akshare_index.py` | 指数日线 + PE/PB估值 | 估值仅3只指数 |
 | AkShare | `akshare_macro.py` | 宏观指标（CPI/PMI/LPR） | 全量 |
 | 交易所 | `exchange_reference.py` | 静态参考数据 | — |

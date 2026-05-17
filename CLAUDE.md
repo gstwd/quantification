@@ -62,8 +62,8 @@ HTTP → api/routers/ → services/ → infra/ → PostgreSQL
 - **`api/routers/`** — 8 route groups: `health`, `system`, `etfs`, `market_data`, `strategies`, `signals`, `runs`, `backtests`
 - **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert)
 - **`infra/db/`** — SQLAlchemy 2 ORM models (`infra/db/models/core.py` has all 18 tables)
-- **`infra/clients/`** — 6 data source clients, all inherit from `base.py`:
-  - `tencent.py` (ETF K-line), `eastmoney.py` (ETF shares/info), `exchange_reference.py` (exchange ref)
+- **`infra/clients/`** — 4 data source clients, all inherit from `base.py`:
+  - `akshare_fund.py` (ETF K-line via Sina + shares/AUM via fund_etf_spot_em), `exchange_reference.py` (exchange ref)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
 - **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends
 - **`plugins/`** — Strategy plugin system (see below)
@@ -111,8 +111,7 @@ Services fully wired to PostgreSQL. 18 tables across 4 migrations (0001→0002�
 - **SQLAlchemy**: Stack is fully **sync** (`create_engine`, `sessionmaker`). Do not introduce async.
 - **DB session injection**: Services take `db: Session` in `__init__`. Routers use `Depends(get_db)` from `api/deps.py` and construct services per-request (no module-level singletons).
 - **`DailyBar.code` vs `etf_code`**: The schema field is `code` (not `etf_code`). Map `EtfDailyBarModel.etf_code → DailyBar(code=...)`.
-- **EastmoneyClient coverage**: Only 7 ETFs in `market_map`; `fetch_share_snapshot` returns `None` for unknown codes — handle gracefully.
-- **TencentClient response key**: API returns `qfqday` (not `day`) for forward-adjusted data. `fetch_daily_bars` reads `qfqday` with fallback to `day`.
+- **AkShareFundClient share snapshot**: Uses `fund_etf_spot_em` with a 10-minute in-process cache; when `shares_total` is missing, falls back to `AUM / price`. Column names may vary across AkShare versions.
 - **Sync blocking in uvicorn**: Services use synchronous `urlopen` for external APIs. FastAPI runs sync routes in a thread pool (default 40 threads). Concurrent cold-start requests can exhaust the pool and cause timeouts — use a per-resource `threading.Lock` to serialize first-fetch, then read from DB on subsequent requests.
 - **ECharts + TypeScript**: `echarts/index.d.ts` triggers TS1203 with `vue-tsc`. Fix: add `"skipLibCheck": true` to `apps/web/tsconfig.json`.
 - **Backend venv on Windows**: Executables are at `apps/api/.venv/Scripts/` (e.g. `.venv/Scripts/alembic`, `.venv/Scripts/python`).

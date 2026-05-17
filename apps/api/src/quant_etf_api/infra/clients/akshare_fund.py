@@ -244,6 +244,16 @@ class AkShareFundClient(BaseDataClient):
                         amplitude=None,
                     )
                 )
+            # 逐日计算涨跌幅和振幅（第一根无前收盘，保持 None）
+            for i in range(1, len(bars)):
+                prev_close = bars[i - 1].close_price
+                if prev_close and prev_close != 0:
+                    bars[i].change_pct = round(
+                        (bars[i].close_price - prev_close) / prev_close * 100, 4
+                    )
+                    bars[i].amplitude = round(
+                        (bars[i].high_price - bars[i].low_price) / prev_close * 100, 4
+                    )
             elapsed = (time.perf_counter() - start) * 1000
             self._log_response(endpoint, len(bars), elapsed)
             return bars

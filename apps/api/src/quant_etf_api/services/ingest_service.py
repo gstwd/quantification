@@ -877,6 +877,38 @@ class IngestService:
             "latest_date": str(idx_val_latest) if idx_val_latest else None,
         }
 
+        # --- 字段级质量 ---
+        total_etf_bars = self._db.query(func.count(EtfDailyBarModel.id)).scalar() or 0
+        null_etf_change_pct = (
+            self._db.query(func.count(EtfDailyBarModel.id))
+            .filter(EtfDailyBarModel.change_pct.is_(None))
+            .scalar()
+            or 0
+        )
+        total_index_bars = self._db.query(func.count(IndexDailyBarModel.id)).scalar() or 0
+        null_index_change_pct = (
+            self._db.query(func.count(IndexDailyBarModel.id))
+            .filter(IndexDailyBarModel.change_pct.is_(None))
+            .scalar()
+            or 0
+        )
+        result["field_quality"] = {
+            "etf_bars": {
+                "total_records": total_etf_bars,
+                "change_pct_null": null_etf_change_pct,
+                "change_pct_null_rate": round(null_etf_change_pct / total_etf_bars, 4)
+                if total_etf_bars
+                else 0,
+            },
+            "index_bars": {
+                "total_records": total_index_bars,
+                "change_pct_null": null_index_change_pct,
+                "change_pct_null_rate": round(null_index_change_pct / total_index_bars, 4)
+                if total_index_bars
+                else 0,
+            },
+        }
+
         result["checked_at"] = datetime.now(timezone.utc).isoformat()
         return result
 
