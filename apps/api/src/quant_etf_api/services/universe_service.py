@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -203,7 +203,7 @@ class UniverseService:
         每只 ETF 的处理结果写入 ResearchRunItem，
         全部完成后更新 research_run 状态与指标。
         """
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
         try:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is None:
@@ -223,7 +223,7 @@ class UniverseService:
 
             if not etfs:
                 run.status = "success"
-                run.finished_at = datetime.utcnow()
+                run.finished_at = datetime.now(timezone.utc)
                 run.metrics = {"total": 0, "message": "无活跃 ETF"}
                 self._db.commit()
                 return
@@ -284,7 +284,7 @@ class UniverseService:
                             changed = True
 
                         if changed:
-                            etf.updated_at = datetime.utcnow()
+                            etf.updated_at = datetime.now(timezone.utc)
                             item_message = "; ".join(changes)
                             updated_count += 1
                         else:
@@ -316,13 +316,13 @@ class UniverseService:
             if run is None:
                 return
             run.status = "success"
-            run.finished_at = datetime.utcnow()
+            run.finished_at = datetime.now(timezone.utc)
             run.metrics = {
                 "total": len(etfs),
                 "updated": updated_count,
                 "unchanged": unchanged_count,
                 "failed": failed_count,
-                "duration_seconds": round((datetime.utcnow() - start_time).total_seconds(), 1),
+                "duration_seconds": round((datetime.now(timezone.utc) - start_time).total_seconds(), 1),
             }
             self._db.commit()
 
@@ -337,7 +337,7 @@ class UniverseService:
                 )
                 if run is not None:
                     run.status = "failed"
-                    run.finished_at = datetime.utcnow()
+                    run.finished_at = datetime.now(timezone.utc)
                     run.error_message = str(e)[:1000]
                     self._db.commit()
             except Exception:

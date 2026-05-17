@@ -192,10 +192,11 @@ const sharesSnapshot = computed(() => {
     ?? { record_count: 0 }
 })
 
-/** 格式化 ISO 时间戳为简短中文友好格式 */
+/** 格式化 ISO 时间戳为简短中文友好格式（北京时间） */
 function formatTime(ts: string | null | undefined): string {
   if (!ts) return '—'
   return new Date(ts).toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',

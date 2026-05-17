@@ -49,7 +49,7 @@ const triggering = ref(false)
 
 function formatTime(ts: string | null | undefined): string {
   if (!ts) return '—'
-  return new Date(ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  return new Date(ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
 async function trigger(type: 'universe' | 'ingest') {

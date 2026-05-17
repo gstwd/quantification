@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 from sqlalchemy import and_
@@ -46,7 +46,7 @@ class BacktestService:
     def create_backtest(self, req: BacktestCreateRequest) -> BacktestSummary:
         """创建回测记录，状态为 pending，立即返回。"""
         backtest_id = str(uuid4())
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         universe_filter = (
             {"mode": "all"}
             if req.universe_mode == "all"
@@ -179,7 +179,7 @@ class BacktestService:
 
             # 标记为执行中
             row.status = "running"
-            row.started_at = datetime.utcnow()
+            row.started_at = datetime.now(timezone.utc)
             self._db.commit()
 
             plugin = self._registry.get(row.strategy_id)
@@ -261,7 +261,7 @@ class BacktestService:
             metrics = self._compute_summary_metrics(daily_results)
 
             row.status = "success"
-            row.finished_at = datetime.utcnow()
+            row.finished_at = datetime.now(timezone.utc)
             row.metrics = metrics
             self._db.commit()
 
@@ -277,7 +277,7 @@ class BacktestService:
                 if row:
                     row.status = "failed"
                     row.error_message = str(exc)
-                    row.finished_at = datetime.utcnow()
+                    row.finished_at = datetime.now(timezone.utc)
                     self._db.commit()
             except Exception:
                 self._db.rollback()

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel
+
+from quant_etf_api.schemas.types import UtcDatetime
 
 
 class BacktestCreateRequest(BaseModel):
@@ -40,9 +42,9 @@ class BacktestSummary(BaseModel):
     status: str
     weighting: str
     metrics: BacktestMetrics | None = None
-    created_at: datetime
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
+    created_at: UtcDatetime
+    started_at: UtcDatetime | None = None
+    finished_at: UtcDatetime | None = None
     error_message: str | None = None
 
 

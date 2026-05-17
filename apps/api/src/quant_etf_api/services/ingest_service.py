@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
@@ -159,7 +159,7 @@ class IngestService:
                         "close_price": b.close_price,
                         "volume": b.volume,
                         "source": "tencent",
-                        "ingested_at": datetime.utcnow(),
+                        "ingested_at": datetime.now(timezone.utc),
                     }
                     for b in bars
                 ]
@@ -192,7 +192,7 @@ class IngestService:
                         "close_price": b.close_price,
                         "volume": b.volume,
                         "source": "tencent",
-                        "ingested_at": datetime.utcnow(),
+                        "ingested_at": datetime.now(timezone.utc),
                     }
                     for b in bars
                 ]
@@ -279,7 +279,7 @@ class IngestService:
                         "aum": snapshot.aum,
                         "nav": round(snapshot.price, 3),
                         "source": "eastmoney",
-                        "ingested_at": datetime.utcnow(),
+                        "ingested_at": datetime.now(timezone.utc),
                     }
                 ]
             )
@@ -386,7 +386,7 @@ class IngestService:
                         "volume": b.volume,
                         "turnover": b.turnover,
                         "source": "akshare",
-                        "ingested_at": datetime.utcnow(),
+                        "ingested_at": datetime.now(timezone.utc),
                     }
                     for b in bars
                 ]
@@ -479,7 +479,7 @@ class IngestService:
                         "pb_percentile": v.pb_percentile,
                         "dividend_yield": v.dividend_yield,
                         "source": "akshare",
-                        "ingested_at": datetime.utcnow(),
+                        "ingested_at": datetime.now(timezone.utc),
                     }
                     for v in valuations
                 ]
@@ -596,7 +596,7 @@ class IngestService:
                         "value": i.value,
                         "unit": i.unit,
                         "source": "akshare",
-                        "ingested_at": datetime.utcnow(),
+                        "ingested_at": datetime.now(timezone.utc),
                     }
                     for i in indicators
                 ]
@@ -835,7 +835,7 @@ class IngestService:
             "latest_date": str(idx_val_latest) if idx_val_latest else None,
         }
 
-        result["checked_at"] = datetime.utcnow().isoformat()
+        result["checked_at"] = datetime.now(timezone.utc).isoformat()
         return result
 
     # ==================================================================
@@ -852,7 +852,7 @@ class IngestService:
 
         完成后更新 research_run 状态为 success/failed。
         """
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
         try:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is None:
@@ -867,7 +867,7 @@ class IngestService:
 
             if today.weekday() >= 5:
                 run.status = "success"
-                run.finished_at = datetime.utcnow()
+                run.finished_at = datetime.now(timezone.utc)
                 run.metrics = {"reason": "weekend", "message": "周末休市，跳过数据摄取"}
                 self._db.commit()
                 return
@@ -958,7 +958,7 @@ class IngestService:
             if run is None:
                 return
             run.status = "success"
-            run.finished_at = datetime.utcnow()
+            run.finished_at = datetime.now(timezone.utc)
             run.metrics = {
                 "etf": {
                     "total": len(etfs),
@@ -972,7 +972,7 @@ class IngestService:
                     "valuation_records": index_valuation_count,
                 },
                 "macro": {"records": macro_count},
-                "duration_seconds": round((datetime.utcnow() - start_time).total_seconds(), 1),
+                "duration_seconds": round((datetime.now(timezone.utc) - start_time).total_seconds(), 1),
             }
             self._db.commit()
 
@@ -987,7 +987,7 @@ class IngestService:
                 )
                 if run is not None:
                     run.status = "failed"
-                    run.finished_at = datetime.utcnow()
+                    run.finished_at = datetime.now(timezone.utc)
                     run.error_message = str(e)[:1000]
                     self._db.commit()
             except Exception:
@@ -1003,7 +1003,7 @@ class IngestService:
         - 跳过周末检查（冷启动可随时执行）
         - 指数日线/估值/宏观复用现有全量方法
         """
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
         try:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is None:
@@ -1077,7 +1077,7 @@ class IngestService:
             if run is None:
                 return
             run.status = "success"
-            run.finished_at = datetime.utcnow()
+            run.finished_at = datetime.now(timezone.utc)
             run.metrics = {
                 "etf": {
                     "total": len(etfs),
@@ -1090,7 +1090,7 @@ class IngestService:
                     "valuation_records": index_valuation_count,
                 },
                 "macro": {"records": macro_count},
-                "duration_seconds": round((datetime.utcnow() - start_time).total_seconds(), 1),
+                "duration_seconds": round((datetime.now(timezone.utc) - start_time).total_seconds(), 1),
             }
             self._db.commit()
 
@@ -1105,7 +1105,7 @@ class IngestService:
                 )
                 if run is not None:
                     run.status = "failed"
-                    run.finished_at = datetime.utcnow()
+                    run.finished_at = datetime.now(timezone.utc)
                     run.error_message = str(e)[:1000]
                     self._db.commit()
             except Exception:

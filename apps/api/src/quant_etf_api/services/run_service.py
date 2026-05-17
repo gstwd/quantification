@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -47,7 +47,7 @@ class RunService:
         self, run_type: str, strategy_id: str | None, trade_date: date
     ) -> ResearchRunSummary:
         run_id = str(uuid4())
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         try:
             run = ResearchRunModel(
                 run_id=run_id,
@@ -84,7 +84,7 @@ class RunService:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is not None:
                 run.status = "failed"
-                run.finished_at = datetime.utcnow()
+                run.finished_at = datetime.now(timezone.utc)
                 run.error_message = error_message[:1000]
                 self._db.commit()
         except Exception:

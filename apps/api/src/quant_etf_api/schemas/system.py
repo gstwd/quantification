@@ -1,8 +1,9 @@
-from datetime import date, datetime
+from datetime import date
 
 from pydantic import BaseModel
 
 from quant_etf_api.schemas.run import ResearchRunSummary
+from quant_etf_api.schemas.types import UtcDatetime
 
 
 class DataFreshnessItem(BaseModel):
@@ -31,7 +32,7 @@ class DataQualityResponse(BaseModel):
     etf_shares: DataFreshnessGroup
     index_bars: DataFreshnessGroup
     index_valuation: DataFreshnessGroup
-    checked_at: datetime
+    checked_at: UtcDatetime
 
 
 class DataSourceSnapshot(BaseModel):
@@ -45,7 +46,7 @@ class DataSourceSnapshot(BaseModel):
     table_name: str  # 数据库表名，如 "etf_daily_bar"
     record_count: int  # 该表记录总数
     latest_trade_date: date | None  # 该表最新交易日期
-    latest_ingested_at: datetime | None  # 该表最晚入库时间
+    latest_ingested_at: UtcDatetime | None  # 该表最晚入库时间
 
 
 class SystemStatusResponse(BaseModel):

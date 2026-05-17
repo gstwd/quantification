@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
@@ -134,7 +134,7 @@ class StrategyExecutionService:
         run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
         if run is not None:
             run.status = "success"
-            run.finished_at = datetime.utcnow()
+            run.finished_at = datetime.now(timezone.utc)
             run.metrics = {
                 "etf_count": len(etfs),
                 "signal_count": signal_count,
@@ -148,7 +148,7 @@ class StrategyExecutionService:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is not None:
                 run.status = "failed"
-                run.finished_at = datetime.utcnow()
+                run.finished_at = datetime.now(timezone.utc)
                 run.error_message = message[:1000]
                 self._db.commit()
         except Exception:
