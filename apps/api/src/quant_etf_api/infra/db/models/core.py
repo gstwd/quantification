@@ -1,3 +1,4 @@
+from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -216,7 +217,8 @@ class FactorDefinitionModel(Base):
         String(64), nullable=True, comment="定义该因子的策略插件 ID，NULL 表示独立因子"
     )
     category: Mapped[str | None] = mapped_column(
-        String(32), nullable=True,
+        String(32),
+        nullable=True,
         comment="因子类别：volume/momentum/volatility/flow/valuation",
     )
 

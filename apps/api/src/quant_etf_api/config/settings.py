@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from functools import lru_cache
 
 from pydantic import Field
@@ -24,6 +26,12 @@ class Settings(BaseSettings):
     )
     startup_fill_enabled: bool = Field(
         default=True, description="系统启动时是否自动检查并补全数据缺口"
+    )
+
+    # 日志配置
+    log_level: str = Field(default="INFO", description="日志级别：DEBUG / INFO / WARNING / ERROR")
+    log_file: str | None = Field(
+        default=None, description="JSON 日志文件路径，留空则仅输出到控制台"
     )
 
 

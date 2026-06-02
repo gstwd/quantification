@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Any
+
 from quant_etf_api.plugins.base import StrategyPlugin
 from quant_etf_api.plugins.builtins.share_flow_monitor.plugin import ShareFlowMonitorPlugin
 from quant_etf_api.plugins.builtins.three_factor.plugin import ThreeFactorGuardPlugin
@@ -18,7 +22,7 @@ class StrategyRegistry:
     def get(self, strategy_id: str) -> StrategyPlugin | None:
         return self._plugins.get(strategy_id)
 
-    def as_summaries(self) -> list[dict]:
+    def as_summaries(self) -> list[dict[str, Any]]:
         # 将所有插件元数据序列化为字典列表，供 API 层返回给前端
         summaries = []
         for plugin in self.all():

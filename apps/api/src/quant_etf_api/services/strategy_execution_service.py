@@ -8,22 +8,22 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
+from typing import Any
 
-from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.db.models.core import (
-    EtfDailyBarModel,
-    EtfDailyShareModel,
     EtfFactorValueModel,
     EtfSignalModel,
-    EtfUniverseModel,
-    IndexDailyBarModel,
-    ResearchRunModel,
 )
+from quant_etf_api.infra.db.repositories.etf_daily_bar import EtfDailyBarRepository
+from quant_etf_api.infra.db.repositories.etf_daily_share import EtfDailyShareRepository
+from quant_etf_api.infra.db.repositories.etf_universe import EtfUniverseRepository
+from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
+from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.plugins.base import StrategyContextData, StrategyPlugin
-from quant_etf_api.services._bar_metrics import (
+from quant_etf_api.domain.common.bar_metrics import (
     calc_5d_return_etf,
     calc_5d_return_index,
     calc_volume_ratio_20d,
@@ -39,15 +39,28 @@ class StrategyExecutionService:
     调用策略插件计算信号/因子值，并将结果持久化。
     """
 
-    def __init__(self, db: Session) -> None:
+    def __init__(
+        self,
+        db: Session,
+        bar_repo: EtfDailyBarRepository | None = None,
+        share_repo: EtfDailyShareRepository | None = None,
+        index_bar_repo: IndexDailyBarRepository | None = None,
+        universe_repo: EtfUniverseRepository | None = None,
+        run_repo: ResearchRunRepository | None = None,
+    ) -> None:
         self._db = db
+        self._bar_repo = bar_repo or EtfDailyBarRepository(db)
+        self._share_repo = share_repo or EtfDailyShareRepository(db)
+        self._index_bar_repo = index_bar_repo or IndexDailyBarRepository(db)
+        self._universe_repo = universe_repo or EtfUniverseRepository(db)
+        self._run_repo = run_repo or ResearchRunRepository(db)
 
     def execute(
         self,
         plugin: StrategyPlugin,
         trade_date: date,
         run_id: str,
-        params: dict | None = None,
+        params: dict[str, Any] | None = None,
     ) -> None:
         """执行单日策略信号计算，写入 etf_signal 和 etf_factor_value。
 
@@ -57,12 +70,7 @@ class StrategyExecutionService:
             run_id: 研究运行 ID
             params: 策略参数覆盖
         """
-        etfs = (
-            self._db.query(EtfUniverseModel)
-            .filter(EtfUniverseModel.is_active.is_(True))
-            .order_by(EtfUniverseModel.etf_code)
-            .all()
-        )
+        etfs = self._universe_repo.find_all_active()
         if not etfs:
             logger.warning("execute: 无活跃 ETF，跳过策略运行")
             return
@@ -131,82 +139,39 @@ class StrategyExecutionService:
         self._db.commit()
 
         # 更新运行状态
-        run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-        if run is not None:
-            run.status = "success"
-            run.finished_at = datetime.now(timezone.utc)
-            run.metrics = {
+        self._run_repo.mark_success(
+            run_id,
+            metrics={
                 "etf_count": len(etfs),
                 "signal_count": signal_count,
                 "factor_count": factor_count,
-            }
-            self._db.commit()
-        logger.info("策略执行完成: %s signals=%d factors=%d", plugin.strategy_id, signal_count, factor_count)
+            },
+        )
+        logger.info(
+            "策略执行完成: %s signals=%d factors=%d", plugin.strategy_id, signal_count, factor_count
+        )
 
     def _mark_run_failed(self, run_id: str, message: str) -> None:
         try:
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is not None:
-                run.status = "failed"
-                run.finished_at = datetime.now(timezone.utc)
-                run.error_message = message[:1000]
-                self._db.commit()
+            self._run_repo.mark_failed(run_id, message)
         except Exception:
-            self._db.rollback()
             logger.warning("更新失败状态时出错", exc_info=True)
 
     # ── 数据加载 ──────────────────────────────────────────────────────────────
 
-    def _load_all_bars(
-        self, trade_date: date, etf_codes: list[str]
-    ) -> dict[tuple[str, date], EtfDailyBarModel]:
+    def _load_all_bars(self, trade_date: date, etf_codes: list[str]) -> dict[tuple[str, date], Any]:
         """批量加载交易日及前 25 日的 ETF 日线。"""
         lookback_start = trade_date - timedelta(days=35)
-        rows = (
-            self._db.query(EtfDailyBarModel)
-            .filter(
-                and_(
-                    EtfDailyBarModel.trade_date >= lookback_start,
-                    EtfDailyBarModel.trade_date <= trade_date,
-                    EtfDailyBarModel.etf_code.in_(etf_codes),
-                )
-            )
-            .all()
-        )
-        return {(r.etf_code, r.trade_date): r for r in rows}
+        return self._bar_repo.find_by_codes_date_range(etf_codes, lookback_start, trade_date)
 
-    def _load_all_shares(
-        self, trade_date: date, etf_codes: list[str]
-    ) -> dict[str, EtfDailyShareModel]:
+    def _load_all_shares(self, trade_date: date, etf_codes: list[str]) -> dict[str, Any]:
         """加载指定交易日的 ETF 份额快照，返回 {etf_code: row} 映射。"""
-        rows = (
-            self._db.query(EtfDailyShareModel)
-            .filter(
-                and_(
-                    EtfDailyShareModel.trade_date == trade_date,
-                    EtfDailyShareModel.etf_code.in_(etf_codes),
-                )
-            )
-            .all()
-        )
-        return {r.etf_code: r for r in rows}
+        return self._share_repo.find_by_codes_date(etf_codes, trade_date)
 
-    def _load_all_index_bars(
-        self, trade_date: date
-    ) -> dict[tuple[str, date], IndexDailyBarModel]:
+    def _load_all_index_bars(self, trade_date: date) -> dict[tuple[str, date], Any]:
         """批量加载交易日及前 10 日的指数日线。"""
         lookback_start = trade_date - timedelta(days=15)
-        rows = (
-            self._db.query(IndexDailyBarModel)
-            .filter(
-                and_(
-                    IndexDailyBarModel.trade_date >= lookback_start,
-                    IndexDailyBarModel.trade_date <= trade_date,
-                )
-            )
-            .all()
-        )
-        return {(r.index_code, r.trade_date): r for r in rows}
+        return self._index_bar_repo.find_all_date_range(lookback_start, trade_date)
 
     # ── 上下文构建 ────────────────────────────────────────────────────────────
 
@@ -214,9 +179,9 @@ class StrategyExecutionService:
         self,
         trade_date: date,
         etf_codes: list[str],
-        all_bars: dict,
-        all_shares: dict,
-        all_index_bars: dict,
+        all_bars: dict[tuple[str, date], Any],
+        all_shares: dict[str, Any],
+        all_index_bars: dict[tuple[str, date], Any],
     ) -> StrategyContextData:
         """从 DB 数据构建单日策略上下文，与 BacktestService._build_historical_context 模式一致。"""
         # 基准指数涨跌幅和 5 日收益
@@ -239,7 +204,7 @@ class StrategyExecutionService:
             }
 
         # ETF K 线衍生指标
-        etf_bars: dict[str, dict] = {}
+        etf_bars: dict[str, dict[str, Any]] = {}
         for code in etf_codes:
             bar = all_bars.get((code, trade_date))
             if bar is None:

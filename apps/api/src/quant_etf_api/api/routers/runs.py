@@ -1,11 +1,15 @@
+from __future__ import annotations
+
 import threading
 from datetime import date
+from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
 from quant_etf_api.infra.db.base import SessionLocal
+from quant_etf_api.schemas.pagination import PaginatedResponse
 from quant_etf_api.schemas.run import ResearchRunSummary
 from quant_etf_api.services.ingest_service import IngestService
 from quant_etf_api.services.run_service import RunService
@@ -22,7 +26,7 @@ def _run_ingest_bg(run_id: str) -> None:
         db.close()
 
 
-def _run_strategy_bg(strategy_id: str, run_id: str, params: dict | None) -> None:
+def _run_strategy_bg(strategy_id: str, run_id: str, params: dict[str, Any] | None) -> None:
     """在独立 Session 中执行策略信号计算。"""
     db = SessionLocal()
     try:
@@ -60,9 +64,14 @@ def _run_universe_refresh_bg(run_id: str) -> None:
         db.close()
 
 
-@router.get("/runs", response_model=list[ResearchRunSummary])
-def list_runs(db: Session = Depends(get_db)) -> list[ResearchRunSummary]:
-    return RunService(db).list_runs()
+@router.get("/runs", response_model=PaginatedResponse[ResearchRunSummary])
+def list_runs(
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> PaginatedResponse[ResearchRunSummary]:
+    items, total = RunService(db).list_runs(offset=offset, limit=limit)
+    return PaginatedResponse(items=items, total=total, offset=offset, limit=limit)
 
 
 @router.post("/runs/universe-refresh")

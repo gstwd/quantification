@@ -1,3 +1,4 @@
+from __future__ import annotations
 from .etf import EtfDetail, EtfSummary
 from .factor import FactorSpecResponse
 from .market_data import DailyBar, IndexValuation, MacroIndicatorSchema, ShareSnapshot

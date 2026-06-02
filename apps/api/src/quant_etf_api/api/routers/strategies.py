@@ -1,3 +1,4 @@
+from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from quant_etf_api.schemas.strategy import StrategyDetail

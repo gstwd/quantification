@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+
 def volume_probability(volume_ratio: float) -> float:
     # 分段线性映射：量比越高，量能概率越大
     # 量比 < 0.5 属于极度缩量，概率接近 0

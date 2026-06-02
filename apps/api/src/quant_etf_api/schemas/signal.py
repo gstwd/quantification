@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from datetime import date
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -10,7 +13,7 @@ class SignalRow(BaseModel):
     signal_score: float
     signal_level: str
     signal_label: str
-    signal_payload: dict = {}
+    signal_payload: dict[str, Any] = {}
 
 
 class FactorRow(BaseModel):
@@ -19,5 +22,5 @@ class FactorRow(BaseModel):
     factor_id: str
     factor_value_numeric: float | None = None
     factor_value_text: str | None = None
-    factor_payload: dict = {}
+    factor_payload: dict[str, Any] = {}
     strategy_id: str | None = None

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, timedelta
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from sqlalchemy import and_
 from sqlalchemy.dialects.postgresql import insert
@@ -53,7 +53,7 @@ class FactorService:
     # 公开接口
     # ==================================================================
 
-    def compute_and_store(self, trade_date: date) -> dict:
+    def compute_and_store(self, trade_date: date) -> dict[str, Any]:
         """计算指定交易日全量 ETF × 全量因子并写入 DB。
 
         执行流程：
@@ -285,7 +285,7 @@ class FactorService:
             etf_shares={(r.etf_code, r.trade_date): r for r in share_rows},
         )
 
-    def _bulk_upsert(self, rows: list[dict]) -> int:
+    def _bulk_upsert(self, rows: list[dict[str, Any]]) -> int:
         """批量 upsert etf_factor_value，使用 partial unique index 处理 NULL strategy_id。
 
         ON CONFLICT 目标：partial index uq_etf_factor_value_builtin

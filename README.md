@@ -364,7 +364,8 @@ API 调用封装在 `api/` 目录下，store 调用 API 函数，页面组件只
 ```bash
 cd apps/api
 
-# 1. 安装依赖（推荐用 uv 或 pip）
+# 1. 使用venv配置vscode，安装依赖（推荐用 uv 或 pip）
+python -m venv .venv
 pip install -e ".[dev]"
 
 # 2. 配置环境变量

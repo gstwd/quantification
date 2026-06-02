@@ -23,15 +23,8 @@ class IndexService:
         Returns:
             按代码升序排列的基准指数列表
         """
-        rows = (
-            self._db.query(BenchmarkIndexModel)
-            .order_by(BenchmarkIndexModel.index_code)
-            .all()
-        )
-        return [
-            BenchmarkIndex(index_code=r.index_code, index_name=r.name_cn)
-            for r in rows
-        ]
+        rows = self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
+        return [BenchmarkIndex(index_code=r.index_code, index_name=r.name_cn) for r in rows]
 
     def add_index(self, index_code: str, name_cn: str | None = None) -> BenchmarkIndex:
         """添加基准指数。

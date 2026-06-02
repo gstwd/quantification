@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
 from quant_etf_api.plugins.base import StrategyContextData, StrategyResult
 from quant_etf_api.plugins.builtins.three_factor.factors import (
@@ -20,7 +21,7 @@ class ThreeFactorGuardPlugin:
     asset_scope = "a_share_etf"
     description = "基于量能、方向、份额三个因子的 A 股 ETF 日频研究信号。"
 
-    def parameter_schema(self) -> dict:
+    def parameter_schema(self) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {"lookback_days": {"type": "integer", "default": 20, "minimum": 20}},
@@ -29,7 +30,7 @@ class ThreeFactorGuardPlugin:
     def required_inputs(self) -> list[str]:
         return ["etf_daily_bar", "index_daily_bar", "etf_daily_share"]
 
-    def factor_definitions(self) -> list[dict]:
+    def factor_definitions(self) -> list[dict[str, Any]]:
         return [
             {"factor_id": "volume_ratio_20d", "name": "20日量比"},
             {"factor_id": "volume_prob", "name": "量能概率"},
@@ -38,10 +39,12 @@ class ThreeFactorGuardPlugin:
             {"factor_id": "composite_prob", "name": "综合概率"},
         ]
 
-    def signal_definition(self) -> dict:
+    def signal_definition(self) -> dict[str, Any]:
         return {"signal_id": "three_factor_signal", "name": "三因子综合信号"}
 
-    def prepare_context(self, trade_date: date, params: dict | None = None) -> StrategyContextData:
+    def prepare_context(
+        self, trade_date: date, params: dict[str, Any] | None = None
+    ) -> StrategyContextData:
         return StrategyContextData(
             benchmark_changes={},
             share_changes={},
@@ -50,9 +53,9 @@ class ThreeFactorGuardPlugin:
     def run_for_universe(
         self,
         trade_date: date,
-        universe: list[dict],
+        universe: list[dict[str, Any]],
         context: StrategyContextData,
-        params: dict | None = None,
+        params: dict[str, Any] | None = None,
     ) -> list[StrategyResult]:
         results: list[StrategyResult] = []
         # 模拟数据：回测时由 BacktestService 通过 context.extra["etf_bars"] 注入真实历史数据
@@ -120,7 +123,7 @@ class ThreeFactorGuardPlugin:
             )
         return results
 
-    def explain_result(self, result: StrategyResult) -> dict:
+    def explain_result(self, result: StrategyResult) -> dict[str, Any]:
         return {
             "summary": f"{result.etf_code} 的三因子综合得分为 {result.signal_score}",
             "payload": result.payload,

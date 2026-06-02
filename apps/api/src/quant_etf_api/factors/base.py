@@ -61,7 +61,7 @@ class FactorValue:
     factor_id: str
     numeric: float | None = None
     text: str | None = None
-    payload: dict = field(default_factory=dict)
+    payload: dict[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable

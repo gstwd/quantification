@@ -1,3 +1,4 @@
+from __future__ import annotations
 from quant_etf_api.plugins.registry import StrategyRegistry, build_default_registry
 from quant_etf_api.schemas.strategy import StrategyDetail
 

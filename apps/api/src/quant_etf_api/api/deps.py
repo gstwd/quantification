@@ -1,9 +1,15 @@
+from __future__ import annotations
+
 from collections.abc import Generator
+from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
 from quant_etf_api.config.settings import Settings, get_settings
 from quant_etf_api.infra.db.base import SessionLocal
+
+if TYPE_CHECKING:
+    from quant_etf_api.factors.registry import FactorRegistry
 
 
 def settings_dependency() -> Settings:
@@ -19,7 +25,7 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-def get_factor_registry():
+def get_factor_registry() -> "FactorRegistry":
     """返回 main.py 模块级 factor_registry 全局实例。
 
     通过 deferred import 获取，避免模块初始化时的循环依赖。

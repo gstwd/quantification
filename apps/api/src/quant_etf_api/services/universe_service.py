@@ -17,6 +17,7 @@ from quant_etf_api.infra.db.models.core import (
     ResearchRunItemModel,
     ResearchRunModel,
 )
+from quant_etf_api.infra.db.repositories.etf_universe import EtfUniverseRepository
 from quant_etf_api.schemas.etf import EtfCreateRequest, EtfDetail
 from quant_etf_api.services.index_service import IndexService
 
@@ -67,25 +68,30 @@ def _row_to_detail(row: EtfUniverseModel) -> EtfDetail:
 
 
 class UniverseService:
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, universe_repo: EtfUniverseRepository | None = None) -> None:
         self._db = db
+        self._universe_repo = universe_repo or EtfUniverseRepository(db)
 
-    def list_etfs(self) -> list[EtfDetail]:
+    def list_etfs(self, offset: int = 0, limit: int = 50) -> tuple[list[EtfDetail], int]:
+        """分页查询活跃 ETF 列表。
+
+        Args:
+            offset: 偏移量。
+            limit: 每页最大条数。
+
+        Returns:
+            (items, total) 元组。
+        """
         try:
-            rows = (
-                self._db.query(EtfUniverseModel)
-                .filter(EtfUniverseModel.is_active.is_(True))
-                .order_by(EtfUniverseModel.etf_code)
-                .all()
-            )
-            return [_row_to_detail(r) for r in rows]
+            rows, total = self._universe_repo.find_active_paginated(offset=offset, limit=limit)
+            return [_row_to_detail(r) for r in rows], total
         except Exception:
-            logger.warning("DB query failed, returning []", exc_info=True)
-            return []
+            logger.warning("list_etfs DB query failed", exc_info=True)
+            return [], 0
 
     def get_etf(self, etf_code: str) -> EtfDetail | None:
         try:
-            row = self._db.get(EtfUniverseModel, etf_code)
+            row = self._universe_repo.find_by_code(etf_code)
             return _row_to_detail(row) if row else None
         except Exception:
             logger.warning("DB query failed for etf_code=%s", etf_code, exc_info=True)
@@ -295,9 +301,7 @@ class UniverseService:
 
                         new_listing_date = _parse_date(info.establishment_date)
                         if new_listing_date and new_listing_date != etf.listing_date:
-                            changes.append(
-                                f"成立日期: {etf.listing_date} → {new_listing_date}"
-                            )
+                            changes.append(f"成立日期: {etf.listing_date} → {new_listing_date}")
                             etf.listing_date = new_listing_date
                             changed = True
 
@@ -340,7 +344,9 @@ class UniverseService:
                 "updated": updated_count,
                 "unchanged": unchanged_count,
                 "failed": failed_count,
-                "duration_seconds": round((datetime.now(timezone.utc) - start_time).total_seconds(), 1),
+                "duration_seconds": round(
+                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                ),
             }
             self._db.commit()
 

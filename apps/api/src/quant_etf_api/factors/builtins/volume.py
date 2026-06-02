@@ -5,15 +5,15 @@ from __future__ import annotations
 from datetime import date
 
 from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
-from quant_etf_api.services._bar_metrics import calc_volume_ratio_20d
+from quant_etf_api.domain.common.bar_metrics import calc_volume_ratio_20d
 
 
 class VolumeRatio20dComputer:
     """20日量比因子计算器。
 
     量比 = 当日成交量 / 近20个交易日平均成交量。
-    直接复用 services._bar_metrics.calc_volume_ratio_20d，保持计算逻辑单一来源。
-    数据不足时返回 1.0（中性值，与 _bar_metrics 的 fallback 一致）。
+    直接复用 domain.common.bar_metrics.calc_volume_ratio_20d，保持计算逻辑单一来源。
+    数据不足时返回 1.0（中性值，与 bar_metrics 的 fallback 一致）。
     """
 
     @property

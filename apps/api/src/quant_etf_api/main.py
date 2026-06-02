@@ -1,11 +1,15 @@
+from __future__ import annotations
+
 import logging
 import threading
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import date
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from quant_etf_api.api.middleware import RequestIdMiddleware
 from quant_etf_api.api.routers import (
     backtests,
     etfs,
@@ -18,6 +22,7 @@ from quant_etf_api.api.routers import (
     strategies,
     system,
 )
+from quant_etf_api.config.logging_config import setup_logging
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.factors.registry import FactorRegistry, build_default_factor_registry
 from quant_etf_api.infra.scheduler import get_scheduler
@@ -25,6 +30,7 @@ from quant_etf_api.plugins.registry import StrategyRegistry, build_default_regis
 
 logger = logging.getLogger(__name__)
 
+setup_logging()
 settings = get_settings()
 # 策略注册表在进程启动时构建一次，所有请求共享同一实例
 registry: StrategyRegistry = build_default_registry()
@@ -52,7 +58,7 @@ def _trigger_startup_fill() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if settings.schedule_enabled:
         get_scheduler().start()
     if settings.startup_fill_enabled:
@@ -62,6 +68,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
+app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,

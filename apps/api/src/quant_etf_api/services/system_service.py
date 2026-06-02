@@ -9,12 +9,12 @@ from sqlalchemy.orm import Session
 from quant_etf_api.infra.db.models.core import (
     EtfDailyBarModel,
     EtfDailyShareModel,
-    EtfUniverseModel,
     IndexDailyBarModel,
     IndexValuationModel,
     MacroIndicatorModel,
-    ResearchRunModel,
 )
+from quant_etf_api.infra.db.repositories.etf_universe import EtfUniverseRepository
+from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.schemas.run import ResearchRunSummary
 from quant_etf_api.schemas.system import DataSourceSnapshot, SystemStatusResponse
 
@@ -28,8 +28,15 @@ class SystemService:
     供前端"数据状态"页面展示。
     """
 
-    def __init__(self, db: Session) -> None:
+    def __init__(
+        self,
+        db: Session,
+        universe_repo: EtfUniverseRepository | None = None,
+        run_repo: ResearchRunRepository | None = None,
+    ) -> None:
         self._db = db
+        self._universe_repo = universe_repo or EtfUniverseRepository(db)
+        self._run_repo = run_repo or ResearchRunRepository(db)
 
     def _check_db_connection(self) -> bool:
         """通过执行轻量查询检测数据库是否可达。"""
@@ -43,11 +50,7 @@ class SystemService:
     def _get_active_etf_count(self) -> int:
         """查询当前活跃 ETF 数量。"""
         try:
-            return (
-                self._db.query(EtfUniverseModel)
-                .filter(EtfUniverseModel.is_active.is_(True))
-                .count()
-            )
+            return self._universe_repo.count_active()
         except Exception:
             logger.warning("活跃ETF数量查询失败", exc_info=True)
             return 0
@@ -96,12 +99,7 @@ class SystemService:
     def _get_recent_runs(self, limit: int = 5) -> list[ResearchRunSummary]:
         """获取最近 N 条研究运行记录。"""
         try:
-            rows = (
-                self._db.query(ResearchRunModel)
-                .order_by(ResearchRunModel.started_at.desc())
-                .limit(limit)
-                .all()
-            )
+            rows = self._run_repo.find_recent(limit=limit)
             return [
                 ResearchRunSummary(
                     run_id=r.run_id,

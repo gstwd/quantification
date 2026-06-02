@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -16,7 +16,7 @@ class BacktestCreateRequest(BaseModel):
     end_date: date
     universe_mode: Literal["all", "subset"] = "all"
     etf_codes: list[str] = []
-    params: dict | None = None
+    params: dict[str, Any] | None = None
     weighting: Literal["equal", "signal_weighted"] = "equal"
 
 
@@ -51,8 +51,8 @@ class BacktestSummary(BaseModel):
 class BacktestDetail(BacktestSummary):
     """回测详情，含配置信息。"""
 
-    universe_filter: dict
-    params: dict | None = None
+    universe_filter: dict[str, Any]
+    params: dict[str, Any] | None = None
 
 
 class BacktestDailyResult(BaseModel):

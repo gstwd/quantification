@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import date, datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
@@ -15,13 +16,13 @@ from quant_etf_api.infra.db.models.core import (
     BenchmarkIndexModel,
     EtfDailyBarModel,
     EtfDailyShareModel,
-    EtfUniverseModel,
     IndexDailyBarModel,
     IndexValuationModel,
     MacroIndicatorModel,
     ResearchRunItemModel,
     ResearchRunModel,
 )
+from quant_etf_api.infra.db.repositories.etf_universe import EtfUniverseRepository
 from quant_etf_api.schemas.market_data import (
     BenchmarkIndex,
     DailyBar,
@@ -130,8 +131,9 @@ class IngestService:
     幂等写入和读穿透缓存，供 API 路由和定时调度器使用。
     """
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, universe_repo: EtfUniverseRepository | None = None) -> None:
         self._db = db
+        self._universe_repo = universe_repo or EtfUniverseRepository(db)
 
     def latest_trade_date(self) -> date:
         return date.today()
@@ -219,7 +221,9 @@ class IngestService:
         # 有历史数据，拉取 max_date 到今日的缺口数据
         start_str = (max_date - timedelta(days=1)).strftime("%Y%m%d")
         end_str = today.strftime("%Y%m%d")
-        bars = AkShareFundClient().fetch_etf_daily_bars(etf_code, start_date=start_str, end_date=end_str)
+        bars = AkShareFundClient().fetch_etf_daily_bars(
+            etf_code, start_date=start_str, end_date=end_str
+        )
         if not bars:
             return str(max_date)
         stmt = (
@@ -699,7 +703,7 @@ class IngestService:
     # 数据质量检查
     # ==================================================================
 
-    def check_data_freshness(self) -> dict:
+    def check_data_freshness(self) -> dict[str, Any]:
         """检查各数据表的新鲜度和覆盖率。
 
         针对每个活跃 ETF / 基准指数，检查对应数据表中是否有记录、
@@ -709,12 +713,7 @@ class IngestService:
         stale_threshold = today - timedelta(days=3)
         result: dict = {}
 
-        etfs = (
-            self._db.query(EtfUniverseModel)
-            .filter(EtfUniverseModel.is_active.is_(True))
-            .order_by(EtfUniverseModel.etf_code)
-            .all()
-        )
+        etfs = self._universe_repo.find_all_active()
 
         # --- ETF 日线 ---
         bar_stale = []
@@ -947,12 +946,7 @@ class IngestService:
                 return
 
             # ------------------------------ 1. ETF 行情 + 份额 ------------------------------
-            etfs = (
-                self._db.query(EtfUniverseModel)
-                .filter(EtfUniverseModel.is_active.is_(True))
-                .order_by(EtfUniverseModel.etf_code)
-                .all()
-            )
+            etfs = self._universe_repo.find_all_active()
 
             etf_success = 0
             etf_failed = 0
@@ -1044,7 +1038,9 @@ class IngestService:
                     "valuation_records": index_valuation_count,
                 },
                 "macro": {"records": macro_count},
-                "duration_seconds": round((datetime.now(timezone.utc) - start_time).total_seconds(), 1),
+                "duration_seconds": round(
+                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                ),
             }
             self._db.commit()
 
@@ -1087,12 +1083,7 @@ class IngestService:
             self._db.commit()
 
             # 1. 全量 ETF 历史日线
-            etfs = (
-                self._db.query(EtfUniverseModel)
-                .filter(EtfUniverseModel.is_active.is_(True))
-                .order_by(EtfUniverseModel.etf_code)
-                .all()
-            )
+            etfs = self._universe_repo.find_all_active()
 
             etf_bar_count = 0
             etf_failed_count = 0
@@ -1162,7 +1153,9 @@ class IngestService:
                     "valuation_records": index_valuation_count,
                 },
                 "macro": {"records": macro_count},
-                "duration_seconds": round((datetime.now(timezone.utc) - start_time).total_seconds(), 1),
+                "duration_seconds": round(
+                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                ),
             }
             self._db.commit()
 
@@ -1205,12 +1198,7 @@ class IngestService:
             self._db.commit()
 
             # 1. ETF 日线增量补全（已是最新则跳过）
-            etfs = (
-                self._db.query(EtfUniverseModel)
-                .filter(EtfUniverseModel.is_active.is_(True))
-                .order_by(EtfUniverseModel.etf_code)
-                .all()
-            )
+            etfs = self._universe_repo.find_all_active()
             etf_filled = 0
             etf_skipped = 0
             etf_failed = 0
@@ -1253,11 +1241,13 @@ class IngestService:
                         logger.warning("指数 %s 估值补全失败: %s", idx.index_code, e)
 
             # 3. 宏观指标（超过 5 天未入库才重新拉取）
-            macro_latest_ingest: datetime | None = (
-                self._db.query(func.max(MacroIndicatorModel.ingested_at)).scalar()
-            )
+            macro_latest_ingest: datetime | None = self._db.query(
+                func.max(MacroIndicatorModel.ingested_at)
+            ).scalar()
             # DateTime 列返回 naive datetime，去掉 tzinfo 后再比较
-            macro_stale_threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=5)
+            macro_stale_threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+                days=5
+            )
             macro_count = 0
             if macro_latest_ingest is None or macro_latest_ingest < macro_stale_threshold:
                 try:
@@ -1282,7 +1272,9 @@ class IngestService:
                     "valuation_records": index_val_count,
                 },
                 "macro": {"records": macro_count},
-                "duration_seconds": round((datetime.now(timezone.utc) - start_time).total_seconds(), 1),
+                "duration_seconds": round(
+                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                ),
             }
             self._db.commit()
 

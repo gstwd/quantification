@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import date, datetime, timedelta, timezone
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import and_
@@ -12,14 +13,15 @@ from quant_etf_api.infra.db.models.core import (
     BacktestDailyResultModel,
     BacktestEtfResultModel,
     BacktestRunModel,
-    EtfDailyBarModel,
-    EtfDailyShareModel,
-    EtfUniverseModel,
-    IndexDailyBarModel,
 )
+from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
+from quant_etf_api.infra.db.repositories.etf_daily_bar import EtfDailyBarRepository
+from quant_etf_api.infra.db.repositories.etf_daily_share import EtfDailyShareRepository
+from quant_etf_api.infra.db.repositories.etf_universe import EtfUniverseRepository
+from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.plugins.base import StrategyContextData, StrategyResult
 from quant_etf_api.plugins.registry import StrategyRegistry
-from quant_etf_api.services._bar_metrics import (
+from quant_etf_api.domain.common.bar_metrics import (
     calc_5d_return_etf,
     calc_5d_return_index,
     calc_volume_ratio_20d,
@@ -39,9 +41,23 @@ logger = logging.getLogger(__name__)
 class BacktestService:
     """回测引擎服务，负责创建、执行和查询回测任务。"""
 
-    def __init__(self, db: Session, registry: StrategyRegistry) -> None:
+    def __init__(
+        self,
+        db: Session,
+        registry: StrategyRegistry,
+        backtest_repo: BacktestRepository | None = None,
+        bar_repo: EtfDailyBarRepository | None = None,
+        share_repo: EtfDailyShareRepository | None = None,
+        index_bar_repo: IndexDailyBarRepository | None = None,
+        universe_repo: EtfUniverseRepository | None = None,
+    ) -> None:
         self._db = db
         self._registry = registry
+        self._backtest_repo = backtest_repo or BacktestRepository(db)
+        self._bar_repo = bar_repo or EtfDailyBarRepository(db)
+        self._share_repo = share_repo or EtfDailyShareRepository(db)
+        self._index_bar_repo = index_bar_repo or IndexDailyBarRepository(db)
+        self._universe_repo = universe_repo or EtfUniverseRepository(db)
 
     def create_backtest(self, req: BacktestCreateRequest) -> BacktestSummary:
         """创建回测记录，状态为 pending，立即返回。"""
@@ -80,28 +96,28 @@ class BacktestService:
             created_at=now,
         )
 
-    def list_backtests(self, limit: int = 50) -> list[BacktestSummary]:
-        """返回最近的回测列表，按创建时间倒序。"""
+    def list_backtests(self, offset: int = 0, limit: int = 50) -> tuple[list[BacktestSummary], int]:
+        """分页返回回测列表，按创建时间倒序。
+
+        Args:
+            offset: 偏移量。
+            limit: 每页最大条数。
+
+        Returns:
+            (items, total) 元组。
+        """
         try:
-            rows = (
-                self._db.query(BacktestRunModel)
-                .order_by(BacktestRunModel.created_at.desc())
-                .limit(limit)
-                .all()
-            )
-            return [self._row_to_summary(r) for r in rows]
+            rows, total = self._backtest_repo.find_all(offset=offset, limit=limit)
+            items = [self._row_to_summary(r) for r in rows]
+            return items, total
         except Exception:
             logger.warning("list_backtests DB query failed", exc_info=True)
-            return []
+            return [], 0
 
     def get_backtest(self, backtest_id: str) -> BacktestDetail | None:
         """返回回测详情，含配置信息。"""
         try:
-            row = (
-                self._db.query(BacktestRunModel)
-                .filter(BacktestRunModel.backtest_id == backtest_id)
-                .first()
-            )
+            row = self._backtest_repo.find_by_id(backtest_id)
             if row is None:
                 return None
             return self._row_to_detail(row)
@@ -112,12 +128,7 @@ class BacktestService:
     def get_daily_results(self, backtest_id: str) -> list[BacktestDailyResult]:
         """返回回测每日组合绩效，按日期升序。"""
         try:
-            rows = (
-                self._db.query(BacktestDailyResultModel)
-                .filter(BacktestDailyResultModel.backtest_id == backtest_id)
-                .order_by(BacktestDailyResultModel.trade_date.asc())
-                .all()
-            )
+            rows = self._backtest_repo.find_daily_results(backtest_id)
             return [
                 BacktestDailyResult(
                     trade_date=r.trade_date,
@@ -139,14 +150,7 @@ class BacktestService:
     ) -> list[BacktestEtfResult]:
         """返回回测每日每 ETF 信号与收益，可按 ETF 过滤。"""
         try:
-            q = self._db.query(BacktestEtfResultModel).filter(
-                BacktestEtfResultModel.backtest_id == backtest_id
-            )
-            if etf_code:
-                q = q.filter(BacktestEtfResultModel.etf_code == etf_code)
-            rows = q.order_by(
-                BacktestEtfResultModel.trade_date.asc(), BacktestEtfResultModel.etf_code.asc()
-            ).all()
+            rows = self._backtest_repo.find_etf_results(backtest_id, etf_code=etf_code)
             return [
                 BacktestEtfResult(
                     trade_date=r.trade_date,
@@ -168,11 +172,7 @@ class BacktestService:
         逐日调用策略插件，计算组合收益，写入结果表，最后更新汇总指标。
         """
         try:
-            row = (
-                self._db.query(BacktestRunModel)
-                .filter(BacktestRunModel.backtest_id == backtest_id)
-                .first()
-            )
+            row = self._backtest_repo.find_by_id(backtest_id)
             if row is None:
                 logger.error("run_backtest: backtest_id %s not found", backtest_id)
                 return
@@ -260,121 +260,65 @@ class BacktestService:
             # 计算汇总指标
             metrics = self._compute_summary_metrics(daily_results)
 
-            row.status = "success"
-            row.finished_at = datetime.now(timezone.utc)
-            row.metrics = metrics
-            self._db.commit()
+            self._backtest_repo.mark_success(backtest_id, metrics)
 
         except Exception as exc:
             self._db.rollback()
             logger.exception("run_backtest failed for %s", backtest_id)
             try:
-                row = (
-                    self._db.query(BacktestRunModel)
-                    .filter(BacktestRunModel.backtest_id == backtest_id)
-                    .first()
-                )
-                if row:
-                    row.status = "failed"
-                    row.error_message = str(exc)
-                    row.finished_at = datetime.now(timezone.utc)
-                    self._db.commit()
+                self._backtest_repo.mark_failed(backtest_id, str(exc))
             except Exception:
                 self._db.rollback()
 
     # ── 内部辅助方法 ──────────────────────────────────────────────────────────
 
-    def _resolve_universe(self, universe_filter: dict) -> list[dict]:
+    def _resolve_universe(self, universe_filter: dict[str, Any]) -> list[dict[str, Any]]:
         """根据 universe_filter 查询回测标的列表。"""
-        q = self._db.query(EtfUniverseModel).filter(EtfUniverseModel.is_active == True)  # noqa: E712
         if universe_filter.get("mode") == "subset":
             codes = universe_filter.get("etf_codes", [])
             if codes:
-                q = q.filter(EtfUniverseModel.etf_code.in_(codes))
-        return [{"etf_code": r.etf_code, "name_cn": r.name_cn} for r in q.all()]
+                rows = self._universe_repo.find_by_codes(codes)
+                return [{"etf_code": r.etf_code, "name_cn": r.name_cn} for r in rows]
+        rows = self._universe_repo.find_all_active()
+        return [{"etf_code": r.etf_code, "name_cn": r.name_cn} for r in rows]
 
     def _get_trading_dates(self, start: date, end: date, etf_codes: list[str]) -> list[date]:
         """从 etf_daily_bar 中提取区间内的交易日列表（升序）。"""
-        rows = (
-            self._db.query(EtfDailyBarModel.trade_date)
-            .filter(
-                and_(
-                    EtfDailyBarModel.trade_date >= start,
-                    EtfDailyBarModel.trade_date <= end,
-                    EtfDailyBarModel.etf_code.in_(etf_codes),
-                )
-            )
-            .distinct()
-            .order_by(EtfDailyBarModel.trade_date.asc())
-            .all()
-        )
-        return [r.trade_date for r in rows]
+        return self._bar_repo.get_trading_dates(etf_codes, start, end)
 
     def _load_all_bars(
         self, trading_dates: list[date], etf_codes: list[str]
-    ) -> dict[tuple[str, date], EtfDailyBarModel]:
+    ) -> dict[tuple[str, date], Any]:
         """批量加载回测区间及前 25 日的行情数据，返回 (etf_code, trade_date) → row 映射。"""
         if not trading_dates:
             return {}
         lookback_start = trading_dates[0] - timedelta(days=35)
-        rows = (
-            self._db.query(EtfDailyBarModel)
-            .filter(
-                and_(
-                    EtfDailyBarModel.trade_date >= lookback_start,
-                    EtfDailyBarModel.trade_date <= trading_dates[-1],
-                    EtfDailyBarModel.etf_code.in_(etf_codes),
-                )
-            )
-            .all()
-        )
-        return {(r.etf_code, r.trade_date): r for r in rows}
+        return self._bar_repo.find_by_codes_date_range(etf_codes, lookback_start, trading_dates[-1])
 
     def _load_all_shares(
         self, trading_dates: list[date], etf_codes: list[str]
-    ) -> dict[tuple[str, date], EtfDailyShareModel]:
+    ) -> dict[tuple[str, date], Any]:
         """批量加载回测区间的份额数据，返回 (etf_code, trade_date) → row 映射。"""
         if not trading_dates:
             return {}
-        rows = (
-            self._db.query(EtfDailyShareModel)
-            .filter(
-                and_(
-                    EtfDailyShareModel.trade_date >= trading_dates[0],
-                    EtfDailyShareModel.trade_date <= trading_dates[-1],
-                    EtfDailyShareModel.etf_code.in_(etf_codes),
-                )
-            )
-            .all()
+        return self._share_repo.find_by_codes_date_range(
+            etf_codes, trading_dates[0], trading_dates[-1]
         )
-        return {(r.etf_code, r.trade_date): r for r in rows}
 
-    def _load_all_index_bars(
-        self, trading_dates: list[date]
-    ) -> dict[tuple[str, date], IndexDailyBarModel]:
+    def _load_all_index_bars(self, trading_dates: list[date]) -> dict[tuple[str, date], Any]:
         """批量加载回测区间及前 10 日的指数行情数据。"""
         if not trading_dates:
             return {}
         lookback_start = trading_dates[0] - timedelta(days=15)
-        rows = (
-            self._db.query(IndexDailyBarModel)
-            .filter(
-                and_(
-                    IndexDailyBarModel.trade_date >= lookback_start,
-                    IndexDailyBarModel.trade_date <= trading_dates[-1],
-                )
-            )
-            .all()
-        )
-        return {(r.index_code, r.trade_date): r for r in rows}
+        return self._index_bar_repo.find_all_date_range(lookback_start, trading_dates[-1])
 
     def _build_historical_context(
         self,
         trade_date: date,
         etf_codes: list[str],
-        all_bars: dict,
-        all_shares: dict,
-        all_index_bars: dict,
+        all_bars: dict[tuple[str, date], Any],
+        all_shares: dict[tuple[str, date], Any],
+        all_index_bars: dict[tuple[str, date], Any],
     ) -> StrategyContextData:
         """
         为指定交易日构建 StrategyContextData，注入真实历史数据到 context.extra["etf_bars"]。
@@ -401,7 +345,7 @@ class BacktestService:
             }
 
         # 构建 etf_bars（供插件读取真实历史量比、涨跌幅等）
-        etf_bars: dict[str, dict] = {}
+        etf_bars: dict[str, dict[str, Any]] = {}
         for code in etf_codes:
             bar = all_bars.get((code, trade_date))
             if bar is None:
@@ -471,7 +415,9 @@ class BacktestService:
         portfolio_return = sum(r * w for r, w in zip(returns, weights)) / total_weight
         return round(portfolio_return, 4), len(high), len(mid), len(low)
 
-    def _compute_summary_metrics(self, daily_results: list[BacktestDailyResultModel]) -> dict:
+    def _compute_summary_metrics(
+        self, daily_results: list[BacktestDailyResultModel]
+    ) -> dict[str, Any]:
         """计算回测汇总绩效指标。"""
         if not daily_results:
             return BacktestMetrics(

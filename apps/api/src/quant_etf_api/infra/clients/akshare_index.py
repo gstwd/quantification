@@ -119,6 +119,7 @@ class AkShareIndexClient(BaseDataClient):
             return None
 
         import re
+
         cleaned = re.sub(r"[（(].*?[）)]", "", name).replace("指数", "").strip()
         if not cleaned:
             return None

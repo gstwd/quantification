@@ -1,4 +1,4 @@
-"""K 线衍生指标计算函数，供 BacktestService 和 StrategyExecutionService 共享。"""
+"""K 线衍生指标计算函数（纯领域逻辑，无外部依赖）。"""
 
 from __future__ import annotations
 

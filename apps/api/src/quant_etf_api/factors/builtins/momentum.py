@@ -1,6 +1,6 @@
 """动量类因子：5日、20日、60日收益率。
 
-不复用 services._bar_metrics.calc_5d_return_etf（数据不足时返回 0.0，语义模糊），
+不复用 domain.common.bar_metrics.calc_5d_return_etf（数据不足时返回 0.0，语义模糊），
 改用内部 _calc_nd_return：数据不足时明确返回 None，区分"零涨跌"与"无数据"。
 """
 

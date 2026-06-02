@@ -13,7 +13,9 @@ from quant_etf_api.infra.clients.base import BaseDataClient, HealthStatus
 _T = TypeVar("_T")
 
 
-def _retry(fn: Callable[..., _T], *args: Any, attempts: int = 3, delay: float = 0.5, **kwargs: Any) -> _T:
+def _retry(
+    fn: Callable[..., _T], *args: Any, attempts: int = 3, delay: float = 0.5, **kwargs: Any
+) -> _T:
     """最多重试 attempts 次，每次间隔递增 delay 秒，最后一次失败时抛出原异常。
 
     用于应对 AkShare 上游的代理断连、ConnectionReset 等瞬时网络错误。
@@ -60,9 +62,9 @@ class AkShareEtfShareSnapshot:
     """AkShare 获取的 ETF 份额快照（当日行情）。"""
 
     code: str
-    price: float        # 单位：元/份
+    price: float  # 单位：元/份
     shares_total: float  # 单位：亿份
-    aum: float          # 单位：亿元
+    aum: float  # 单位：亿元
 
 
 # 基金类型 → category 映射
@@ -360,6 +362,7 @@ class AkShareFundClient(BaseDataClient):
             # 交易日当天可能还未收盘，退一步取最近 5 日
             if not bars:
                 from datetime import timedelta
+
                 s = (date.today() - timedelta(days=7)).strftime("%Y%m%d")
                 bars = self.fetch_etf_daily_bars("510300", start_date=s)
             elapsed = (time.perf_counter() - start) * 1000

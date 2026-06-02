@@ -1,3 +1,4 @@
+from __future__ import annotations
 from quant_etf_api.infra.clients.akshare_fund import (
     AkShareEtfDailyBar,
     AkShareEtfShareSnapshot,

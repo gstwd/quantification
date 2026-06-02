@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Any
+
 from quant_etf_api.infra.clients.base import BaseDataClient, HealthStatus
 
 
@@ -9,7 +13,7 @@ class ExchangeReferenceClient(BaseDataClient):
 
     source_name = "exchange_reference"
 
-    def list_reference_sources(self) -> list[dict]:
+    def list_reference_sources(self) -> list[dict[str, Any]]:
         """获取参考数据源列表。"""
         self._log_request("list_reference_sources")
         sources = [

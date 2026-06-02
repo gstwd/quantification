@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
@@ -15,6 +15,7 @@ from quant_etf_api.schemas.backtest import (
     BacktestEtfResult,
     BacktestSummary,
 )
+from quant_etf_api.schemas.pagination import PaginatedResponse
 from quant_etf_api.services.backtest_service import BacktestService
 
 router = APIRouter(tags=["backtests"])
@@ -41,10 +42,15 @@ def create_backtest(req: BacktestCreateRequest, db: Session = Depends(get_db)) -
     return summary
 
 
-@router.get("/backtests", response_model=list[BacktestSummary])
-def list_backtests(limit: int = 50, db: Session = Depends(get_db)) -> list[BacktestSummary]:
-    """返回最近的回测列表。"""
-    return BacktestService(db, _registry).list_backtests(limit=limit)
+@router.get("/backtests", response_model=PaginatedResponse[BacktestSummary])
+def list_backtests(
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> PaginatedResponse[BacktestSummary]:
+    """分页返回回测列表，按创建时间倒序。"""
+    items, total = BacktestService(db, _registry).list_backtests(offset=offset, limit=limit)
+    return PaginatedResponse(items=items, total=total, offset=offset, limit=limit)
 
 
 @router.get("/backtests/{backtest_id}", response_model=BacktestDetail)

@@ -7,41 +7,46 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.db.models.core import ResearchRunModel
+from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.schemas.run import ResearchRunSummary
 
 logger = logging.getLogger(__name__)
 
 
 class RunService:
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, run_repo: ResearchRunRepository | None = None) -> None:
         self._db = db
+        self._run_repo = run_repo or ResearchRunRepository(db)
 
-    def list_runs(self) -> list[ResearchRunSummary]:
+    def list_runs(self, offset: int = 0, limit: int = 50) -> tuple[list[ResearchRunSummary], int]:
+        """分页查询运行记录。
+
+        Args:
+            offset: 偏移量。
+            limit: 每页最大条数。
+
+        Returns:
+            (items, total) 元组。
+        """
         try:
-            # 取最近 50 条运行记录，按开始时间倒序
-            rows = (
-                self._db.query(ResearchRunModel)
-                .order_by(ResearchRunModel.started_at.desc())
-                .limit(50)
-                .all()
-            )
-            if rows:
-                return [
-                    ResearchRunSummary(
-                        run_id=r.run_id,
-                        run_type=r.run_type,
-                        strategy_id=r.strategy_id,
-                        trade_date=r.trade_date,
-                        status=r.status,
-                        started_at=r.started_at,
-                        finished_at=r.finished_at,
-                        error_message=r.error_message,
-                    )
-                    for r in rows
-                ]
+            rows, total = self._run_repo.find_all(offset=offset, limit=limit)
+            items = [
+                ResearchRunSummary(
+                    run_id=r.run_id,
+                    run_type=r.run_type,
+                    strategy_id=r.strategy_id,
+                    trade_date=r.trade_date,
+                    status=r.status,
+                    started_at=r.started_at,
+                    finished_at=r.finished_at,
+                    error_message=r.error_message,
+                )
+                for r in rows
+            ]
+            return items, total
         except Exception:
             logger.warning("list_runs DB query failed", exc_info=True)
-            return []
+            return [], 0
 
     def create_run(
         self, run_type: str, strategy_id: str | None, trade_date: date
@@ -80,13 +85,8 @@ class RunService:
             run_id: 运行 ID
         """
         try:
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is not None:
-                run.status = "success"
-                run.finished_at = datetime.now(timezone.utc)
-                self._db.commit()
+            self._run_repo.mark_success(run_id)
         except Exception:
-            self._db.rollback()
             logger.warning("mark_success 更新失败", exc_info=True)
 
     def mark_failed(self, run_id: str, error_message: str) -> None:
@@ -97,12 +97,6 @@ class RunService:
             error_message: 错误描述
         """
         try:
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is not None:
-                run.status = "failed"
-                run.finished_at = datetime.now(timezone.utc)
-                run.error_message = error_message[:1000]
-                self._db.commit()
+            self._run_repo.mark_failed(run_id, error_message)
         except Exception:
-            self._db.rollback()
             logger.warning("mark_failed 更新失败", exc_info=True)

@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -11,7 +15,7 @@ class StrategySummary(BaseModel):
 
 
 class StrategyDetail(StrategySummary):
-    parameter_schema: dict
+    parameter_schema: dict[str, Any]
     required_inputs: list[str]
-    factors: list[dict]
-    signal_definition: dict
+    factors: list[dict[str, Any]]
+    signal_definition: dict[str, Any]

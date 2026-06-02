@@ -1,5 +1,7 @@
 """因子层公开接口。"""
 
+from __future__ import annotations
+
 from quant_etf_api.factors.base import FactorComputer, FactorContext, FactorSpec, FactorValue
 from quant_etf_api.factors.registry import FactorRegistry, build_default_factor_registry
 
