@@ -1,8 +1,14 @@
 import { apiClient } from './client'
-import type { DataQualityResponse, ResearchRunSummary, SystemStatusResponse } from '../types/api'
+import type { DataQualityResponse, PaginatedResponse, ResearchRunSummary, SystemStatusResponse } from '../types/api'
 
-export async function fetchRuns(): Promise<ResearchRunSummary[]> {
-  const { data } = await apiClient.get<ResearchRunSummary[]>('/runs')
+/** 分页获取运行记录 */
+export async function fetchRuns(
+  offset = 0,
+  limit = 50,
+): Promise<PaginatedResponse<ResearchRunSummary>> {
+  const { data } = await apiClient.get<PaginatedResponse<ResearchRunSummary>>('/runs', {
+    params: { offset, limit },
+  })
   return data
 }
 

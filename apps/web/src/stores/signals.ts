@@ -6,13 +6,16 @@ import type { SignalRow } from '../types/api'
 export const useSignalStore = defineStore('signals', {
   state: () => ({
     items: [] as SignalRow[],
+    total: 0,
     loading: false,
   }),
   actions: {
-    async loadLatest(strategyId: string) {
+    async loadLatest(strategyId: string, offset = 0, limit = 50) {
       this.loading = true
       try {
-        this.items = await fetchLatestSignals(strategyId)
+        const res = await fetchLatestSignals(strategyId, offset, limit)
+        this.items = res.items
+        this.total = res.total
       } finally {
         this.loading = false
       }

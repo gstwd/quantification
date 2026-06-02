@@ -42,6 +42,12 @@
       </table>
       <div v-if="!loading && store.items.length === 0" class="empty">暂无回测记录，点击「新建回测」开始</div>
     </div>
+
+    <div v-if="store.total > pageSize" class="pagination">
+      <button class="page-btn" :disabled="offset === 0" @click="goPage(offset - pageSize)">上一页</button>
+      <span class="page-info">{{ offset + 1 }}–{{ Math.min(offset + pageSize, store.total) }} / 共 {{ store.total }} 条</span>
+      <button class="page-btn" :disabled="offset + pageSize >= store.total" @click="goPage(offset + pageSize)">下一页</button>
+    </div>
   </div>
 </template>
 
@@ -53,6 +59,8 @@ import { useBacktestStore } from '../stores/backtests'
 
 const store = useBacktestStore()
 const loading = ref(false)
+const offset = ref(0)
+const pageSize = 50
 
 function statusLabel(status: string): string {
   const map: Record<string, string> = { pending: '待执行', running: '执行中', success: '成功', failed: '失败' }
@@ -72,9 +80,15 @@ function formatTime(ts: string): string {
   return new Date(ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
+async function goPage(newOffset: number) {
+  offset.value = newOffset
+  loading.value = true
+  try { await store.loadAll(newOffset, pageSize) } finally { loading.value = false }
+}
+
 onMounted(async () => {
   loading.value = true
-  try { await store.loadAll() } finally { loading.value = false }
+  try { await store.loadAll(0, pageSize) } finally { loading.value = false }
 })
 </script>
 
@@ -146,4 +160,19 @@ onMounted(async () => {
 .status-running { background: rgba(59,130,246,0.15); color: #60a5fa; }
 .status-success { background: rgba(34,197,94,0.15); color: var(--success); }
 .status-failed { background: rgba(239,68,68,0.15); color: var(--danger); }
+
+.pagination { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px 0; }
+.page-btn {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.page-btn:hover:not(:disabled) { border-color: var(--accent); }
+.page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.page-info { font-size: 13px; color: var(--text-muted); }
 </style>

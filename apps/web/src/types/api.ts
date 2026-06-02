@@ -228,3 +228,11 @@ export interface FactorRow {
   factor_value_numeric: number | null
   factor_value_text: string | null
 }
+
+/** 统一分页响应格式 */
+export interface PaginatedResponse<T> {
+  items: T[]
+  total: number
+  offset: number
+  limit: number
+}

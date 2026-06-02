@@ -1,9 +1,9 @@
 import { apiClient } from './client'
-import type { DailyBar, DateRange, EtfCreatePayload, EtfDetail, ShareSnapshot } from '../types/api'
+import type { DailyBar, DateRange, EtfCreatePayload, EtfDetail, PaginatedResponse, ShareSnapshot } from '../types/api'
 
-/** 获取所有 ETF 列表 */
-export async function fetchEtfs(): Promise<EtfDetail[]> {
-  const { data } = await apiClient.get<EtfDetail[]>('/etfs')
+/** 分页获取 ETF 列表 */
+export async function fetchEtfs(offset = 0, limit = 50): Promise<PaginatedResponse<EtfDetail>> {
+  const { data } = await apiClient.get<PaginatedResponse<EtfDetail>>('/etfs', { params: { offset, limit } })
   return data
 }
 

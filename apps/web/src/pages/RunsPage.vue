@@ -34,6 +34,12 @@
       </table>
       <div v-if="!loading && runs.length === 0" class="empty">暂无运行记录</div>
     </div>
+
+    <div v-if="total > pageSize" class="pagination">
+      <button class="page-btn" :disabled="currentOffset === 0" @click="load(currentOffset - pageSize)">上一页</button>
+      <span class="page-info">{{ currentOffset + 1 }}–{{ Math.min(currentOffset + pageSize, total) }} / 共 {{ total }} 条</span>
+      <button class="page-btn" :disabled="currentOffset + pageSize >= total" @click="load(currentOffset + pageSize)">下一页</button>
+    </div>
   </div>
 </template>
 
@@ -44,6 +50,9 @@ import { fetchRuns, triggerDailyIngest, triggerUniverseRefresh } from '../api/ru
 import type { ResearchRunSummary } from '../types/api'
 
 const runs = ref<ResearchRunSummary[]>([])
+const total = ref(0)
+const currentOffset = ref(0)
+const pageSize = 50
 const loading = ref(false)
 const triggering = ref(false)
 
@@ -57,15 +66,22 @@ async function trigger(type: 'universe' | 'ingest') {
   try {
     if (type === 'universe') await triggerUniverseRefresh()
     else await triggerDailyIngest()
-    await load()
+    await load(currentOffset.value)
   } finally {
     triggering.value = false
   }
 }
 
-async function load() {
+async function load(offset = 0) {
   loading.value = true
-  try { runs.value = await fetchRuns() } finally { loading.value = false }
+  try {
+    const res = await fetchRuns(offset, pageSize)
+    runs.value = res.items
+    total.value = res.total
+    currentOffset.value = offset
+  } finally {
+    loading.value = false
+  }
 }
 
 onMounted(load)
@@ -138,4 +154,19 @@ onMounted(load)
 .status-running { background: rgba(59,130,246,0.15); color: #60a5fa; }
 .status-completed { background: rgba(34,197,94,0.15); color: var(--success); }
 .status-failed { background: rgba(239,68,68,0.15); color: var(--danger); }
+
+.pagination { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px 0; }
+.page-btn {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.page-btn:hover:not(:disabled) { border-color: var(--accent); }
+.page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.page-info { font-size: 13px; color: var(--text-muted); }
 </style>

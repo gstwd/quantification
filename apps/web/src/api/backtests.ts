@@ -5,6 +5,7 @@ import type {
   BacktestDailyResult,
   BacktestEtfResult,
   BacktestSummary,
+  PaginatedResponse,
 } from '../types/api'
 
 /** 创建回测任务，后端立即返回 pending 状态并在后台执行 */
@@ -13,9 +14,14 @@ export async function createBacktest(req: BacktestCreateRequest): Promise<Backte
   return data
 }
 
-/** 获取回测列表 */
-export async function fetchBacktests(limit = 50): Promise<BacktestSummary[]> {
-  const { data } = await apiClient.get<BacktestSummary[]>('/backtests', { params: { limit } })
+/** 分页获取回测列表 */
+export async function fetchBacktests(
+  offset = 0,
+  limit = 50,
+): Promise<PaginatedResponse<BacktestSummary>> {
+  const { data } = await apiClient.get<PaginatedResponse<BacktestSummary>>('/backtests', {
+    params: { offset, limit },
+  })
   return data
 }
 

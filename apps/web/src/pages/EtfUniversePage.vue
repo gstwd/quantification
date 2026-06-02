@@ -2,7 +2,7 @@
   <div class="page">
     <div class="page-header">
       <h1 class="page-title">ETF 池</h1>
-      <span class="count-badge">{{ filtered.length }} 只</span>
+      <span class="count-badge">{{ store.total }} 只</span>
     </div>
 
     <div class="toolbar">
@@ -51,6 +51,12 @@
       <div v-if="!store.loading && filtered.length === 0" class="empty">未找到匹配的 ETF</div>
     </div>
 
+    <div v-if="store.total > pageSize" class="pagination">
+      <button class="page-btn" :disabled="offset === 0" @click="goPage(offset - pageSize)">上一页</button>
+      <span class="page-info">{{ offset + 1 }}–{{ Math.min(offset + pageSize, store.total) }} / 共 {{ store.total }} 条</span>
+      <button class="page-btn" :disabled="offset + pageSize >= store.total" @click="goPage(offset + pageSize)">下一页</button>
+    </div>
+
     <!-- 添加 ETF 弹窗 -->
     <div v-if="showAddModal" class="modal-overlay" @click.self="closeAddModal">
       <div class="modal">
@@ -90,6 +96,8 @@ import { useEtfStore } from '../stores/etfs'
 
 const store = useEtfStore()
 const query = ref('')
+const offset = ref(0)
+const pageSize = 200
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
@@ -97,7 +105,12 @@ const filtered = computed(() => {
   return store.items.filter(e => e.etf_code.includes(q) || e.name_cn.toLowerCase().includes(q))
 })
 
-onMounted(() => store.loadAll())
+async function goPage(newOffset: number) {
+  offset.value = newOffset
+  await store.loadAll(newOffset, pageSize)
+}
+
+onMounted(() => store.loadAll(0, pageSize))
 
 // --- 添加 ETF ---
 const showAddModal = ref(false)
@@ -313,4 +326,19 @@ async function handleDelete(etfCode: string) {
 }
 .btn-submit:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-submit:not(:disabled):hover { opacity: 0.85; }
+
+.pagination { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px 0; }
+.page-btn {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.page-btn:hover:not(:disabled) { border-color: var(--accent); }
+.page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.page-info { font-size: 13px; color: var(--text-muted); }
 </style>

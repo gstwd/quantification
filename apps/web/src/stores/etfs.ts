@@ -6,14 +6,17 @@ import type { EtfCreatePayload, EtfDetail } from '../types/api'
 export const useEtfStore = defineStore('etfs', {
   state: () => ({
     items: [] as EtfDetail[],
+    total: 0,
     current: null as EtfDetail | null,
     loading: false,
   }),
   actions: {
-    async loadAll() {
+    async loadAll(offset = 0, limit = 200) {
       this.loading = true
       try {
-        this.items = await fetchEtfs()
+        const res = await fetchEtfs(offset, limit)
+        this.items = res.items
+        this.total = res.total
       } finally {
         this.loading = false
       }

@@ -18,6 +18,7 @@ import type {
 export const useBacktestStore = defineStore('backtests', {
   state: () => ({
     items: [] as BacktestSummary[],
+    total: 0,
     current: null as BacktestDetail | null,
     dailyResults: [] as BacktestDailyResult[],
     etfResults: [] as BacktestEtfResult[],
@@ -25,10 +26,12 @@ export const useBacktestStore = defineStore('backtests', {
     submitting: false,
   }),
   actions: {
-    async loadAll() {
+    async loadAll(offset = 0, limit = 50) {
       this.loading = true
       try {
-        this.items = await fetchBacktests()
+        const res = await fetchBacktests(offset, limit)
+        this.items = res.items
+        this.total = res.total
       } finally {
         this.loading = false
       }
