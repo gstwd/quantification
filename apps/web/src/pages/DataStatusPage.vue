@@ -142,22 +142,6 @@
           </tbody>
         </table>
       </div>
-
-      <!-- 区域四：系统信息 -->
-      <div class="status-strip">
-        <div class="status-chip">
-          <span class="chip-key">asset_scope</span>
-          <span class="chip-val">{{ status.asset_scope }}</span>
-        </div>
-        <div class="status-chip">
-          <span class="chip-key">frequency</span>
-          <span class="chip-val">{{ status.frequency }}</span>
-        </div>
-        <div class="status-chip">
-          <span class="chip-key">database</span>
-          <span class="chip-val">{{ status.database }}</span>
-        </div>
-      </div>
     </template>
   </div>
 </template>
@@ -436,21 +420,6 @@ onMounted(() => Promise.all([loadStatus(), loadQuality()]))
 .status-running  { background: rgba(59,130,246,0.15); color: #60a5fa; }
 .status-success  { background: rgba(34,197,94,0.15); color: var(--success); }
 .status-failed   { background: rgba(239,68,68,0.15); color: var(--danger); }
-
-/* === 系统信息条（复用 DashboardPage） === */
-.status-strip {
-  display: flex; flex-wrap: wrap; gap: 8px;
-}
-.status-chip {
-  display: flex; align-items: center; gap: 6px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  padding: 4px 12px;
-  font-size: 12px;
-}
-.chip-key { color: var(--text-muted); }
-.chip-val { color: var(--text); font-weight: 500; }
 
 /* === 数据质量 === */
 .quality-loading { padding: 24px 20px; color: var(--text-muted); font-size: 13px; }

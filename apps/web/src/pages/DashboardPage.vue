@@ -63,13 +63,6 @@
         </tbody>
       </table>
     </div>
-
-    <div class="status-strip" v-if="systemStatus">
-      <div v-for="(val, key) in statusChips" :key="key" class="status-chip">
-        <span class="chip-key">{{ key }}</span>
-        <span class="chip-val">{{ val }}</span>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -88,18 +81,6 @@ const signalStore = useSignalStore()
 const etfStore = useEtfStore()
 const strategyStore = useStrategyStore()
 const signals = computed(() => signalStore.items)
-
-const statusChips = computed(() => {
-  const s = systemStatus.value
-  if (!s) return {}
-  const keys = ['asset_scope', 'frequency', 'database'] as const
-  const result: Record<string, string> = {}
-  for (const k of keys) {
-    const v = s[k]
-    if (v !== undefined) result[k] = String(v)
-  }
-  return result
-})
 
 function scoreColor(level: string): string {
   if (level === 'HIGH') return 'var(--signal-high)'
@@ -205,24 +186,4 @@ onMounted(async () => {
 
 .text-muted { color: var(--text-muted); }
 .mono { font-family: monospace; font-size: 12px; }
-
-.status-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.status-chip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  padding: 4px 12px;
-  font-size: 12px;
-}
-
-.chip-key { color: var(--text-muted); }
-.chip-val { color: var(--text); font-weight: 500; }
 </style>

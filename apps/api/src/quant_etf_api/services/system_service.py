@@ -136,9 +136,6 @@ class SystemService:
                 latest_trade_date=None,
                 data_sources=[],
                 recent_runs=[],
-                asset_scope="a_share_etf",
-                frequency="daily",
-                database="postgresql",
                 db_connected=False,
             )
 
@@ -187,8 +184,5 @@ class SystemService:
             latest_trade_date=latest_trade_date,
             data_sources=data_sources,
             recent_runs=recent_runs,
-            asset_scope="a_share_etf",
-            frequency="daily",
-            database="postgresql",
             db_connected=True,
         )
