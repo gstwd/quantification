@@ -4,7 +4,6 @@ import BacktestCreatePage from '../pages/BacktestCreatePage.vue'
 import BacktestDetailPage from '../pages/BacktestDetailPage.vue'
 import BacktestListPage from '../pages/BacktestListPage.vue'
 import DashboardPage from '../pages/DashboardPage.vue'
-import DataStatusPage from '../pages/DataStatusPage.vue'
 import EtfDetailPage from '../pages/EtfDetailPage.vue'
 import EtfUniversePage from '../pages/EtfUniversePage.vue'
 import FactorDetailPage from '../pages/FactorDetailPage.vue'
@@ -30,7 +29,6 @@ const router = createRouter({
     { path: '/factors', component: FactorsPage },
     { path: '/factors/:factorId', component: FactorDetailPage, props: true },
     { path: '/runs', component: RunsPage },
-    { path: '/data-status', component: DataStatusPage },
     { path: '/backtests', component: BacktestListPage },
     { path: '/backtests/new', component: BacktestCreatePage },
     { path: '/backtests/:backtestId', component: BacktestDetailPage, props: true },
