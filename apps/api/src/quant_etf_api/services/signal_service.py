@@ -123,7 +123,7 @@ class SignalService:
                     factor_id=r.factor_id,
                     factor_value_numeric=r.factor_value_numeric,
                     factor_value_text=r.factor_value_text,
-                    factor_payload=r.factor_payload or {},
+                    factor_payload=_parse_json_payload(r.factor_payload),
                     strategy_id=r.strategy_id,
                 )
                 for r in rows
@@ -131,3 +131,17 @@ class SignalService:
         except Exception:
             logger.warning("factor_rows DB query failed", exc_info=True)
             return []
+
+
+def _parse_json_payload(value: dict | str | None) -> dict:
+    """将 JSON 字段值（可能是字符串或字典）统一转为字典。"""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    import json
+
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}

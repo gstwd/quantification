@@ -393,12 +393,20 @@ class FactorService:
 
 def _row_to_factor_row(row: EtfFactorValueModel) -> FactorRow:
     """将 ORM 行转换为 FactorRow schema。"""
+    payload = row.factor_payload
+    if isinstance(payload, str):
+        import json
+
+        try:
+            payload = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
     return FactorRow(
         trade_date=row.trade_date,
         etf_code=row.etf_code,
         factor_id=row.factor_id,
         factor_value_numeric=row.factor_value_numeric,
         factor_value_text=row.factor_value_text,
-        factor_payload=row.factor_payload or {},
+        factor_payload=payload or {},
         strategy_id=row.strategy_id,
     )
