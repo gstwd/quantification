@@ -8,8 +8,13 @@
           <h1 class="page-title">{{ spec.name }}</h1>
           <div class="badges">
             <span class="factor-id">{{ spec.factor_id }}</span>
-            <span class="chip" :class="`chip-${spec.category}`">{{ CATEGORY_LABELS[spec.category] ?? spec.category }}</span>
+            <span class="chip" :class="`chip-${spec.category ?? 'default'}`">
+              {{ CATEGORY_LABELS[spec.category ?? ''] ?? spec.category ?? '未分类' }}
+            </span>
             <span class="chip chip-ver">v{{ spec.version }}</span>
+            <span class="status-tag" :class="spec.is_active ? 'active' : 'disabled'">
+              {{ spec.is_active ? '启用' : '禁用' }}
+            </span>
           </div>
         </div>
         <p class="factor-desc">{{ spec.description }}</p>
@@ -29,20 +34,23 @@
       <div v-show="tab === 'cross'" class="card">
         <div class="card-header">
           <span class="card-title">横截面快照</span>
+          <span v-if="crossDate" class="card-subtitle">数据日期：{{ crossDate }}</span>
           <div class="controls">
-            <input type="date" class="date-input" v-model="crossDate" />
-            <button class="query-btn" @click="loadCross">查询</button>
+            <input type="date" class="date-input" v-model="crossDateInput" />
+            <button class="query-btn" @click="loadCrossByDate">指定日期查询</button>
           </div>
         </div>
         <div v-if="crossLoading" class="empty">加载中...</div>
-        <div v-else-if="crossRows.length === 0" class="empty">暂无数据，请选择日期并查询</div>
+        <div v-else-if="crossRows.length === 0" class="empty">暂无数据</div>
         <table v-else class="data-table">
           <thead>
             <tr>
               <th>排名</th>
               <th>ETF 代码</th>
+              <th>ETF 名称</th>
               <th>因子值</th>
               <th class="bar-col">相对分布</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -51,6 +59,7 @@
               <td>
                 <RouterLink :to="`/etfs/${row.etf_code}`" class="etf-link">{{ row.etf_code }}</RouterLink>
               </td>
+              <td class="name-cell">{{ row.name_cn }}</td>
               <td class="value mono">{{ row.factor_value_numeric != null ? row.factor_value_numeric.toFixed(4) : '—' }}</td>
               <td class="bar-cell">
                 <div class="bar-track">
@@ -59,6 +68,9 @@
                     :style="{ width: barWidth(row.factor_value_numeric) + '%' }"
                   ></div>
                 </div>
+              </td>
+              <td>
+                <button class="series-btn" @click="goToSeries(row.etf_code)">时间序列</button>
               </td>
             </tr>
           </tbody>
@@ -93,11 +105,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+/**
+ * 因子详情页面。
+ *
+ * 展示单个因子的元数据、横截面快照和时间序列图表。
+ * 横截面自动展示最新有数据的交易日，后端按需自动计算。
+ * 时间序列查询时后端自动补算缺失日期。
+ */
+
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { fetchFactorCrossSection, fetchFactorSpecs, fetchFactorTimeSeries } from '../api/factors'
-import type { FactorRow, FactorSpec } from '../types/api'
+import type { CrossSectionRow, FactorRow, FactorSpec } from '../types/api'
 
 const props = defineProps<{ factorId: string }>()
 
@@ -107,8 +127,9 @@ const specLoading = ref(false)
 const tab = ref<'cross' | 'series'>('cross')
 
 /** 横截面状态 */
-const crossDate = ref(new Date().toISOString().slice(0, 10))
-const crossRows = ref<FactorRow[]>([])
+const crossDate = ref('')
+const crossDateInput = ref('')
+const crossRows = ref<CrossSectionRow[]>([])
 const crossLoading = ref(false)
 
 /** 时间序列状态 */
@@ -150,19 +171,45 @@ function barWidth(val: number | null): number {
   return ((val - crossMin.value) / range) * 100
 }
 
-/** 加载横截面数据，按因子值降序排列 */
+/** 加载横截面数据（默认最新日期），按因子值降序排列 */
 async function loadCross() {
   crossLoading.value = true
   try {
-    const rows = await fetchFactorCrossSection(props.factorId, crossDate.value)
-    crossRows.value = rows
-      .filter(r => r.factor_value_numeric !== null)
-      .sort((a, b) => (b.factor_value_numeric ?? 0) - (a.factor_value_numeric ?? 0))
+    const resp = await fetchFactorCrossSection(props.factorId)
+    crossDate.value = resp.trade_date
+    crossDateInput.value = resp.trade_date
+    crossRows.value = resp.rows
+      .slice()
+      .sort((a, b) => (b.factor_value_numeric ?? -Infinity) - (a.factor_value_numeric ?? -Infinity))
   } catch {
     crossRows.value = []
   } finally {
     crossLoading.value = false
   }
+}
+
+/** 按指定日期加载横截面 */
+async function loadCrossByDate() {
+  if (!crossDateInput.value) return
+  crossLoading.value = true
+  try {
+    const resp = await fetchFactorCrossSection(props.factorId, crossDateInput.value)
+    crossDate.value = resp.trade_date
+    crossRows.value = resp.rows
+      .slice()
+      .sort((a, b) => (b.factor_value_numeric ?? -Infinity) - (a.factor_value_numeric ?? -Infinity))
+  } catch {
+    crossRows.value = []
+  } finally {
+    crossLoading.value = false
+  }
+}
+
+/** 从横截面跳转到指定 ETF 的时间序列 */
+function goToSeries(etfCode: string) {
+  seriesEtf.value = etfCode
+  tab.value = 'series'
+  nextTick(() => loadSeries())
 }
 
 /** 加载时间序列数据并渲染图表 */
@@ -286,7 +333,17 @@ onUnmounted(() => {
 .chip-volatility{ background: rgba(239, 68, 68, 0.12);  color: #f87171; }
 .chip-flow      { background: rgba(139, 92, 246, 0.15); color: #a78bfa; }
 .chip-valuation { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+.chip-default   { background: var(--surface-2, rgba(255,255,255,0.05)); color: var(--text-muted); }
 .chip-ver       { background: var(--surface-2); color: var(--text-muted); }
+
+.status-tag {
+  font-size: 10px;
+  padding: 1px 8px;
+  border-radius: 20px;
+  font-weight: 600;
+}
+.status-tag.active  { background: rgba(34, 197, 94, 0.12); color: #4ade80; }
+.status-tag.disabled { background: rgba(239, 68, 68, 0.12); color: #f87171; }
 
 .factor-desc { font-size: 13px; color: var(--text-muted); line-height: 1.6; }
 
@@ -326,6 +383,7 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 .card-title { font-size: 14px; font-weight: 600; }
+.card-subtitle { font-size: 12px; color: var(--text-muted); }
 
 .controls { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
 
@@ -386,6 +444,7 @@ onUnmounted(() => {
 .data-table tr:hover td { background: rgba(255,255,255,0.02); }
 
 .rank { color: var(--text-muted); font-size: 12px; width: 48px; }
+.name-cell { font-size: 13px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .value.mono { font-family: monospace; font-size: 13px; }
 .bar-col { width: 180px; }
 .etf-link { color: var(--accent); font-family: monospace; font-weight: 600; }
@@ -394,6 +453,19 @@ onUnmounted(() => {
 .bar-cell { padding: 9px 16px 9px 0; }
 .bar-track { background: var(--surface-2, rgba(255,255,255,0.06)); border-radius: 4px; height: 6px; overflow: hidden; }
 .bar-fill  { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s ease; }
+
+.series-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  padding: 2px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.series-btn:hover { color: var(--accent); border-color: var(--accent); }
 
 /* 时间序列图表 */
 .chart-container { width: 100%; height: 340px; padding: 8px; }

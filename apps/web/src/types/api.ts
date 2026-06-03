@@ -215,10 +215,11 @@ export interface DateRange {
 export interface FactorSpec {
   factor_id: string
   name: string
-  category: string
+  category: string | null
   version: string
   description: string
   required_data: string[]
+  is_active: boolean
 }
 
 export interface FactorRow {
@@ -227,6 +228,31 @@ export interface FactorRow {
   factor_id: string
   factor_value_numeric: number | null
   factor_value_text: string | null
+  factor_payload: Record<string, unknown>
+  strategy_id: string | null
+}
+
+/** 横截面数据行，包含 ETF 中文名 */
+export interface CrossSectionRow {
+  etf_code: string
+  name_cn: string
+  factor_value_numeric: number | null
+  factor_value_text: string | null
+}
+
+/** 横截面查询响应 */
+export interface CrossSectionResponse {
+  factor_id: string
+  trade_date: string
+  rows: CrossSectionRow[]
+}
+
+/** 因子编辑请求体 */
+export interface FactorUpdatePayload {
+  name?: string
+  description?: string
+  category?: string
+  is_active?: boolean
 }
 
 /** 统一分页响应格式 */

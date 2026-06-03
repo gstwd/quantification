@@ -221,6 +221,15 @@ class FactorDefinitionModel(Base):
         nullable=True,
         comment="因子类别：volume/momentum/volatility/flow/valuation",
     )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default="true",
+        comment="是否启用，禁用后不参与计算且前端隐藏",
+    )
+    required_data: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True, comment="依赖的数据源列表，如 ['etf_bars']，由代码同步"
+    )
 
 
 class EtfFactorValueModel(Base):
