@@ -3,14 +3,14 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from quant_etf_api.plugins.base import StrategyContextData, StrategyResult
-from quant_etf_api.plugins.builtins.three_factor.factors import (
+from quant_etf_api.domain.strategies.scoring import (
     composite_probability,
     direction_probability,
     share_probability,
     signal_level,
     volume_probability,
 )
+from quant_etf_api.plugins.base import StrategyContextData, StrategyResult
 
 
 class ThreeFactorGuardPlugin:

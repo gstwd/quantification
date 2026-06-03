@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from quant_etf_api.domain.strategies.scoring import share_probability, signal_level
 from quant_etf_api.plugins.base import StrategyContextData, StrategyResult
-from quant_etf_api.plugins.builtins.three_factor.factors import share_probability, signal_level
 
 
 class ShareFlowMonitorPlugin:

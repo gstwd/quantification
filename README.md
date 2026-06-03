@@ -119,20 +119,33 @@ api/routers/        ← 路由层：解析请求参数，调用 service，返回
     ▼
 services/           ← 业务逻辑层：编排数据获取、策略运行、结果存储
     │
-    ├── infra/db/   ← 数据库层：SQLAlchemy ORM 模型，repositories 封装查询
-    │
+    ├── infra/db/       ← 数据库层：SQLAlchemy ORM 模型，repositories 封装查询
     ├── infra/clients/  ← 外部 API 客户端：腾讯 K 线、东方财富份额
     │
-    └── plugins/    ← 策略插件：每个策略独立实现，通过 registry 统一管理
+    ├── domain/         ← 领域层：纯业务规则、计算公式、值对象（无外部依赖）
+    │     ├── common/   ← 通用领域：K 线指标、枚举、值对象
+    │     └── strategies/ ← 策略领域：信号评分规则、领域模型
+    │
+    ├── factors/        ← 因子层：单因子计算（依赖 domain）
+    │
+    └── plugins/        ← 插件层：策略编排（依赖 domain），通过 registry 统一管理
 ```
 
 **路由层（`api/routers/`）** 只做参数解析和响应格式化，不包含业务逻辑。
 
-**服务层（`services/`）** 是业务逻辑的核心，当前使用 stub（桩）数据，后续替换为真实数据库查询和 API 调用。
+**服务层（`services/`）** 是业务逻辑的核心，编排数据获取、策略运行、结果存储。
 
 **基础设施层（`infra/`）** 分两部分：
 - `db/` — 数据库连接、ORM 模型、查询封装
 - `clients/` — 外部 HTTP API 的封装，只负责抓取和初步解析，不做业务判断
+
+**领域层（`domain/`）** 是纯业务规则层，无任何外部依赖（不 import SQLAlchemy/FastAPI）：
+- `common/` — K 线衍生指标计算、领域枚举、值对象
+- `strategies/` — 信号评分规则（volume_probability、signal_level 等）、策略领域模型（StrategyContextData、StrategyResult）
+
+**因子层（`factors/`）** 实现单因子计算（FactorComputer Protocol），依赖 domain 层的计算函数。
+
+**插件层（`plugins/`）** 实现策略编排（StrategyPlugin Protocol），依赖 domain 层的评分规则，组合多个因子产出信号。三个内置插件之间无依赖关系。
 
 ### 数据库模型
 
@@ -219,7 +232,7 @@ registry.register(VolumeBreakoutDailyPlugin())
 
 ### 三因子模型
 
-三因子模型的数学实现在 `plugins/builtins/three_factor/factors.py`，从原始脚本迁移而来。
+三因子模型的评分规则在 `domain/strategies/scoring.py`（纯领域逻辑），`plugins/builtins/three_factor/factors.py` 为其 re-export 兼容层。
 
 #### 因子 1：量比概率（`volume_probability`）
 

@@ -76,14 +76,19 @@
 
 ```
 HTTP请求 → api/routers/ → services/ → infra/ → PostgreSQL
-                                    ↗ plugins/
+                          ↓           ↑
+                      plugins/ ← domain/ (纯业务规则)
+                          ↓
+                      factors/ (单因子计算)
 ```
 
-- **`api/routers/`** — 8个路由组：health、system、etfs、market_data、strategies、signals、runs、backtests
+- **`api/routers/`** — 9个路由组：health、system、etfs、market_data、strategies、signals、factors、runs、backtests
 - **`services/`** — 业务逻辑层：IngestService（数据采集）、StrategyExecutionService（策略执行）、BacktestService（回测）、SignalService（信号查询）等
 - **`infra/db/`** — ORM模型（18张表）与数据访问
-- **`infra/clients/`** — 5个外部数据源客户端，统一继承 `base.py`
-- **`plugins/`** — 策略插件系统（Plugin Protocol + Registry）
+- **`infra/clients/`** — 4个外部数据源客户端，统一继承 `base.py`
+- **`domain/`** — 纯领域逻辑（无外部依赖）：`common/`（bar_metrics、enums、values）、`strategies/`（models、scoring）
+- **`factors/`** — 单因子计算层：FactorComputer Protocol + 6个内置因子计算器，依赖 domain
+- **`plugins/`** — 策略插件系统：StrategyPlugin Protocol + 3个内置策略，依赖 domain 的评分规则
 
 ## 四、数据层（Data Layer）✅ 已实现
 

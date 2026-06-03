@@ -57,6 +57,10 @@ alembic upgrade head                               # apply
 
 ```
 HTTP → api/routers/ → services/ → infra/ → PostgreSQL
+                          ↓           ↑
+                      plugins/ ← domain/ (pure business rules)
+                          ↓
+                      factors/ (single-factor computation)
 ```
 
 - **`api/routers/`** — 9 route groups: `health`, `system`, `etfs`, `market_data`, `strategies`, `signals`, `factors`, `runs`, `backtests`
@@ -66,9 +70,11 @@ HTTP → api/routers/ → services/ → infra/ → PostgreSQL
   - `akshare_fund.py` (ETF K-line via Sina + shares/AUM via fund_etf_spot_em), `exchange_reference.py` (exchange ref)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
 - **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends
-- **`factors/`** — Independent factor layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry + build_default_factor_registry), `service.py` (FactorService), `builtins/` (6 built-in computers). Pattern mirrors `plugins/`. Context key format: `(etf_code, date)` dict, same as `domain/common/bar_metrics.py`.
-- **`domain/`** — Pure domain logic: `common/bar_metrics.py` (BAR computation), `common/enums.py` (SignalLevel, RunStatus, etc.), `common/values.py` (DateRange, TradeDate), `signal_levels.py`. No infrastructure dependencies.
-- **`plugins/`** — Strategy plugin system (see below)
+- **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports). Three sub-layers with clear dependency direction: `domain ← factors ← plugins`:
+  - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, etc.), `values.py` (DateRange)
+  - `strategies/` — `models.py` (StrategyContextData, StrategyResult dataclasses), `scoring.py` (signal scoring rules: volume_probability, direction_probability, share_probability, composite_probability, signal_level)
+- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `builtins/` (6 built-in computers). Depends on `domain/common/` for calculations.
+- **`plugins/`** — Strategy plugin layer: `base.py` (StrategyPlugin Protocol, re-exports domain models), `registry.py` (StrategyRegistry), `builtins/` (3 strategy plugins). Depends on `domain/strategies/` for scoring rules. Each plugin implements `StrategyPlugin` Protocol (structural subtyping — no inheritance required).
 - **`config/`** — Pydantic settings loaded from `.env`
 
 ### Database schema (18 tables, migration 0003)
