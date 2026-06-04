@@ -63,11 +63,16 @@
             {{ allocation.timing.label }}
           </div>
           <div class="timing-detail">
-            <span class="timing-score">确信度 {{ allocation.timing.confidence.toFixed(0) }}%</span>
-            <span class="timing-factors">
+            <span class="timing-score">
+              {{ allocation.timing.confidence > 0 ? `确信度 ${allocation.timing.confidence.toFixed(0)}%` : '数据不足，无法计算' }}
+            </span>
+            <span v-if="allocation.timing.confidence > 0" class="timing-factors">
               估值 {{ (allocation.timing.factors.valuation_score as number)?.toFixed(0) ?? '—' }} /
               趋势 {{ (allocation.timing.factors.trend_score as number)?.toFixed(0) ?? '—' }} /
               量能 {{ (allocation.timing.factors.volume_score as number)?.toFixed(0) ?? '—' }}
+            </span>
+            <span v-else class="timing-factors text-muted">
+              {{ (allocation.timing.factors.reason as string) || '需要估值和趋势数据才能生成择时信号' }}
             </span>
           </div>
         </div>

@@ -132,13 +132,20 @@ def assess_timing(
     # 量能始终有值（默认 1.0），但权重较低
     weights_and_scores.append((0.2, vol_score))
 
-    if not weights_and_scores:
-        # 极端情况：无任何数据，返回观望
+    # 关键数据缺失检查：估值和趋势都无数据时，仅凭量能不能给出有效信号
+    has_valuation = val_score is not None
+    has_trend = trend_s is not None
+    if not has_valuation and not has_trend:
         return TimingSignal(
             regime="neutral",
             confidence=0.0,
-            label="观望",
-            factors={"reason": "无任何指标数据"},
+            label="数据不足",
+            factors={
+                "reason": "估值和趋势数据均缺失，无法生成有效择时信号",
+                "valuation_score": None,
+                "trend_score": None,
+                "volume_score": vol_score,
+            },
         )
 
     # 加权合成
