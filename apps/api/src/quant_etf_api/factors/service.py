@@ -62,196 +62,17 @@ class FactorService:
     # 公开接口
     # ==================================================================
 
-    def compute_and_store(self, trade_date: date) -> dict[str, Any]:
-        """计算指定交易日全量 ETF × 全量已启用因子并写入 DB。
+    def sync_factor_definitions(self) -> dict[str, int]:
+        """将注册表中的 FactorSpec 同步到 factor_definition 表（幂等）。
 
-        执行流程：
-        1. _ensure_factor_definitions：双向同步因子定义到 DB
-        2. 查询活跃 ETF 列表
-        3. _load_context：批量加载 90 天回望数据
-        4. 对每个 ETF × 每个已启用因子调用 compute()
-        5. upsert（partial index ON CONFLICT DO UPDATE）写入 etf_factor_value
-
-        Args:
-            trade_date: 要计算的交易日。
-
-        Returns:
-            汇总统计字典，包含 etf_count / factor_count / upsert_count / errors。
-        """
-        self._ensure_factor_definitions()
-
-        etfs = (
-            self._db.query(EtfUniverseModel)
-            .filter(EtfUniverseModel.is_active.is_(True))
-            .order_by(EtfUniverseModel.etf_code)
-            .all()
-        )
-        if not etfs:
-            logger.warning("compute_and_store: 无活跃 ETF，跳过因子计算")
-            return {"etf_count": 0, "factor_count": 0, "upsert_count": 0, "errors": 0}
-
-        etf_codes = [e.etf_code for e in etfs]
-        ctx = self._load_context(trade_date, etf_codes)
-
-        # 仅计算 DB 中 is_active=True 的因子
-        active_ids = {d.factor_id for d in self._repo.find_active()}
-        computers = [c for c in self._registry.all() if c.spec.factor_id in active_ids]
-
-        rows_to_upsert: list[dict] = []
-        errors = 0
-
-        for etf in etfs:
-            for computer in computers:
-                try:
-                    fv = computer.compute(etf.etf_code, trade_date, ctx)
-                    rows_to_upsert.append(
-                        {
-                            "trade_date": trade_date,
-                            "etf_code": etf.etf_code,
-                            "factor_id": fv.factor_id,
-                            "factor_value_numeric": fv.numeric,
-                            "factor_value_text": fv.text,
-                            "factor_payload": fv.payload or None,
-                            "strategy_id": None,
-                        }
-                    )
-                except Exception:
-                    errors += 1
-                    logger.warning(
-                        "因子计算失败: etf=%s factor=%s",
-                        etf.etf_code,
-                        computer.spec.factor_id,
-                        exc_info=True,
-                    )
-
-        upsert_count = self._bulk_upsert(rows_to_upsert)
-        logger.info(
-            "因子计算完成: trade_date=%s etf=%d factor=%d upsert=%d errors=%d",
-            trade_date,
-            len(etfs),
-            len(computers),
-            upsert_count,
-            errors,
-        )
-        return {
-            "etf_count": len(etfs),
-            "factor_count": len(computers),
-            "upsert_count": upsert_count,
-            "errors": errors,
-        }
-
-    def get_or_compute_cross_section(
-        self, factor_id: str
-    ) -> tuple[date, list[CrossSectionRow]]:
-        """获取指定因子的横截面数据，自动选择最新日期并按需计算。
-
-        流程：
-        1. 查询该因子在 etf_factor_value 中的最大 trade_date
-        2. 若无记录，取 etf_daily_bar 的最大 trade_date 作为基准日
-        3. 若基准日该因子无数据，调用 compute_and_store 计算
-        4. 返回横截面数据（含 ETF 中文名）
-
-        Args:
-            factor_id: 因子标识。
-
-        Returns:
-            (trade_date, cross_section_rows) 元组。
-
-        Raises:
-            ValueError: 无任何行情数据时抛出。
-        """
-        # 查询因子最新数据日期
-        latest = self._repo.find_latest_date(factor_id)
-
-        if latest is None:
-            # 因子从未计算过，取行情最新日期
-            bar_latest = self._repo.find_latest_bar_date()
-            if bar_latest is None:
-                raise ValueError("无任何行情数据，无法计算因子")
-            # 按需计算
-            self.compute_and_store(bar_latest)
-            latest = bar_latest
-
-        rows = self._repo.find_cross_section(factor_id, latest)
-        return latest, [
-            CrossSectionRow(
-                etf_code=r[0],
-                name_cn=r[1],
-                factor_value_numeric=r[2],
-                factor_value_text=r[3],
-            )
-            for r in rows
-        ]
-
-    def get_or_compute_time_series(
-        self,
-        factor_id: str,
-        etf_code: str,
-        start_date: date,
-        end_date: date,
-    ) -> list[FactorRow]:
-        """获取因子时间序列，自动补算缺失日期后返回。
-
-        流程：
-        1. 查询 etf_daily_bar 中该 ETF 在 [start, end] 有数据的日期集合
-        2. 查询 etf_factor_value 中已有的日期集合
-        3. 差集 = 缺失日期，逐日调用 compute_and_store 补算
-        4. 返回完整时间序列
-
-        Args:
-            factor_id: 因子标识。
-            etf_code: ETF 代码。
-            start_date: 开始日期（含）。
-            end_date: 结束日期（含）。
-
-        Returns:
-            按 trade_date 升序排列的 FactorRow 列表。
-        """
-        missing = self._repo.find_missing_dates(factor_id, etf_code, start_date, end_date)
-        for d in missing:
-            self.compute_and_store(d)
-
-        rows = self._repo.find_factor_values(factor_id, etf_code, start_date, end_date)
-        return [_row_to_factor_row(r) for r in rows]
-
-    def factor_history(
-        self,
-        factor_id: str,
-        etf_code: str,
-        start_date: date,
-        end_date: date,
-    ) -> list[FactorRow]:
-        """查询单因子在单 ETF 上的时间序列。
-
-        仅返回独立因子值（strategy_id IS NULL）。
-
-        Args:
-            factor_id: 因子标识。
-            etf_code: ETF 代码。
-            start_date: 开始日期（含）。
-            end_date: 结束日期（含）。
-
-        Returns:
-            按 trade_date 升序排列的 FactorRow 列表。
-        """
-        try:
-            rows = self._repo.find_factor_values(factor_id, etf_code, start_date, end_date)
-            return [_row_to_factor_row(r) for r in rows]
-        except Exception:
-            logger.warning("factor_history 查询失败", exc_info=True)
-            return []
-
-    # ==================================================================
-    # 内部方法
-    # ==================================================================
-
-    def _ensure_factor_definitions(self) -> None:
-        """将注册表中的 FactorSpec 与 factor_definition 表双向同步（幂等）。
-
+        这是唯一的因子定义同步入口，需要显式调用。
         同步策略：
         - 代码中有、DB 中没有 → INSERT（新因子）
-        - 代码和 DB 都有 → 仅更新 version、required_data（代码管控字段），保留用户编辑的 name/description/category
-        - DB 中有、代码中没有 → 设为 is_active=False（不删除，保留历史数据关联）
+        - 代码和 DB 都有 → 仅更新 version、required_data（代码管控字段）
+        - DB 中有、代码中没有 → 设为 is_active=False（保留历史数据关联）
+
+        Returns:
+            同步统计字典：new / updated / deactivated。
         """
         specs = {s.factor_id: s for s in self._registry.specs()}
         existing = {d.factor_id: d for d in self._repo.find_all()}
@@ -307,6 +128,208 @@ class FactorService:
             except Exception:
                 self._db.rollback()
                 logger.warning("因子定义同步失败", exc_info=True)
+                raise
+
+        return {"new": new_count, "updated": update_count, "deactivated": deactivate_count}
+
+    def compute_and_store(self, trade_date: date) -> dict[str, Any]:
+        """计算指定交易日全量 ETF × 全量已启用因子并写入 DB。
+
+        执行流程：
+        1. 查询活跃 ETF 列表
+        2. _load_context：批量加载 90 天回望数据
+        3. 对每个 ETF × 每个已启用因子调用 compute()
+        4. upsert（partial index ON CONFLICT DO UPDATE）写入 etf_factor_value
+
+        注意：因子定义必须已存在于 DB 中，否则不会参与计算。
+        使用 sync_factor_definitions() 或 POST /factors/init 初始化因子定义。
+
+        Args:
+            trade_date: 要计算的交易日。
+
+        Returns:
+            汇总统计字典，包含 etf_count / factor_count / upsert_count / errors。
+        """
+        etfs = (
+            self._db.query(EtfUniverseModel)
+            .filter(EtfUniverseModel.is_active.is_(True))
+            .order_by(EtfUniverseModel.etf_code)
+            .all()
+        )
+        if not etfs:
+            logger.warning("compute_and_store: 无活跃 ETF，跳过因子计算")
+            return {"etf_count": 0, "factor_count": 0, "upsert_count": 0, "errors": 0}
+
+        etf_codes = [e.etf_code for e in etfs]
+        ctx = self._load_context(trade_date, etf_codes)
+
+        # 仅计算 DB 中 is_active=True 的因子
+        active_ids = {d.factor_id for d in self._repo.find_active()}
+        computers = [c for c in self._registry.all() if c.spec.factor_id in active_ids]
+
+        if not computers:
+            logger.warning("compute_and_store: 无已启用的因子，跳过计算")
+            return {"etf_count": len(etfs), "factor_count": 0, "upsert_count": 0, "errors": 0}
+
+        rows_to_upsert: list[dict] = []
+        errors = 0
+
+        for etf in etfs:
+            for computer in computers:
+                try:
+                    fv = computer.compute(etf.etf_code, trade_date, ctx)
+                    rows_to_upsert.append(
+                        {
+                            "trade_date": trade_date,
+                            "etf_code": etf.etf_code,
+                            "factor_id": fv.factor_id,
+                            "factor_value_numeric": fv.numeric,
+                            "factor_value_text": fv.text,
+                            "factor_payload": fv.payload or None,
+                            "strategy_id": None,
+                        }
+                    )
+                except Exception:
+                    errors += 1
+                    logger.warning(
+                        "因子计算失败: etf=%s factor=%s",
+                        etf.etf_code,
+                        computer.spec.factor_id,
+                        exc_info=True,
+                    )
+
+        upsert_count = self._bulk_upsert(rows_to_upsert)
+        logger.info(
+            "因子计算完成: trade_date=%s etf=%d factor=%d upsert=%d errors=%d",
+            trade_date,
+            len(etfs),
+            len(computers),
+            upsert_count,
+            errors,
+        )
+        return {
+            "etf_count": len(etfs),
+            "factor_count": len(computers),
+            "upsert_count": upsert_count,
+            "errors": errors,
+        }
+
+    def get_or_compute_cross_section(
+        self, factor_id: str, force_recompute: bool = False
+    ) -> tuple[date, list[CrossSectionRow]]:
+        """获取指定因子的横截面数据，自动选择最新日期并按需计算。
+
+        流程：
+        1. 查询该因子在 etf_factor_value 中的最大 trade_date
+        2. 若无记录，取 etf_daily_bar 的最大 trade_date 作为基准日
+        3. 若基准日该因子无数据或 force_recompute=True，调用 compute_and_store 计算
+        4. 返回横截面数据（含 ETF 中文名）
+
+        Args:
+            factor_id: 因子标识。
+            force_recompute: 是否强制重新计算，覆盖已有数据。
+
+        Returns:
+            (trade_date, cross_section_rows) 元组。
+
+        Raises:
+            ValueError: 无任何行情数据时抛出。
+        """
+        # 查询因子最新数据日期
+        latest = self._repo.find_latest_date(factor_id)
+
+        if latest is None or force_recompute:
+            # 因子从未计算过或强制重算，取行情最新日期
+            bar_latest = self._repo.find_latest_bar_date()
+            if bar_latest is None:
+                raise ValueError("无任何行情数据，无法计算因子")
+            # 强制重新计算，覆盖已有数据
+            self.compute_and_store(bar_latest)
+            latest = bar_latest
+
+        rows = self._repo.find_cross_section(factor_id, latest)
+        return latest, [
+            CrossSectionRow(
+                etf_code=r[0],
+                name_cn=r[1],
+                factor_value_numeric=r[2],
+                factor_value_text=r[3],
+            )
+            for r in rows
+        ]
+
+    def get_or_compute_time_series(
+        self,
+        factor_id: str,
+        etf_code: str,
+        start_date: date,
+        end_date: date,
+        force_recompute: bool = False,
+    ) -> list[FactorRow]:
+        """获取因子时间序列，自动补算缺失日期后返回。
+
+        流程：
+        1. 查询 etf_daily_bar 中该 ETF 在 [start, end] 有数据的日期集合
+        2. 查询 etf_factor_value 中已有的日期集合
+        3. 差集 = 缺失日期，逐日调用 compute_and_store 补算
+        4. 若 force_recompute=True，强制重新计算所有日期
+        5. 返回完整时间序列
+
+        Args:
+            factor_id: 因子标识。
+            etf_code: ETF 代码。
+            start_date: 开始日期（含）。
+            end_date: 结束日期（含）。
+            force_recompute: 是否强制重新计算，覆盖已有数据。
+
+        Returns:
+            按 trade_date 升序排列的 FactorRow 列表。
+        """
+        if force_recompute:
+            # 强制重算：获取所有有行情数据的日期并重新计算
+            dates_to_compute = self._repo.find_all_bar_dates(etf_code, start_date, end_date)
+        else:
+            # 正常模式：仅补算缺失日期
+            dates_to_compute = self._repo.find_missing_dates(
+                factor_id, etf_code, start_date, end_date
+            )
+
+        for d in dates_to_compute:
+            self.compute_and_store(d)
+
+        rows = self._repo.find_factor_values(factor_id, etf_code, start_date, end_date)
+        return [_row_to_factor_row(r) for r in rows]
+
+    def factor_history(
+        self,
+        factor_id: str,
+        etf_code: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[FactorRow]:
+        """查询单因子在单 ETF 上的时间序列。
+
+        仅返回独立因子值（strategy_id IS NULL）。
+
+        Args:
+            factor_id: 因子标识。
+            etf_code: ETF 代码。
+            start_date: 开始日期（含）。
+            end_date: 结束日期（含）。
+
+        Returns:
+            按 trade_date 升序排列的 FactorRow 列表。
+        """
+        try:
+            rows = self._repo.find_factor_values(factor_id, etf_code, start_date, end_date)
+            return [_row_to_factor_row(r) for r in rows]
+        except Exception:
+            logger.warning("factor_history 查询失败", exc_info=True)
+            return []
+
+    # ==================================================================
+    # 内部方法
+    # ==================================================================
 
     def _load_context(self, trade_date: date, etf_codes: list[str]) -> FactorContext:
         """批量加载 90 天回望的所有数据，构建 FactorContext。

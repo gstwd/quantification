@@ -38,6 +38,9 @@
           <div class="controls">
             <input type="date" class="date-input" v-model="crossDateInput" />
             <button class="query-btn" @click="loadCrossByDate">指定日期查询</button>
+            <button class="recompute-btn" :disabled="crossLoading" @click="loadCross(true)">
+              {{ crossLoading ? '计算中...' : '强制重新计算' }}
+            </button>
           </div>
         </div>
         <div v-if="crossLoading" class="empty">加载中...</div>
@@ -87,12 +90,15 @@
               class="etf-input"
               v-model="seriesEtf"
               placeholder="ETF代码，如 510300"
-              @keyup.enter="loadSeries"
+              @keyup.enter="() => loadSeries()"
             />
             <input type="date" class="date-input" v-model="seriesStart" />
             <span class="sep">~</span>
             <input type="date" class="date-input" v-model="seriesEnd" />
-            <button class="query-btn" @click="loadSeries">查询</button>
+            <button class="query-btn" @click="() => loadSeries()">查询</button>
+            <button class="recompute-btn" :disabled="seriesLoading" @click="() => loadSeries(true)">
+              {{ seriesLoading ? '计算中...' : '强制重新计算' }}
+            </button>
           </div>
         </div>
         <div v-if="seriesLoading" class="empty">加载中...</div>
@@ -172,10 +178,10 @@ function barWidth(val: number | null): number {
 }
 
 /** 加载横截面数据（默认最新日期），按因子值降序排列 */
-async function loadCross() {
+async function loadCross(forceRecompute = false) {
   crossLoading.value = true
   try {
-    const resp = await fetchFactorCrossSection(props.factorId)
+    const resp = await fetchFactorCrossSection(props.factorId, undefined, forceRecompute)
     crossDate.value = resp.trade_date
     crossDateInput.value = resp.trade_date
     crossRows.value = resp.rows
@@ -213,7 +219,7 @@ function goToSeries(etfCode: string) {
 }
 
 /** 加载时间序列数据并渲染图表 */
-async function loadSeries() {
+async function loadSeries(forceRecompute = false) {
   if (!seriesEtf.value.trim()) return
   seriesLoading.value = true
   try {
@@ -222,6 +228,7 @@ async function loadSeries() {
       seriesEtf.value.trim(),
       seriesStart.value,
       seriesEnd.value,
+      forceRecompute,
     )
   } catch {
     seriesRows.value = []
@@ -424,6 +431,19 @@ onUnmounted(() => {
   transition: background 0.15s;
 }
 .query-btn:hover { background: rgba(59, 130, 246, 0.25); }
+
+.recompute-btn {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: #fbbf24;
+  border-radius: var(--radius-sm);
+  padding: 4px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.recompute-btn:hover:not(:disabled) { background: rgba(245, 158, 11, 0.25); }
+.recompute-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .sep { color: var(--text-muted); font-size: 12px; }
 

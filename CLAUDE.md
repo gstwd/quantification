@@ -51,6 +51,30 @@ alembic revision --autogenerate -m "description"   # generate migration
 alembic upgrade head                               # apply
 ```
 
+### CLI commands
+
+```bash
+cd apps/api
+python -m quant_etf_api.cli init-factors   # 将代码中的因子元数据同步到数据库
+```
+
+### Factor definition sync
+
+因子定义以数据库为唯一 source of truth。首次部署或添加新因子后，需要手动同步：
+
+```bash
+# 方式1：CLI 命令
+python -m quant_etf_api.cli init-factors
+
+# 方式2：API 端点
+curl -X POST http://localhost:8000/api/factors/init
+```
+
+同步策略：
+- 代码中有、DB 中没有 → INSERT（新因子）
+- 代码和 DB 都有 → 仅更新 version、required_data（代码管控字段）
+- DB 中有、代码中没有 → 设为 is_active=False（保留历史数据关联）
+
 ## Architecture
 
 ### Backend layers

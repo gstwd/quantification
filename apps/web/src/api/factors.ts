@@ -25,10 +25,14 @@ export async function updateFactor(
 export async function fetchFactorCrossSection(
   factorId: string,
   tradeDate?: string,
+  forceRecompute = false,
 ): Promise<CrossSectionResponse> {
-  const params: Record<string, string> = {}
+  const params: Record<string, string | boolean> = {}
   if (tradeDate) {
     params.trade_date = tradeDate
+  }
+  if (forceRecompute) {
+    params.force_recompute = true
   }
   const { data } = await apiClient.get<CrossSectionResponse>(
     `/factors/${factorId}/cross-section`,
@@ -43,9 +47,16 @@ export async function fetchFactorTimeSeries(
   etfCode: string,
   startDate: string,
   endDate: string,
+  forceRecompute = false,
 ): Promise<FactorRow[]> {
-  const { data } = await apiClient.get<FactorRow[]>(`/factors/${factorId}/values`, {
-    params: { etf_code: etfCode, start_date: startDate, end_date: endDate },
-  })
+  const params: Record<string, string | boolean> = {
+    etf_code: etfCode,
+    start_date: startDate,
+    end_date: endDate,
+  }
+  if (forceRecompute) {
+    params.force_recompute = true
+  }
+  const { data } = await apiClient.get<FactorRow[]>(`/factors/${factorId}/values`, { params })
   return data
 }

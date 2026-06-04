@@ -29,11 +29,7 @@ class FactorDefinitionRepository(BaseRepository):
 
     def find_all(self) -> list[FactorDefinitionModel]:
         """返回所有因子定义（含已禁用），按 factor_id 排序。"""
-        return (
-            self._db.query(FactorDefinitionModel)
-            .order_by(FactorDefinitionModel.factor_id)
-            .all()
-        )
+        return self._db.query(FactorDefinitionModel).order_by(FactorDefinitionModel.factor_id).all()
 
     def find_active(self) -> list[FactorDefinitionModel]:
         """返回所有启用的因子定义，供计算使用。"""
@@ -186,6 +182,35 @@ class FactorDefinitionRepository(BaseRepository):
             .all()
         }
         return sorted(bar_dates - factor_dates)
+
+    def find_all_bar_dates(
+        self,
+        etf_code: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[date]:
+        """查询指定 ETF 在 [start, end] 范围内所有有行情数据的日期。
+
+        用于强制重新计算时获取需要计算的日期列表。
+
+        Args:
+            etf_code: ETF 代码。
+            start_date: 开始日期（含）。
+            end_date: 结束日期（含）。
+
+        Returns:
+            有行情数据的交易日列表，按日期升序排列。
+        """
+        return sorted(
+            r[0]
+            for r in self._db.query(EtfDailyBarModel.trade_date)
+            .filter(
+                EtfDailyBarModel.etf_code == etf_code,
+                EtfDailyBarModel.trade_date >= start_date,
+                EtfDailyBarModel.trade_date <= end_date,
+            )
+            .all()
+        )
 
     def find_missing_dates_for_all_etfs(
         self,
