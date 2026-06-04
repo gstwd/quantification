@@ -20,6 +20,8 @@ class IndexDailyBar:
     low_price: float
     volume: float
     turnover: float
+    prev_close_price: float | None = None
+    change_pct: float | None = None
 
 
 @dataclass
@@ -187,6 +189,14 @@ class AkShareIndexClient(BaseDataClient):
                         turnover=float(row["amount"]),
                     )
                 )
+            # 逐日计算涨跌幅（第一根无前收盘，保持 None）
+            for i in range(1, len(bars)):
+                prev_close = bars[i - 1].close_price
+                if prev_close and prev_close != 0:
+                    bars[i].prev_close_price = prev_close
+                    bars[i].change_pct = round(
+                        (bars[i].close_price - prev_close) / prev_close * 100, 4
+                    )
             elapsed = (time.perf_counter() - start) * 1000
             self._log_response(endpoint, len(bars), elapsed)
             return bars
@@ -206,6 +216,9 @@ class AkShareIndexClient(BaseDataClient):
         中证1000、中证800、上证380、上证180、深证100、创业板50、
         深证红利、上证红利、中证100），其他指数返回空列表。
 
+        百分位计算逻辑：对于每个交易日，统计历史所有交易日中 PE/PB 值
+        小于当前值的比例，得到 0-100 的历史分位数。
+
         Args:
             index_code: 指数代码
 
@@ -221,40 +234,94 @@ class AkShareIndexClient(BaseDataClient):
 
         start = time.perf_counter()
         self._log_request("stock_index_pe_lg+pb", {"index_code": index_code, "name": name})
-        try:
-            pe_df = ak.stock_index_pe_lg(symbol=name)
-            pb_df = ak.stock_index_pb_lg(symbol=name)
-        except Exception as e:
+
+        # 重试机制：legulegu.com 偶发 CSRF token 获取失败，最多重试 3 次
+        max_retries = 3
+        pe_df = None
+        pb_df = None
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                pe_df = ak.stock_index_pe_lg(symbol=name)
+                pb_df = ak.stock_index_pb_lg(symbol=name)
+                break
+            except (AttributeError, Exception) as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_seconds = 2 ** attempt
+                    self._logger.info(
+                        "指数 %s 估值拉取失败（第 %d 次），%d 秒后重试: %s",
+                        index_code, attempt + 1, wait_seconds, e
+                    )
+                    time.sleep(wait_seconds)
+
+        if pe_df is None or pb_df is None:
             elapsed = (time.perf_counter() - start) * 1000
-            self._log_error("stock_index_pe_lg+pb", e, elapsed)
-            raise
+            self._log_error("stock_index_pe_lg+pb", last_error, elapsed)
+            raise last_error
 
         # 按日期建立 PB 查找表
-        pb_map: dict[date, tuple[float | None, float | None]] = {}
+        pb_map: dict[date, float | None] = {}
         for _, row in pb_df.iterrows():
             d = row["日期"]
             if isinstance(d, str):
                 d = datetime.strptime(d, "%Y-%m-%d").date()
-            pb_map[d] = (
-                float(row["市净率"]) if row.get("市净率") is not None else None,
-                float(row["市净率百分位"]) if row.get("市净率百分位") is not None else None,
-            )
+            pb_val = row.get("市净率")
+            pb_map[d] = float(pb_val) if pb_val is not None else None
 
+        # 收集所有 PE 和 PB 值用于计算百分位
+        pe_values: list[tuple[date, float]] = []
+        pb_values: list[tuple[date, float]] = []
+
+        for _, row in pe_df.iterrows():
+            d = row["日期"]
+            if isinstance(d, str):
+                d = datetime.strptime(d, "%Y-%m-%d").date()
+            pe_val = row.get("静态市盈率")
+            if pe_val is not None:
+                try:
+                    pe_values.append((d, float(pe_val)))
+                except (ValueError, TypeError):
+                    pass
+
+        for d, pb_val in pb_map.items():
+            if pb_val is not None:
+                pb_values.append((d, pb_val))
+
+        # 按日期排序
+        pe_values.sort(key=lambda x: x[0])
+        pb_values.sort(key=lambda x: x[0])
+
+        # 计算历史百分位：对于每个交易日，统计之前所有交易日中值小于当前值的比例
+        def _calc_percentile(data: list[tuple[date, float]]) -> dict[date, float]:
+            """计算每个交易日的历史百分位。"""
+            result: dict[date, float] = {}
+            for i, (d, val) in enumerate(data):
+                # 统计前 i 个交易日中值小于当前值的数量
+                count_less = sum(1 for _, prev_val in data[:i] if prev_val < val)
+                percentile = round(count_less / i * 100, 2) if i > 0 else 50.0
+                result[d] = percentile
+            return result
+
+        pe_percentile_map = _calc_percentile(pe_values)
+        pb_percentile_map = _calc_percentile(pb_values)
+
+        # 构建结果
         results: list[IndexValuation] = []
         for _, row in pe_df.iterrows():
             d = row["日期"]
             if isinstance(d, str):
                 d = datetime.strptime(d, "%Y-%m-%d").date()
-            pb_val, pb_pct = pb_map.get(d, (None, None))
             pe_val = row.get("静态市盈率")
-            pe_pct = row.get("静态市盈率百分位")
+            pb_val = pb_map.get(d)
             results.append(
                 IndexValuation(
                     trade_date=d,
                     pe=float(pe_val) if pe_val is not None else None,
-                    pe_percentile=float(pe_pct) if pe_pct is not None else None,
+                    pe_percentile=pe_percentile_map.get(d),
                     pb=pb_val,
-                    pb_percentile=pb_pct,
+                    pb_percentile=pb_percentile_map.get(d),
                     dividend_yield=None,  # legulegu 源无股息率
                 )
             )

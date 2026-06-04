@@ -60,6 +60,18 @@ class TestIndexDaily:
             assert str(bars[0].trade_date) >= "2026-01-01"
             assert str(bars[-1].trade_date) <= "2026-03-31"
 
+    def test_prev_close_and_change_pct_populated(self, client: AkShareIndexClient) -> None:
+        """验证 prev_close_price 和 change_pct 字段被正确填充。"""
+        bars = _retry_fetch(lambda: client.fetch_index_daily("000300"))
+        assert len(bars) > 1, "应返回多条日线数据"
+        # 第一根 bar 无前收盘，应为 None
+        assert bars[0].prev_close_price is None
+        assert bars[0].change_pct is None
+        # 第二根 bar 应有前收盘和涨跌幅
+        assert bars[1].prev_close_price is not None
+        assert bars[1].prev_close_price > 0
+        assert bars[1].change_pct is not None
+
 
 class TestIndexValuation:
     """指数估值数据拉取。
@@ -91,6 +103,21 @@ class TestIndexValuation:
         """不支持的指数应返回空列表。"""
         valuations = client.fetch_index_valuation("000688")
         assert valuations == []
+
+    def test_percentile_calculated(self, client: AkShareIndexClient) -> None:
+        """验证 PE/PB 百分位被正确计算。"""
+        try:
+            valuations = _retry_fetch(lambda: client.fetch_index_valuation("000300"))
+        except Exception:
+            pytest.skip("上游 legulegu.com 暂时不可用")
+        if len(valuations) < 10:
+            pytest.skip("上游返回数据不足")
+        # 检查中间某条数据的百分位是否被计算
+        mid = valuations[len(valuations) // 2]
+        assert mid.pe_percentile is not None, "PE 百分位应被计算"
+        assert 0 <= mid.pe_percentile <= 100, "PE 百分位应在 0-100 之间"
+        assert mid.pb_percentile is not None, "PB 百分位应被计算"
+        assert 0 <= mid.pb_percentile <= 100, "PB 百分位应在 0-100 之间"
 
 
 class TestHealthCheck:

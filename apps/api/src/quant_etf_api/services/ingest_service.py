@@ -418,7 +418,7 @@ class IngestService:
         """从 AkShare 拉取指数日线并幂等写入 index_daily_bar。
 
         分批写入，避免单条 INSERT 参数超过 PostgreSQL 65535 限制
-        （每行 10 字段，批次上限 6000 行 = 60000 参数）。
+        （每行 12 字段，批次上限 5000 行 = 60000 参数）。
 
         Returns:
             写入记录数
@@ -427,7 +427,7 @@ class IngestService:
         if not bars:
             return 0
 
-        batch_size = 6000
+        batch_size = 5000
         values = [
             {
                 "trade_date": b.trade_date,
@@ -436,6 +436,8 @@ class IngestService:
                 "high_price": b.high_price,
                 "low_price": b.low_price,
                 "close_price": b.close_price,
+                "prev_close_price": b.prev_close_price,
+                "change_pct": b.change_pct,
                 "volume": b.volume,
                 "turnover": b.turnover,
                 "source": "akshare",
