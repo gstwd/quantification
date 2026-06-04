@@ -45,6 +45,12 @@
             </button>
           </div>
         </div>
+        <details class="info-block">
+          <summary>查看说明</summary>
+          <p><strong>横截面快照</strong>是某一天所有 ETF 的因子值截面，按因子值降序排列。因子值越高，表示该因子维度上信号越强。</p>
+          <p><strong>相对分布</strong>柱显示各 ETF 因子值在当日全量 ETF 中的归一化位置，便于直观对比。</p>
+          <p>点击行尾的「时间序列」按钮，可跳转查看该 ETF 在此因子上的历史走势。</p>
+        </details>
         <div v-if="crossLoading" class="empty">加载中...</div>
         <div v-else-if="crossRows.length === 0" class="empty">暂无数据</div>
         <table v-else class="data-table">
@@ -103,6 +109,11 @@
             </button>
           </div>
         </div>
+        <details class="info-block">
+          <summary>查看说明</summary>
+          <p><strong>时间序列</strong>展示单个 ETF 在指定日期范围内因子值的变化趋势。输入 ETF 代码和日期范围后点击查询。</p>
+          <p>后端会自动补算缺失日期的因子值，勾选「强制重新计算」可覆盖已有数据。</p>
+        </details>
         <div v-if="seriesLoading" class="empty">加载中...</div>
         <div v-else-if="seriesRows.length === 0" class="empty">输入 ETF 代码并查询，查看因子值走势</div>
         <div v-else ref="chartEl" class="chart-container"></div>
@@ -119,6 +130,19 @@
             <button class="query-btn" @click="loadIC">查询</button>
           </div>
         </div>
+        <details class="info-block">
+          <summary>查看说明</summary>
+          <p><strong>Rank IC（Information Coefficient）</strong>是因子值与下期收益率的 Spearman 秩相关系数，衡量因子的预测能力。取值范围 [-1, 1]。</p>
+          <p><strong>计算流程：</strong>取当日所有 ETF 的因子值 → 计算 N 天后的收益率 → 对两个序列做 Spearman 相关。</p>
+          <div class="info-table">
+            <div class="info-row"><span class="info-label">IC 均值</span><span class="info-desc">所有交易日 IC 的平均值。<strong>> 0</strong> 表示因子有正向预测力，绝对值 > 0.03 算有效。</span></div>
+            <div class="info-row"><span class="info-label">IC 标准差</span><span class="info-desc">IC 的波动程度，<strong>越小越稳定</strong>。</span></div>
+            <div class="info-row"><span class="info-label">IC_IR</span><span class="info-desc">IC 均值 / IC 标准差，类似夏普比率。<strong>> 0.5 较稳定，> 1.0 优秀</strong>，是衡量因子质量的核心指标。</span></div>
+            <div class="info-row"><span class="info-label">IC>0 占比</span><span class="info-desc">IC 为正的交易日占比。<strong>> 50%</strong> 说明多数时候方向正确，> 60% 较好。</span></div>
+            <div class="info-row"><span class="info-label">数据点</span><span class="info-desc">有效 IC 计算天数，<strong>< 30 天</strong>时统计意义不足。</span></div>
+          </div>
+          <p><strong>柱状图解读：</strong>绿色柱 = IC > 0（因子预测方向正确），红色柱 = IC < 0（方向相反）。柱子越高预测力越强。大面积绿色且柱高说明因子有效且稳定。</p>
+        </details>
         <div v-if="icLoading" class="empty">加载中...</div>
         <template v-else>
           <div v-if="icSummary && icSummary.count > 0" class="ic-summary-row">
@@ -162,6 +186,17 @@
             <button class="query-btn" @click="loadCorrelation">查询</button>
           </div>
         </div>
+        <details class="info-block">
+          <summary>查看说明</summary>
+          <p><strong>因子相关性矩阵</strong>衡量同一天各因子之间的 Spearman 秩相关系数，用于判断因子冗余度。对角线恒为 1.0（自身完全相关）。</p>
+          <p><strong>热力图颜色：</strong>绿色 = 正相关（两个因子同向变化），红色 = 负相关（反向变化），深色/黑色 = 接近 0（相互独立）。</p>
+          <div class="info-table">
+            <div class="info-row"><span class="info-label">|r| > 0.7</span><span class="info-desc">高度冗余，两个因子捕捉的信息高度重叠，建议只保留一个或做正交化处理。</span></div>
+            <div class="info-row"><span class="info-label">|r| < 0.3</span><span class="info-desc">低相关，互补性好，组合使用可提升策略覆盖面。</span></div>
+            <div class="info-row"><span class="info-label">负相关</span><span class="info-desc">两个因子可能捕捉市场的不同维度（如量能 vs 波动率），组合时注意对冲效应。</span></div>
+          </div>
+          <p>选择相关性低的因子组合，可以降低策略的单一因子依赖，提高鲁棒性。</p>
+        </details>
         <div v-if="corrLoading" class="empty">加载中...</div>
         <template v-else>
           <div v-if="!corrData || corrData.matrix.length === 0" class="empty">暂无相关性数据，请确认当日有多个因子的计算结果</div>
@@ -741,4 +776,51 @@ onUnmounted(() => {
 .stat-value { font-size: 16px; font-weight: 600; font-family: monospace; }
 .stat-value.positive { color: #4ade80; }
 .stat-value.negative { color: #f87171; }
+
+/* 说明折叠块 */
+.info-block {
+  border-bottom: 1px solid var(--border);
+  padding: 0 20px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.7;
+}
+.info-block summary {
+  cursor: pointer;
+  padding: 8px 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  user-select: none;
+}
+.info-block summary:hover { color: var(--text); }
+.info-block p { margin: 6px 0; }
+.info-block strong { color: var(--text); font-weight: 600; }
+.info-block[open] { padding-bottom: 14px; }
+
+.info-table {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+  padding: 10px 14px;
+  background: var(--surface-2, rgba(255,255,255,0.03));
+  border-radius: var(--radius-sm);
+}
+.info-row {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+}
+.info-label {
+  flex-shrink: 0;
+  width: 90px;
+  font-family: monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.info-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+}
 </style>
