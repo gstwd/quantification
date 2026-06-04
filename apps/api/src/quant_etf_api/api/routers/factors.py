@@ -12,10 +12,17 @@ from quant_etf_api.api.deps import get_db, get_factor_registry
 from quant_etf_api.factors.registry import FactorRegistry
 from quant_etf_api.factors.service import FactorService
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
+from quant_etf_api.factors.evaluation import (
+    calc_factor_correlation_matrix,
+    calc_ic_summary,
+)
 from quant_etf_api.schemas.factor import (
+    CorrelationResponse,
     CrossSectionResponse,
     FactorSpecResponse,
     FactorUpdateRequest,
+    ICResponse,
+    ICSummary,
 )
 from quant_etf_api.schemas.signal import FactorRow
 
@@ -190,4 +197,64 @@ def factor_time_series(
         start_date=start_date,
         end_date=end_date,
         force_recompute=force_recompute,
+    )
+
+
+@router.get("/factors/{factor_id}/ic", response_model=ICResponse)
+def factor_ic_analysis(
+    factor_id: str,
+    start_date: date = Query(..., description="IC 分析起始日期（含）"),
+    end_date: date = Query(..., description="IC 分析截止日期（含）"),
+    forward_days: int = Query(1, ge=1, le=20, description="前瞻天数，用于计算下期收益率"),
+    db: Session = Depends(get_db),
+) -> ICResponse:
+    """查询因子的 IC（Information Coefficient）分析。
+
+    计算因子值与下期收益率的 Rank IC 时间序列及汇总统计。
+    IC 均值 > 0 表示因子有正向预测力，IC_IR > 0.5 表示因子较稳定。
+    """
+    repo = FactorDefinitionRepository(db)
+    if repo.find_by_id(factor_id) is None:
+        raise HTTPException(status_code=404, detail=f"因子 {factor_id} 不存在")
+
+    try:
+        summary_data = calc_ic_summary(db, factor_id, start_date, end_date, forward_days)
+        series_data = summary_data.pop("series", []) if "series" in summary_data else []
+        # 重新获取 series（calc_ic_summary 内部调用了 calc_ic_series）
+        from quant_etf_api.factors.evaluation import calc_ic_series
+
+        series_data = calc_ic_series(db, factor_id, start_date, end_date, forward_days)
+    except Exception:
+        logger.warning("IC 分析失败: factor_id=%s", factor_id, exc_info=True)
+        raise HTTPException(status_code=500, detail="IC 分析计算失败") from None
+
+    return ICResponse(
+        factor_id=factor_id,
+        summary=ICSummary(**summary_data),
+        series=[{"trade_date": s["trade_date"], "ic": s["ic"]} for s in series_data],
+    )
+
+
+@router.get("/factors/correlation", response_model=CorrelationResponse)
+def factor_correlation(
+    trade_date: date = Query(..., description="交易日"),
+    factor_ids: list[str] | None = Query(None, description="因子列表，不传时计算所有有数据的因子"),
+    db: Session = Depends(get_db),
+) -> CorrelationResponse:
+    """查询因子间截面 Rank 相关性矩阵。
+
+    对指定交易日的所有 ETF，计算各因子值之间的 Spearman 秩相关系数。
+    可用于判断因子冗余度，相关性高的因子可考虑正交化或二选一。
+    """
+    try:
+        result = calc_factor_correlation_matrix(db, trade_date, factor_ids)
+    except Exception:
+        logger.warning("因子相关性计算失败: trade_date=%s", trade_date, exc_info=True)
+        raise HTTPException(status_code=500, detail="相关性计算失败") from None
+
+    return CorrelationResponse(
+        factor_ids=result["factor_ids"],
+        matrix=result["matrix"],
+        etf_count=result.get("etf_count", 0),
+        trade_date=result.get("trade_date", str(trade_date)),
     )

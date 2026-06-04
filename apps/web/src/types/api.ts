@@ -255,6 +255,36 @@ export interface FactorUpdatePayload {
   is_active?: boolean
 }
 
+/** IC 时间序列单点 */
+export interface ICPoint {
+  trade_date: string
+  ic: number
+}
+
+/** IC 汇总统计 */
+export interface ICSummary {
+  ic_mean: number | null
+  ic_std: number | null
+  ic_ir: number | null
+  ic_positive_ratio: number | null
+  count: number
+}
+
+/** 因子 IC 分析响应 */
+export interface ICResponse {
+  factor_id: string
+  summary: ICSummary
+  series: ICPoint[]
+}
+
+/** 因子相关性矩阵响应 */
+export interface CorrelationResponse {
+  factor_ids: string[]
+  matrix: number[][]
+  etf_count: number
+  trade_date: string
+}
+
 /** 统一分页响应格式 */
 export interface PaginatedResponse<T> {
   items: T[]

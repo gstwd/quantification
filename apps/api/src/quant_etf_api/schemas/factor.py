@@ -73,3 +73,63 @@ class CrossSectionResponse(BaseModel):
     factor_id: str
     trade_date: str
     rows: list[CrossSectionRow]
+
+
+class ICPoint(BaseModel):
+    """IC 时间序列单点。
+
+    Attributes:
+        trade_date: 交易日。
+        ic: Rank IC 值。
+    """
+
+    trade_date: str
+    ic: float
+
+
+class ICSummary(BaseModel):
+    """IC 汇总统计。
+
+    Attributes:
+        ic_mean: IC 均值。
+        ic_std: IC 标准差。
+        ic_ir: IC_IR（IC 均值 / IC 标准差）。
+        ic_positive_ratio: IC>0 的比例。
+        count: 有效 IC 数据点数量。
+    """
+
+    ic_mean: float | None = None
+    ic_std: float | None = None
+    ic_ir: float | None = None
+    ic_positive_ratio: float | None = None
+    count: int = 0
+
+
+class ICResponse(BaseModel):
+    """因子 IC 分析响应。
+
+    Attributes:
+        factor_id: 因子标识。
+        summary: IC 汇总统计。
+        series: IC 时间序列。
+    """
+
+    factor_id: str
+    summary: ICSummary
+    series: list[ICPoint]
+
+
+class CorrelationResponse(BaseModel):
+    """因子相关性矩阵响应。
+
+    Attributes:
+        factor_ids: 因子标识列表（矩阵行列顺序）。
+        matrix: 相关系数二维矩阵。
+        etf_count: 参与计算的 ETF 数量。
+        trade_date: 数据日期。
+    """
+
+    factor_ids: list[str]
+    matrix: list[list[float]]
+    etf_count: int
+    trade_date: str

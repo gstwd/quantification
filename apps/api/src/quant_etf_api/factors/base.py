@@ -40,11 +40,15 @@ class FactorContext:
         etf_bars: ETF 日线映射，key=(etf_code, date)。
         etf_shares: ETF 份额映射，key=(etf_code, date)。
         index_bars: 指数日线映射，key=(index_code, date)，当前内置因子留空。
+        index_valuation: 指数估值映射，key=(index_code, date)，含 pe_percentile/pb_percentile。
+        etf_index_map: ETF 代码到跟踪指数代码的映射，如 {"510300": "000300"}。
     """
 
     etf_bars: dict[tuple[str, date], Any] = field(default_factory=dict)
     etf_shares: dict[tuple[str, date], Any] = field(default_factory=dict)
     index_bars: dict[tuple[str, date], Any] = field(default_factory=dict)
+    index_valuation: dict[tuple[str, date], Any] = field(default_factory=dict)
+    etf_index_map: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

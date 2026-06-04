@@ -24,7 +24,7 @@ from quant_etf_api.factors.builtins.momentum import (
 from quant_etf_api.factors.builtins.share_flow import ShareDeltaPctComputer
 from quant_etf_api.factors.builtins.volatility import Volatility20dComputer
 from quant_etf_api.factors.builtins.volume import VolumeRatio20dComputer
-from quant_etf_api.factors.registry import FactorRegistry, build_default_factor_registry
+from quant_etf_api.factors.registry import build_default_factor_registry
 
 
 # ─── 测试辅助：轻量 mock 数据行 ─────────────────────────────────────────────────
@@ -446,9 +446,9 @@ class TestShareDeltaPctComputer:
 
 class TestFactorRegistry:
     def test_default_registry_has_six_factors(self) -> None:
-        """默认注册表应包含 6 个内置因子。"""
+        """默认注册表应包含 8 个内置因子。"""
         registry = build_default_factor_registry()
-        assert len(registry.all()) == 6
+        assert len(registry.all()) == 8
 
     def test_default_registry_factor_ids(self) -> None:
         """默认注册表的 factor_id 集合应完整。"""
@@ -461,6 +461,8 @@ class TestFactorRegistry:
             "return_60d",
             "volatility_20d",
             "share_delta_pct",
+            "pe_percentile",
+            "pb_percentile",
         }
 
     def test_get_returns_correct_computer(self) -> None:

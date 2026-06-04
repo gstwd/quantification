@@ -1,18 +1,18 @@
 # Plugin System
 
-## 三层关系
+## 四层关系
 
-策略相关代码分为三层，依赖方向为 `domain ← factors ← plugins`：
+策略相关代码分为四层，依赖方向为 `domain ← factors ← plugins`，evaluation 模块平行于 factors 层：
 
 ```
 ┌─────────────┐
-│   Plugin     │  编排层：组合多个因子结果，产出信号
-│  (策略)      │  "量能50% + 方向20% + 份额30% → 三因子策略"
+│   Plugin     │  编排层：对因子做标准化/加权组合，产出信号
+│  (策略)      │  "Z-Score 标准化 → 量能50% + 方向20% + 份额30% → 三因子策略"
 └──────┬───────┘
        │ 调用
 ┌──────▼───────┐
-│   Factor      │  计算层：单一维度的数值计算
-│  (因子)      │  "量比 → 量能概率 0~100"
+│   Factor      │  计算层：原始因子值计算 + 因子评估（IC/相关性）
+│  (因子)      │  "量比 1.92"、"PE 百分位 35.2"、"Rank IC 0.12"
 └──────┬───────┘
        │ 使用
 ┌──────▼───────┐
@@ -21,11 +21,21 @@
 └──────────────┘
 ```
 
-| 层 | 职责 | 特征 |
-|---|---|---|
-| **Domain** | 纯业务规则、计算公式、阈值、值对象、枚举 | 无外部依赖（不 import SQLAlchemy/FastAPI） |
-| **Factor** | 单因子计算（FactorComputer Protocol 实现） | 依赖 domain，被 FactorService 编排 |
-| **Plugin** | 策略编排（StrategyPlugin Protocol 实现） | 依赖 domain，组合多个因子产出信号 |
+## 因子层与策略层的职责边界
+
+| 职责 | 归属层 | 说明 |
+|------|-------|------|
+| 原始因子值计算 | **因子层** | 回答"ETF X 在日期 T 的原始因子值是多少？" |
+| 因子定义管理 | **因子层** | FactorSpec 元数据、DB 同步、启停控制 |
+| 因子 IC/IR 评估 | **因子层** | Rank IC、IC_IR、因子效力分析 |
+| 因子相关性矩阵 | **因子层** | 截面 Spearman 相关，判断因子冗余度 |
+| 数据质量监控 | **因子层** | 覆盖率、时效性、缺失检测 |
+| 因子标准化 | **策略层** | 去极值（MAD/3σ）、Z-Score，使不同因子可比 |
+| 因子加权组合 | **策略层** | 等权/IC 加权/最优化加权，产出综合得分 |
+| 信号生成 | **策略层** | 综合得分 → 信号等级（HIGH/MID/LOW） |
+| 因子衰减管理 | **策略层** | 半衰期、换手率，影响持仓周期 |
+
+**原则：因子层只产出原始值和评估指标，不做标准化/加权；策略层消费因子原始值，负责组合和信号生成。**
 
 ## Domain 层
 
@@ -47,7 +57,31 @@
 - **`base.py`** — FactorSpec、FactorContext、FactorValue 数据类 + FactorComputer Protocol
 - **`registry.py`** — FactorRegistry 注册表
 - **`service.py`** — FactorService 编排因子计算和持久化
-- **`builtins/`** — 6 个内置因子计算器（volume_ratio_20d、return_5d/20d/60d、volatility_20d、share_delta_pct）
+- **`evaluation.py`** — 因子评估模块：Rank IC 计算、IC 汇总统计、因子相关性矩阵
+- **`builtins/`** — 8 个内置因子计算器
+
+### 内置因子列表
+
+| factor_id | 名称 | 类别 | 数据依赖 |
+|-----------|------|------|---------|
+| `volume_ratio_20d` | 20日量比 | volume | etf_bars |
+| `return_5d` | 5日收益率 | momentum | etf_bars |
+| `return_20d` | 20日收益率 | momentum | etf_bars |
+| `return_60d` | 60日收益率 | momentum | etf_bars |
+| `volatility_20d` | 20日年化波动率 | volatility | etf_bars |
+| `share_delta_pct` | 份额日变化率 | flow | etf_shares |
+| `pe_percentile` | PE百分位 | valuation | index_valuation |
+| `pb_percentile` | PB百分位 | valuation | index_valuation |
+
+### 因子类别
+
+| 类别 | 说明 |
+|------|------|
+| volume | 量能类因子，衡量成交活跃度 |
+| momentum | 动量类因子，衡量价格趋势 |
+| volatility | 波动率类因子，衡量风险水平 |
+| flow | 资金流类因子，衡量申赎动向 |
+| valuation | 估值类因子，衡量指数估值水平 |
 
 ## Plugin 层
 

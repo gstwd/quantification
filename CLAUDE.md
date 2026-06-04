@@ -19,7 +19,7 @@ uvicorn quant_etf_api.main:app --reload --port 8000  # dev server
 ```
 
 ```bash
-pytest                           # run all tests (83 unit tests: services, factors, plugins, domain)
+pytest                           # run all tests (97 unit tests: services, factors, plugins, domain)
 pytest tests/path/to/test.py     # run single test file
 ruff check .                     # lint
 ruff format .                    # format
@@ -94,10 +94,10 @@ HTTP → api/routers/ → services/ → infra/ → PostgreSQL
   - `akshare_fund.py` (ETF K-line via Sina + shares/AUM via fund_etf_spot_em), `exchange_reference.py` (exchange ref)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
 - **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends
-- **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports). Three sub-layers with clear dependency direction: `domain ← factors ← plugins`:
+- **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports). Three sub-layers with clear dependency direction: `domain ← factors ← plugins`. Factor layer computes raw values + IC/IR evaluation; strategy layer handles normalization, weighting, and signal generation:
   - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, etc.), `values.py` (DateRange)
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult dataclasses), `scoring.py` (signal scoring rules: volume_probability, direction_probability, share_probability, composite_probability, signal_level)
-- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `builtins/` (6 built-in computers). Depends on `domain/common/` for calculations.
+- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `builtins/` (8 built-in computers: volume, momentum, volatility, flow, valuation). Depends on `domain/common/` for calculations.
 - **`plugins/`** — Strategy plugin layer: `base.py` (StrategyPlugin Protocol, re-exports domain models), `registry.py` (StrategyRegistry), `builtins/` (3 strategy plugins). Depends on `domain/strategies/` for scoring rules. Each plugin implements `StrategyPlugin` Protocol (structural subtyping — no inheritance required).
 - **`config/`** — Pydantic settings loaded from `.env`
 

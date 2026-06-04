@@ -25,6 +25,7 @@ from quant_etf_api.infra.db.models.core import (
     EtfFactorValueModel,
     EtfUniverseModel,
     FactorDefinitionModel,
+    IndexValuationModel,
 )
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
 from quant_etf_api.schemas.factor import CrossSectionRow
@@ -336,13 +337,14 @@ class FactorService:
 
         覆盖 Return60dComputer 所需的 61 个收盘价（约 84 个自然日）。
         etf_shares 加载 trade_date 当日快照数据（shares_delta_pct 为当日值）。
+        index_valuation 加载 trade_date 当日的估值数据（PE/PB 百分位）。
 
         Args:
             trade_date: 目标交易日。
             etf_codes: 活跃 ETF 代码列表。
 
         Returns:
-            填充了 etf_bars / etf_shares 的 FactorContext（index_bars 留空）。
+            填充了 etf_bars / etf_shares / index_valuation / etf_index_map 的 FactorContext。
         """
         lookback_start = trade_date - timedelta(days=_LOOKBACK_DAYS)
 
@@ -370,9 +372,35 @@ class FactorService:
             .all()
         )
 
+        # 构建 ETF 代码到跟踪指数代码的映射
+        etf_models = (
+            self._db.query(EtfUniverseModel)
+            .filter(EtfUniverseModel.etf_code.in_(etf_codes))
+            .all()
+        )
+        etf_index_map: dict[str, str] = {}
+        for etf in etf_models:
+            if etf.tracking_index_code:
+                etf_index_map[etf.etf_code] = etf.tracking_index_code
+
+        # 加载当日指数估值数据（仅跟踪指数覆盖的）
+        index_codes = list(set(etf_index_map.values()))
+        valuation_rows = (
+            self._db.query(IndexValuationModel)
+            .filter(
+                and_(
+                    IndexValuationModel.trade_date == trade_date,
+                    IndexValuationModel.index_code.in_(index_codes),
+                )
+            )
+            .all()
+        ) if index_codes else []
+
         return FactorContext(
             etf_bars={(r.etf_code, r.trade_date): r for r in bar_rows},
             etf_shares={(r.etf_code, r.trade_date): r for r in share_rows},
+            index_valuation={(r.index_code, r.trade_date): r for r in valuation_rows},
+            etf_index_map=etf_index_map,
         )
 
     def _bulk_upsert(self, rows: list[dict[str, Any]]) -> int:

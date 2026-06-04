@@ -53,6 +53,10 @@ def build_default_factor_registry() -> FactorRegistry:
         Return60dComputer,
     )
     from quant_etf_api.factors.builtins.share_flow import ShareDeltaPctComputer
+    from quant_etf_api.factors.builtins.valuation import (
+        PBPercentileComputer,
+        PEPercentileComputer,
+    )
     from quant_etf_api.factors.builtins.volatility import Volatility20dComputer
     from quant_etf_api.factors.builtins.volume import VolumeRatio20dComputer
 
@@ -63,4 +67,6 @@ def build_default_factor_registry() -> FactorRegistry:
     registry.register(Return60dComputer())
     registry.register(Volatility20dComputer())
     registry.register(ShareDeltaPctComputer())
+    registry.register(PEPercentileComputer())
+    registry.register(PBPercentileComputer())
     return registry

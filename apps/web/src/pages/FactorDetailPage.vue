@@ -28,6 +28,8 @@
       <div class="tabs">
         <button class="tab-btn" :class="{ active: tab === 'cross' }" @click="tab = 'cross'">横截面</button>
         <button class="tab-btn" :class="{ active: tab === 'series' }" @click="tab = 'series'">时间序列</button>
+        <button class="tab-btn" :class="{ active: tab === 'ic' }" @click="tab = 'ic'; loadIC()">IC 分析</button>
+        <button class="tab-btn" :class="{ active: tab === 'correlation' }" @click="tab = 'correlation'; loadCorrelation()">相关性</button>
       </div>
 
       <!-- 横截面 Tab -->
@@ -105,6 +107,67 @@
         <div v-else-if="seriesRows.length === 0" class="empty">输入 ETF 代码并查询，查看因子值走势</div>
         <div v-else ref="chartEl" class="chart-container"></div>
       </div>
+
+      <!-- IC 分析 Tab -->
+      <div v-show="tab === 'ic'" class="card">
+        <div class="card-header">
+          <span class="card-title">IC 分析（Rank IC）</span>
+          <div class="controls">
+            <input type="date" class="date-input" v-model="icStart" />
+            <span class="sep">~</span>
+            <input type="date" class="date-input" v-model="icEnd" />
+            <button class="query-btn" @click="loadIC">查询</button>
+          </div>
+        </div>
+        <div v-if="icLoading" class="empty">加载中...</div>
+        <template v-else>
+          <div v-if="icSummary && icSummary.count > 0" class="ic-summary-row">
+            <div class="stat-card">
+              <span class="stat-label">IC 均值</span>
+              <span class="stat-value" :class="(icSummary.ic_mean ?? 0) >= 0 ? 'positive' : 'negative'">
+                {{ icSummary.ic_mean?.toFixed(4) ?? '—' }}
+              </span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">IC 标准差</span>
+              <span class="stat-value">{{ icSummary.ic_std?.toFixed(4) ?? '—' }}</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">IC_IR</span>
+              <span class="stat-value" :class="(icSummary.ic_ir ?? 0) >= 0.5 ? 'positive' : ''">
+                {{ icSummary.ic_ir?.toFixed(4) ?? '—' }}
+              </span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">IC>0 占比</span>
+              <span class="stat-value">{{ icSummary.ic_positive_ratio != null ? (icSummary.ic_positive_ratio * 100).toFixed(1) + '%' : '—' }}</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">数据点</span>
+              <span class="stat-value">{{ icSummary.count }}</span>
+            </div>
+          </div>
+          <div v-if="icSeries.length === 0" class="empty">暂无 IC 数据，请调整日期范围</div>
+          <div v-else ref="icChartEl" class="chart-container"></div>
+        </template>
+      </div>
+
+      <!-- 相关性 Tab -->
+      <div v-show="tab === 'correlation'" class="card">
+        <div class="card-header">
+          <span class="card-title">因子相关性矩阵</span>
+          <span v-if="corrData" class="card-subtitle">ETF 数量：{{ corrData.etf_count }}</span>
+          <div class="controls">
+            <input type="date" class="date-input" v-model="corrDate" />
+            <button class="query-btn" @click="loadCorrelation">查询</button>
+          </div>
+        </div>
+        <div v-if="corrLoading" class="empty">加载中...</div>
+        <template v-else>
+          <div v-if="!corrData || corrData.matrix.length === 0" class="empty">暂无相关性数据，请确认当日有多个因子的计算结果</div>
+          <div v-else ref="corrChartEl" class="chart-container corr-chart"></div>
+        </template>
+      </div>
     </template>
     <div v-else class="empty">因子不存在</div>
   </div>
@@ -122,15 +185,15 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import { fetchFactorCrossSection, fetchFactorSpecs, fetchFactorTimeSeries } from '../api/factors'
-import type { CrossSectionRow, FactorRow, FactorSpec } from '../types/api'
+import { fetchFactorCrossSection, fetchFactorCorrelation, fetchFactorIC, fetchFactorSpecs, fetchFactorTimeSeries } from '../api/factors'
+import type { CorrelationResponse, CrossSectionRow, FactorRow, FactorSpec, ICPoint, ICSummary } from '../types/api'
 
 const props = defineProps<{ factorId: string }>()
 
 const spec = ref<FactorSpec | null>(null)
 const specLoading = ref(false)
 
-const tab = ref<'cross' | 'series'>('cross')
+const tab = ref<'cross' | 'series' | 'ic' | 'correlation'>('cross')
 
 /** 横截面状态 */
 const crossDate = ref('')
@@ -145,6 +208,28 @@ const seriesLoading = ref(false)
 const chartEl = ref<HTMLElement | null>(null)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let chartInstance: any = null
+
+/** IC 分析状态 */
+const icStart = ref((() => {
+  const d = new Date()
+  d.setDate(d.getDate() - 180)
+  return d.toISOString().slice(0, 10)
+})())
+const icEnd = ref(new Date().toISOString().slice(0, 10))
+const icSummary = ref<ICSummary | null>(null)
+const icSeries = ref<ICPoint[]>([])
+const icLoading = ref(false)
+const icChartEl = ref<HTMLElement | null>(null)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let icChartInstance: any = null
+
+/** 相关性状态 */
+const corrDate = ref(new Date().toISOString().slice(0, 10))
+const corrData = ref<CorrelationResponse | null>(null)
+const corrLoading = ref(false)
+const corrChartEl = ref<HTMLElement | null>(null)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let corrChartInstance: any = null
 
 const CATEGORY_LABELS: Record<string, string> = {
   volume: '量能',
@@ -288,6 +373,148 @@ watch([seriesRows, chartEl], () => {
   if (!seriesLoading.value) renderChart()
 }, { flush: 'post' })
 
+/** 加载 IC 分析数据 */
+async function loadIC() {
+  if (!icStart.value || !icEnd.value) return
+  icLoading.value = true
+  try {
+    const resp = await fetchFactorIC(props.factorId, icStart.value, icEnd.value)
+    icSummary.value = resp.summary
+    icSeries.value = resp.series
+  } catch {
+    icSummary.value = null
+    icSeries.value = []
+  } finally {
+    icLoading.value = false
+  }
+}
+
+/** 渲染 IC 时间序列图表 */
+async function renderICChart() {
+  if (!icChartEl.value || icSeries.value.length === 0) return
+  const echarts = await import('echarts')
+  icChartInstance?.dispose()
+  icChartInstance = echarts.init(icChartEl.value, null, { renderer: 'canvas' })
+  const dates = icSeries.value.map(r => r.trade_date)
+  const values = icSeries.value.map(r => r.ic)
+  icChartInstance.setOption({
+    backgroundColor: 'transparent',
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: '#1e293b',
+      borderColor: '#334155',
+      textStyle: { color: '#f1f5f9', fontSize: 12 },
+      formatter: (params: { name: string; value: number }[]) => {
+        const p = params[0]
+        return `${p.name}<br/>Rank IC: <b>${p.value?.toFixed(4) ?? '—'}</b>`
+      },
+    },
+    grid: { left: 64, right: 20, top: 24, bottom: 36 },
+    xAxis: {
+      type: 'category',
+      data: dates,
+      axisLine: { lineStyle: { color: '#334155' } },
+      axisLabel: { color: '#94a3b8', fontSize: 11 },
+    },
+    yAxis: {
+      scale: true,
+      splitLine: { lineStyle: { color: '#334155', type: 'dashed' } },
+      axisLabel: { color: '#94a3b8', fontSize: 11 },
+    },
+    series: [
+      {
+        type: 'bar',
+        data: values.map(v => ({
+          value: v,
+          itemStyle: { color: v >= 0 ? '#4ade80' : '#f87171' },
+        })),
+      },
+    ],
+  })
+}
+
+watch([icSeries, icChartEl], () => {
+  if (!icLoading.value) renderICChart()
+}, { flush: 'post' })
+
+/** 加载因子相关性数据 */
+async function loadCorrelation() {
+  if (!corrDate.value) return
+  corrLoading.value = true
+  try {
+    corrData.value = await fetchFactorCorrelation(corrDate.value)
+  } catch {
+    corrData.value = null
+  } finally {
+    corrLoading.value = false
+  }
+}
+
+/** 渲录相关性热力图 */
+async function renderCorrChart() {
+  if (!corrChartEl.value || !corrData.value || corrData.value.matrix.length === 0) return
+  const echarts = await import('echarts')
+  corrChartInstance?.dispose()
+  corrChartInstance = echarts.init(corrChartEl.value, null, { renderer: 'canvas' })
+  const { factor_ids: fids, matrix } = corrData.value
+  const data: [number, number, number][] = []
+  for (let i = 0; i < fids.length; i++) {
+    for (let j = 0; j < fids.length; j++) {
+      data.push([j, i, matrix[i][j]])
+    }
+  }
+  corrChartInstance.setOption({
+    backgroundColor: 'transparent',
+    tooltip: {
+      backgroundColor: '#1e293b',
+      borderColor: '#334155',
+      textStyle: { color: '#f1f5f9', fontSize: 12 },
+      formatter: (p: { data: [number, number, number] }) => {
+        const d = p.data
+        return `${fids[d[1]]} × ${fids[d[0]]}<br/>相关系数: <b>${d[2].toFixed(4)}</b>`
+      },
+    },
+    grid: { left: 100, right: 40, top: 20, bottom: 80 },
+    xAxis: {
+      type: 'category',
+      data: fids,
+      axisLabel: { color: '#94a3b8', fontSize: 10, rotate: 45 },
+      splitArea: { show: true, areaStyle: { color: ['rgba(255,255,255,0.02)', 'transparent'] } },
+    },
+    yAxis: {
+      type: 'category',
+      data: fids,
+      axisLabel: { color: '#94a3b8', fontSize: 10 },
+      splitArea: { show: true, areaStyle: { color: ['rgba(255,255,255,0.02)', 'transparent'] } },
+    },
+    visualMap: {
+      min: -1,
+      max: 1,
+      calculable: true,
+      orient: 'vertical',
+      right: 0,
+      top: 'center',
+      inRange: {
+        color: ['#f87171', '#1e293b', '#4ade80'],
+      },
+      textStyle: { color: '#94a3b8', fontSize: 11 },
+    },
+    series: [
+      {
+        type: 'heatmap',
+        data,
+        emphasis: {
+          itemStyle: { borderColor: '#f1f5f9', borderWidth: 1 },
+        },
+      },
+    ],
+  })
+}
+
+watch([corrData, corrChartEl], () => {
+  if (!corrLoading.value) renderCorrChart()
+}, { flush: 'post' })
+
 onMounted(async () => {
   specLoading.value = true
   try {
@@ -303,6 +530,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   chartInstance?.dispose()
+  icChartInstance?.dispose()
+  corrChartInstance?.dispose()
 })
 </script>
 
@@ -489,4 +718,27 @@ onUnmounted(() => {
 
 /* 时间序列图表 */
 .chart-container { width: 100%; height: 340px; padding: 8px; }
+.corr-chart { height: 400px; }
+
+/* IC 汇总统计卡片 */
+.ic-summary-row {
+  display: flex;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--surface-2, rgba(255,255,255,0.04));
+  border-radius: var(--radius-sm);
+  padding: 10px 16px;
+  min-width: 100px;
+}
+.stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.stat-value { font-size: 16px; font-weight: 600; font-family: monospace; }
+.stat-value.positive { color: #4ade80; }
+.stat-value.negative { color: #f87171; }
 </style>
