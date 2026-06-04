@@ -56,6 +56,7 @@ alembic upgrade head                               # apply
 ```bash
 cd apps/api
 python -m quant_etf_api.cli init-factors   # 将代码中的因子元数据同步到数据库
+python -m quant_etf_api.cli init-indexes   # 将默认指数种子数据同步到数据库
 ```
 
 ### Factor definition sync
@@ -74,6 +75,16 @@ curl -X POST http://localhost:8000/api/factors/init
 - 代码中有、DB 中没有 → INSERT（新因子）
 - 代码和 DB 都有 → 仅更新 version、required_data（代码管控字段）
 - DB 中有、代码中没有 → 设为 is_active=False（保留历史数据关联）
+
+### Index seed data sync
+
+首次部署或数据库重建后，需要同步默认指数种子数据（legulegu 估值源支持的 12 个指数）：
+
+```bash
+python -m quant_etf_api.cli init-indexes
+```
+
+幂等操作，已存在的指数自动跳过。同步后 `daily-ingest` 会自动拉取这些指数的日线和估值数据。
 
 ## Architecture
 

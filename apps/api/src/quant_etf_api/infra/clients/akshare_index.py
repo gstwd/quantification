@@ -35,11 +35,20 @@ class IndexValuation:
 
 
 # 从 index_code 到 legulegu PE/PB 所需中文名的映射
-# 仅这三个指数在 AkShare stock_index_pe/pb_lg 中有数据
+# AkShare stock_index_pe_lg / stock_index_pb_lg 支持的全部 12 个指数
 _PE_PB_NAME_MAP: dict[str, str] = {
     "000300": "沪深300",
     "000016": "上证50",
     "000905": "中证500",
+    "000852": "中证1000",
+    "000906": "中证800",
+    "000009": "中证380",
+    "000010": "中证180",
+    "399330": "中证100",
+    "399673": "创业板50",
+    "399324": "中证红利",
+    "000015": "上证红利",
+    "000903": "上证100",
 }
 
 
@@ -193,8 +202,9 @@ class AkShareIndexClient(BaseDataClient):
     def fetch_index_valuation(self, index_code: str) -> list[IndexValuation]:
         """拉取指数 PE/PB 估值历史数据。
 
-        仅支持沪深300(000300)、上证50(000016)、中证500(000905)，
-        其他指数返回空列表。
+        支持 legulegu 覆盖的 12 个指数（沪深300、上证50、中证500、
+        中证1000、中证800、中证380、中证180、中证100、创业板50、
+        中证红利、上证红利、上证100），其他指数返回空列表。
 
         Args:
             index_code: 指数代码
