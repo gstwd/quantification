@@ -24,7 +24,7 @@ class HealthStatus:
 class BaseDataClient(ABC):
     """数据源客户端抽象基类。
 
-    所有数据源客户端（腾讯、东方财富、AkShare 等）均需继承此类，
+    所有数据源客户端（新浪、东方财富、AkShare 等）均需继承此类，
     实现 source_name 属性和 health_check 方法，以提供统一的日志、健康检测和调用规范。
     """
 

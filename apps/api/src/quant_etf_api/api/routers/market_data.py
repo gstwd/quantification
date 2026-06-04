@@ -34,7 +34,7 @@ def etf_daily_bars(
     limit: int = Query(default=30, ge=1, le=2000),
     db: Session = Depends(get_db),
 ) -> list[DailyBar]:
-    """ETF 日线行情（读穿透缓存，冷启动时从腾讯 API 拉取）。
+    """ETF 日线行情（读穿透缓存，冷启动时从新浪 API 拉取）。
 
     提供 start_date/end_date 时使用日期范围查询，否则使用 limit 返回最近 N 条。
     """

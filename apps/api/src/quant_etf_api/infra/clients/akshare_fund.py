@@ -185,7 +185,7 @@ class AkShareFundClient(BaseDataClient):
 
     @staticmethod
     def _exchange_prefix(code: str) -> str:
-        """根据 ETF 代码推断交易所前缀（新浪/腾讯接口需要）。
+        """根据 ETF 代码推断交易所前缀（新浪接口需要）。
 
         规则：以 '5' 开头 → 上海（sh）；以 '1' 开头 → 深圳（sz）。
         """

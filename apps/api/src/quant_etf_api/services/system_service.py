@@ -66,7 +66,7 @@ class SystemService:
 
         Args:
             model: SQLAlchemy 模型类（如 EtfDailyBarModel）。
-            source_name: 数据源展示名称（如 "腾讯日线行情"）。
+            source_name: 数据源展示名称（如 "新浪日线行情"）。
             table_name: 数据库表名（如 "etf_daily_bar"）。
             date_column: 用于获取最新日期的列名，默认 "trade_date"。
 
@@ -144,7 +144,7 @@ class SystemService:
         data_sources = [
             self._get_table_snapshot(
                 EtfDailyBarModel,
-                source_name="腾讯日线行情",
+                source_name="新浪日线行情",
                 table_name="etf_daily_bar",
             ),
             self._get_table_snapshot(

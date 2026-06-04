@@ -43,7 +43,7 @@ class DataSourceSnapshot(BaseModel):
     供前端"数据源状态"区域展示各表新鲜度。
     """
 
-    source_name: str  # 展示名称，如 "腾讯日线行情"
+    source_name: str  # 展示名称，如 "新浪日线行情"
     table_name: str  # 数据库表名，如 "etf_daily_bar"
     record_count: int  # 该表记录总数
     latest_trade_date: date | None  # 该表最新交易日期

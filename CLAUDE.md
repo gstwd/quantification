@@ -148,7 +148,7 @@ To add a strategy: create a plugin file in `plugins/builtins/`, implement the Pr
 
 ## Current State
 
-Services fully wired to PostgreSQL. 18 tables across 6 migrations (0001→0002→0002_backtest→0003_index_macro→0004→0005_factor_layer). Each data type has exactly **one** source: ETF K-line→Tencent, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh.
+Services fully wired to PostgreSQL. 18 tables across 6 migrations (0001→0002→0002_backtest→0003_index_macro→0004→0005_factor_layer). Each data type has exactly **one** source: ETF K-line→Sina, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh.
 
 **Dual-mode backtesting**: `BacktestService` supports signal scoring mode (HIGH/MID/LOW → equal/signal-weighted portfolio) and asset allocation mode (timing → rotation → position sizing). Backtest mode is stored in `backtest_run.params` JSON field.
 
