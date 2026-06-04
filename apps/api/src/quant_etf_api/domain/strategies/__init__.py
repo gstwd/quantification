@@ -5,7 +5,13 @@
 
 from __future__ import annotations
 
-from quant_etf_api.domain.strategies.models import StrategyContextData, StrategyResult
+from quant_etf_api.domain.strategies.models import (
+    AllocationPlan,
+    AssetRanking,
+    StrategyContextData,
+    StrategyResult,
+    TimingSignal,
+)
 from quant_etf_api.domain.strategies.scoring import (
     composite_probability,
     direction_probability,
@@ -15,8 +21,11 @@ from quant_etf_api.domain.strategies.scoring import (
 )
 
 __all__ = [
+    "AllocationPlan",
+    "AssetRanking",
     "StrategyContextData",
     "StrategyResult",
+    "TimingSignal",
     "composite_probability",
     "direction_probability",
     "share_probability",

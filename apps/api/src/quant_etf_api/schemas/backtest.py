@@ -9,7 +9,18 @@ from quant_etf_api.schemas.types import UtcDatetime
 
 
 class BacktestCreateRequest(BaseModel):
-    """创建回测请求体。"""
+    """创建回测请求体。
+
+    Attributes:
+        strategy_id: 策略插件标识。
+        start_date: 回测起始日期。
+        end_date: 回测截止日期。
+        universe_mode: 标的范围，all=全部活跃 ETF，subset=指定代码列表。
+        etf_codes: 指定 ETF 代码列表（universe_mode=subset 时生效）。
+        params: 策略参数透传。
+        weighting: 信号评分模式的加权方式。
+        backtest_mode: 回测模式，signal=信号评分模式（默认），allocation=资产配置模式。
+    """
 
     strategy_id: str
     start_date: date
@@ -18,6 +29,7 @@ class BacktestCreateRequest(BaseModel):
     etf_codes: list[str] = []
     params: dict[str, Any] | None = None
     weighting: Literal["equal", "signal_weighted"] = "equal"
+    backtest_mode: Literal["signal", "allocation"] = "signal"
 
 
 class BacktestMetrics(BaseModel):
@@ -41,6 +53,7 @@ class BacktestSummary(BaseModel):
     end_date: date
     status: str
     weighting: str
+    backtest_mode: str = "signal"
     metrics: BacktestMetrics | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None = None
@@ -56,15 +69,33 @@ class BacktestDetail(BacktestSummary):
 
 
 class BacktestDailyResult(BaseModel):
-    """回测单日组合绩效。"""
+    """回测单日组合绩效。
+
+    Attributes:
+        trade_date: 交易日。
+        portfolio_return: 当日组合收益率（%）。
+        cumulative_return: 累计收益率（%）。
+        drawdown: 回撤（%）。
+        high_signal_count: HIGH 信号数量（信号模式）。
+        mid_signal_count: MID 信号数量（信号模式）。
+        low_signal_count: LOW 信号数量（信号模式）。
+        timing_regime: 择时状态（资产配置模式）。
+        total_exposure: 总仓位比例（资产配置模式）。
+        cash_ratio: 现金比例（资产配置模式）。
+        positions: 持仓明细（资产配置模式），etf_code → 权重。
+    """
 
     trade_date: date
     portfolio_return: float
     cumulative_return: float
     drawdown: float
-    high_signal_count: int
-    mid_signal_count: int
-    low_signal_count: int
+    high_signal_count: int = 0
+    mid_signal_count: int = 0
+    low_signal_count: int = 0
+    timing_regime: str | None = None
+    total_exposure: float | None = None
+    cash_ratio: float | None = None
+    positions: dict[str, float] | None = None
 
 
 class BacktestEtfResult(BaseModel):

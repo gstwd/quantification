@@ -127,6 +127,7 @@ export interface BacktestCreateRequest {
   etf_codes: string[]
   params?: Record<string, unknown> | null
   weighting: 'equal' | 'signal_weighted'
+  backtest_mode?: 'signal' | 'allocation'
 }
 
 export interface BacktestMetrics {
@@ -146,6 +147,7 @@ export interface BacktestSummary {
   end_date: string
   status: string
   weighting: string
+  backtest_mode?: string
   metrics: BacktestMetrics | null
   created_at: string
   started_at: string | null
@@ -166,6 +168,10 @@ export interface BacktestDailyResult {
   high_signal_count: number
   mid_signal_count: number
   low_signal_count: number
+  timing_regime?: string | null
+  total_exposure?: number | null
+  cash_ratio?: number | null
+  positions?: Record<string, number> | null
 }
 
 export interface BacktestEtfResult {
@@ -283,6 +289,37 @@ export interface CorrelationResponse {
   matrix: number[][]
   etf_count: number
   trade_date: string
+}
+
+/** 资产配置决策管线响应 */
+export interface AllocationTiming {
+  regime: string
+  confidence: number
+  label: string
+  factors: Record<string, unknown>
+}
+
+export interface AllocationRanking {
+  etf_code: string
+  name_cn: string
+  category: string
+  score: number
+  momentum_rank: number
+  valuation_rank: number
+  details: Record<string, unknown>
+}
+
+export interface AllocationPlan {
+  positions: Record<string, number>
+  total_exposure: number
+  cash_ratio: number
+  reasoning: string
+}
+
+export interface AllocationResponse {
+  timing: AllocationTiming
+  rankings: AllocationRanking[]
+  plan: AllocationPlan
 }
 
 /** 统一分页响应格式 */

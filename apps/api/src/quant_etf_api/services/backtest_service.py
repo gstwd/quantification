@@ -13,12 +13,15 @@ from quant_etf_api.infra.db.models.core import (
     BacktestDailyResultModel,
     BacktestEtfResultModel,
     BacktestRunModel,
+    EtfUniverseModel,
+    IndexValuationModel,
 )
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
 from quant_etf_api.infra.db.repositories.etf_daily_bar import EtfDailyBarRepository
 from quant_etf_api.infra.db.repositories.etf_daily_share import EtfDailyShareRepository
 from quant_etf_api.infra.db.repositories.etf_universe import EtfUniverseRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
+from quant_etf_api.domain.strategies.models import AllocationPlan, AssetRanking, TimingSignal
 from quant_etf_api.plugins.base import StrategyContextData, StrategyResult
 from quant_etf_api.plugins.registry import StrategyRegistry
 from quant_etf_api.domain.common.bar_metrics import (
@@ -68,6 +71,10 @@ class BacktestService:
             if req.universe_mode == "all"
             else {"mode": "subset", "etf_codes": req.etf_codes}
         )
+        # 将 backtest_mode 存入 params 字段，避免新增数据库列
+        params = dict(req.params) if req.params else {}
+        params["_backtest_mode"] = req.backtest_mode
+
         try:
             row = BacktestRunModel(
                 backtest_id=backtest_id,
@@ -75,7 +82,7 @@ class BacktestService:
                 start_date=req.start_date,
                 end_date=req.end_date,
                 universe_filter=universe_filter,
-                params=req.params,
+                params=params,
                 weighting=req.weighting,
                 status="pending",
                 created_at=now,
@@ -93,6 +100,7 @@ class BacktestService:
             end_date=req.end_date,
             status="pending",
             weighting=req.weighting,
+            backtest_mode=req.backtest_mode,
             created_at=now,
         )
 
@@ -167,9 +175,11 @@ class BacktestService:
             return []
 
     def run_backtest(self, backtest_id: str) -> None:
-        """
-        回测执行入口，在后台线程中同步运行。
-        逐日调用策略插件，计算组合收益，写入结果表，最后更新汇总指标。
+        """回测执行入口，在后台线程中同步运行。
+
+        支持双模式：
+        - signal 模式：逐日调用 run_for_universe()，HIGH/MID/LOW 信号评分
+        - allocation 模式：逐日调用决策管线（择时 → 排名 → 分配），按仓位比例持有
         """
         try:
             row = self._backtest_repo.find_by_id(backtest_id)
@@ -203,64 +213,20 @@ class BacktestService:
             all_shares = self._load_all_shares(trading_dates, etf_codes)
             all_index_bars = self._load_all_index_bars(trading_dates)
 
-            daily_results: list[BacktestDailyResultModel] = []
-            cumulative = 1.0  # 累计净值，初始为 1
-            peak = 1.0
+            # 判断回测模式：从 params 中读取，或自动检测插件能力
+            backtest_mode = (row.params or {}).get("_backtest_mode", "signal")
+            use_allocation = backtest_mode == "allocation" and hasattr(plugin, "assess_market_timing")
 
-            for i, trade_date in enumerate(trading_dates):
-                context = self._build_historical_context(
-                    trade_date, etf_codes, all_bars, all_shares, all_index_bars
+            if use_allocation:
+                self._run_allocation_backtest(
+                    backtest_id, row, plugin, universe, etf_codes,
+                    trading_dates, all_bars, all_shares, all_index_bars,
                 )
-                results = plugin.run_for_universe(trade_date, universe, context, row.params)
-
-                # 计算 T+1 收益（末日无 T+1 数据，etf_return=None）
-                next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
-                portfolio_return, high_cnt, mid_cnt, low_cnt = self._compute_portfolio_return(
-                    results, next_date, all_bars, row.weighting
+            else:
+                self._run_signal_backtest(
+                    backtest_id, row, plugin, universe, etf_codes,
+                    trading_dates, all_bars, all_shares, all_index_bars,
                 )
-
-                cumulative *= 1 + portfolio_return / 100
-                cumulative_return_pct = (cumulative - 1) * 100
-                peak = max(peak, cumulative)
-                drawdown = (cumulative / peak - 1) * 100
-
-                daily_row = BacktestDailyResultModel(
-                    backtest_id=backtest_id,
-                    trade_date=trade_date,
-                    portfolio_return=round(portfolio_return, 4),
-                    cumulative_return=round(cumulative_return_pct, 4),
-                    drawdown=round(drawdown, 4),
-                    high_signal_count=high_cnt,
-                    mid_signal_count=mid_cnt,
-                    low_signal_count=low_cnt,
-                )
-                self._db.add(daily_row)
-                daily_results.append(daily_row)
-
-                # 写入每 ETF 结果
-                for r in results:
-                    in_portfolio = r.signal_level == "HIGH"
-                    etf_ret = None
-                    if next_date and in_portfolio:
-                        etf_ret = self._get_etf_return(r.etf_code, trade_date, next_date, all_bars)
-                    self._db.add(
-                        BacktestEtfResultModel(
-                            backtest_id=backtest_id,
-                            trade_date=trade_date,
-                            etf_code=r.etf_code,
-                            signal_score=r.signal_score,
-                            signal_level=r.signal_level,
-                            in_portfolio=in_portfolio,
-                            etf_return=etf_ret,
-                        )
-                    )
-
-            self._db.flush()
-
-            # 计算汇总指标
-            metrics = self._compute_summary_metrics(daily_results)
-
-            self._backtest_repo.mark_success(backtest_id, metrics)
 
         except Exception as exc:
             self._db.rollback()
@@ -270,7 +236,282 @@ class BacktestService:
             except Exception:
                 self._db.rollback()
 
-    # ── 内部辅助方法 ──────────────────────────────────────────────────────────
+    def _run_signal_backtest(
+        self,
+        backtest_id: str,
+        row: BacktestRunModel,
+        plugin: Any,
+        universe: list[dict[str, Any]],
+        etf_codes: list[str],
+        trading_dates: list[date],
+        all_bars: dict,
+        all_shares: dict,
+        all_index_bars: dict,
+    ) -> None:
+        """信号评分模式回测（原有逻辑）。"""
+        daily_results: list[BacktestDailyResultModel] = []
+        cumulative = 1.0
+        peak = 1.0
+
+        for i, trade_date in enumerate(trading_dates):
+            context = self._build_historical_context(
+                trade_date, etf_codes, all_bars, all_shares, all_index_bars
+            )
+            results = plugin.run_for_universe(trade_date, universe, context, row.params)
+
+            next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
+            portfolio_return, high_cnt, mid_cnt, low_cnt = self._compute_portfolio_return(
+                results, next_date, all_bars, row.weighting
+            )
+
+            cumulative *= 1 + portfolio_return / 100
+            cumulative_return_pct = (cumulative - 1) * 100
+            peak = max(peak, cumulative)
+            drawdown = (cumulative / peak - 1) * 100
+
+            daily_row = BacktestDailyResultModel(
+                backtest_id=backtest_id,
+                trade_date=trade_date,
+                portfolio_return=round(portfolio_return, 4),
+                cumulative_return=round(cumulative_return_pct, 4),
+                drawdown=round(drawdown, 4),
+                high_signal_count=high_cnt,
+                mid_signal_count=mid_cnt,
+                low_signal_count=low_cnt,
+            )
+            self._db.add(daily_row)
+            daily_results.append(daily_row)
+
+            for r in results:
+                in_portfolio = r.signal_level == "HIGH"
+                etf_ret = None
+                if next_date and in_portfolio:
+                    etf_ret = self._get_etf_return(r.etf_code, trade_date, next_date, all_bars)
+                self._db.add(
+                    BacktestEtfResultModel(
+                        backtest_id=backtest_id,
+                        trade_date=trade_date,
+                        etf_code=r.etf_code,
+                        signal_score=r.signal_score,
+                        signal_level=r.signal_level,
+                        in_portfolio=in_portfolio,
+                        etf_return=etf_ret,
+                    )
+                )
+
+        self._db.flush()
+        metrics = self._compute_summary_metrics(daily_results)
+        self._backtest_repo.mark_success(backtest_id, metrics)
+
+    def _run_allocation_backtest(
+        self,
+        backtest_id: str,
+        row: BacktestRunModel,
+        plugin: Any,
+        universe: list[dict[str, Any]],
+        etf_codes: list[str],
+        trading_dates: list[date],
+        all_bars: dict,
+        all_shares: dict,
+        all_index_bars: dict,
+    ) -> None:
+        """资产配置模式回测：择时 → 资产轮动 → 仓位分配。"""
+        # 加载指数估值数据和 ETF-指数映射
+        all_valuation = self._load_all_valuation(trading_dates)
+        etf_index_map = self._load_etf_index_map(etf_codes)
+
+        daily_results: list[BacktestDailyResultModel] = []
+        cumulative = 1.0
+        peak = 1.0
+
+        for i, trade_date in enumerate(trading_dates):
+            # 构建增强版上下文（含估值和映射数据）
+            context = self._build_allocation_context(
+                trade_date, etf_codes, all_bars, all_shares, all_index_bars,
+                all_valuation, etf_index_map,
+            )
+
+            # 运行决策管线
+            timing: TimingSignal = plugin.assess_market_timing(trade_date, context, row.params)
+            rankings: list[AssetRanking] = plugin.rank_assets(trade_date, universe, context, row.params)
+            plan: AllocationPlan = plugin.allocate_positions(timing, rankings, row.params)
+
+            # 计算 T+1 收益
+            next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
+            portfolio_return = self._compute_allocation_return(plan, trade_date, next_date, all_bars)
+
+            cumulative *= 1 + portfolio_return / 100
+            cumulative_return_pct = (cumulative - 1) * 100
+            peak = max(peak, cumulative)
+            drawdown = (cumulative / peak - 1) * 100
+
+            # 将分配信息存入 high/mid/low 字段（兼容现有 schema）
+            held_count = len(plan.positions)
+            regime_map = {"offensive": 0, "neutral": 1, "defensive": 2}
+            daily_row = BacktestDailyResultModel(
+                backtest_id=backtest_id,
+                trade_date=trade_date,
+                portfolio_return=round(portfolio_return, 4),
+                cumulative_return=round(cumulative_return_pct, 4),
+                drawdown=round(drawdown, 4),
+                high_signal_count=held_count,
+                mid_signal_count=regime_map.get(timing.regime, 1),
+                low_signal_count=0,
+            )
+            self._db.add(daily_row)
+            daily_results.append(daily_row)
+
+            # 写入每 ETF 结果
+            for item in universe:
+                code = item["etf_code"]
+                target_weight = plan.positions.get(code, 0.0)
+                in_portfolio = target_weight > 0
+                etf_ret = None
+                if next_date and in_portfolio:
+                    etf_ret = self._get_etf_return(code, trade_date, next_date, all_bars)
+                self._db.add(
+                    BacktestEtfResultModel(
+                        backtest_id=backtest_id,
+                        trade_date=trade_date,
+                        etf_code=code,
+                        signal_score=round(target_weight * 100, 2),
+                        signal_level=timing.regime,
+                        in_portfolio=in_portfolio,
+                        etf_return=etf_ret,
+                    )
+                )
+
+        self._db.flush()
+        metrics = self._compute_summary_metrics(daily_results)
+        self._backtest_repo.mark_success(backtest_id, metrics)
+
+    # ── 分配模式辅助方法 ────────────────────────────────────────────────────
+
+    def _load_all_valuation(
+        self, trading_dates: list[date]
+    ) -> dict[tuple[str, date], Any]:
+        """批量加载回测区间的指数估值数据，返回 (index_code, trade_date) → row 映射。"""
+        if not trading_dates:
+            return {}
+        rows = (
+            self._db.query(IndexValuationModel)
+            .filter(
+                and_(
+                    IndexValuationModel.trade_date >= trading_dates[0],
+                    IndexValuationModel.trade_date <= trading_dates[-1],
+                )
+            )
+            .all()
+        )
+        return {(r.index_code, r.trade_date): r for r in rows}
+
+    def _load_etf_index_map(self, etf_codes: list[str]) -> dict[str, str]:
+        """构建 ETF 代码到跟踪指数代码的映射。"""
+        rows = (
+            self._db.query(EtfUniverseModel.etf_code, EtfUniverseModel.tracking_index_code)
+            .filter(EtfUniverseModel.etf_code.in_(etf_codes))
+            .all()
+        )
+        return {r[0]: r[1] for r in rows if r[1]}
+
+    def _build_allocation_context(
+        self,
+        trade_date: date,
+        etf_codes: list[str],
+        all_bars: dict,
+        all_shares: dict,
+        all_index_bars: dict,
+        all_valuation: dict,
+        etf_index_map: dict[str, str],
+    ) -> StrategyContextData:
+        """为资产配置模式构建增强版上下文，含估值和映射数据。"""
+        # 基础上下文
+        context = self._build_historical_context(
+            trade_date, etf_codes, all_bars, all_shares, all_index_bars
+        )
+
+        # 添加指数估值数据
+        index_valuation: dict[str, dict[str, Any]] = {}
+        for idx_code in set(etf_index_map.values()):
+            val_row = all_valuation.get((idx_code, trade_date))
+            if val_row:
+                index_valuation[idx_code] = {
+                    "pe_percentile": val_row.pe_percentile,
+                    "pb_percentile": val_row.pb_percentile,
+                    "pe": val_row.pe,
+                    "pb": val_row.pb,
+                }
+        context.extra["index_valuation"] = index_valuation
+        context.extra["etf_index_map"] = etf_index_map
+
+        # 补充 return_20d 和 return_5d 到 etf_bars
+        etf_bars = context.extra.get("etf_bars", {})
+        for code in etf_codes:
+            if code not in etf_bars:
+                etf_bars[code] = {}
+            bars = etf_bars[code]
+            # 计算 20 日收益
+            if "return_20d" not in bars:
+                bars["return_20d"] = self._calc_nd_return_from_bars(code, trade_date, all_bars, 20)
+            # 计算 5 日收益
+            if "return_5d" not in bars:
+                bars["return_5d"] = self._calc_nd_return_from_bars(code, trade_date, all_bars, 5)
+            # 计算 MA60
+            if "ma60" not in bars:
+                bars["ma60"] = self._calc_ma_from_bars(code, trade_date, all_bars, 60)
+        context.extra["etf_bars"] = etf_bars
+
+        return context
+
+    def _calc_nd_return_from_bars(
+        self, etf_code: str, trade_date: date, all_bars: dict, n: int
+    ) -> float | None:
+        """从预加载数据中计算 N 日收益率。"""
+        today_bar = all_bars.get((etf_code, trade_date))
+        if today_bar is None or today_bar.close_price is None:
+            return None
+        past_closes = sorted(
+            [(dt, v.close_price) for (code, dt), v in all_bars.items()
+             if code == etf_code and dt < trade_date and v.close_price is not None],
+            key=lambda x: x[0],
+        )
+        if len(past_closes) < n:
+            return None
+        base = past_closes[-n][1]
+        if base <= 0:
+            return None
+        return round((today_bar.close_price / base - 1) * 100, 4)
+
+    def _calc_ma_from_bars(
+        self, etf_code: str, trade_date: date, all_bars: dict, n: int
+    ) -> float | None:
+        """从预加载数据中计算 N 日均线。"""
+        closes = sorted(
+            [v.close_price for (code, dt), v in all_bars.items()
+             if code == etf_code and dt <= trade_date and v.close_price is not None],
+        )
+        if len(closes) < n:
+            return None
+        return round(sum(closes[-n:]) / n, 4)
+
+    def _compute_allocation_return(
+        self,
+        plan: AllocationPlan,
+        trade_date: date,
+        next_date: date | None,
+        all_bars: dict,
+    ) -> float:
+        """按仓位分配方案计算组合 T+1 收益。"""
+        if next_date is None or not plan.positions:
+            return 0.0
+        total_return = 0.0
+        for code, weight in plan.positions.items():
+            ret = self._get_etf_return(code, trade_date, next_date, all_bars)
+            if ret is not None:
+                total_return += weight * ret
+        return round(total_return, 4)
+
+    # ── 通用辅助方法 ────────────────────────────────────────────────────────
 
     def _resolve_universe(self, universe_filter: dict[str, Any]) -> list[dict[str, Any]]:
         """根据 universe_filter 查询回测标的列表。"""
@@ -496,6 +737,7 @@ class BacktestService:
                 metrics = BacktestMetrics(**row.metrics)
             except Exception:
                 pass
+        backtest_mode = (row.params or {}).get("_backtest_mode", "signal")
         return BacktestSummary(
             backtest_id=row.backtest_id,
             strategy_id=row.strategy_id,
@@ -503,6 +745,7 @@ class BacktestService:
             end_date=row.end_date,
             status=row.status,
             weighting=row.weighting,
+            backtest_mode=backtest_mode,
             metrics=metrics,
             created_at=row.created_at,
             started_at=row.started_at,

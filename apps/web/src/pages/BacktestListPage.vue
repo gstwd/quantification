@@ -11,8 +11,8 @@
         <thead>
           <tr>
             <th>策略</th>
+            <th>模式</th>
             <th>日期范围</th>
-            <th>加权</th>
             <th>状态</th>
             <th>累计收益</th>
             <th>最大回撤</th>
@@ -28,8 +28,8 @@
             @click="$router.push(`/backtests/${item.backtest_id}`)"
           >
             <td class="mono">{{ item.strategy_id }}</td>
+            <td><span class="badge">{{ item.backtest_mode === 'allocation' ? '资产配置' : '信号评分' }}</span></td>
             <td class="text-muted">{{ item.start_date }} ~ {{ item.end_date }}</td>
-            <td><span class="badge">{{ item.weighting === 'equal' ? '等权' : '信号加权' }}</span></td>
             <td><span class="status-badge" :class="'status-' + item.status">{{ statusLabel(item.status) }}</span></td>
             <td :class="returnClass(item.metrics?.cumulative_return_pct)">
               {{ item.metrics ? formatPct(item.metrics.cumulative_return_pct) : '—' }}

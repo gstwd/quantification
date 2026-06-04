@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from quant_etf_api.plugins.base import StrategyPlugin
+from quant_etf_api.plugins.builtins.etf_allocation.plugin import EtfAllocationPlugin
 from quant_etf_api.plugins.builtins.share_flow_monitor.plugin import ShareFlowMonitorPlugin
 from quant_etf_api.plugins.builtins.three_factor.plugin import ThreeFactorGuardPlugin
 from quant_etf_api.plugins.builtins.volume_breakout.plugin import VolumeBreakoutDailyPlugin
@@ -20,7 +21,20 @@ class StrategyRegistry:
         return list(self._plugins.values())
 
     def get(self, strategy_id: str) -> StrategyPlugin | None:
+        """按 strategy_id 查找插件。"""
         return self._plugins.get(strategy_id)
+
+    def has_decision_pipeline(self, strategy_id: str) -> bool:
+        """检查指定插件是否实现了决策管线方法（assess_market_timing）。
+
+        Args:
+            strategy_id: 策略标识。
+
+        Returns:
+            True 表示插件支持决策管线模式。
+        """
+        plugin = self.get(strategy_id)
+        return plugin is not None and hasattr(plugin, "assess_market_timing")
 
     def as_summaries(self) -> list[dict[str, Any]]:
         # 将所有插件元数据序列化为字典列表，供 API 层返回给前端
@@ -44,8 +58,9 @@ class StrategyRegistry:
 
 
 def build_default_registry() -> StrategyRegistry:
-    # 注册三个内置策略插件，应用启动时调用一次
+    """构建包含所有内置策略插件的默认注册表，进程启动时调用一次。"""
     registry = StrategyRegistry()
+    registry.register(EtfAllocationPlugin())
     registry.register(ThreeFactorGuardPlugin())
     registry.register(ShareFlowMonitorPlugin())
     registry.register(VolumeBreakoutDailyPlugin())

@@ -45,6 +45,83 @@
       </div>
     </div>
 
+    <!-- 资产配置决策 -->
+    <div class="section">
+      <div class="section-header">
+        <h2 class="section-title">资产配置决策</h2>
+        <span class="section-badge">etf_allocation</span>
+        <button class="btn btn-sm" :disabled="allocLoading" @click="loadAllocation">
+          {{ allocLoading ? '计算中...' : '刷新' }}
+        </button>
+      </div>
+      <div v-if="allocLoading" class="loading">正在计算资产配置...</div>
+      <div v-else-if="allocError" class="error-tip">{{ allocError }}</div>
+      <div v-else-if="allocation" class="alloc-content">
+        <!-- 择时信号 -->
+        <div class="alloc-timing">
+          <div class="timing-badge" :class="'regime-' + allocation.timing.regime">
+            {{ allocation.timing.label }}
+          </div>
+          <div class="timing-detail">
+            <span class="timing-score">确信度 {{ allocation.timing.confidence.toFixed(0) }}%</span>
+            <span class="timing-factors">
+              估值 {{ (allocation.timing.factors.valuation_score as number)?.toFixed(0) ?? '—' }} /
+              趋势 {{ (allocation.timing.factors.trend_score as number)?.toFixed(0) ?? '—' }} /
+              量能 {{ (allocation.timing.factors.volume_score as number)?.toFixed(0) ?? '—' }}
+            </span>
+          </div>
+        </div>
+        <!-- 仓位分配 -->
+        <div class="alloc-positions">
+          <div class="alloc-summary">
+            <span>总仓位 <strong>{{ (allocation.plan.total_exposure * 100).toFixed(0) }}%</strong></span>
+            <span>现金 <strong>{{ (allocation.plan.cash_ratio * 100).toFixed(0) }}%</strong></span>
+          </div>
+          <div v-if="Object.keys(allocation.plan.positions).length > 0" class="position-bars">
+            <div v-for="(weight, code) in allocation.plan.positions" :key="code" class="position-bar-row">
+              <span class="position-code">{{ code }}</span>
+              <div class="position-bar-bg">
+                <div class="position-bar" :style="{ width: (weight * 100 / 30) + '%' }"></div>
+              </div>
+              <span class="position-weight">{{ (weight * 100).toFixed(1) }}%</span>
+            </div>
+          </div>
+          <div v-else class="empty-small">暂无持仓建议</div>
+          <div class="alloc-reasoning">{{ allocation.plan.reasoning }}</div>
+        </div>
+        <!-- 资产排名 -->
+        <div v-if="allocation.rankings.length > 0" class="alloc-rankings">
+          <h3 class="sub-title">板块排名</h3>
+          <table class="data-table compact">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>ETF</th>
+                <th>板块</th>
+                <th>综合分</th>
+                <th>动量</th>
+                <th>估值</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(r, idx) in allocation.rankings.slice(0, 10)" :key="r.etf_code">
+                <td class="mono">{{ idx + 1 }}</td>
+                <td>
+                  <RouterLink :to="`/etfs/${r.etf_code}`" class="code-link">{{ r.etf_code }}</RouterLink>
+                  <span class="name-small">{{ r.name_cn }}</span>
+                </td>
+                <td><span class="category-tag">{{ r.category }}</span></td>
+                <td class="mono">{{ r.score.toFixed(1) }}</td>
+                <td class="mono text-muted">{{ r.momentum_rank || '—' }}</td>
+                <td class="mono text-muted">{{ r.valuation_rank || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div v-else class="empty">暂无资产配置数据，点击"刷新"计算</div>
+    </div>
+
     <!-- 最新三因子信号 -->
     <div class="section">
       <div class="section-header">
@@ -197,7 +274,8 @@
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import type { DataQualityResponse, SystemStatusResponse } from '../types/api'
+import type { AllocationResponse, DataQualityResponse, SystemStatusResponse } from '../types/api'
+import { runAllocation } from '../api/strategies'
 import { fetchDataQuality, fetchSystemStatus, triggerColdStart, triggerDailyIngest } from '../api/runs'
 import { useSignalStore } from '../stores/signals'
 import { useStrategyStore } from '../stores/strategies'
@@ -209,6 +287,11 @@ const qualityLoading = ref(false)
 const error = ref<string | null>(null)
 const triggering = ref(false)
 const triggeringColdStart = ref(false)
+
+/** 资产配置决策结果 */
+const allocation = ref<AllocationResponse | null>(null)
+const allocLoading = ref(false)
+const allocError = ref<string | null>(null)
 
 const signalStore = useSignalStore()
 const strategyStore = useStrategyStore()
@@ -317,12 +400,26 @@ async function triggerIngest() {
   }
 }
 
+/** 加载资产配置决策结果 */
+async function loadAllocation() {
+  allocLoading.value = true
+  allocError.value = null
+  try {
+    allocation.value = await runAllocation('etf_allocation')
+  } catch (e) {
+    allocError.value = e instanceof Error ? e.message : '加载资产配置失败'
+  } finally {
+    allocLoading.value = false
+  }
+}
+
 onMounted(() =>
   Promise.all([
     loadStatus(),
     loadQuality(),
     signalStore.loadLatest('three_factor_guard'),
     strategyStore.loadAll(),
+    loadAllocation(),
   ]),
 )
 </script>
@@ -526,6 +623,45 @@ onMounted(() =>
 /* === 通用工具类 === */
 .text-muted { color: var(--text-muted); }
 .mono { font-family: monospace; font-size: 12px; }
+
+/* === 资产配置面板 === */
+.alloc-content { padding: 16px 20px; display: flex; flex-direction: column; gap: 20px; }
+.alloc-timing { display: flex; align-items: center; gap: 16px; }
+.timing-badge {
+  font-size: 20px; font-weight: 700;
+  padding: 8px 24px; border-radius: var(--radius);
+  text-align: center; min-width: 80px;
+}
+.regime-offensive { background: rgba(34,197,94,0.15); color: var(--success); }
+.regime-neutral { background: rgba(245,158,11,0.15); color: #f59e0b; }
+.regime-defensive { background: rgba(239,68,68,0.15); color: var(--danger); }
+.timing-detail { display: flex; flex-direction: column; gap: 4px; }
+.timing-score { font-size: 14px; font-weight: 600; }
+.timing-factors { font-size: 12px; color: var(--text-muted); }
+
+.alloc-positions { display: flex; flex-direction: column; gap: 10px; }
+.alloc-summary { display: flex; gap: 20px; font-size: 14px; }
+.alloc-reasoning { font-size: 12px; color: var(--text-muted); line-height: 1.6; }
+.empty-small { padding: 12px; color: var(--text-muted); font-size: 13px; text-align: center; }
+
+.position-bars { display: flex; flex-direction: column; gap: 6px; }
+.position-bar-row { display: flex; align-items: center; gap: 10px; }
+.position-code { font-family: monospace; font-size: 12px; min-width: 60px; }
+.position-bar-bg { flex: 1; height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; max-width: 200px; }
+.position-bar { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s; }
+.position-weight { font-size: 12px; font-weight: 600; min-width: 40px; }
+
+.alloc-rankings { margin-top: 4px; }
+.sub-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.compact td, .compact th { padding: 8px 12px !important; font-size: 12px; }
+.name-small { font-size: 11px; color: var(--text-muted); margin-left: 6px; }
+.category-tag {
+  font-size: 10px; background: var(--surface-2);
+  color: var(--text-muted); padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.btn-sm { padding: 4px 12px; font-size: 12px; }
 
 /* === 响应式 === */
 @media (max-width: 640px) {
