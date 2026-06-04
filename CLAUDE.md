@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Quant ETF Research Platform — a quantitative research platform for A-share ETFs (daily frequency only, no individual stocks, no trading execution). Full-stack: FastAPI backend + PostgreSQL + Vue 3 frontend.
+Quant ETF Asset Allocation System — an asset allocation decision system for A-share ETFs (daily frequency only, no individual stocks, no trading execution). Full-stack: FastAPI backend + PostgreSQL + Vue 3 frontend. Supports dual-mode backtesting: signal scoring mode and asset allocation mode (timing → rotation → position sizing).
 
 ## Commands
 
@@ -19,7 +19,7 @@ uvicorn quant_etf_api.main:app --reload --port 8000  # dev server
 ```
 
 ```bash
-pytest                           # run all tests (97 unit tests: services, factors, plugins, domain)
+pytest                           # run all tests (123 unit tests: services, factors, plugins, domain, allocation)
 pytest tests/path/to/test.py     # run single test file
 ruff check .                     # lint
 ruff format .                    # format
@@ -98,7 +98,7 @@ HTTP → api/routers/ → services/ → infra/ → PostgreSQL
   - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, etc.), `values.py` (DateRange)
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult dataclasses), `scoring.py` (signal scoring rules: volume_probability, direction_probability, share_probability, composite_probability, signal_level)
 - **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `builtins/` (8 built-in computers: volume, momentum, volatility, flow, valuation). Depends on `domain/common/` for calculations.
-- **`plugins/`** — Strategy plugin layer: `base.py` (StrategyPlugin Protocol, re-exports domain models), `registry.py` (StrategyRegistry), `builtins/` (3 strategy plugins). Depends on `domain/strategies/` for scoring rules. Each plugin implements `StrategyPlugin` Protocol (structural subtyping — no inheritance required).
+- **`plugins/`** — Strategy plugin layer: `base.py` (StrategyPlugin Protocol, re-exports domain models), `registry.py` (StrategyRegistry), `builtins/` (4 strategy plugins). Depends on `domain/strategies/` for scoring rules. Each plugin implements `StrategyPlugin` Protocol (structural subtyping — no inheritance required). The Protocol includes 3 optional decision pipeline methods (`assess_market_timing`, `rank_assets`, `allocate_positions`) for asset allocation mode.
 - **`config/`** — Pydantic settings loaded from `.env`
 
 ### Database schema (18 tables, migration 0003)
@@ -117,11 +117,13 @@ Plugins implement the `StrategyPlugin` Protocol (structural subtyping — no inh
 
 - **Metadata attributes:** `strategy_id`, `display_name`, `version`, `frequency`, `asset_scope`, `description`
 - **Methods:** `parameter_schema()`, `required_inputs()`, `factor_definitions()`, `signal_definition()`, `prepare_context()`, `run_for_universe()`, `explain_result()`
+- **Optional decision pipeline methods** (checked via `hasattr`): `assess_market_timing()`, `rank_assets()`, `allocate_positions()`
 
 Built-in plugins in `plugins/builtins/`:
 1. **`three_factor_guard`** — Volume probability (50%) + direction probability (20%) + share probability (30%); signal levels HIGH ≥70, MID 50–69, LOW <50
 2. **`share_flow_monitor`** — Single-factor share flow validation
 3. **`volume_breakout_daily`** — Volume breakout baseline
+4. **`etf_allocation`** — Asset allocation strategy with full decision pipeline: timing assessment (valuation 40% + trend 40% + volume 20%) → asset rotation ranking (momentum 60% + valuation 40%) → position sizing (regime-based exposure: offensive 80%, neutral 50%, defensive 20%)
 
 To add a strategy: create a plugin file in `plugins/builtins/`, implement the Protocol, register in `plugins/registry.py`.
 
@@ -136,6 +138,10 @@ To add a strategy: create a plugin file in `plugins/builtins/`, implement the Pr
 ## Current State
 
 Services fully wired to PostgreSQL. 18 tables across 6 migrations (0001→0002→0002_backtest→0003_index_macro→0004→0005_factor_layer). Each data type has exactly **one** source: ETF K-line→Tencent, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh.
+
+**Dual-mode backtesting**: `BacktestService` supports signal scoring mode (HIGH/MID/LOW → equal/signal-weighted portfolio) and asset allocation mode (timing → rotation → position sizing). Backtest mode is stored in `backtest_run.params` JSON field.
+
+**Asset allocation API**: `GET /strategies/{strategy_id}/allocation` runs the full decision pipeline and returns timing signal, asset rankings, and allocation plan.
 
 ## Gotchas
 
@@ -158,6 +164,8 @@ Services fully wired to PostgreSQL. 18 tables across 6 migrations (0001→0002�
 - **`factor_definition.owner_plugin` is nullable** (migration 0005): independent built-in factors use `owner_plugin=NULL, strategy_id=NULL`. Plugins still set `owner_plugin` to their `strategy_id`.
 - **`from __future__ import annotations` + `dict[str, Any]` requires explicit `from typing import Any`**: When a file has `from __future__ import annotations`, ruff (F821) treats `Any` as undefined even though it's only used in stringified type hints. Always add `from typing import Any` alongside the future import when using `dict[str, Any]` or similar generic types.
 - **Ruff on Windows**: Installed at `.venv/Scripts/ruff.exe` (inside the project venv, not globally). Use `.venv/Scripts/ruff.exe check .` from `apps/api`.
+- **Backtest mode storage**: `backtest_mode` ("signal" | "allocation") is stored in `backtest_run.params` JSON field, not a separate column. Access via `params.get("backtest_mode", "signal")`.
+- **Optional plugin methods**: Decision pipeline methods (`assess_market_timing`, `rank_assets`, `allocate_positions`) are optional on `StrategyPlugin`. Use `hasattr(plugin, "assess_market_timing")` to check support. `StrategyRegistry.has_decision_pipeline()` wraps this check.
 
 ## Coding Standards
 

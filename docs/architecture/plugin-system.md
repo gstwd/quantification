@@ -6,8 +6,9 @@
 
 ```
 ┌─────────────┐
-│   Plugin     │  编排层：对因子做标准化/加权组合，产出信号
-│  (策略)      │  "Z-Score 标准化 → 量能50% + 方向20% + 份额30% → 三因子策略"
+│   Plugin     │  编排层：对因子做标准化/加权组合，产出信号或决策
+│  (策略)      │  "信号模式: Z-Score → 量能50% + 方向20% + 份额30% → HIGH/MID/LOW"
+│              │  "配置模式: 择时 → 轮动排名 → 仓位分配 → 调仓建议"
 └──────┬───────┘
        │ 调用
 ┌──────▼───────┐
@@ -41,7 +42,7 @@
 
 `domain/strategies/` 包含：
 
-- **`models.py`** — `StrategyContextData`（策略执行上下文）和 `StrategyResult`（单 ETF 策略结果）数据类
+- **`models.py`** — `StrategyContextData`（策略执行上下文）、`StrategyResult`（单 ETF 策略结果）、`TimingSignal`（择时信号）、`AssetRanking`（资产排名项）、`AllocationPlan`（仓位分配方案）数据类
 - **`scoring.py`** — 信号评分规则：`volume_probability()`、`direction_probability()`、`share_probability()`、`composite_probability()`、`signal_level()`
 
 `domain/common/` 包含：
@@ -88,13 +89,14 @@
 `plugins/` 包含：
 
 - **`base.py`** — StrategyPlugin Protocol（re-exports domain models）
-- **`registry.py`** — StrategyRegistry 注册表
-- **`builtins/`** — 3 个内置策略插件
+- **`registry.py`** — StrategyRegistry 注册表，包含 `has_decision_pipeline()` 方法
+- **`builtins/`** — 4 个内置策略插件
 
 Plugins implement the `StrategyPlugin` Protocol (structural subtyping — no inheritance required). Required interface:
 
 - **Metadata attributes:** `strategy_id`, `display_name`, `version`, `frequency`, `asset_scope`, `description`
 - **Methods:** `parameter_schema()`, `required_inputs()`, `factor_definitions()`, `signal_definition()`, `prepare_context()`, `run_for_universe()`, `explain_result()`
+- **Optional decision pipeline methods** (checked via `hasattr`): `assess_market_timing()`, `rank_assets()`, `allocate_positions()`
 
 Built-in plugins:
 
@@ -103,5 +105,22 @@ Built-in plugins:
 | `three_factor_guard` | 三因子综合守卫 | volume_probability, direction_probability, share_probability, composite_probability, signal_level |
 | `share_flow_monitor` | 份额流向监控 | share_probability, signal_level |
 | `volume_breakout_daily` | 放量突破基线 | volume_probability, signal_level |
+| `etf_allocation` | 资产配置策略（择时→轮动→仓位） | TimingSignal, AssetRanking, AllocationPlan |
+
+### 决策管线（Decision Pipeline）
+
+`etf_allocation` 插件实现了完整的资产配置决策管线：
+
+```
+assess_market_timing()  →  TimingSignal (regime: 进攻/防守/观望)
+        ↓
+rank_assets()           →  list[AssetRanking] (按综合得分排序)
+        ↓
+allocate_positions()    →  AllocationPlan (目标仓位比例)
+```
+
+- **择时评分**：估值(40%) + 趋势(40%) + 量能(20%) → 综合分 ≥65 进攻，≤35 防守，否则观望
+- **轮动排名**：动量(60%) + 估值吸引力(40%) → 板块选择
+- **仓位分配**：进攻 80%、中性 50%、防守 20% 总仓位，单只上限 30%，最多持 5 只
 
 To add a strategy: create a plugin file in `plugins/builtins/`, implement the Protocol, register in `plugins/registry.py`.

@@ -1,15 +1,16 @@
-# Quant ETF Research Platform Overview
+# Quant ETF Asset Allocation System Overview
 
-This project is an A-share ETF daily-frequency research platform.
+This project is an A-share ETF asset allocation decision system.
 
 ## Scope
 - A-share ETFs only
 - Daily data only
-- Research platform only
+- Asset allocation decision system (timing + rotation + position sizing)
+- Dual-mode backtesting (signal scoring + asset allocation)
 - PostgreSQL persistence
 - FastAPI backend
 - Vue 3 frontend
-- Strategy plugins for research signals
+- Strategy plugins with optional decision pipeline
 
 ## Layout
 - `apps/api/`: backend API and plugin runtime
@@ -19,6 +20,7 @@ This project is an A-share ETF daily-frequency research platform.
 - `etf-three-factor-org/`: legacy reference implementation
 
 ## Current built-in plugins
-- `three_factor_guard`
-- `share_flow_monitor`
-- `volume_breakout_daily`
+- `three_factor_guard` — signal scoring mode
+- `share_flow_monitor` — signal scoring mode
+- `volume_breakout_daily` — signal scoring mode
+- `etf_allocation` — asset allocation mode (timing → rotation → position sizing)

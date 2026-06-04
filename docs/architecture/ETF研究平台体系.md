@@ -1,15 +1,24 @@
-# ETF研究平台架构设计
+# ETF资产配置决策系统架构设计
 
 ## 一、平台定位
 
-本平台定位为 **ETF研究与策略分析平台**，核心目标：
+本平台定位为 **ETF资产配置决策系统**，核心目标：
 
 - 对A股ETF及其底层指数进行系统化研究（仅日频数据）
+- 提供资产配置决策支持：择时判断 → 资产轮动 → 仓位管理
 - 构建可解释、可回测、可迭代的策略研究体系
-- 验证投资逻辑和因子有效性
-- 提供数据分析、因子分析、策略回测与风险评估能力
+- 支持双模式回测：信号评分模式 + 资产配置模式
 - **不涉及实盘交易**，仅用于研究和决策辅助
 - **不涉及个股**，研究对象限定为ETF和指数
+
+### 核心决策流程
+
+```
+宏观指标 → 择时信号(进攻/防守/观望)
+    + 板块指标 → 资产轮动排名(买什么)
+    + 风控指标 → 仓位分配(买多少)
+    = 最终调仓建议
+```
 
 ## 二、核心研究对象
 
@@ -50,14 +59,14 @@
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                   可视化层（Vue 3 + ECharts）              │
+│                   Dashboard + 资产配置面板                 │
 ├─────────────────────────────────────────────────────────┤
 │                   API层（FastAPI REST）                   │
 ├──────────┬──────────┬──────────┬──────────┬─────────────┤
-│  回测层   │  风险层   │  策略层   │  因子层   │  组合层     │
-│  ✅ 基础  │  📋 规划  │  ✅ 已实现 │  ✅ 已实现 │  📋 规划   │
+│  回测层   │  风险层   │  策略层   │  因子层   │  数据层     │
+│  ✅ 双模式 │  📋 规划  │  ✅ 决策管线│  ✅ 已实现 │  ✅ 已实现  │
 ├──────────┴──────────┴──────────┴──────────┴─────────────┤
-│                   数据层（PostgreSQL + 数据源客户端）       │
-│                   ✅ 已实现                               │
+│                   PostgreSQL + 数据源客户端                │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -83,12 +92,12 @@ HTTP请求 → api/routers/ → services/ → infra/ → PostgreSQL
 ```
 
 - **`api/routers/`** — 9个路由组：health、system、etfs、market_data、strategies、signals、factors、runs、backtests
-- **`services/`** — 业务逻辑层：IngestService（数据采集）、StrategyExecutionService（策略执行）、BacktestService（回测）、SignalService（信号查询）等
+- **`services/`** — 业务逻辑层：IngestService（数据采集）、StrategyService（策略执行 + 资产配置决策）、BacktestService（双模式回测）、SignalService（信号查询）等
 - **`infra/db/`** — ORM模型（18张表）与数据访问
 - **`infra/clients/`** — 4个外部数据源客户端，统一继承 `base.py`
-- **`domain/`** — 纯领域逻辑（无外部依赖）：`common/`（bar_metrics、enums、values）、`strategies/`（models、scoring）
-- **`factors/`** — 单因子计算层：FactorComputer Protocol + 6个内置因子计算器，依赖 domain
-- **`plugins/`** — 策略插件系统：StrategyPlugin Protocol + 3个内置策略，依赖 domain 的评分规则
+- **`domain/`** — 纯领域逻辑（无外部依赖）：`common/`（bar_metrics、enums、values）、`strategies/`（models、scoring、TimingSignal、AssetRanking、AllocationPlan）
+- **`factors/`** — 单因子计算层：FactorComputer Protocol + 8个内置因子计算器，依赖 domain
+- **`plugins/`** — 策略插件系统：StrategyPlugin Protocol + 4个内置策略（含决策管线），依赖 domain 的评分规则
 
 ## 四、数据层（Data Layer）✅ 已实现
 
@@ -199,7 +208,7 @@ class StrategyPlugin(Protocol):
     asset_scope: str
     description: str
 
-    # 接口方法
+    # 必需接口方法
     def parameter_schema(self) -> dict: ...
     def required_inputs(self) -> list[str]: ...
     def factor_definitions(self) -> list[dict]: ...
@@ -207,6 +216,11 @@ class StrategyPlugin(Protocol):
     def prepare_context(self, trade_date, params) -> StrategyContextData: ...
     def run_for_universe(self, trade_date, universe, context, params) -> list[StrategyResult]: ...
     def explain_result(self, result) -> dict: ...
+
+    # 可选决策管线方法（通过 hasattr 检查）
+    def assess_market_timing(self, trade_date, context, params) -> TimingSignal | None: ...
+    def rank_assets(self, trade_date, universe, context, params) -> list[AssetRanking] | None: ...
+    def allocate_positions(self, timing, rankings, params) -> AllocationPlan | None: ...
 ```
 
 ### 信号输出
@@ -221,26 +235,47 @@ class StrategyPlugin(Protocol):
 
 ### 已实现的策略插件
 
-| 插件 | 策略逻辑 | 因子权重 |
-|------|---------|---------|
-| `three_factor_guard` | 三因子综合守卫 | 成交量50% + 方向20% + 份额30% |
-| `share_flow_monitor` | 份额流向监控 | 单因子 |
-| `volume_breakout_daily` | 放量突破基线 | 量比 + 日收益率 |
+| 插件 | 策略逻辑 | 因子权重 | 模式 |
+|------|---------|---------|------|
+| `three_factor_guard` | 三因子综合守卫 | 成交量50% + 方向20% + 份额30% | 信号评分 |
+| `share_flow_monitor` | 份额流向监控 | 单因子 | 信号评分 |
+| `volume_breakout_daily` | 放量突破基线 | 量比 + 日收益率 | 信号评分 |
+| `etf_allocation` | 资产配置策略 | 择时→轮动→仓位分配 | 资产配置 |
+
+### 决策管线（Decision Pipeline）
+
+`etf_allocation` 插件实现完整的资产配置决策管线：
+
+```
+assess_market_timing()  →  TimingSignal (regime: 进攻/防守/观望)
+        ↓
+rank_assets()           →  list[AssetRanking] (按综合得分排序)
+        ↓
+allocate_positions()    →  AllocationPlan (目标仓位比例)
+```
+
+**择时评分**：估值(40%) + 趋势(40%) + 量能(20%) → 综合分 ≥65 进攻，≤35 防守，否则观望
+
+**轮动排名**：动量(60%) + 估值吸引力(40%) → 板块选择
+
+**仓位分配**：进攻 80%、中性 50%、防守 20% 总仓位，单只上限 30%，最多持 5 只
 
 ### 策略层演进方向
 
 | 能力 | 当前 | 目标 |
 |------|-----|------|
-| 策略类型 | 信号评分型 | 增加趋势型（均线交叉）、估值型（PE分位择时） |
+| 策略类型 | 信号评分型 + 资产配置型 | 增加更多配置策略变体 |
 | 参数管理 | `parameter_schema()` 定义 | 参数网格搜索、参数敏感性分析 |
 | 多策略协同 | 独立运行 | 策略信号融合、投票机制 |
 | 调仓逻辑 | 仅日频 | 增加周/月频调仓支持 |
 
-## 七、回测层（Backtest Layer）✅ 基础实现
+## 七、回测层（Backtest Layer）✅ 双模式实现
 
 ### 当前回测能力
 
-回测引擎基于历史信号驱动，流程：
+回测引擎支持双模式，通过 `backtest_mode` 参数选择：
+
+**模式A：信号评分模式（signal）**
 
 ```
 选择策略 + 时间范围 + ETF范围
@@ -250,22 +285,35 @@ class StrategyPlugin(Protocol):
     → 汇总组合指标
 ```
 
-**组合构建方式：**
+组合构建方式：
 - `equal_weighted`：HIGH信号ETF等权
 - `signal_weighted`：按 signal_score 加权
+
+**模式B：资产配置模式（allocation）**
+
+```
+选择策略 + 时间范围 + ETF范围
+    → 逐日执行决策管线
+    → assess_market_timing() → 进攻/防守/观望
+    → rank_assets() → 资产排名
+    → allocate_positions() → 目标仓位
+    → 按仓位比例计算组合收益
+    → 汇总组合指标
+```
 
 **已实现指标：**
 - 累计收益率、最大回撤、夏普比率（年化）
 - 胜率、信号准确率
 - 逐日组合收益曲线、回撤曲线
 - 单ETF信号明细
+- 资产配置模式：逐日择时信号、总仓位、现金比例、持仓明细
 
 ### 回测层演进方向
 
 | 能力 | 当前 | 目标 |
 |------|-----|------|
 | 交易成本 | 无 | 佣金 + 印花税 + 滑点模拟 |
-| 仓位管理 | 等权/信号加权 | 风险平价、固定仓位、动态仓位 |
+| 仓位管理 | 等权/信号加权/资产配置 | 增加风险平价、动态仓位 |
 | 调仓频率 | 仅日频 | 周/月调仓 |
 | 基准对比 | 无 | 与沪深300等基准对比 |
 | 分年统计 | 无 | 年度/月度收益分解 |
@@ -348,42 +396,55 @@ class StrategyPlugin(Protocol):
 
 ## 十二、发展路线图
 
-### 第一阶段：数据与基础策略 ✅ 当前阶段
+### 第一阶段：数据与基础策略 ✅ 已完成
 
 - [x] 数据采集体系（5个数据源、18张表、定时刷新）
 - [x] Plugin Protocol 策略框架
-- [x] 3个内置策略插件
+- [x] 3个内置策略插件（信号评分模式）
 - [x] 基础回测引擎
 - [x] 前端完整页面体系
 
-### 第二阶段：因子体系独立化
+### 第二阶段：因子体系独立化 ✅ 已完成
 
 - [x] 将通用因子从插件中抽离为独立模块
 - [x] 实现动量、波动率、估值等标准因子（8 个内置因子）
 - [x] 因子 IC/IR 评估与相关性矩阵分析
 - [ ] 扩展数据源覆盖（ETF份额全覆盖、更多指数估值）
 
-### 第三阶段：回测与风险完善
+### 第三阶段：资产配置决策系统 ✅ 已完成
+
+- [x] 扩展 StrategyPlugin Protocol，新增 3 个可选决策管线方法
+- [x] 新增领域模型：TimingSignal、AssetRanking、AllocationPlan
+- [x] 实现 etf_allocation 插件（择时→轮动→仓位分配）
+- [x] BacktestService 支持双模式回测（信号评分 + 资产配置）
+- [x] StrategyService 支持运行资产配置决策管线
+- [x] Dashboard 新增资产配置面板
+- [x] 回测创建页支持选择回测模式
+- [x] 123 个单元测试全部通过
+
+### 第四阶段：回测与风险完善
 
 - [ ] 回测增加交易成本模拟
 - [ ] 回测增加基准对比和分期统计
 - [ ] 建立风险分析模块（相关性、Beta、波动率分析）
 - [ ] 多频率调仓支持
 
-### 第四阶段：组合与高级研究
+### 第五阶段：高级配置策略
 
+- [ ] 新增 MA 趋势因子（ma_position）
+- [ ] 新增最大回撤因子（max_drawdown_60d）
+- [ ] 新增相对强弱因子（relative_strength_20d）
 - [ ] 多策略信号融合
 - [ ] 组合优化与再平衡
-- [ ] 因子择时研究
-- [ ] 市场风格轮动、宏观驱动分析
 
 ## 十三、平台目标
 
 平台最终目标不是寻找"永远赚钱"的圣杯策略，而是建立一套：
 
-- **可解释** — 每个信号都能追溯到具体因子和数据
+- **可解释** — 每个决策都能追溯到具体因子和数据
 - **可验证** — 任何策略都必须经过历史回测检验
 - **可复现** — 相同参数、相同数据产出相同结果
 - **可迭代** — Plugin Protocol 支持快速新增和替换策略
+- **实用导向** — 直接回答"现在该买什么、买多少"的核心问题
 
-的ETF研究体系。核心价值在于：**通过数据和回测验证投资逻辑，而不是依赖主观判断或市场情绪。**
+的ETF资产配置决策系统。核心价值在于：**通过数据和回测验证投资逻辑，为个人ETF投资提供系统化的决策支持。**
