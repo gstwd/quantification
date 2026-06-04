@@ -147,6 +147,7 @@ class IngestService:
 
         使用新浪后端（fund_etf_hist_sina），单次调用返回从上市至今的全量数据，
         无需按年分批（约 425ms 完成，不受东方财富代理封锁影响）。
+        分批写入，避免单条 INSERT 参数超过 PostgreSQL 65535 限制。
 
         Returns:
             写入记录数
@@ -161,30 +162,32 @@ class IngestService:
         if not bars:
             return 0
 
-        stmt = (
-            insert(EtfDailyBarModel)
-            .values(
-                [
-                    {
-                        "trade_date": b.trade_date,
-                        "etf_code": etf_code,
-                        "open_price": b.open_price,
-                        "high_price": b.high_price,
-                        "low_price": b.low_price,
-                        "close_price": b.close_price,
-                        "volume": b.volume,
-                        "turnover": b.turnover,
-                        "change_pct": b.change_pct,
-                        "amplitude": b.amplitude,
-                        "source": "akshare",
-                        "ingested_at": datetime.now(timezone.utc),
-                    }
-                    for b in bars
-                ]
+        batch_size = 5000
+        values = [
+            {
+                "trade_date": b.trade_date,
+                "etf_code": etf_code,
+                "open_price": b.open_price,
+                "high_price": b.high_price,
+                "low_price": b.low_price,
+                "close_price": b.close_price,
+                "volume": b.volume,
+                "turnover": b.turnover,
+                "change_pct": b.change_pct,
+                "amplitude": b.amplitude,
+                "source": "akshare",
+                "ingested_at": datetime.now(timezone.utc),
+            }
+            for b in bars
+        ]
+        for i in range(0, len(values), batch_size):
+            batch = values[i : i + batch_size]
+            stmt = (
+                insert(EtfDailyBarModel)
+                .values(batch)
+                .on_conflict_do_nothing(constraint="uq_etf_daily_bar")
             )
-            .on_conflict_do_nothing(constraint="uq_etf_daily_bar")
-        )
-        self._db.execute(stmt)
+            self._db.execute(stmt)
         self._db.commit()
         return len(bars)
 
@@ -414,34 +417,40 @@ class IngestService:
     def _fetch_and_upsert_index_bars(self, index_code: str) -> int:
         """从 AkShare 拉取指数日线并幂等写入 index_daily_bar。
 
+        分批写入，避免单条 INSERT 参数超过 PostgreSQL 65535 限制
+        （每行 10 字段，批次上限 6000 行 = 60000 参数）。
+
         Returns:
             写入记录数
         """
         bars = AkShareIndexClient().fetch_index_daily(index_code)
         if not bars:
             return 0
-        stmt = (
-            insert(IndexDailyBarModel)
-            .values(
-                [
-                    {
-                        "trade_date": b.trade_date,
-                        "index_code": index_code,
-                        "open_price": b.open_price,
-                        "high_price": b.high_price,
-                        "low_price": b.low_price,
-                        "close_price": b.close_price,
-                        "volume": b.volume,
-                        "turnover": b.turnover,
-                        "source": "akshare",
-                        "ingested_at": datetime.now(timezone.utc),
-                    }
-                    for b in bars
-                ]
+
+        batch_size = 6000
+        values = [
+            {
+                "trade_date": b.trade_date,
+                "index_code": index_code,
+                "open_price": b.open_price,
+                "high_price": b.high_price,
+                "low_price": b.low_price,
+                "close_price": b.close_price,
+                "volume": b.volume,
+                "turnover": b.turnover,
+                "source": "akshare",
+                "ingested_at": datetime.now(timezone.utc),
+            }
+            for b in bars
+        ]
+        for i in range(0, len(values), batch_size):
+            batch = values[i : i + batch_size]
+            stmt = (
+                insert(IndexDailyBarModel)
+                .values(batch)
+                .on_conflict_do_nothing(constraint="uq_index_daily_bar")
             )
-            .on_conflict_do_nothing(constraint="uq_index_daily_bar")
-        )
-        self._db.execute(stmt)
+            self._db.execute(stmt)
         self._db.commit()
         return len(bars)
 
@@ -508,33 +517,39 @@ class IngestService:
     def _fetch_and_upsert_index_valuation(self, index_code: str) -> int:
         """从 AkShare 拉取指数 PE/PB 估值并幂等写入 index_valuation。
 
+        分批写入，避免单条 INSERT 参数超过 PostgreSQL 65535 限制
+        （每行 9 字段，批次上限 7000 行 = 63000 参数）。
+
         Returns:
             写入记录数
         """
         valuations = AkShareIndexClient().fetch_index_valuation(index_code)
         if not valuations:
             return 0
-        stmt = (
-            insert(IndexValuationModel)
-            .values(
-                [
-                    {
-                        "trade_date": v.trade_date,
-                        "index_code": index_code,
-                        "pe": v.pe,
-                        "pe_percentile": v.pe_percentile,
-                        "pb": v.pb,
-                        "pb_percentile": v.pb_percentile,
-                        "dividend_yield": v.dividend_yield,
-                        "source": "akshare",
-                        "ingested_at": datetime.now(timezone.utc),
-                    }
-                    for v in valuations
-                ]
+
+        batch_size = 7000
+        values = [
+            {
+                "trade_date": v.trade_date,
+                "index_code": index_code,
+                "pe": v.pe,
+                "pe_percentile": v.pe_percentile,
+                "pb": v.pb,
+                "pb_percentile": v.pb_percentile,
+                "dividend_yield": v.dividend_yield,
+                "source": "akshare",
+                "ingested_at": datetime.now(timezone.utc),
+            }
+            for v in valuations
+        ]
+        for i in range(0, len(values), batch_size):
+            batch = values[i : i + batch_size]
+            stmt = (
+                insert(IndexValuationModel)
+                .values(batch)
+                .on_conflict_do_nothing(constraint="uq_index_valuation")
             )
-            .on_conflict_do_nothing(constraint="uq_index_valuation")
-        )
-        self._db.execute(stmt)
+            self._db.execute(stmt)
         self._db.commit()
         return len(valuations)
 
