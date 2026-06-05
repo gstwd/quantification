@@ -21,6 +21,12 @@
           </div>
         </div>
         <div class="header-actions">
+          <button class="btn-accent" @click="handleRunSignal" :disabled="running">
+            {{ running ? '执行中...' : '运行信号' }}
+          </button>
+          <button class="btn-accent" @click="handleRunAllocation" :disabled="allocating">
+            {{ allocating ? '计算中...' : '查看决策' }}
+          </button>
           <button class="btn-secondary" @click="showEdit = true">编辑</button>
           <button class="btn-danger" @click="handleDelete">删除</button>
         </div>
@@ -169,6 +175,89 @@
         </div>
       </div>
 
+      <!-- 执行结果提示 -->
+      <div v-if="runMessage" :class="['run-tip', runSuccess ? 'run-success' : 'run-error']">
+        {{ runMessage }}
+      </div>
+
+      <!-- 决策管线结果 -->
+      <div v-if="allocation" class="allocation-section">
+        <h2 class="section-title">决策管线结果</h2>
+
+        <!-- 择时信号 -->
+        <div v-if="allocation.timing && allocation.timing.regime" class="alloc-card">
+          <div class="alloc-header">择时信号</div>
+          <div class="alloc-body">
+            <div class="alloc-row">
+              <span class="alloc-key">Regime</span>
+              <span :class="['regime-tag', `regime-${allocation.timing.regime}`]">
+                {{ allocation.timing.regime === 'offensive' ? '进攻' : allocation.timing.regime === 'defensive' ? '防守' : '中性' }}
+              </span>
+            </div>
+            <div class="alloc-row">
+              <span class="alloc-key">置信度</span>
+              <span class="alloc-val">{{ ((allocation.timing.confidence ?? 0) * 100).toFixed(0) }}%</span>
+            </div>
+            <div v-if="allocation.timing.label" class="alloc-row">
+              <span class="alloc-key">标签</span>
+              <span class="alloc-val">{{ allocation.timing.label }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 排名 -->
+        <div v-if="allocation.rankings && allocation.rankings.length > 0" class="alloc-card">
+          <div class="alloc-header">资产排名 (Top {{ allocation.rankings.length }})</div>
+          <div class="alloc-body">
+            <table class="rank-table">
+              <thead>
+                <tr>
+                  <th>排名</th>
+                  <th>代码</th>
+                  <th>名称</th>
+                  <th>得分</th>
+                  <th>类别</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(r, i) in allocation.rankings" :key="r.etf_code">
+                  <td>{{ i + 1 }}</td>
+                  <td class="mono">{{ r.etf_code }}</td>
+                  <td>{{ r.name_cn }}</td>
+                  <td class="mono">{{ r.score?.toFixed(1) }}</td>
+                  <td>{{ r.category }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 仓位分配 -->
+        <div v-if="allocation.plan && Object.keys(allocation.plan.positions ?? {}).length > 0" class="alloc-card">
+          <div class="alloc-header">仓位分配</div>
+          <div class="alloc-body">
+            <div class="alloc-row">
+              <span class="alloc-key">方法</span>
+              <span class="alloc-val">{{ allocation.plan.method }}</span>
+            </div>
+            <div class="alloc-row">
+              <span class="alloc-key">总仓位</span>
+              <span class="alloc-val">{{ (allocation.plan.total_exposure * 100).toFixed(1) }}%</span>
+            </div>
+            <div class="alloc-row">
+              <span class="alloc-key">现金</span>
+              <span class="alloc-val">{{ (allocation.plan.cash_ratio * 100).toFixed(1) }}%</span>
+            </div>
+            <div class="position-tags">
+              <span v-for="(w, code) in allocation.plan.positions" :key="code" class="position-tag">
+                <span class="pos-code">{{ code }}</span>
+                <span class="pos-weight">{{ (w * 100).toFixed(1) }}%</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- 原始配置 JSON -->
       <details class="json-section">
         <summary class="json-toggle">原始配置 JSON</summary>
@@ -225,12 +314,21 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
+import { runAllocation } from '../api/strategies'
+import { triggerStrategyRun } from '../api/runs'
 import StrategyConfigForm from '../components/StrategyConfigForm.vue'
 import { useStrategyStore } from '../stores/strategies'
+import type { AllocationResponse } from '../types/api'
 
 const props = defineProps<{ strategyId: string }>()
 const store = useStrategyStore()
 const router = useRouter()
+
+const running = ref(false)
+const allocating = ref(false)
+const runMessage = ref('')
+const runSuccess = ref(true)
+const allocation = ref<AllocationResponse | null>(null)
 
 const showEdit = ref(false)
 const editJsonError = ref('')
@@ -292,6 +390,39 @@ async function handleUpdate(): Promise<void> {
   })
   if (success) {
     showEdit.value = false
+  }
+}
+
+/** 运行信号计算 */
+async function handleRunSignal(): Promise<void> {
+  running.value = true
+  runMessage.value = ''
+  try {
+    await triggerStrategyRun(props.strategyId)
+    runMessage.value = '信号计算任务已提交，后台执行中。可前往"运行记录"页面查看进度。'
+    runSuccess.value = true
+  } catch (e) {
+    runMessage.value = e instanceof Error ? e.message : '信号计算触发失败'
+    runSuccess.value = false
+  } finally {
+    running.value = false
+  }
+}
+
+/** 运行决策管线 */
+async function handleRunAllocation(): Promise<void> {
+  allocating.value = true
+  runMessage.value = ''
+  try {
+    allocation.value = await runAllocation(props.strategyId)
+    runMessage.value = '决策管线执行完成'
+    runSuccess.value = true
+  } catch (e) {
+    runMessage.value = e instanceof Error ? e.message : '决策管线执行失败'
+    runSuccess.value = false
+    allocation.value = null
+  } finally {
+    allocating.value = false
   }
 }
 
@@ -478,4 +609,88 @@ onMounted(() => store.loadOne(props.strategyId))
   transition: all 0.15s;
 }
 .toggle-json-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* 执行按钮 */
+.btn-accent {
+  padding: 8px 16px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.btn-accent:hover:not(:disabled) { opacity: 0.85; }
+.btn-accent:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 执行结果提示 */
+.run-tip {
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+.run-success { background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.25); color: #4ade80; }
+.run-error { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.25); color: #f87171; }
+
+/* 决策结果区域 */
+.allocation-section { display: flex; flex-direction: column; gap: 12px; }
+.section-title { font-size: 16px; font-weight: 600; }
+
+.alloc-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.alloc-header {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+}
+.alloc-body { padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+.alloc-row { display: flex; align-items: center; gap: 8px; }
+.alloc-key { font-size: 12px; color: var(--text-muted); min-width: 60px; }
+.alloc-val { font-size: 12px; }
+
+.regime-tag {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-weight: 600;
+}
+.regime-offensive { background: rgba(34,197,94,0.15); color: #4ade80; }
+.regime-neutral { background: rgba(245,158,11,0.15); color: #f59e0b; }
+.regime-defensive { background: rgba(239,68,68,0.15); color: #f87171; }
+
+/* 排名表格 */
+.rank-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.rank-table th {
+  text-align: left;
+  padding: 6px 8px;
+  color: var(--text-muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+}
+.rank-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(51,65,85,0.3);
+}
+
+/* 仓位标签 */
+.position-tags { display: flex; gap: 6px; flex-wrap: wrap; padding-top: 4px; }
+.position-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  background: var(--surface-2);
+  border-radius: 12px;
+  font-size: 11px;
+}
+.pos-code { color: var(--text-muted); }
+.pos-weight { color: var(--accent); font-weight: 600; }
 </style>
