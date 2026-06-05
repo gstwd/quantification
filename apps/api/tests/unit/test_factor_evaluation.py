@@ -165,12 +165,12 @@ class TestRankICLogic:
 
 
 class TestValuationRegistry:
-    def test_default_registry_has_eight_factors(self) -> None:
-        """默认注册表应包含 8 个内置因子（含 2 个估值因子）。"""
+    def test_default_registry_has_seven_factors(self) -> None:
+        """默认注册表应包含 7 个内置因子（含 2 个估值因子）。"""
         from quant_etf_api.factors.registry import build_default_factor_registry
 
         registry = build_default_factor_registry()
-        assert len(registry.all()) == 8
+        assert len(registry.all()) == 7
 
     def test_valuation_factors_registered(self) -> None:
         """估值因子应已注册。"""

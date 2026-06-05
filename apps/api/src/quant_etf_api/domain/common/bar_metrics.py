@@ -71,6 +71,5 @@ def calc_5d_return(
     return round((today_bar.close_price / base_close - 1) * 100, 4) if base_close > 0 else 0.0
 
 
-# 向后兼容别名，供 three_factor_guard 等旧代码使用
 calc_5d_return_etf = calc_5d_return
 calc_5d_return_index = calc_5d_return

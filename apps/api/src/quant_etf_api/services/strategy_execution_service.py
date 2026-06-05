@@ -18,7 +18,6 @@ from quant_etf_api.infra.db.models.core import (
     EtfSignalModel,
 )
 from quant_etf_api.infra.db.repositories.etf_daily_bar import EtfDailyBarRepository
-from quant_etf_api.infra.db.repositories.etf_daily_share import EtfDailyShareRepository
 from quant_etf_api.infra.db.repositories.etf_universe import EtfUniverseRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
@@ -43,14 +42,12 @@ class StrategyExecutionService:
         self,
         db: Session,
         bar_repo: EtfDailyBarRepository | None = None,
-        share_repo: EtfDailyShareRepository | None = None,
         index_bar_repo: IndexDailyBarRepository | None = None,
         universe_repo: EtfUniverseRepository | None = None,
         run_repo: ResearchRunRepository | None = None,
     ) -> None:
         self._db = db
         self._bar_repo = bar_repo or EtfDailyBarRepository(db)
-        self._share_repo = share_repo or EtfDailyShareRepository(db)
         self._index_bar_repo = index_bar_repo or IndexDailyBarRepository(db)
         self._universe_repo = universe_repo or EtfUniverseRepository(db)
         self._run_repo = run_repo or ResearchRunRepository(db)
@@ -80,12 +77,11 @@ class StrategyExecutionService:
 
         # 批量加载所需数据
         all_bars = self._load_all_bars(trade_date, etf_codes)
-        all_shares = self._load_all_shares(trade_date, etf_codes)
         all_index_bars = self._load_all_index_bars(trade_date)
 
         # 构建策略上下文
         context = self._build_live_context(
-            trade_date, etf_codes, all_bars, all_shares, all_index_bars
+            trade_date, etf_codes, all_bars, all_index_bars
         )
 
         # 调用插件计算信号
@@ -164,10 +160,6 @@ class StrategyExecutionService:
         lookback_start = trade_date - timedelta(days=35)
         return self._bar_repo.find_by_codes_date_range(etf_codes, lookback_start, trade_date)
 
-    def _load_all_shares(self, trade_date: date, etf_codes: list[str]) -> dict[str, Any]:
-        """加载指定交易日的 ETF 份额快照，返回 {etf_code: row} 映射。"""
-        return self._share_repo.find_by_codes_date(etf_codes, trade_date)
-
     def _load_all_index_bars(self, trade_date: date) -> dict[tuple[str, date], Any]:
         """批量加载交易日及前 10 日的指数日线。"""
         lookback_start = trade_date - timedelta(days=15)
@@ -180,10 +172,9 @@ class StrategyExecutionService:
         trade_date: date,
         etf_codes: list[str],
         all_bars: dict[tuple[str, date], Any],
-        all_shares: dict[str, Any],
         all_index_bars: dict[tuple[str, date], Any],
     ) -> StrategyContextData:
-        """从 DB 数据构建单日策略上下文，与 BacktestService._build_historical_context 模式一致。"""
+        """从 DB 数据构建单日策略上下文。"""
         # 基准指数涨跌幅和 5 日收益
         benchmark_changes: dict[str, float] = {}
         index_5d_return: dict[str, float] = {}
@@ -194,14 +185,6 @@ class StrategyExecutionService:
             index_5d_return[index_code] = calc_5d_return_index(
                 index_code, trade_date, all_index_bars
             )
-
-        # ETF 份额变化
-        share_changes: dict[str, dict[str, float | None]] = {}
-        for code in etf_codes:
-            share_row = all_shares.get(code)
-            share_changes[code] = {
-                "share_delta_pct": share_row.shares_delta_pct if share_row else None
-            }
 
         # ETF K 线衍生指标
         etf_bars: dict[str, dict[str, Any]] = {}
@@ -220,6 +203,5 @@ class StrategyExecutionService:
 
         return StrategyContextData(
             benchmark_changes=benchmark_changes,
-            share_changes=share_changes,
             extra={"etf_bars": etf_bars, "index_5d_return": index_5d_return},
         )

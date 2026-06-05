@@ -3,7 +3,6 @@ import type {
   BacktestCreateRequest,
   BacktestDetail,
   BacktestDailyResult,
-  BacktestEtfResult,
   BacktestIndexResult,
   BacktestSummary,
   PaginatedResponse,
@@ -35,18 +34,6 @@ export async function fetchBacktest(backtestId: string): Promise<BacktestDetail>
 /** 获取回测每日组合绩效（用于权益曲线和回撤图） */
 export async function fetchBacktestDaily(backtestId: string): Promise<BacktestDailyResult[]> {
   const { data } = await apiClient.get<BacktestDailyResult[]>(`/backtests/${backtestId}/daily`)
-  return data
-}
-
-/** 获取回测每日每 ETF 信号与收益（three_factor_guard 专用），可按 ETF 代码过滤 */
-export async function fetchBacktestEtfResults(
-  backtestId: string,
-  etfCode?: string,
-): Promise<BacktestEtfResult[]> {
-  const { data } = await apiClient.get<BacktestEtfResult[]>(
-    `/backtests/${backtestId}/etf-results`,
-    { params: etfCode ? { etf_code: etfCode } : {} },
-  )
   return data
 }
 

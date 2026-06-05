@@ -1,7 +1,6 @@
 """内置因子计算器单元测试。
 
-测试策略参考 test_three_factor_factors.py：
-- 构造 mock FactorContext（含模拟的 etf_bars / etf_shares dict）
+- 构造 mock FactorContext（含模拟的 etf_bars dict）
 - 测试每个 FactorComputer 的核心计算逻辑
 - 覆盖：正常值、数据不足返回 None、公式验证、单调性
 """
@@ -21,7 +20,6 @@ from quant_etf_api.factors.builtins.momentum import (
     Return60dComputer,
     _calc_nd_return,
 )
-from quant_etf_api.factors.builtins.share_flow import ShareDeltaPctComputer
 from quant_etf_api.factors.builtins.volatility import Volatility20dComputer
 from quant_etf_api.factors.builtins.volume import VolumeRatio20dComputer
 from quant_etf_api.factors.registry import build_default_factor_registry
@@ -37,15 +35,6 @@ class MockBar:
     volume: float | None = None
     close_price: float | None = None
     change_pct: float | None = None
-
-
-@dataclass
-class MockShare:
-    """模拟 EtfDailyShareModel 行，仅保留计算所需字段。"""
-
-    shares_total: float | None = None
-    shares_delta: float | None = None
-    shares_delta_pct: float | None = None
 
 
 def _build_etf_bars(
@@ -361,94 +350,14 @@ class TestVolatility20dComputer:
         assert "sample_count" in result.payload
 
 
-# ─── ShareDeltaPctComputer ────────────────────────────────────────────────────────
-
-
-class TestShareDeltaPctComputer:
-    _computer = ShareDeltaPctComputer()
-
-    def test_spec(self) -> None:
-        assert self._computer.spec.factor_id == "share_delta_pct"
-        assert self._computer.spec.category == "flow"
-
-    def test_no_share_data(self) -> None:
-        """无份额数据时应返回 None，payload 说明原因。"""
-        ctx = FactorContext()
-        result = self._computer.compute("510300", date(2024, 6, 1), ctx)
-        assert result.numeric is None
-        assert "无份额数据" in result.payload.get("reason", "")
-
-    def test_positive_inflow(self) -> None:
-        """净申购时 numeric > 0。"""
-        trade_date = date(2024, 6, 1)
-        ctx = FactorContext(
-            etf_shares={
-                ("510300", trade_date): MockShare(
-                    shares_total=100.0,
-                    shares_delta=5.0,
-                    shares_delta_pct=5.26,
-                )
-            }
-        )
-        result = self._computer.compute("510300", trade_date, ctx)
-        assert result.numeric == pytest.approx(5.26)
-
-    def test_negative_outflow(self) -> None:
-        """净赎回时 numeric < 0。"""
-        trade_date = date(2024, 6, 1)
-        ctx = FactorContext(
-            etf_shares={
-                ("510300", trade_date): MockShare(
-                    shares_total=100.0,
-                    shares_delta=-3.0,
-                    shares_delta_pct=-2.91,
-                )
-            }
-        )
-        result = self._computer.compute("510300", trade_date, ctx)
-        assert result.numeric is not None
-        assert result.numeric < 0
-
-    def test_none_delta_pct(self) -> None:
-        """shares_delta_pct 为 None 时（数据存在但值缺失），numeric 应为 None。"""
-        trade_date = date(2024, 6, 1)
-        ctx = FactorContext(
-            etf_shares={
-                ("510300", trade_date): MockShare(
-                    shares_total=100.0,
-                    shares_delta=None,
-                    shares_delta_pct=None,
-                )
-            }
-        )
-        result = self._computer.compute("510300", trade_date, ctx)
-        assert result.numeric is None
-
-    def test_payload_contains_shares_info(self) -> None:
-        """payload 中应包含 shares_total 和 shares_delta。"""
-        trade_date = date(2024, 6, 1)
-        ctx = FactorContext(
-            etf_shares={
-                ("510300", trade_date): MockShare(
-                    shares_total=100.0,
-                    shares_delta=2.0,
-                    shares_delta_pct=2.04,
-                )
-            }
-        )
-        result = self._computer.compute("510300", trade_date, ctx)
-        assert result.payload.get("shares_total") == 100.0
-        assert result.payload.get("shares_delta") == 2.0
-
-
 # ─── FactorRegistry ──────────────────────────────────────────────────────────────
 
 
 class TestFactorRegistry:
-    def test_default_registry_has_six_factors(self) -> None:
-        """默认注册表应包含 8 个内置因子。"""
+    def test_default_registry_has_seven_factors(self) -> None:
+        """默认注册表应包含 7 个内置因子。"""
         registry = build_default_factor_registry()
-        assert len(registry.all()) == 8
+        assert len(registry.all()) == 7
 
     def test_default_registry_factor_ids(self) -> None:
         """默认注册表的 factor_id 集合应完整。"""
@@ -460,7 +369,6 @@ class TestFactorRegistry:
             "return_20d",
             "return_60d",
             "volatility_20d",
-            "share_delta_pct",
             "pe_percentile",
             "pb_percentile",
         }

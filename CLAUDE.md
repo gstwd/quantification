@@ -107,9 +107,9 @@ HTTP → api/routers/ → services/ → infra/ → PostgreSQL
 - **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports). Three sub-layers with clear dependency direction: `domain ← factors ← plugins`. Factor layer computes raw values + IC/IR evaluation; strategy layer handles normalization, weighting, and signal generation:
   - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, etc.), `values.py` (DateRange)
-  - `strategies/` — `models.py` (StrategyContextData, StrategyResult dataclasses), `scoring.py` (signal scoring rules: volume_probability, direction_probability, share_probability, composite_probability, signal_level)
-- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `builtins/` (7 built-in computers: volume, momentum×3, volatility, valuation×2). **所有因子基于指数数据计算**（`index_factor_value` 表），`three_factor_guard` 内部使用的 `share_delta_pct` 除外。Depends on `domain/common/` for calculations.
-- **`plugins/`** — Strategy plugin layer: `base.py` (StrategyPlugin Protocol, re-exports domain models), `registry.py` (StrategyRegistry), `builtins/` (4 strategy plugins). Depends on `domain/strategies/` for scoring rules. Each plugin implements `StrategyPlugin` Protocol (structural subtyping — no inheritance required). The Protocol includes 3 optional decision pipeline methods (`assess_market_timing`, `rank_assets`, `allocate_positions`) for asset allocation mode.
+  - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, AllocationPlan dataclasses)
+- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `builtins/` (6 built-in computers: volume, momentum×3, volatility, valuation×2). **所有因子基于指数数据计算**（`index_factor_value` 表）。Depends on `domain/common/` for calculations.
+- **`plugins/`** — Strategy plugin layer: `base.py` (StrategyPlugin Protocol, re-exports domain models), `registry.py` (StrategyRegistry), `builtins/` (2 strategy plugins). Each plugin implements `StrategyPlugin` Protocol (structural subtyping — no inheritance required). The Protocol includes 3 optional decision pipeline methods (`assess_market_timing`, `rank_assets`, `allocate_positions`) for asset allocation mode.
 - **`config/`** — Pydantic settings loaded from `.env`
 
 ### Database schema (20 tables, migrations 0001–0007)
@@ -131,9 +131,8 @@ Plugins implement the `StrategyPlugin` Protocol (structural subtyping — no inh
 - **Optional decision pipeline methods** (checked via `hasattr`): `assess_market_timing()`, `rank_assets()`, `allocate_positions()`
 
 Built-in plugins in `plugins/builtins/`:
-1. **`three_factor_guard`** — Volume probability (50%) + direction probability (20%) + share probability (30%); signal levels HIGH ≥70, MID 50–69, LOW <50. **ETF 模式专用**：信号和收益均基于 ETF 数据。
-2. **`volume_breakout_daily`** — Volume breakout baseline（指数模式）
-3. **`etf_allocation`** — Asset allocation strategy with full decision pipeline: timing assessment (valuation 40% + trend 40% + volume 20%) → asset rotation ranking (momentum 60% + valuation 40%) → position sizing (regime-based exposure: offensive 80%, neutral 50%, defensive 20%)（指数模式）
+1. **`volume_breakout_daily`** — Volume breakout baseline（指数模式）
+2. **`etf_allocation`** — Asset allocation strategy with full decision pipeline: timing assessment (valuation 40% + trend 40% + volume 20%) → asset rotation ranking (momentum 60% + valuation 40%) → position sizing (regime-based exposure: offensive 80%, neutral 50%, defensive 20%)（指数模式）
 
 To add a strategy: create a plugin file in `plugins/builtins/`, implement the Protocol, register in `plugins/registry.py`.
 
@@ -149,11 +148,7 @@ To add a strategy: create a plugin file in `plugins/builtins/`, implement the Pr
 
 Services fully wired to PostgreSQL. 20 tables across 7 migrations (0001→0002→0002_backtest→0003_index_macro→0004→0005_factor_layer→0007_index_factor_backtest). Each data type has exactly **one** source: ETF K-line→Sina, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh.
 
-**Dual-mode backtesting**: `BacktestService` supports two标的模式：
-- **指数模式**（默认）：因子和收益均基于指数数据（`index_factor_value` + `backtest_index_result`），收益以百分比展示。适用于 `etf_allocation`、`volume_breakout_daily` 等策略。
-- **ETF 混合模式**（`three_factor_guard` 专用）：信号基于 ETF 数据，收益用 ETF 价格，结果写入 `backtest_etf_result`。
-
-Backtest mode（signal/allocation）存储在 `backtest_run.params` JSON 字段。
+**Backtesting**: `BacktestService` 以指数模式运行（`index_factor_value` + `backtest_index_result`），收益以百分比展示。适用于所有策略（`etf_allocation`、`volume_breakout_daily`）。Backtest mode（signal/allocation）存储在 `backtest_run.params` JSON 字段。
 
 **Asset allocation API**: `GET /strategies/{strategy_id}/allocation` runs the full decision pipeline and returns timing signal, asset rankings, and allocation plan.
 
@@ -169,8 +164,7 @@ Backtest mode（signal/allocation）存储在 `backtest_run.params` JSON 字段�
 - **Backend venv on Windows**: Executables are at `apps/api/.venv/Scripts/` (e.g. `.venv/Scripts/alembic`, `.venv/Scripts/python`).
 - **`strategy_plugin` table is always empty** — strategies are managed by the in-memory `StrategyRegistry`. Never add a FK referencing `strategy_plugin`; it will silently reject all inserts due to FK violation.
 - **Backtest `context.extra["etf_bars"]`**: `BacktestService` injects real historical bar data here before calling `plugin.run_for_universe()`. Plugins check this key first and fall back to stubs when absent (live runs). **指数模式下此 key 实际存放指数数据**（透明映射），插件无需区分。
-- **`_ETF_STRATEGY_IDS`**: `BacktestService` 通过此集合（当前仅含 `three_factor_guard`）判断回测模式。新增 ETF 专用策略时需加入此集合。
-- **`universe` 字典 key**: 指数模式下 `_resolve_index_universe()` 返回的字典同时包含 `etf_code` 和 `index_code`（值相同），以便插件层通过 `item["etf_code"]` 透明兼容。
+- **`universe` 字典 key**: `_resolve_index_universe()` 返回的字典同时包含 `etf_code` 和 `index_code`（值相同），以便插件层通过 `item["etf_code"]` 透明兼容。
 - **AkShare index valuation**: Only 沪深300(000300), 上证50(000016), 中证500(000905) return PE/PB from legulegu.com. Other indexes (000688/399001/399006) return empty — must handle gracefully in frontend.
 - **Backend GET endpoints never return 500**: External API failures are caught/logged, returning `[]`. A 200 OK with empty array can mean either "no data yet" or "upstream error".
 - **AkShare API instability**: Upstream network errors (ConnectionResetError, AttributeError) are common. Tests use `_retry_fetch()` with 3 attempts. Frontend pages catch errors silently and show "暂无数据".

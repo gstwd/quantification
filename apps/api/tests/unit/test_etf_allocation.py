@@ -9,10 +9,7 @@
 
 from __future__ import annotations
 
-import pytest
-
 from quant_etf_api.domain.strategies.models import (
-    AllocationPlan,
     AssetRanking,
     StrategyContextData,
     TimingSignal,
@@ -266,7 +263,6 @@ class TestEtfAllocationPlugin:
         """构建测试用上下文。"""
         return StrategyContextData(
             benchmark_changes={"000300": 0.5},
-            share_changes={},
             extra={
                 "etf_bars": {
                     "510300": {

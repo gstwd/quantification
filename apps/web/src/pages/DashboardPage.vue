@@ -127,46 +127,6 @@
       <div v-else class="empty">暂无资产配置数据，点击"刷新"计算</div>
     </div>
 
-    <!-- 最新三因子信号 -->
-    <div class="section">
-      <div class="section-header">
-        <h2 class="section-title">最新三因子信号</h2>
-        <span class="section-badge">three_factor_guard</span>
-      </div>
-      <div v-if="signalStore.loading" class="loading">加载中...</div>
-      <div v-else-if="signals.length === 0" class="empty">暂无信号数据</div>
-      <table v-else class="data-table">
-        <thead>
-          <tr>
-            <th>ETF 代码</th>
-            <th>信号分数</th>
-            <th>等级</th>
-            <th>标签</th>
-            <th>交易日</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="row in signals" :key="row.etf_code">
-            <td>
-              <RouterLink :to="`/etfs/${row.etf_code}`" class="code-link">{{ row.etf_code }}</RouterLink>
-            </td>
-            <td>
-              <div class="score-cell">
-                <div class="score-bar-bg">
-                  <div class="score-bar" :style="{ width: row.signal_score + '%', background: scoreColor(row.signal_level) }"></div>
-                </div>
-                <span class="score-num">{{ row.signal_score.toFixed(1) }}</span>
-              </div>
-            </td>
-            <td>
-              <span class="badge" :class="'badge-' + row.signal_level.toLowerCase()">{{ row.signal_level }}</span>
-            </td>
-            <td class="text-muted">{{ row.signal_label }}</td>
-            <td class="text-muted mono">{{ row.trade_date }}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
 
     <!-- 数据源状态 -->
     <div v-if="systemStatus" class="section">
@@ -282,7 +242,6 @@ import { RouterLink } from 'vue-router'
 import type { AllocationResponse, DataQualityResponse, SystemStatusResponse } from '../types/api'
 import { runAllocation } from '../api/strategies'
 import { fetchDataQuality, fetchSystemStatus, triggerColdStart, triggerDailyIngest } from '../api/runs'
-import { useSignalStore } from '../stores/signals'
 import { useStrategyStore } from '../stores/strategies'
 
 const systemStatus = ref<SystemStatusResponse | null>(null)
@@ -298,9 +257,7 @@ const allocation = ref<AllocationResponse | null>(null)
 const allocLoading = ref(false)
 const allocError = ref<string | null>(null)
 
-const signalStore = useSignalStore()
 const strategyStore = useStrategyStore()
-const signals = computed(() => signalStore.items)
 
 /** 数据质量分组配置 */
 const qualityGroups = computed(() => {
@@ -313,11 +270,6 @@ const qualityGroups = computed(() => {
   ]
 })
 
-function scoreColor(level: string): string {
-  if (level === 'HIGH') return 'var(--signal-high)'
-  if (level === 'MID') return 'var(--signal-mid)'
-  return 'var(--signal-low)'
-}
 
 /** 格式化 ISO 时间戳为简短中文友好格式（北京时间） */
 function formatTime(ts: string | null | undefined): string {
@@ -422,7 +374,6 @@ onMounted(() =>
   Promise.all([
     loadStatus(),
     loadQuality(),
-    signalStore.loadLatest('three_factor_guard'),
     strategyStore.loadAll(),
     loadAllocation(),
   ]),

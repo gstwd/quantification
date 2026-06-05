@@ -1,8 +1,6 @@
 """回测引擎服务，负责创建、执行和查询回测任务。
 
-支持两种标的模式：
-- 指数模式（默认）：因子和收益均基于指数数据，收益以百分比展示。
-- ETF 混合模式（three_factor_guard 专用）：信号基于 ETF 数据，收益用 ETF 价格。
+标的模式：指数模式 — 因子和收益均基于指数数据，收益以百分比展示。
 """
 
 from __future__ import annotations
@@ -18,7 +16,6 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.db.models.core import (
     BacktestDailyResultModel,
-    BacktestEtfResultModel,
     BacktestIndexResultModel,
     BacktestRunModel,
     BenchmarkIndexModel,
@@ -26,9 +23,6 @@ from quant_etf_api.infra.db.models.core import (
     IndexValuationModel,
 )
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
-from quant_etf_api.infra.db.repositories.etf_daily_bar import EtfDailyBarRepository
-from quant_etf_api.infra.db.repositories.etf_daily_share import EtfDailyShareRepository
-from quant_etf_api.infra.db.repositories.etf_universe import EtfUniverseRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.domain.strategies.models import AllocationPlan, AssetRanking, TimingSignal
 from quant_etf_api.plugins.base import StrategyContextData, StrategyResult
@@ -41,16 +35,12 @@ from quant_etf_api.schemas.backtest import (
     BacktestCreateRequest,
     BacktestDetail,
     BacktestDailyResult,
-    BacktestEtfResult,
     BacktestIndexResult,
     BacktestMetrics,
     BacktestSummary,
 )
 
 logger = logging.getLogger(__name__)
-
-# ETF 专用策略列表，这些策略的回测使用 ETF 数据
-_ETF_STRATEGY_IDS = {"three_factor_guard"}
 
 
 class BacktestService:
@@ -61,37 +51,23 @@ class BacktestService:
         db: Session,
         registry: StrategyRegistry,
         backtest_repo: BacktestRepository | None = None,
-        bar_repo: EtfDailyBarRepository | None = None,
-        share_repo: EtfDailyShareRepository | None = None,
         index_bar_repo: IndexDailyBarRepository | None = None,
-        universe_repo: EtfUniverseRepository | None = None,
     ) -> None:
         self._db = db
         self._registry = registry
         self._backtest_repo = backtest_repo or BacktestRepository(db)
-        self._bar_repo = bar_repo or EtfDailyBarRepository(db)
-        self._share_repo = share_repo or EtfDailyShareRepository(db)
         self._index_bar_repo = index_bar_repo or IndexDailyBarRepository(db)
-        self._universe_repo = universe_repo or EtfUniverseRepository(db)
 
     def create_backtest(self, req: BacktestCreateRequest) -> BacktestSummary:
         """创建回测记录，状态为 pending，立即返回。"""
         backtest_id = str(uuid4())
         now = datetime.now(timezone.utc)
-        is_etf_mode = req.strategy_id in _ETF_STRATEGY_IDS
 
-        if is_etf_mode:
-            universe_filter = (
-                {"mode": "all"}
-                if req.universe_mode == "all"
-                else {"mode": "subset", "etf_codes": req.etf_codes}
-            )
-        else:
-            universe_filter = (
-                {"mode": "all"}
-                if req.universe_mode == "all"
-                else {"mode": "subset", "index_codes": req.index_codes}
-            )
+        universe_filter = (
+            {"mode": "all"}
+            if req.universe_mode == "all"
+            else {"mode": "subset", "index_codes": req.index_codes}
+        )
 
         params = dict(req.params) if req.params else {}
         params["_backtest_mode"] = req.backtest_mode
@@ -196,43 +172,8 @@ class BacktestService:
             logger.warning("get_index_results DB query failed", exc_info=True)
             return []
 
-    def get_etf_results(
-        self, backtest_id: str, etf_code: str | None = None
-    ) -> list[BacktestEtfResult]:
-        """返回回测每日每 ETF 信号与收益（three_factor_guard 专用），可按 ETF 过滤。"""
-        try:
-            rows = (
-                self._db.query(BacktestEtfResultModel)
-                .filter(BacktestEtfResultModel.backtest_id == backtest_id)
-            )
-            if etf_code:
-                rows = rows.filter(BacktestEtfResultModel.etf_code == etf_code)
-            rows = rows.order_by(
-                BacktestEtfResultModel.trade_date.asc(),
-                BacktestEtfResultModel.etf_code.asc(),
-            ).all()
-            return [
-                BacktestEtfResult(
-                    trade_date=r.trade_date,
-                    etf_code=r.etf_code,
-                    signal_score=r.signal_score,
-                    signal_level=r.signal_level,
-                    in_portfolio=r.in_portfolio,
-                    etf_return=r.etf_return,
-                )
-                for r in rows
-            ]
-        except Exception:
-            logger.warning("get_etf_results DB query failed", exc_info=True)
-            return []
-
     def run_backtest(self, backtest_id: str) -> None:
-        """回测执行入口，在后台线程中同步运行。
-
-        根据策略类型自动选择模式：
-        - ETF 专用策略（three_factor_guard）：使用 ETF 数据
-        - 其他策略：使用指数数据
-        """
+        """回测执行入口，在后台线程中同步运行。使用指数模式。"""
         try:
             row = self._backtest_repo.find_by_id(backtest_id)
             if row is None:
@@ -247,13 +188,9 @@ class BacktestService:
             if plugin is None:
                 raise ValueError(f"策略插件 {row.strategy_id} 未注册")
 
-            is_etf_mode = row.strategy_id in _ETF_STRATEGY_IDS
             backtest_mode = (row.params or {}).get("_backtest_mode", "signal")
-
-            if is_etf_mode:
-                self._run_etf_backtest(backtest_id, row, plugin, backtest_mode)
-            else:
-                self._run_index_backtest(backtest_id, row, plugin, backtest_mode)
+            # TODO: 如未来新增 ETF 模式策略，需在此恢复 ETF/指数模式分支判断
+            self._run_index_backtest(backtest_id, row, plugin, backtest_mode)
 
         except Exception as exc:
             self._db.rollback()
@@ -435,83 +372,6 @@ class BacktestService:
         metrics = self._compute_summary_metrics(daily_results)
         self._backtest_repo.mark_success(backtest_id, metrics)
 
-    # ── ETF 混合模式回测（three_factor_guard 专用）──────────────────────
-
-    def _run_etf_backtest(
-        self,
-        backtest_id: str,
-        row: BacktestRunModel,
-        plugin: Any,
-        backtest_mode: str,
-    ) -> None:
-        """ETF 混合模式回测：信号基于 ETF 数据，收益用 ETF 价格。"""
-        universe = self._resolve_etf_universe(row.universe_filter)
-        if not universe:
-            raise ValueError("回测标的范围为空")
-
-        etf_codes = [u["etf_code"] for u in universe]
-        trading_dates = self._get_etf_trading_dates(row.start_date, row.end_date, etf_codes)
-        if not trading_dates:
-            raise ValueError(f"区间 {row.start_date} ~ {row.end_date} 内无交易日数据")
-
-        all_bars = self._load_all_etf_bars(trading_dates, etf_codes)
-        all_shares = self._load_all_shares(trading_dates, etf_codes)
-        all_index_bars = self._load_all_index_bars(trading_dates)
-
-        daily_results: list[BacktestDailyResultModel] = []
-        cumulative = 1.0
-        peak = 1.0
-
-        for i, trade_date in enumerate(trading_dates):
-            context = self._build_etf_historical_context(
-                trade_date, etf_codes, all_bars, all_shares, all_index_bars
-            )
-            results = plugin.run_for_universe(trade_date, universe, context, row.params)
-
-            next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
-            portfolio_return, high_cnt, mid_cnt, low_cnt = self._compute_etf_portfolio_return(
-                results, next_date, all_bars, row.weighting
-            )
-
-            cumulative *= 1 + portfolio_return / 100
-            cumulative_return_pct = (cumulative - 1) * 100
-            peak = max(peak, cumulative)
-            drawdown = (cumulative / peak - 1) * 100
-
-            daily_row = BacktestDailyResultModel(
-                backtest_id=backtest_id,
-                trade_date=trade_date,
-                portfolio_return=round(portfolio_return, 4),
-                cumulative_return=round(cumulative_return_pct, 4),
-                drawdown=round(drawdown, 4),
-                high_signal_count=high_cnt,
-                mid_signal_count=mid_cnt,
-                low_signal_count=low_cnt,
-            )
-            self._db.add(daily_row)
-            daily_results.append(daily_row)
-
-            for r in results:
-                in_portfolio = r.signal_level == "HIGH"
-                etf_ret = None
-                if next_date and in_portfolio:
-                    etf_ret = self._get_etf_return(r.etf_code, trade_date, next_date, all_bars)
-                self._db.add(
-                    BacktestEtfResultModel(
-                        backtest_id=backtest_id,
-                        trade_date=trade_date,
-                        etf_code=r.etf_code,
-                        signal_score=r.signal_score,
-                        signal_level=r.signal_level,
-                        in_portfolio=in_portfolio,
-                        etf_return=etf_ret,
-                    )
-                )
-
-        self._db.flush()
-        metrics = self._compute_summary_metrics(daily_results)
-        self._backtest_repo.mark_success(backtest_id, metrics)
-
     # ── 指数模式辅助方法 ─────────────────────────────────────────────────
 
     def _resolve_index_universe(
@@ -598,7 +458,6 @@ class BacktestService:
 
         return StrategyContextData(
             benchmark_changes={},
-            share_changes={},
             extra={
                 "etf_bars": index_bars,  # 插件通过 etf_bars 读取，此处实际是指数数据
                 "index_bars": index_bars,
@@ -700,135 +559,6 @@ class BacktestService:
                 total_return += weight * ret
         return round(total_return, 4)
 
-    # ── ETF 混合模式辅助方法 ─────────────────────────────────────────────
-
-    def _resolve_etf_universe(
-        self, universe_filter: dict[str, Any]
-    ) -> list[dict[str, Any]]:
-        """根据 universe_filter 查询回测 ETF 列表。"""
-        if universe_filter.get("mode") == "subset":
-            codes = universe_filter.get("etf_codes", [])
-            if codes:
-                rows = self._universe_repo.find_by_codes(codes)
-                return [{"etf_code": r.etf_code, "name_cn": r.name_cn} for r in rows]
-        rows = self._universe_repo.find_all_active()
-        return [{"etf_code": r.etf_code, "name_cn": r.name_cn} for r in rows]
-
-    def _get_etf_trading_dates(
-        self, start: date, end: date, etf_codes: list[str]
-    ) -> list[date]:
-        """从 etf_daily_bar 中提取区间内的交易日列表。"""
-        return self._bar_repo.get_trading_dates(etf_codes, start, end)
-
-    def _load_all_etf_bars(
-        self, trading_dates: list[date], etf_codes: list[str]
-    ) -> dict[tuple[str, date], Any]:
-        """批量加载 ETF 行情数据。"""
-        if not trading_dates:
-            return {}
-        lookback_start = trading_dates[0] - timedelta(days=35)
-        return self._bar_repo.find_by_codes_date_range(etf_codes, lookback_start, trading_dates[-1])
-
-    def _load_all_shares(
-        self, trading_dates: list[date], etf_codes: list[str]
-    ) -> dict[tuple[str, date], Any]:
-        """批量加载 ETF 份额数据。"""
-        if not trading_dates:
-            return {}
-        return self._share_repo.find_by_codes_date_range(
-            etf_codes, trading_dates[0], trading_dates[-1]
-        )
-
-    def _build_etf_historical_context(
-        self,
-        trade_date: date,
-        etf_codes: list[str],
-        all_bars: dict,
-        all_shares: dict,
-        all_index_bars: dict,
-    ) -> StrategyContextData:
-        """为 ETF 混合模式构建 StrategyContextData。"""
-        benchmark_changes: dict[str, float] = {}
-        index_5d_return: dict[str, float] = {}
-        for index_code in ("000300", "000016", "000905"):
-            bar = all_index_bars.get((index_code, trade_date))
-            if bar and bar.change_pct is not None:
-                benchmark_changes[index_code] = bar.change_pct
-            index_5d_return[index_code] = calc_5d_return(index_code, trade_date, all_index_bars)
-
-        share_changes: dict[str, dict[str, float | None]] = {}
-        for code in etf_codes:
-            share_row = all_shares.get((code, trade_date))
-            share_changes[code] = {
-                "share_delta_pct": share_row.shares_delta_pct if share_row else None
-            }
-
-        etf_bars: dict[str, dict[str, Any]] = {}
-        for code in etf_codes:
-            bar = all_bars.get((code, trade_date))
-            if bar is None:
-                continue
-            volume_ratio_20d = calc_volume_ratio_20d(code, trade_date, all_bars)
-            etf_5d_return = calc_5d_return(code, trade_date, all_bars)
-            etf_bars[code] = {
-                "volume_ratio_20d": volume_ratio_20d,
-                "change_pct": bar.change_pct or 0.0,
-                "etf_5d_return": etf_5d_return,
-                "close_price": bar.close_price,
-            }
-
-        return StrategyContextData(
-            benchmark_changes=benchmark_changes,
-            share_changes=share_changes,
-            extra={"etf_bars": etf_bars, "index_5d_return": index_5d_return},
-        )
-
-    def _get_etf_return(
-        self, etf_code: str, trade_date: date, next_date: date, all_bars: dict
-    ) -> float | None:
-        """获取 ETF 的 T+1 日收益率（%）。"""
-        today_bar = all_bars.get((etf_code, trade_date))
-        next_bar = all_bars.get((etf_code, next_date))
-        if today_bar is None or next_bar is None:
-            return None
-        if (
-            today_bar.close_price is None
-            or next_bar.close_price is None
-            or today_bar.close_price == 0
-        ):
-            return None
-        return round((next_bar.close_price / today_bar.close_price - 1) * 100, 4)
-
-    def _compute_etf_portfolio_return(
-        self,
-        results: list[StrategyResult],
-        next_date: date | None,
-        all_bars: dict,
-        weighting: str,
-    ) -> tuple[float, int, int, int]:
-        """计算 ETF 模式的当日组合收益率。"""
-        high = [r for r in results if r.signal_level == "HIGH"]
-        mid = [r for r in results if r.signal_level == "MID"]
-        low = [r for r in results if r.signal_level == "LOW"]
-
-        if not high or next_date is None:
-            return 0.0, len(high), len(mid), len(low)
-
-        returns = []
-        weights = []
-        for r in high:
-            ret = self._get_etf_return(r.etf_code, r.trade_date, next_date, all_bars)
-            if ret is not None:
-                returns.append(ret)
-                weights.append(r.signal_score if weighting == "signal_weighted" else 1.0)
-
-        if not returns:
-            return 0.0, len(high), len(mid), len(low)
-
-        total_weight = sum(weights)
-        portfolio_return = sum(r * w for r, w in zip(returns, weights)) / total_weight
-        return round(portfolio_return, 4), len(high), len(mid), len(low)
-
     # ── 通用辅助方法 ─────────────────────────────────────────────────────
 
     def _load_all_valuation(
@@ -918,7 +648,6 @@ class BacktestService:
         signal_accuracy_pct = 0.0
         try:
             backtest_id = daily_results[0].backtest_id
-            # 尝试从 index_result 表计算
             idx_rows = (
                 self._db.query(BacktestIndexResultModel)
                 .filter(
@@ -931,20 +660,6 @@ class BacktestService:
             if idx_rows:
                 positive = sum(1 for r in idx_rows if r.index_return is not None and r.index_return > 0)
                 signal_accuracy_pct = round(positive / len(idx_rows) * 100, 2)
-            else:
-                # 回退到 ETF 结果表
-                etf_rows = (
-                    self._db.query(BacktestEtfResultModel)
-                    .filter(
-                        BacktestEtfResultModel.backtest_id == backtest_id,
-                        BacktestEtfResultModel.in_portfolio.is_(True),
-                        BacktestEtfResultModel.etf_return.isnot(None),
-                    )
-                    .all()
-                )
-                if etf_rows:
-                    positive = sum(1 for r in etf_rows if r.etf_return is not None and r.etf_return > 0)
-                    signal_accuracy_pct = round(positive / len(etf_rows) * 100, 2)
         except Exception:
             logger.warning("compute signal_accuracy_pct failed", exc_info=True)
 

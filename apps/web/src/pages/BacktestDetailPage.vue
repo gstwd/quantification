@@ -90,28 +90,6 @@
         </table>
       </div>
 
-      <!-- per-ETF 汇总表（ETF 模式，three_factor_guard 专用） -->
-      <div v-if="etfSummary.length > 0" class="table-card">
-        <div class="table-title">ETF 信号汇总</div>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>ETF 代码</th>
-              <th>HIGH 次数</th>
-              <th>平均得分</th>
-              <th>信号准确率</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in etfSummary" :key="row.etf_code">
-              <td class="mono">{{ row.etf_code }}</td>
-              <td>{{ row.high_count }}</td>
-              <td>{{ row.avg_score.toFixed(1) }}</td>
-              <td :class="row.accuracy >= 50 ? 'success' : 'danger'">{{ row.accuracy.toFixed(1) }}%</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
     </template>
   </div>
 </template>
@@ -146,30 +124,7 @@ function formatPct(v: number): string {
   return (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
 }
 
-/** 按 ETF 汇总信号统计（three_factor_guard 专用） */
-const etfSummary = computed(() => {
-  const map = new Map<string, { high_count: number; scores: number[]; correct: number; total: number }>()
-  for (const r of store.etfResults) {
-    if (!map.has(r.etf_code)) map.set(r.etf_code, { high_count: 0, scores: [], correct: 0, total: 0 })
-    const entry = map.get(r.etf_code)!
-    entry.scores.push(r.signal_score)
-    if (r.signal_level === 'HIGH') entry.high_count++
-    if (r.in_portfolio && r.etf_return !== null) {
-      entry.total++
-      if (r.etf_return > 0) entry.correct++
-    }
-  }
-  return Array.from(map.entries())
-    .map(([etf_code, v]) => ({
-      etf_code,
-      high_count: v.high_count,
-      avg_score: v.scores.reduce((a, b) => a + b, 0) / (v.scores.length || 1),
-      accuracy: v.total > 0 ? (v.correct / v.total) * 100 : 0,
-    }))
-    .sort((a, b) => b.high_count - a.high_count)
-})
-
-/** 按指数汇总信号统计（指数模式） */
+/** 按指数汇总信号统计 */
 const indexSummary = computed(() => {
   const map = new Map<string, { high_count: number; scores: number[]; correct: number; total: number }>()
   for (const r of store.indexResults) {
@@ -277,7 +232,6 @@ onMounted(async () => {
   if (store.current?.status === 'success') {
     await Promise.all([
       store.loadDailyResults(props.backtestId),
-      store.loadEtfResults(props.backtestId),
       store.loadIndexResults(props.backtestId),
     ])
     await initCharts()

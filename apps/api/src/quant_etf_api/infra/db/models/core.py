@@ -272,7 +272,6 @@ class IndexFactorValueModel(Base):
     """指数因子值表，存储指数级别的因子计算结果。
 
     与 etf_factor_value 并行，用于指数级因子（volume/momentum/volatility/valuation）。
-    three_factor_guard 等 ETF 专用策略仍使用 etf_factor_value。
     """
 
     __tablename__ = "index_factor_value"
@@ -315,7 +314,7 @@ class SignalDefinitionModel(Base):
     __tablename__ = "signal_definition"
 
     signal_id: Mapped[str] = mapped_column(
-        String(64), primary_key=True, comment="信号唯一标识，如 three_factor_signal"
+        String(64), primary_key=True, comment="信号唯一标识，如 volume_breakout_signal"
     )
     strategy_id: Mapped[str] = mapped_column(
         String(64), nullable=False, comment="产生该信号的策略 ID"
@@ -364,7 +363,7 @@ class StrategyPluginModel(Base):
     __tablename__ = "strategy_plugin"
 
     strategy_id: Mapped[str] = mapped_column(
-        String(64), primary_key=True, comment="策略唯一标识，如 three_factor_guard"
+        String(64), primary_key=True, comment="策略唯一标识，如 volume_breakout_daily"
     )
     display_name: Mapped[str] = mapped_column(
         String(128), nullable=False, comment="策略中文显示名称"

@@ -125,7 +125,6 @@ export interface BacktestCreateRequest {
   start_date: string
   end_date: string
   universe_mode: 'all' | 'subset'
-  etf_codes: string[]
   index_codes: string[]
   params?: Record<string, unknown> | null
   weighting: 'equal' | 'signal_weighted'
@@ -174,15 +173,6 @@ export interface BacktestDailyResult {
   total_exposure?: number | null
   cash_ratio?: number | null
   positions?: Record<string, number> | null
-}
-
-export interface BacktestEtfResult {
-  trade_date: string
-  etf_code: string
-  signal_score: number
-  signal_level: string
-  in_portfolio: boolean
-  etf_return: number | null
 }
 
 export interface BacktestIndexResult {

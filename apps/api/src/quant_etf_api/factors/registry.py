@@ -45,8 +45,6 @@ def build_default_factor_registry() -> FactorRegistry:
     """构建包含所有内置因子计算器的默认注册表，进程启动时调用一次。
 
     所有因子均基于指数数据计算。
-    ShareDeltaPctComputer（ETF 份额因子）不在默认注册表中，
-    仅由 three_factor_guard 插件内部使用。
 
     Returns:
         已注册全部内置因子的 FactorRegistry 实例。

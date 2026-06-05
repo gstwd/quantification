@@ -73,7 +73,7 @@ class EtfAllocationPlugin:
 
     def required_inputs(self) -> list[str]:
         """返回所需数据源列表。"""
-        return ["etf_daily_bar", "index_daily_bar", "index_valuation", "etf_daily_share"]
+        return ["index_daily_bar", "index_valuation"]
 
     def factor_definitions(self) -> list[dict[str, Any]]:
         """返回插件定义的因子列表。"""
@@ -100,7 +100,6 @@ class EtfAllocationPlugin:
         """构建策略上下文（空壳，实际数据由服务层注入）。"""
         return StrategyContextData(
             benchmark_changes={},
-            share_changes={},
         )
 
     # ── 决策管线方法 ──────────────────────────────────────────────────────

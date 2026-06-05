@@ -4,7 +4,6 @@ import {
   createBacktest,
   fetchBacktest,
   fetchBacktestDaily,
-  fetchBacktestEtfResults,
   fetchBacktestIndexResults,
   fetchBacktests,
 } from '../api/backtests'
@@ -12,7 +11,6 @@ import type {
   BacktestCreateRequest,
   BacktestDetail,
   BacktestDailyResult,
-  BacktestEtfResult,
   BacktestIndexResult,
   BacktestSummary,
 } from '../types/api'
@@ -23,7 +21,6 @@ export const useBacktestStore = defineStore('backtests', {
     total: 0,
     current: null as BacktestDetail | null,
     dailyResults: [] as BacktestDailyResult[],
-    etfResults: [] as BacktestEtfResult[],
     indexResults: [] as BacktestIndexResult[],
     loading: false,
     submitting: false,
@@ -49,9 +46,6 @@ export const useBacktestStore = defineStore('backtests', {
     },
     async loadDailyResults(backtestId: string) {
       this.dailyResults = await fetchBacktestDaily(backtestId)
-    },
-    async loadEtfResults(backtestId: string, etfCode?: string) {
-      this.etfResults = await fetchBacktestEtfResults(backtestId, etfCode)
     },
     async loadIndexResults(backtestId: string, indexCode?: string) {
       this.indexResults = await fetchBacktestIndexResults(backtestId, indexCode)

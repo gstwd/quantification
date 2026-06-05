@@ -1,4 +1,4 @@
-"""策略领域层：领域模型与评分规则。
+"""策略领域层：领域模型。
 
 导出核心符号，方便外部通过 domain.strategies 直接 import。
 """
@@ -12,13 +12,6 @@ from quant_etf_api.domain.strategies.models import (
     StrategyResult,
     TimingSignal,
 )
-from quant_etf_api.domain.strategies.scoring import (
-    composite_probability,
-    direction_probability,
-    share_probability,
-    signal_level,
-    volume_probability,
-)
 
 __all__ = [
     "AllocationPlan",
@@ -26,9 +19,4 @@ __all__ = [
     "StrategyContextData",
     "StrategyResult",
     "TimingSignal",
-    "composite_probability",
-    "direction_probability",
-    "share_probability",
-    "signal_level",
-    "volume_probability",
 ]

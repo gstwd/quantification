@@ -4,7 +4,6 @@ from typing import Any
 
 from quant_etf_api.plugins.base import StrategyPlugin
 from quant_etf_api.plugins.builtins.etf_allocation.plugin import EtfAllocationPlugin
-from quant_etf_api.plugins.builtins.three_factor.plugin import ThreeFactorGuardPlugin
 from quant_etf_api.plugins.builtins.volume_breakout.plugin import VolumeBreakoutDailyPlugin
 
 
@@ -60,6 +59,5 @@ def build_default_registry() -> StrategyRegistry:
     """构建包含所有内置策略插件的默认注册表，进程启动时调用一次。"""
     registry = StrategyRegistry()
     registry.register(EtfAllocationPlugin())
-    registry.register(ThreeFactorGuardPlugin())
     registry.register(VolumeBreakoutDailyPlugin())
     return registry

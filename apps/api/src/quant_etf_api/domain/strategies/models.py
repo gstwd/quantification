@@ -21,12 +21,10 @@ class StrategyContextData:
 
     Attributes:
         benchmark_changes: 基准指数当日涨跌幅，key=指数代码，value=涨跌幅（%）。
-        share_changes: ETF 份额变化数据，key=ETF 代码，value=包含 share_delta_pct 等字段的字典。
         extra: 扩展字段，各插件可自定义存放额外上下文数据。
     """
 
     benchmark_changes: dict[str, float] = field(default_factory=dict)
-    share_changes: dict[str, dict[str, float | None]] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
 
 

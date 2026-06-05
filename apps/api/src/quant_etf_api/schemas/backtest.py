@@ -15,8 +15,8 @@ class BacktestCreateRequest(BaseModel):
         strategy_id: 策略插件标识。
         start_date: 回测起始日期。
         end_date: 回测截止日期。
-        universe_mode: 标的范围，all=全部活跃 ETF，subset=指定代码列表。
-        etf_codes: 指定 ETF 代码列表（universe_mode=subset 时生效）。
+        universe_mode: 标的范围，all=全部指数，subset=指定指数代码列表。
+        index_codes: 指定指数代码列表（universe_mode=subset 时生效）。
         params: 策略参数透传。
         weighting: 信号评分模式的加权方式。
         backtest_mode: 回测模式，signal=信号评分模式（默认），allocation=资产配置模式。
@@ -26,7 +26,6 @@ class BacktestCreateRequest(BaseModel):
     start_date: date
     end_date: date
     universe_mode: Literal["all", "subset"] = "all"
-    etf_codes: list[str] = []
     index_codes: list[str] = []
     params: dict[str, Any] | None = None
     weighting: Literal["equal", "signal_weighted"] = "equal"
@@ -97,17 +96,6 @@ class BacktestDailyResult(BaseModel):
     total_exposure: float | None = None
     cash_ratio: float | None = None
     positions: dict[str, float] | None = None
-
-
-class BacktestEtfResult(BaseModel):
-    """回测单日单 ETF 信号与实际收益（three_factor_guard 专用）。"""
-
-    trade_date: date
-    etf_code: str
-    signal_score: float
-    signal_level: str
-    in_portfolio: bool
-    etf_return: float | None = None
 
 
 class BacktestIndexResult(BaseModel):

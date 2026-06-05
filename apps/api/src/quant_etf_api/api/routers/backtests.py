@@ -12,7 +12,6 @@ from quant_etf_api.schemas.backtest import (
     BacktestCreateRequest,
     BacktestDetail,
     BacktestDailyResult,
-    BacktestEtfResult,
     BacktestIndexResult,
     BacktestSummary,
 )
@@ -69,16 +68,6 @@ def get_backtest_daily(
 ) -> list[BacktestDailyResult]:
     """返回回测每日组合绩效，用于权益曲线和回撤图渲染。"""
     return BacktestService(db, _registry).get_daily_results(backtest_id)
-
-
-@router.get("/backtests/{backtest_id}/etf-results", response_model=list[BacktestEtfResult])
-def get_backtest_etf_results(
-    backtest_id: str,
-    etf_code: str | None = None,
-    db: Session = Depends(get_db),
-) -> list[BacktestEtfResult]:
-    """返回回测每日每 ETF 信号与实际收益（three_factor_guard 专用），可按 ETF 代码过滤。"""
-    return BacktestService(db, _registry).get_etf_results(backtest_id, etf_code=etf_code)
 
 
 @router.get("/backtests/{backtest_id}/index-results", response_model=list[BacktestIndexResult])

@@ -7,7 +7,6 @@ from typing import Any
 
 from quant_etf_api.infra.db.models.core import (
     BacktestDailyResultModel,
-    BacktestEtfResultModel,
     BacktestRunModel,
 )
 from quant_etf_api.infra.db.repositories.base import BaseRepository
@@ -52,17 +51,6 @@ class BacktestRepository(BaseRepository):
             .order_by(BacktestDailyResultModel.trade_date.asc())
             .all()
         )
-
-    def find_etf_results(
-        self, backtest_id: str, etf_code: str | None = None
-    ) -> list[BacktestEtfResultModel]:
-        """查询回测的单 ETF 结果。"""
-        q = self._db.query(BacktestEtfResultModel).filter(
-            BacktestEtfResultModel.backtest_id == backtest_id
-        )
-        if etf_code:
-            q = q.filter(BacktestEtfResultModel.etf_code == etf_code)
-        return q.order_by(BacktestEtfResultModel.trade_date.asc()).all()
 
     def mark_success(self, backtest_id: str, metrics: dict[str, Any] | None = None) -> None:
         """将回测标记为成功。"""
