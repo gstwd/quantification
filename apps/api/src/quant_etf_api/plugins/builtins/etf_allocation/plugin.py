@@ -68,6 +68,12 @@ class EtfAllocationPlugin:
                     "maximum": 20,
                     "description": "最大持仓 ETF 数量",
                 },
+                "representative_indexes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": ["000300", "000016", "000905"],
+                    "description": "择时参考的代表性指数列表，按优先级排列",
+                },
             },
         }
 
@@ -116,33 +122,46 @@ class EtfAllocationPlugin:
 
         Args:
             trade_date: 交易日。
-            context: 策略上下文，需包含 extra["index_valuation"]、extra["etf_bars"]。
-            params: 策略参数（当前未使用）。
+            context: 策略上下文，需包含 extra["index_valuation"]、extra["asset_bars"]。
+            params: 策略参数，支持 representative_indexes。
 
         Returns:
             TimingSignal，包含 regime、confidence、label、factors。
         """
+        params = params or {}
+        rep_indexes: list[str] = params.get(
+            "representative_indexes", ["000300", "000016", "000905"]
+        )
+
         # 从上下文读取数据
-        etf_bars = context.extra.get("etf_bars", {})
+        asset_bars = context.extra.get("asset_bars", {})
         index_valuation = context.extra.get("index_valuation", {})
         index_5d_return = context.extra.get("index_5d_return", {})
 
-        # 选取代表性指数估值（沪深300 优先）
+        # 选取代表性指数估值（按参数优先级）
         pe_pct: float | None = None
         pb_pct: float | None = None
-        for idx_code in ("000300", "000016", "000905"):
+        for idx_code in rep_indexes:
             val = index_valuation.get(idx_code, {})
             if val.get("pe_percentile") is not None:
                 pe_pct = val["pe_percentile"]
                 pb_pct = val.get("pb_percentile")
                 break
 
-        # 选取代表性标的的行情（沪深300 优先，兼容 ETF 和指数模式）
+        # 选取代表性标的的行情（兼容 ETF 和指数模式）
         close_price: float | None = None
         ma60: float | None = None
         volume_ratio = 1.0
-        for code in ("000300", "510300", "000016", "510050", "000905", "510500"):
-            bars = etf_bars.get(code, {})
+        # 每个指数代码尝试指数模式和 ETF 模式
+        bar_candidates: list[str] = []
+        for idx_code in rep_indexes:
+            bar_candidates.append(idx_code)
+            # 常见 ETF 映射：000300→510300, 000016→510050, 000905→510500
+            etf_code = self._index_to_etf_code(idx_code)
+            if etf_code:
+                bar_candidates.append(etf_code)
+        for code in bar_candidates:
+            bars = asset_bars.get(code, {})
             if bars.get("close_price") is not None:
                 close_price = bars["close_price"]
                 ma60 = bars.get("ma60")
@@ -151,7 +170,7 @@ class EtfAllocationPlugin:
 
         # 选取代表性指数 5 日收益
         idx_5d: float | None = None
-        for idx_code in ("000300", "000016"):
+        for idx_code in rep_indexes:
             if idx_code in index_5d_return:
                 idx_5d = index_5d_return[idx_code]
                 break
@@ -164,6 +183,23 @@ class EtfAllocationPlugin:
             volume_ratio=volume_ratio,
             index_5d_return=idx_5d,
         )
+
+    @staticmethod
+    def _index_to_etf_code(index_code: str) -> str | None:
+        """将指数代码映射为对应的 ETF 代码。
+
+        Args:
+            index_code: 指数代码，如 000300。
+
+        Returns:
+            对应的 ETF 代码，未知映射返回 None。
+        """
+        mapping = {
+            "000300": "510300",
+            "000016": "510050",
+            "000905": "510500",
+        }
+        return mapping.get(index_code)
 
     def rank_assets(
         self,
@@ -185,15 +221,15 @@ class EtfAllocationPlugin:
         Returns:
             按综合得分降序排列的 AssetRanking 列表。
         """
-        etf_bars = context.extra.get("etf_bars", {})
+        asset_bars = context.extra.get("asset_bars", {})
         index_valuation = context.extra.get("index_valuation", {})
-        etf_index_map = context.extra.get("etf_index_map", {})
+        asset_index_map = context.extra.get("asset_index_map", {})
 
         return rank_etf_assets(
             universe=universe,
-            etf_bars=etf_bars,
+            etf_bars=asset_bars,
             index_valuation=index_valuation,
-            etf_index_map=etf_index_map,
+            etf_index_map=asset_index_map,
         )
 
     def allocate_positions(

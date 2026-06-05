@@ -91,11 +91,16 @@ class StrategyService:
     def _build_allocation_context(
         self,
     ) -> tuple[StrategyContextData, list[dict[str, Any]]]:
-        """为决策管线构建上下文和 ETF 宇宙。"""
-        from quant_etf_api.domain.common.bar_metrics import calc_5d_return_etf, calc_volume_ratio_20d
+        """为决策管线构建上下文和 ETF 宇宙。
+
+        优先从 index_factor_value 表读取已计算的因子值（volume_ratio_20d、
+        return_5d），仅在因子值缺失时从原始 K 线回退计算。
+        """
+        from quant_etf_api.domain.common.bar_metrics import calc_5d_return, calc_volume_ratio_20d
         from quant_etf_api.infra.db.models.core import (
             EtfDailyBarModel,
             EtfUniverseModel,
+            IndexFactorValueModel,
             IndexValuationModel,
         )
 
@@ -111,11 +116,12 @@ class StrategyService:
             for e in etfs
         ]
 
-        # 加载最近 90 天行情
         from datetime import timedelta
 
         today = date.today()
         lookback = today - timedelta(days=90)
+
+        # 加载最近 90 天行情（回退计算用）
         bars = (
             self._db.query(EtfDailyBarModel)
             .filter(
@@ -126,6 +132,24 @@ class StrategyService:
             .all()
         )
         all_bars = {(r.etf_code, r.trade_date): r for r in bars}
+
+        # 优先从 index_factor_value 读取已计算的因子值
+        precomputed: dict[str, dict[str, float]] = {}
+        for factor_id in ("volume_ratio_20d", "return_5d"):
+            rows = (
+                self._db.query(
+                    IndexFactorValueModel.index_code,
+                    IndexFactorValueModel.factor_value_numeric,
+                )
+                .filter(
+                    IndexFactorValueModel.factor_id == factor_id,
+                    IndexFactorValueModel.trade_date == today,
+                    IndexFactorValueModel.strategy_id.is_(None),
+                )
+                .all()
+            )
+            for code, value in rows:
+                precomputed.setdefault(code, {})[factor_id] = value
 
         # 加载指数估值
         val_rows = (
@@ -143,25 +167,30 @@ class StrategyService:
             }
 
         # 构建 ETF-指数映射
-        etf_index_map = {e.etf_code: e.tracking_index_code for e in etfs if e.tracking_index_code}
+        asset_index_map = {e.etf_code: e.tracking_index_code for e in etfs if e.tracking_index_code}
 
-        # 构建 etf_bars 上下文
-        etf_bars: dict[str, dict[str, Any]] = {}
+        # 构建 asset_bars 上下文（优先用因子值，缺失时回退计算）
+        asset_bars: dict[str, dict[str, Any]] = {}
         for code in etf_codes:
             bar = all_bars.get((code, today))
             if bar and bar.close_price:
-                etf_bars[code] = {
+                factors = precomputed.get(code, {})
+                asset_bars[code] = {
                     "close_price": bar.close_price,
-                    "volume_ratio_20d": calc_volume_ratio_20d(code, today, all_bars),
-                    "return_5d": calc_5d_return_etf(code, today, all_bars),
+                    "volume_ratio_20d": factors.get(
+                        "volume_ratio_20d", calc_volume_ratio_20d(code, today, all_bars)
+                    ),
+                    "return_5d": factors.get(
+                        "return_5d", calc_5d_return(code, today, all_bars)
+                    ),
                     "change_pct": bar.change_pct,
                 }
 
         context = StrategyContextData(
             extra={
-                "etf_bars": etf_bars,
+                "asset_bars": asset_bars,
                 "index_valuation": index_valuation,
-                "etf_index_map": etf_index_map,
+                "asset_index_map": asset_index_map,
             }
         )
         return context, universe

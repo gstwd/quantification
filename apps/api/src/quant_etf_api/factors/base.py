@@ -17,7 +17,7 @@ class FactorSpec:
         category: 因子类别：volume/momentum/volatility/flow/valuation。
         version: 语义化版本号，如 1.0.0。
         description: 计算逻辑说明。
-        required_data: 依赖的数据源列表，如 ["etf_bars", "etf_shares"]。
+        required_data: 依赖的数据源列表，如 ["index_bars", "index_valuation"]。
     """
 
     factor_id: str
@@ -32,23 +32,17 @@ class FactorSpec:
 class FactorContext:
     """单次计算所需的全部数据视图，由 FactorService._load_context() 构建。
 
-    所有 dict 的 key 均为 (etf_code/index_code, trade_date) 二元组，
+    所有 dict 的 key 均为 (index_code, trade_date) 二元组，
     value 为对应的 ORM 行对象（保留 .volume、.close_price 等属性）。
     回望窗口固定为 90 个自然日，满足 Return60dComputer 需求。
 
     Attributes:
-        etf_bars: ETF 日线映射，key=(etf_code, date)。
-        etf_shares: ETF 份额映射，key=(etf_code, date)。
-        index_bars: 指数日线映射，key=(index_code, date)，当前内置因子留空。
+        index_bars: 指数日线映射，key=(index_code, date)。
         index_valuation: 指数估值映射，key=(index_code, date)，含 pe_percentile/pb_percentile。
-        etf_index_map: ETF 代码到跟踪指数代码的映射，如 {"510300": "000300"}。
     """
 
-    etf_bars: dict[tuple[str, date], Any] = field(default_factory=dict)
-    etf_shares: dict[tuple[str, date], Any] = field(default_factory=dict)
     index_bars: dict[tuple[str, date], Any] = field(default_factory=dict)
     index_valuation: dict[tuple[str, date], Any] = field(default_factory=dict)
-    etf_index_map: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

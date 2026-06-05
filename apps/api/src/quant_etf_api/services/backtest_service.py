@@ -459,10 +459,10 @@ class BacktestService:
         return StrategyContextData(
             benchmark_changes={},
             extra={
-                "etf_bars": index_bars,  # 插件通过 etf_bars 读取，此处实际是指数数据
+                "asset_bars": index_bars,
                 "index_bars": index_bars,
                 "index_valuation": index_valuation,
-                "etf_index_map": {c: c for c in index_codes},  # 指数模式：自己映射自己
+                "asset_index_map": {c: c for c in index_codes},
                 "index_5d_return": {
                     c: calc_5d_return(c, trade_date, all_bars) for c in index_codes
                 },
@@ -479,11 +479,11 @@ class BacktestService:
         """为指数资产配置模式构建增强版上下文。"""
         context = self._build_index_context(trade_date, index_codes, all_bars, all_valuation)
 
-        etf_bars = context.extra.get("etf_bars", {})
+        asset_bars = context.extra.get("asset_bars", {})
         for code in index_codes:
-            if code not in etf_bars:
-                etf_bars[code] = {}
-            bars = etf_bars[code]
+            if code not in asset_bars:
+                asset_bars[code] = {}
+            bars = asset_bars[code]
             if "return_20d" not in bars:
                 bars["return_20d"] = self._calc_nd_return_from_bars(code, trade_date, all_bars, 20)
             if "return_5d" not in bars:
@@ -492,7 +492,7 @@ class BacktestService:
                 bars["ma60"] = self._calc_ma_from_bars(code, trade_date, all_bars, 60)
             if "volatility_20d" not in bars:
                 bars["volatility_20d"] = None  # 可以后续计算
-        context.extra["etf_bars"] = etf_bars
+        context.extra["asset_bars"] = asset_bars
 
         return context
 

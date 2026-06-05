@@ -69,7 +69,3 @@ def calc_5d_return(
         return 0.0
     base_close = past_closes[-5][1]
     return round((today_bar.close_price / base_close - 1) * 100, 4) if base_close > 0 else 0.0
-
-
-calc_5d_return_etf = calc_5d_return
-calc_5d_return_index = calc_5d_return

@@ -23,8 +23,7 @@ from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRep
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.plugins.base import StrategyContextData, StrategyPlugin
 from quant_etf_api.domain.common.bar_metrics import (
-    calc_5d_return_etf,
-    calc_5d_return_index,
+    calc_5d_return,
     calc_volume_ratio_20d,
 )
 
@@ -182,19 +181,19 @@ class StrategyExecutionService:
             bar = all_index_bars.get((index_code, trade_date))
             if bar is not None and bar.change_pct is not None:
                 benchmark_changes[index_code] = bar.change_pct
-            index_5d_return[index_code] = calc_5d_return_index(
+            index_5d_return[index_code] = calc_5d_return(
                 index_code, trade_date, all_index_bars
             )
 
-        # ETF K 线衍生指标
-        etf_bars: dict[str, dict[str, Any]] = {}
+        # 资产 K 线衍生指标
+        asset_bars: dict[str, dict[str, Any]] = {}
         for code in etf_codes:
             bar = all_bars.get((code, trade_date))
             if bar is None:
                 continue
             volume_ratio_20d = calc_volume_ratio_20d(code, trade_date, all_bars)
-            etf_5d_return = calc_5d_return_etf(code, trade_date, all_bars)
-            etf_bars[code] = {
+            etf_5d_return = calc_5d_return(code, trade_date, all_bars)
+            asset_bars[code] = {
                 "volume_ratio_20d": volume_ratio_20d,
                 "change_pct": bar.change_pct or 0.0,
                 "etf_5d_return": etf_5d_return,
@@ -203,5 +202,5 @@ class StrategyExecutionService:
 
         return StrategyContextData(
             benchmark_changes=benchmark_changes,
-            extra={"etf_bars": etf_bars, "index_5d_return": index_5d_return},
+            extra={"asset_bars": asset_bars, "index_5d_return": index_5d_return},
         )

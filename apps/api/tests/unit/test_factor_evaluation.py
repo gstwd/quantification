@@ -51,27 +51,19 @@ class TestPEPercentileComputer:
         """正常场景：有估值数据时返回百分位值。"""
         trade_date = date(2024, 6, 1)
         ctx = FactorContext(
-            etf_index_map={"510300": "000300"},
             index_valuation={
                 ("000300", trade_date): MockValuation(pe=12.5, pe_percentile=35.2),
             },
         )
-        result = self._computer.compute("510300", trade_date, ctx)
+        result = self._computer.compute("000300", trade_date, ctx)
         assert result.numeric == 35.2
         assert result.payload.get("index_code") == "000300"
         assert result.payload.get("pe") == 12.5
 
-    def test_no_index_mapping(self) -> None:
-        """ETF 无跟踪指数映射时返回 None。"""
-        ctx = FactorContext()
-        result = self._computer.compute("510300", date(2024, 6, 1), ctx)
-        assert result.numeric is None
-        assert "无跟踪指数映射" in result.payload.get("reason", "")
-
     def test_no_valuation_data(self) -> None:
         """无估值数据时返回 None。"""
-        ctx = FactorContext(etf_index_map={"510300": "000300"})
-        result = self._computer.compute("510300", date(2024, 6, 1), ctx)
+        ctx = FactorContext()
+        result = self._computer.compute("000300", date(2024, 6, 1), ctx)
         assert result.numeric is None
         assert "无估值数据" in result.payload.get("reason", "")
 
@@ -79,12 +71,11 @@ class TestPEPercentileComputer:
         """pe_percentile 为 None 时返回 None。"""
         trade_date = date(2024, 6, 1)
         ctx = FactorContext(
-            etf_index_map={"510300": "000300"},
             index_valuation={
                 ("000300", trade_date): MockValuation(pe=12.5, pe_percentile=None),
             },
         )
-        result = self._computer.compute("510300", trade_date, ctx)
+        result = self._computer.compute("000300", trade_date, ctx)
         assert result.numeric is None
 
 
@@ -102,19 +93,18 @@ class TestPBPercentileComputer:
         """正常场景：有估值数据时返回百分位值。"""
         trade_date = date(2024, 6, 1)
         ctx = FactorContext(
-            etf_index_map={"510300": "000300"},
             index_valuation={
                 ("000300", trade_date): MockValuation(pb=1.35, pb_percentile=22.8),
             },
         )
-        result = self._computer.compute("510300", trade_date, ctx)
+        result = self._computer.compute("000300", trade_date, ctx)
         assert result.numeric == 22.8
         assert result.payload.get("pb") == 1.35
 
     def test_no_data_returns_none(self) -> None:
         """无数据时返回 None。"""
         ctx = FactorContext()
-        result = self._computer.compute("510300", date(2024, 6, 1), ctx)
+        result = self._computer.compute("000300", date(2024, 6, 1), ctx)
         assert result.numeric is None
 
 

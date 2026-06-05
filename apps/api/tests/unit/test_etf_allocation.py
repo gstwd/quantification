@@ -65,7 +65,7 @@ class TestAssessTiming:
         assert signal.label == "观望"
 
     def test_no_valuation_trend_data(self) -> None:
-        """无估值和趋势数据，仅有量能 → 由量能得分决定。"""
+        """无估值和趋势数据，仅有量能 → 数据不足，返回中性信号。"""
         signal = assess_timing(
             pe_pct=None,
             pb_pct=None,
@@ -73,8 +73,8 @@ class TestAssessTiming:
             ma60=None,
             volume_ratio=1.0,  # 温和放量，量能得分 70
         )
-        # volume_ratio=1.0 得分 70，20% 权重，composite=70 → offensive
-        assert signal.regime == "offensive"
+        # 估值和趋势均缺失时，仅凭量能不能给出有效信号
+        assert signal.regime == "neutral"
         assert signal.factors["valuation_score"] is None
         assert signal.factors["trend_score"] is None
 
@@ -264,7 +264,7 @@ class TestEtfAllocationPlugin:
         return StrategyContextData(
             benchmark_changes={"000300": 0.5},
             extra={
-                "etf_bars": {
+                "asset_bars": {
                     "510300": {
                         "close_price": 4.0,
                         "ma60": 3.8,
@@ -287,7 +287,7 @@ class TestEtfAllocationPlugin:
                 "index_valuation": {
                     "000300": {"pe_percentile": 30.0, "pb_percentile": 25.0},
                 },
-                "etf_index_map": {"510300": "000300", "510500": "000905"},
+                "asset_index_map": {"510300": "000300", "510500": "000905"},
                 "index_5d_return": {"000300": 1.0},
             },
         )

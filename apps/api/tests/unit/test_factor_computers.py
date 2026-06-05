@@ -1,6 +1,6 @@
 """内置因子计算器单元测试。
 
-- 构造 mock FactorContext（含模拟的 etf_bars dict）
+- 构造 mock FactorContext（含模拟的 index_bars dict）
 - 测试每个 FactorComputer 的核心计算逻辑
 - 覆盖：正常值、数据不足返回 None、公式验证、单调性
 """
@@ -30,14 +30,14 @@ from quant_etf_api.factors.registry import build_default_factor_registry
 
 @dataclass
 class MockBar:
-    """模拟 EtfDailyBarModel 行，仅保留计算所需字段。"""
+    """模拟 IndexDailyBarModel 行，仅保留计算所需字段。"""
 
     volume: float | None = None
     close_price: float | None = None
     change_pct: float | None = None
 
 
-def _build_etf_bars(
+def _build_index_bars(
     etf_code: str,
     trade_date: date,
     n_days: int,
@@ -45,12 +45,12 @@ def _build_etf_bars(
     base_close: float = 100.0,
     daily_return: float = 0.001,
 ) -> dict:
-    """构造指定 ETF 的 n_days 天历史 K 线数据（含 trade_date 当日）。
+    """构造指定指数的 n_days 天历史 K 线数据（含 trade_date 当日）。
 
     从 trade_date 向前推 n_days-1 天，收盘价按 daily_return 递增。
 
     Args:
-        etf_code: ETF 代码。
+        etf_code: 指数代码。
         trade_date: 最新交易日。
         n_days: 生成的历史天数（含 trade_date 当日）。
         base_volume: 最早一日的成交量。
@@ -58,7 +58,7 @@ def _build_etf_bars(
         daily_return: 每日收益率，用于模拟价格序列。
 
     Returns:
-        符合 FactorContext.etf_bars 格式的 dict。
+        符合 FactorContext.index_bars 格式的 dict。
     """
     bars = {}
     close = base_close
@@ -88,8 +88,8 @@ class TestVolumeRatio20dComputer:
     def test_normal_compute(self) -> None:
         """正常场景：有足够历史数据，量比应为正数。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=25)
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=25)
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric is not None
         assert result.numeric > 0
@@ -104,16 +104,16 @@ class TestVolumeRatio20dComputer:
         """当日无 K 线时返回默认值 1.0。"""
         trade_date = date(2024, 6, 1)
         # 只有前一天的数据，没有当日
-        bars = _build_etf_bars("510300", trade_date - timedelta(days=1), n_days=20)
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date - timedelta(days=1), n_days=20)
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric == 1.0
 
     def test_payload_contains_lookback(self) -> None:
         """payload 中应包含 lookback_days 字段。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=25)
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=25)
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.payload.get("lookback_days") == 20
 
@@ -128,15 +128,15 @@ class TestCalcNdReturn:
 
     def test_returns_none_when_insufficient_history(self) -> None:
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=4)  # 只有3条历史
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=4)  # 只有3条历史
+        ctx = FactorContext(index_bars=bars)
         assert _calc_nd_return("510300", trade_date, ctx, n=5) is None
 
     def test_positive_return_on_rising_prices(self) -> None:
         """价格单调上涨时，收益率应为正。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=10, daily_return=0.01)
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=10, daily_return=0.01)
+        ctx = FactorContext(index_bars=bars)
         result = _calc_nd_return("510300", trade_date, ctx, n=5)
         assert result is not None
         assert result > 0
@@ -144,8 +144,8 @@ class TestCalcNdReturn:
     def test_negative_return_on_falling_prices(self) -> None:
         """价格单调下跌时，收益率应为负。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=10, daily_return=-0.01)
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=10, daily_return=-0.01)
+        ctx = FactorContext(index_bars=bars)
         result = _calc_nd_return("510300", trade_date, ctx, n=5)
         assert result is not None
         assert result < 0
@@ -164,8 +164,8 @@ class TestReturn5dComputer:
     def test_positive_return(self) -> None:
         """价格单调上涨时，5日收益率应为正值。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=10, daily_return=0.01)
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=10, daily_return=0.01)
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric is not None
         assert result.numeric > 4.0  # 每日 1%，5日约 5%
@@ -173,8 +173,8 @@ class TestReturn5dComputer:
     def test_none_when_insufficient_data(self) -> None:
         """历史数据不足5条时应返回 None。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=3)  # 只有2条历史
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=3)  # 只有2条历史
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric is None
 
@@ -191,16 +191,16 @@ class TestReturn20dComputer:
     def test_requires_20_history_bars(self) -> None:
         """少于20条历史数据时应返回 None。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=15)
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=15)
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric is None
 
     def test_returns_value_with_sufficient_data(self) -> None:
         """满足21条数据时应返回非 None 值。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=25, daily_return=0.002)
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=25, daily_return=0.002)
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric is not None
         assert result.numeric > 0
@@ -208,8 +208,8 @@ class TestReturn20dComputer:
     def test_monotone_property(self) -> None:
         """n=5 的收益率应小于 n=20 的收益率（同等每日涨幅下，时间窗口越长收益越大）。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=25, daily_return=0.01)
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=25, daily_return=0.01)
+        ctx = FactorContext(index_bars=bars)
         r5 = Return5dComputer().compute("510300", trade_date, ctx).numeric
         r20 = Return20dComputer().compute("510300", trade_date, ctx).numeric
         assert r5 is not None and r20 is not None
@@ -228,16 +228,16 @@ class TestReturn60dComputer:
     def test_requires_60_history_bars(self) -> None:
         """少于60条历史数据时应返回 None。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=30)
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=30)
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric is None
 
     def test_returns_value_with_sufficient_data(self) -> None:
         """满足61条数据时应返回非 None 值。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=65, daily_return=0.002)
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=65, daily_return=0.002)
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric is not None
         assert result.numeric > 0
@@ -256,8 +256,8 @@ class TestVolatility20dComputer:
     def test_insufficient_data(self) -> None:
         """少于21个收盘价时应返回 None。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=10)
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=10)
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric is None
         assert result.payload.get("required") == 20
@@ -269,7 +269,7 @@ class TestVolatility20dComputer:
             ("510300", trade_date - timedelta(days=i)): MockBar(close_price=100.0)
             for i in range(25)
         }
-        ctx = FactorContext(etf_bars=bars)
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric == 0.0
 
@@ -285,7 +285,7 @@ class TestVolatility20dComputer:
             ("510300", trade_date - timedelta(days=24 - i)): MockBar(close_price=closes_low[i])
             for i in range(25)
         }
-        ctx_low = FactorContext(etf_bars=bars_low)
+        ctx_low = FactorContext(index_bars=bars_low)
         result_low = self._computer.compute("510300", trade_date, ctx_low)
 
         # 高波动：交替 +3%/-3%，25条
@@ -296,7 +296,7 @@ class TestVolatility20dComputer:
             ("510300", trade_date - timedelta(days=24 - i)): MockBar(close_price=closes_high[i])
             for i in range(25)
         }
-        ctx_high = FactorContext(etf_bars=bars_high)
+        ctx_high = FactorContext(index_bars=bars_high)
         result_high = self._computer.compute("510300", trade_date, ctx_high)
 
         assert result_low.numeric is not None
@@ -314,7 +314,7 @@ class TestVolatility20dComputer:
             ("510300", trade_date - timedelta(days=20 - i)): MockBar(close_price=closes[i])
             for i in range(21)
         }
-        ctx = FactorContext(etf_bars=bars)
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
 
         # 手动计算期望值
@@ -336,7 +336,7 @@ class TestVolatility20dComputer:
             ("510300", trade_date - timedelta(days=24 - i)): MockBar(close_price=closes[i])
             for i in range(25)
         }
-        ctx = FactorContext(etf_bars=bars)
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric is not None
         assert result.numeric > 0
@@ -344,8 +344,8 @@ class TestVolatility20dComputer:
     def test_payload_contains_sample_count(self) -> None:
         """payload 中应包含 sample_count 字段。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_etf_bars("510300", trade_date, n_days=25)
-        ctx = FactorContext(etf_bars=bars)
+        bars = _build_index_bars("510300", trade_date, n_days=25)
+        ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert "sample_count" in result.payload
 

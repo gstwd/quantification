@@ -163,7 +163,7 @@ Services fully wired to PostgreSQL. 20 tables across 7 migrations (0001→0002�
 - **ECharts + TypeScript**: `echarts/index.d.ts` triggers TS1203 with `vue-tsc`. Fix: add `"skipLibCheck": true` to `apps/web/tsconfig.json`.
 - **Backend venv on Windows**: Executables are at `apps/api/.venv/Scripts/` (e.g. `.venv/Scripts/alembic`, `.venv/Scripts/python`).
 - **`strategy_plugin` table is always empty** — strategies are managed by the in-memory `StrategyRegistry`. Never add a FK referencing `strategy_plugin`; it will silently reject all inserts due to FK violation.
-- **Backtest `context.extra["etf_bars"]`**: `BacktestService` injects real historical bar data here before calling `plugin.run_for_universe()`. Plugins check this key first and fall back to stubs when absent (live runs). **指数模式下此 key 实际存放指数数据**（透明映射），插件无需区分。
+- **Backtest `context.extra["asset_bars"]`**: `BacktestService` injects real historical bar data here before calling `plugin.run_for_universe()`. Plugins check this key first and fall back to stubs when absent (live runs). **指数模式下此 key 实际存放指数数据**（透明映射），插件无需区分。
 - **`universe` 字典 key**: `_resolve_index_universe()` 返回的字典同时包含 `etf_code` 和 `index_code`（值相同），以便插件层通过 `item["etf_code"]` 透明兼容。
 - **AkShare index valuation**: Only 沪深300(000300), 上证50(000016), 中证500(000905) return PE/PB from legulegu.com. Other indexes (000688/399001/399006) return empty — must handle gracefully in frontend.
 - **Backend GET endpoints never return 500**: External API failures are caught/logged, returning `[]`. A 200 OK with empty array can mean either "no data yet" or "upstream error".

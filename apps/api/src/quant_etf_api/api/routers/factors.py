@@ -14,7 +14,6 @@ from quant_etf_api.factors.service import FactorService
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
 from quant_etf_api.factors.evaluation import (
     calc_factor_correlation_matrix,
-    calc_ic_summary,
 )
 from quant_etf_api.schemas.factor import (
     CorrelationResponse,
@@ -205,19 +204,34 @@ def factor_ic_analysis(
         raise HTTPException(status_code=404, detail=f"因子 {factor_id} 不存在")
 
     try:
-        summary_data = calc_ic_summary(db, factor_id, start_date, end_date, forward_days)
-        series_data = summary_data.pop("series", []) if "series" in summary_data else []
-        # 重新获取 series（calc_ic_summary 内部调用了 calc_ic_series）
         from quant_etf_api.factors.evaluation import calc_ic_series
 
         series_data = calc_ic_series(db, factor_id, start_date, end_date, forward_days)
+        # 从 IC 序列直接计算汇总统计，避免 calc_ic_summary 内部重复调用 calc_ic_series
+        if series_data:
+            ic_values = [s["ic"] for s in series_data]
+            n = len(ic_values)
+            mean = sum(ic_values) / n
+            variance = sum((x - mean) ** 2 for x in ic_values) / (n - 1) if n > 1 else 0.0
+            std = variance**0.5
+            ic_ir = round(mean / std, 4) if std > 0 else None
+            positive_count = sum(1 for x in ic_values if x > 0)
+            summary = ICSummary(
+                ic_mean=round(mean, 4),
+                ic_std=round(std, 4),
+                ic_ir=ic_ir,
+                ic_positive_ratio=round(positive_count / n, 4),
+                count=n,
+            )
+        else:
+            summary = ICSummary(ic_mean=None, ic_std=None, ic_ir=None, ic_positive_ratio=None, count=0)
     except Exception:
         logger.warning("IC 分析失败: factor_id=%s", factor_id, exc_info=True)
         raise HTTPException(status_code=500, detail="IC 分析计算失败") from None
 
     return ICResponse(
         factor_id=factor_id,
-        summary=ICSummary(**summary_data),
+        summary=summary,
         series=[{"trade_date": s["trade_date"], "ic": s["ic"]} for s in series_data],
     )
 

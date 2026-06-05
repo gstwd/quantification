@@ -103,14 +103,14 @@ class VolumeBreakoutDailyPlugin:
         Args:
             trade_date: 交易日。
             universe: 指数宇宙列表。
-            context: 策略上下文，需包含 extra["etf_bars"] 中的 volume_ratio_20d。
+            context: 策略上下文，需包含 extra["asset_bars"] 中的 volume_ratio_20d。
             params: 策略参数。
 
         Returns:
             StrategyResult 列表。
         """
         results = []
-        etf_bars = context.extra.get("etf_bars", {})
+        etf_bars = context.extra.get("asset_bars", {})
         for item in universe:
             code = item["etf_code"]
             ratio = etf_bars.get(code, {}).get("volume_ratio_20d", 1.0)
