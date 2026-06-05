@@ -1,12 +1,11 @@
 from __future__ import annotations
-from datetime import date
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
 from quant_etf_api.schemas.pagination import PaginatedResponse
-from quant_etf_api.schemas.signal import FactorRow, SignalRow
+from quant_etf_api.schemas.signal import SignalRow
 from quant_etf_api.services.signal_service import SignalService
 
 router = APIRouter(tags=["signals"])
@@ -37,10 +36,3 @@ def signal_history(
         strategy_id, etf_code, offset=offset, limit=limit
     )
     return PaginatedResponse(items=items, total=total, offset=offset, limit=limit)
-
-
-@router.get("/factors", response_model=list[FactorRow])
-def factor_rows(
-    etf_code: str = Query(...), trade_date: date = Query(...), db: Session = Depends(get_db)
-) -> list[FactorRow]:
-    return SignalService(db).factor_rows(etf_code, trade_date)

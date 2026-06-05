@@ -1,17 +1,15 @@
-"""信号与因子值仓库。"""
+"""信号仓库。"""
 
 from __future__ import annotations
 
-from datetime import date
-
 from sqlalchemy import and_, func
 
-from quant_etf_api.infra.db.models.core import EtfFactorValueModel, EtfSignalModel
+from quant_etf_api.infra.db.models.core import EtfSignalModel
 from quant_etf_api.infra.db.repositories.base import BaseRepository
 
 
 class SignalRepository(BaseRepository):
-    """信号与因子值的只读查询仓库。"""
+    """信号的只读查询仓库。"""
 
     def find_latest_by_strategy(self, strategy_id: str) -> list[EtfSignalModel]:
         """查询某策略在各 ETF 上的最新信号（子查询去重）。"""
@@ -54,16 +52,3 @@ class SignalRepository(BaseRepository):
         total = base_q.count()
         rows = base_q.order_by(EtfSignalModel.trade_date.desc()).offset(offset).limit(limit).all()
         return rows, total
-
-    def find_factors_by_etf_date(
-        self, etf_code: str, trade_date: date
-    ) -> list[EtfFactorValueModel]:
-        """查询某 ETF 在某日的所有因子值。"""
-        return (
-            self._db.query(EtfFactorValueModel)
-            .filter(
-                EtfFactorValueModel.etf_code == etf_code,
-                EtfFactorValueModel.trade_date == trade_date,
-            )
-            .all()
-        )

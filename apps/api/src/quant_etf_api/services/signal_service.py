@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
 
 from sqlalchemy.orm import Session
 
-from quant_etf_api.infra.db.models.core import EtfFactorValueModel, EtfSignalModel
-from quant_etf_api.schemas.signal import FactorRow, SignalRow
+from quant_etf_api.infra.db.models.core import EtfSignalModel
+from quant_etf_api.schemas.signal import SignalRow
 
 logger = logging.getLogger(__name__)
 
@@ -105,43 +104,3 @@ class SignalService:
         except Exception:
             logger.warning("signal_history DB query failed", exc_info=True)
             return [], 0
-
-    def factor_rows(self, etf_code: str, trade_date: date) -> list[FactorRow]:
-        try:
-            rows = (
-                self._db.query(EtfFactorValueModel)
-                .filter(
-                    EtfFactorValueModel.etf_code == etf_code,
-                    EtfFactorValueModel.trade_date == trade_date,
-                )
-                .all()
-            )
-            return [
-                FactorRow(
-                    trade_date=r.trade_date,
-                    etf_code=r.etf_code,
-                    factor_id=r.factor_id,
-                    factor_value_numeric=r.factor_value_numeric,
-                    factor_value_text=r.factor_value_text,
-                    factor_payload=_parse_json_payload(r.factor_payload),
-                    strategy_id=r.strategy_id,
-                )
-                for r in rows
-            ]
-        except Exception:
-            logger.warning("factor_rows DB query failed", exc_info=True)
-            return []
-
-
-def _parse_json_payload(value: dict | str | None) -> dict:
-    """将 JSON 字段值（可能是字符串或字典）统一转为字典。"""
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return value
-    import json
-
-    try:
-        return json.loads(value)
-    except (json.JSONDecodeError, TypeError):
-        return {}

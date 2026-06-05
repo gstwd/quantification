@@ -274,6 +274,6 @@ def calc_factor_correlation_matrix(
     return {
         "factor_ids": sorted_factor_ids,
         "matrix": matrix,
-        "etf_count": len(valid_indexes),
+        "index_count": len(valid_indexes),
         "trade_date": str(trade_date),
     }

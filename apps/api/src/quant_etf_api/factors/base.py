@@ -47,7 +47,7 @@ class FactorContext:
 
 @dataclass
 class FactorValue:
-    """单个因子在单个 ETF 上的计算结果。
+    """单个因子在单个指数上的计算结果。
 
     Attributes:
         factor_id: 与 FactorSpec.factor_id 一致。
