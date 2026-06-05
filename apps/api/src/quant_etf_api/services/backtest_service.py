@@ -75,6 +75,7 @@ class BacktestService:
                 strategy_id=req.strategy_id,
                 start_date=req.start_date,
                 end_date=req.end_date,
+                backtest_mode=req.backtest_mode,
                 universe_filter=universe_filter,
                 params=params,
                 weighting=req.weighting,
@@ -132,6 +133,10 @@ class BacktestService:
                     high_signal_count=r.high_signal_count,
                     mid_signal_count=r.mid_signal_count,
                     low_signal_count=r.low_signal_count,
+                    timing_regime=r.timing_regime,
+                    total_exposure=r.total_exposure,
+                    cash_ratio=r.cash_ratio,
+                    positions=r.positions,
                 )
                 for r in rows
             ]
@@ -170,7 +175,7 @@ class BacktestService:
             return []
 
     def run_backtest(self, backtest_id: str) -> None:
-        """回测执行入口。使用指数模式 + 引擎统一执行。"""
+        """回测执行入口。根据 backtest_mode 分流执行信号模式或配置模式。"""
         try:
             row = self._backtest_repo.find_by_id(backtest_id)
             if row is None:
@@ -187,7 +192,11 @@ class BacktestService:
             if config is None:
                 raise ValueError(f"策略 {row.strategy_id} 配置不存在")
 
-            self._run_index_backtest(backtest_id, row, config)
+            mode = getattr(row, "backtest_mode", "signal")
+            if mode == "allocation":
+                self._run_allocation_backtest(backtest_id, row, config)
+            else:
+                self._run_signal_backtest(backtest_id, row, config)
 
         except Exception as exc:
             self._db.rollback()
@@ -199,31 +208,22 @@ class BacktestService:
 
     # ── 统一回测执行 ─────────────────────────────────────────────────────
 
-    def _run_index_backtest(
+    def _run_signal_backtest(
         self,
         backtest_id: str,
         row: BacktestRunModel,
         config: StrategyConfig,
     ) -> None:
-        """指数模式回测：使用引擎统一执行信号和配置模式。"""
-        universe = self._resolve_index_universe(row.universe_filter)
-        if not universe:
-            raise ValueError("回测标的范围为空，请检查 universe_filter 配置")
-
-        index_codes = [u["index_code"] for u in universe]
-        trading_dates = self._get_index_trading_dates(row.start_date, row.end_date, index_codes)
-        if not trading_dates:
-            raise ValueError(f"区间 {row.start_date} ~ {row.end_date} 内无交易日数据")
-
-        all_bars = self._load_all_index_bars(trading_dates, index_codes)
-        all_valuation = self._load_all_valuation(trading_dates)
+        """信号模式回测：按 HIGH/MID/LOW 信号等级计算组合收益。"""
+        universe, index_codes, trading_dates, all_bars, all_valuation = (
+            self._prepare_backtest_data(row)
+        )
 
         daily_results: list[BacktestDailyResultModel] = []
         cumulative = 1.0
         peak = 1.0
 
         for i, trade_date in enumerate(trading_dates):
-            # 构建上下文并执行引擎
             context = self._context_builder.build_backtest_context(
                 trade_date, index_codes, all_bars, all_valuation
             )
@@ -231,22 +231,10 @@ class BacktestService:
 
             next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
 
-            # 根据引擎输出计算组合收益
-            if result.positions:
-                # 配置模式：按仓位权重计算
-                portfolio_return = self._compute_allocation_return(
-                    result.positions, trade_date, next_date, all_bars
-                )
-                held_count = len(result.positions)
-                regime_map = {"offensive": 0, "neutral": 1, "defensive": 2}
-                mid_count = regime_map.get(result.timing.regime, 1) if result.timing else 1
-            else:
-                # 信号模式：按 HIGH 信号等权
-                portfolio_return, high_cnt, mid_cnt, low_cnt = self._compute_signal_return(
-                    result.strategy_results, next_date, all_bars, row.weighting
-                )
-                held_count = high_cnt
-                mid_count = mid_cnt
+            # 信号模式：按 HIGH 信号等权/信号加权
+            portfolio_return, high_cnt, mid_cnt, low_cnt = self._compute_signal_return(
+                result.strategy_results, next_date, all_bars, row.weighting
+            )
 
             cumulative *= 1 + portfolio_return / 100
             cumulative_return_pct = (cumulative - 1) * 100
@@ -259,14 +247,13 @@ class BacktestService:
                 portfolio_return=round(portfolio_return, 4),
                 cumulative_return=round(cumulative_return_pct, 4),
                 drawdown=round(drawdown, 4),
-                high_signal_count=held_count,
-                mid_signal_count=mid_count,
-                low_signal_count=0,
+                high_signal_count=high_cnt,
+                mid_signal_count=mid_cnt,
+                low_signal_count=low_cnt,
             )
             self._db.add(daily_row)
             daily_results.append(daily_row)
 
-            # 写入每日每指数结果
             self._write_index_results(
                 backtest_id, trade_date, next_date, universe, result, all_bars
             )
@@ -274,6 +261,86 @@ class BacktestService:
         self._db.flush()
         metrics = self._compute_summary_metrics(daily_results)
         self._backtest_repo.mark_success(backtest_id, metrics)
+
+    def _run_allocation_backtest(
+        self,
+        backtest_id: str,
+        row: BacktestRunModel,
+        config: StrategyConfig,
+    ) -> None:
+        """配置模式回测：按引擎输出的仓位权重计算组合收益。"""
+        universe, index_codes, trading_dates, all_bars, all_valuation = (
+            self._prepare_backtest_data(row)
+        )
+
+        daily_results: list[BacktestDailyResultModel] = []
+        cumulative = 1.0
+        peak = 1.0
+
+        for i, trade_date in enumerate(trading_dates):
+            context = self._context_builder.build_backtest_context(
+                trade_date, index_codes, all_bars, all_valuation
+            )
+            result = self._engine.run(config, context)
+
+            next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
+
+            # 配置模式：按仓位权重计算
+            portfolio_return = self._compute_allocation_return(
+                result.positions, trade_date, next_date, all_bars
+            )
+
+            cumulative *= 1 + portfolio_return / 100
+            cumulative_return_pct = (cumulative - 1) * 100
+            peak = max(peak, cumulative)
+            drawdown = (cumulative / peak - 1) * 100
+
+            daily_row = BacktestDailyResultModel(
+                backtest_id=backtest_id,
+                trade_date=trade_date,
+                portfolio_return=round(portfolio_return, 4),
+                cumulative_return=round(cumulative_return_pct, 4),
+                drawdown=round(drawdown, 4),
+                high_signal_count=len(result.positions),
+                mid_signal_count=0,
+                low_signal_count=0,
+                timing_regime=result.timing.regime if result.timing else None,
+                total_exposure=result.total_exposure,
+                cash_ratio=result.cash_ratio,
+                positions=result.positions if result.positions else None,
+            )
+            self._db.add(daily_row)
+            daily_results.append(daily_row)
+
+            self._write_index_results(
+                backtest_id, trade_date, next_date, universe, result, all_bars
+            )
+
+        self._db.flush()
+        metrics = self._compute_summary_metrics(daily_results)
+        self._backtest_repo.mark_success(backtest_id, metrics)
+
+    def _prepare_backtest_data(
+        self, row: BacktestRunModel
+    ) -> tuple[list[dict[str, Any]], list[str], list[date], dict, dict]:
+        """准备回测通用数据：标的、交易日、行情、估值。
+
+        Returns:
+            (universe, index_codes, trading_dates, all_bars, all_valuation) 元组。
+        """
+        universe = self._resolve_index_universe(row.universe_filter)
+        if not universe:
+            raise ValueError("回测标的范围为空，请检查 universe_filter 配置")
+
+        index_codes = [u["index_code"] for u in universe]
+        trading_dates = self._get_index_trading_dates(row.start_date, row.end_date, index_codes)
+        if not trading_dates:
+            raise ValueError(f"区间 {row.start_date} ~ {row.end_date} 内无交易日数据")
+
+        all_bars = self._load_all_index_bars(trading_dates, index_codes)
+        all_valuation = self._load_all_valuation(trading_dates)
+
+        return universe, index_codes, trading_dates, all_bars, all_valuation
 
     def _write_index_results(
         self,
@@ -533,7 +600,7 @@ class BacktestService:
             end_date=row.end_date,
             status=row.status,
             weighting=row.weighting,
-            backtest_mode=(row.params or {}).get("_backtest_mode", "signal"),
+            backtest_mode=getattr(row, "backtest_mode", "signal"),
             metrics=metrics,
             created_at=row.created_at,
             started_at=row.started_at,

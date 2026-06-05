@@ -237,14 +237,16 @@ class StrategyConfigService:
         if row is None:
             return None
         try:
-            cfg = StrategyConfig(**row.config_json)
-            cfg.strategy_id = row.strategy_id
-            cfg.display_name = row.display_name
-            cfg.version = row.version
-            cfg.description = row.description or ""
-            cfg.frequency = row.frequency
-            cfg.asset_scope = row.asset_scope
-            return cfg
+            full_config = {
+                "strategy_id": row.strategy_id,
+                "display_name": row.display_name,
+                "version": row.version,
+                "description": row.description or "",
+                "frequency": row.frequency,
+                "asset_scope": row.asset_scope,
+                **row.config_json,
+            }
+            return StrategyConfig(**full_config)
         except Exception:
             logger.exception("解析策略配置 %s 失败", strategy_id)
             return None

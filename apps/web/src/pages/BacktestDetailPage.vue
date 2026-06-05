@@ -61,14 +61,35 @@
         <div ref="drawdownChartEl" class="chart-container"></div>
       </div>
 
-      <!-- 信号分布 -->
-      <div class="chart-card">
+      <!-- 信号分布（信号模式） -->
+      <div v-if="!isAllocationMode" class="chart-card">
         <div class="chart-title">每日信号分布</div>
         <div ref="signalChartEl" class="chart-container chart-short"></div>
       </div>
 
-      <!-- per-指数 汇总表（指数模式） -->
-      <div v-if="indexSummary.length > 0" class="table-card">
+      <!-- 仓位变化（配置模式） -->
+      <div v-if="isAllocationMode" class="chart-card">
+        <div class="chart-title">仓位变化</div>
+        <div ref="positionsChartEl" class="chart-container"></div>
+      </div>
+
+      <!-- 择时状态时间线（配置模式） -->
+      <div v-if="isAllocationMode && regimeTimeline.length > 0" class="table-card">
+        <div class="table-title">择时状态变化</div>
+        <div class="regime-timeline">
+          <span
+            v-for="(item, i) in regimeTimeline"
+            :key="i"
+            :class="['regime-block', `regime-${item.regime}`]"
+            :title="`${item.date}: ${item.regime} (${(item.exposure * 100).toFixed(0)}%)`"
+          >
+            {{ item.date.slice(5) }}
+          </span>
+        </div>
+      </div>
+
+      <!-- per-指数 汇总表（信号模式） -->
+      <div v-if="!isAllocationMode && indexSummary.length > 0" class="table-card">
         <div class="table-title">指数信号汇总</div>
         <table class="data-table">
           <thead>
@@ -106,6 +127,7 @@ const store = useBacktestStore()
 const equityChartEl = ref<HTMLElement | null>(null)
 const drawdownChartEl = ref<HTMLElement | null>(null)
 const signalChartEl = ref<HTMLElement | null>(null)
+const positionsChartEl = ref<HTMLElement | null>(null)
 const polling = ref(false)
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -114,6 +136,11 @@ let equityChart: any = null
 let drawdownChart: any = null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let signalChart: any = null
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let positionsChart: any = null
+
+/** 是否为配置模式 */
+const isAllocationMode = computed(() => store.current?.backtest_mode === 'allocation')
 
 function statusLabel(status: string): string {
   const map: Record<string, string> = { pending: '待执行', running: '执行中', success: '成功', failed: '失败' }
@@ -123,6 +150,17 @@ function statusLabel(status: string): string {
 function formatPct(v: number): string {
   return (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
 }
+
+/** 择时状态时间线数据 */
+const regimeTimeline = computed(() => {
+  return store.dailyResults
+    .filter((r) => r.timing_regime)
+    .map((r) => ({
+      date: String(r.trade_date),
+      regime: r.timing_regime ?? 'neutral',
+      exposure: r.total_exposure ?? 0,
+    }))
+})
 
 /** 按指数汇总信号统计 */
 const indexSummary = computed(() => {
@@ -200,8 +238,8 @@ async function initCharts() {
     })
   }
 
-  // 信号分布堆叠柱状图
-  if (signalChartEl.value) {
+  // 信号分布堆叠柱状图（信号模式）
+  if (!isAllocationMode.value && signalChartEl.value) {
     signalChart?.dispose()
     signalChart = echarts.init(signalChartEl.value)
     signalChart.setOption({
@@ -216,6 +254,65 @@ async function initCharts() {
         { name: 'MID', type: 'bar', stack: 'signal', data: midCounts, itemStyle: { color: '#f59e0b' } },
         { name: 'LOW', type: 'bar', stack: 'signal', data: lowCounts, itemStyle: { color: '#475569' } },
       ],
+    })
+  }
+
+  // 仓位变化堆叠面积图（配置模式）
+  if (isAllocationMode.value && positionsChartEl.value) {
+    positionsChart?.dispose()
+    positionsChart = echarts.init(positionsChartEl.value)
+
+    // 收集所有持仓的指数代码
+    const allCodes = new Set<string>()
+    for (const r of store.dailyResults) {
+      if (r.positions) {
+        for (const code of Object.keys(r.positions)) allCodes.add(code)
+      }
+    }
+    const codeList = Array.from(allCodes).sort()
+
+    // 构建每个指数的权重时间序列
+    const colorPalette = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#a855f7', '#06b6d4', '#f97316', '#ec4899']
+    const series = codeList.map((code, idx) => ({
+      name: code,
+      type: 'line',
+      stack: 'positions',
+      areaStyle: {},
+      symbol: 'none',
+      lineStyle: { width: 0 },
+      itemStyle: { color: colorPalette[idx % colorPalette.length] },
+      data: store.dailyResults.map((r) => r.positions ? ((r.positions[code] ?? 0) * 100) : 0),
+    }))
+
+    // 现金比例
+    series.push({
+      name: '现金',
+      type: 'line',
+      stack: 'positions',
+      areaStyle: {},
+      symbol: 'none',
+      lineStyle: { width: 0 },
+      itemStyle: { color: '#475569' },
+      data: store.dailyResults.map((r) => r.cash_ratio ? (r.cash_ratio * 100) : (100 - (r.total_exposure ?? 0) * 100)),
+    })
+
+    positionsChart.setOption({
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'axis',
+        formatter: (params: { name: string; seriesName: string; value: number }[]) => {
+          let tip = params[0].name + '<br/>'
+          for (const p of params) {
+            if (p.value > 0.01) tip += `${p.seriesName}: ${p.value.toFixed(1)}%<br/>`
+          }
+          return tip
+        },
+      },
+      legend: { data: [...codeList, '现金'], textStyle: { color: '#94a3b8', fontSize: 11 }, top: 0, type: 'scroll' },
+      grid: { left: 60, right: 20, top: 40, bottom: 40 },
+      xAxis: { type: 'category', data: dates, axisLabel: { color: '#94a3b8', fontSize: 10, interval: Math.floor(dates.length / 8) }, axisLine: { lineStyle: { color: '#334155' } } },
+      yAxis: { type: 'value', max: 100, axisLabel: { color: '#94a3b8', fontSize: 11, formatter: (v: number) => v + '%' }, splitLine: { lineStyle: { color: '#1e293b' } } },
+      series,
     })
   }
 }
@@ -242,6 +339,7 @@ onUnmounted(() => {
   equityChart?.dispose()
   drawdownChart?.dispose()
   signalChart?.dispose()
+  positionsChart?.dispose()
 })
 </script>
 
@@ -320,4 +418,24 @@ onUnmounted(() => {
 .status-running { background: rgba(59,130,246,0.15); color: #60a5fa; }
 .status-success { background: rgba(34,197,94,0.15); color: var(--success); }
 .status-failed { background: rgba(239,68,68,0.15); color: var(--danger); }
+
+/* 择时状态时间线 */
+.regime-timeline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 8px 0;
+}
+.regime-block {
+  display: inline-block;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 500;
+  cursor: default;
+  line-height: 1.4;
+}
+.regime-block.regime-offensive { background: rgba(34,197,94,0.25); color: #4ade80; }
+.regime-block.regime-neutral { background: rgba(245,158,11,0.25); color: #f59e0b; }
+.regime-block.regime-defensive { background: rgba(239,68,68,0.25); color: #f87171; }
 </style>

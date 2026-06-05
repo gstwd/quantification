@@ -461,6 +461,10 @@ class BacktestRunModel(Base):
     strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="关联策略 ID")
     start_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="回测起始日期")
     end_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="回测结束日期")
+    backtest_mode: Mapped[str] = mapped_column(
+        String(32), default="signal", server_default="signal",
+        comment="回测模式：signal=信号评分，allocation=资产配置",
+    )
     universe_filter: Mapped[dict] = mapped_column(
         JSON,
         nullable=False,
@@ -521,6 +525,18 @@ class BacktestDailyResultModel(Base):
     )
     low_signal_count: Mapped[int] = mapped_column(
         Integer, nullable=False, comment="当日 LOW 信号 ETF 数量"
+    )
+    timing_regime: Mapped[str | None] = mapped_column(
+        String(32), comment="择时状态：offensive/neutral/defensive（配置模式）"
+    )
+    total_exposure: Mapped[float | None] = mapped_column(
+        Float, comment="总仓位比例，0-1（配置模式）"
+    )
+    cash_ratio: Mapped[float | None] = mapped_column(
+        Float, comment="现金比例，0-1（配置模式）"
+    )
+    positions: Mapped[dict | None] = mapped_column(
+        JSON, comment="持仓明细，etf_code → 权重（配置模式）"
     )
 
 
