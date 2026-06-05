@@ -46,16 +46,16 @@ class FactorUpdateRequest(BaseModel):
 
 
 class CrossSectionRow(BaseModel):
-    """横截面数据行，包含 ETF 中文名。
+    """横截面数据行，包含指数中文名。
 
     Attributes:
-        etf_code: ETF 代码。
-        name_cn: ETF 中文简称。
+        index_code: 指数代码。
+        name_cn: 指数中文名称。
         factor_value_numeric: 因子数值。
         factor_value_text: 因子文本值。
     """
 
-    etf_code: str
+    index_code: str
     name_cn: str
     factor_value_numeric: float | None = None
     factor_value_text: str | None = None

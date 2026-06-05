@@ -4,7 +4,6 @@ from typing import Any
 
 from quant_etf_api.plugins.base import StrategyPlugin
 from quant_etf_api.plugins.builtins.etf_allocation.plugin import EtfAllocationPlugin
-from quant_etf_api.plugins.builtins.share_flow_monitor.plugin import ShareFlowMonitorPlugin
 from quant_etf_api.plugins.builtins.three_factor.plugin import ThreeFactorGuardPlugin
 from quant_etf_api.plugins.builtins.volume_breakout.plugin import VolumeBreakoutDailyPlugin
 
@@ -62,6 +61,5 @@ def build_default_registry() -> StrategyRegistry:
     registry = StrategyRegistry()
     registry.register(EtfAllocationPlugin())
     registry.register(ThreeFactorGuardPlugin())
-    registry.register(ShareFlowMonitorPlugin())
     registry.register(VolumeBreakoutDailyPlugin())
     return registry

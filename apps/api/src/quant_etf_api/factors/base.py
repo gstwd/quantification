@@ -82,14 +82,14 @@ class FactorComputer(Protocol):
 
     def compute(
         self,
-        etf_code: str,
+        index_code: str,
         trade_date: date,
         ctx: FactorContext,
     ) -> FactorValue:
-        """计算指定 ETF 在指定交易日的因子值。
+        """计算指定指数在指定交易日的因子值。
 
         Args:
-            etf_code: ETF 代码，如 510300。
+            index_code: 指数代码，如 000300。
             trade_date: 目标交易日。
             ctx: 包含 90 天回望数据的上下文。
 

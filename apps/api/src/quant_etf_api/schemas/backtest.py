@@ -27,6 +27,7 @@ class BacktestCreateRequest(BaseModel):
     end_date: date
     universe_mode: Literal["all", "subset"] = "all"
     etf_codes: list[str] = []
+    index_codes: list[str] = []
     params: dict[str, Any] | None = None
     weighting: Literal["equal", "signal_weighted"] = "equal"
     backtest_mode: Literal["signal", "allocation"] = "signal"
@@ -99,7 +100,7 @@ class BacktestDailyResult(BaseModel):
 
 
 class BacktestEtfResult(BaseModel):
-    """回测单日单 ETF 信号与实际收益。"""
+    """回测单日单 ETF 信号与实际收益（three_factor_guard 专用）。"""
 
     trade_date: date
     etf_code: str
@@ -107,3 +108,14 @@ class BacktestEtfResult(BaseModel):
     signal_level: str
     in_portfolio: bool
     etf_return: float | None = None
+
+
+class BacktestIndexResult(BaseModel):
+    """回测单日单指数信号与实际收益。"""
+
+    trade_date: date
+    index_code: str
+    signal_score: float
+    signal_level: str
+    in_portfolio: bool
+    index_return: float | None = None

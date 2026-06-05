@@ -268,6 +268,49 @@ class EtfFactorValueModel(Base):
     )
 
 
+class IndexFactorValueModel(Base):
+    """指数因子值表，存储指数级别的因子计算结果。
+
+    与 etf_factor_value 并行，用于指数级因子（volume/momentum/volatility/valuation）。
+    three_factor_guard 等 ETF 专用策略仍使用 etf_factor_value。
+    """
+
+    __tablename__ = "index_factor_value"
+    __table_args__ = (
+        UniqueConstraint(
+            "trade_date", "index_code", "factor_id", "strategy_id",
+            name="uq_index_factor_value",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, comment="自增主键"
+    )
+    trade_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="交易日期")
+    index_code: Mapped[str] = mapped_column(
+        ForeignKey("benchmark_index.index_code"),
+        nullable=False,
+        comment="指数代码，外键关联 benchmark_index",
+    )
+    factor_id: Mapped[str] = mapped_column(
+        ForeignKey("factor_definition.factor_id"),
+        nullable=False,
+        comment="因子 ID，外键关联 factor_definition",
+    )
+    factor_value_numeric: Mapped[float | None] = mapped_column(
+        Float, comment="因子数值，如量比 1.92、收益率 3.5"
+    )
+    factor_value_text: Mapped[str | None] = mapped_column(
+        String(128), comment="因子文本值，用于枚举类因子"
+    )
+    factor_payload: Mapped[dict | None] = mapped_column(
+        JSON, comment="因子计算中间数据，用于调试和解释"
+    )
+    strategy_id: Mapped[str | None] = mapped_column(
+        String(64), comment="产生该因子值的策略 ID，NULL 表示通用因子"
+    )
+
+
 class SignalDefinitionModel(Base):
     __tablename__ = "signal_definition"
 
@@ -513,6 +556,40 @@ class BacktestEtfResultModel(Base):
     )
     etf_return: Mapped[float | None] = mapped_column(
         Float, comment="T+1 日实际收益率，单位 %，末日为 NULL"
+    )
+
+
+class BacktestIndexResultModel(Base):
+    """回测每日每只指数的信号和实际收益，用于指数级回测。"""
+
+    __tablename__ = "backtest_index_result"
+    __table_args__ = (
+        UniqueConstraint("backtest_id", "trade_date", "index_code", name="uq_backtest_index"),
+        Index("ix_backtest_index_backtest_id", "backtest_id"),
+        Index("ix_backtest_index_code", "backtest_id", "index_code"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="自增主键"
+    )
+    backtest_id: Mapped[str] = mapped_column(
+        ForeignKey("backtest_run.backtest_id"), nullable=False, comment="所属回测 ID"
+    )
+    trade_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="信号生成日期（T 日）")
+    index_code: Mapped[str] = mapped_column(
+        ForeignKey("benchmark_index.index_code"), nullable=False, comment="指数代码"
+    )
+    signal_score: Mapped[float] = mapped_column(
+        Float, nullable=False, comment="信号综合得分，0-100"
+    )
+    signal_level: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="信号等级：HIGH/MID/LOW"
+    )
+    in_portfolio: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, comment="是否纳入当日组合"
+    )
+    index_return: Mapped[float | None] = mapped_column(
+        Float, comment="T+1 日指数收益率，单位 %，末日为 NULL"
     )
 
 

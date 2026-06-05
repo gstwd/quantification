@@ -1,6 +1,6 @@
-"""估值类因子：PE 百分位、PB 百分位。
+"""估值类因子：PE 百分位、PB 百分位（基于指数数据）。
 
-读取 ETF 跟踪指数的估值数据（index_valuation 表），
+直接读取指数的估值数据（index_valuation 表），
 将 PE/PB 历史百分位映射为因子值。
 百分位越低表示越低估，因子值直接透传原始百分位（0-100）。
 """
@@ -15,10 +15,9 @@ from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
 class PEPercentileComputer:
     """PE 百分位因子计算器。
 
-    读取 ETF 跟踪指数的 PE(TTM) 历史百分位（0-100），
+    读取指数的 PE(TTM) 历史百分位（0-100），
     百分位越低表示当前估值越便宜。
-    数据来源于 index_valuation 表，仅沪深300/上证50/中证500 有数据，
-    其他指数返回 None。
+    仅沪深 300/上证 50/中证 500 等主要宽基指数有数据覆盖。
     """
 
     @property
@@ -28,36 +27,27 @@ class PEPercentileComputer:
             factor_id="pe_percentile",
             name="PE百分位",
             category="valuation",
-            version="1.0.0",
+            version="2.0.0",
             description=(
-                "ETF 跟踪指数的 PE(TTM) 历史百分位（0-100），数值越低越低估。"
+                "指数的 PE(TTM) 历史百分位（0-100），数值越低越低估。"
                 "数据来源于 index_valuation 表，仅主要宽基指数有覆盖。"
             ),
             required_data=["index_valuation"],
         )
 
-    def compute(self, etf_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
+    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
         """计算 PE 百分位。
 
-        通过 etf_index_map 查找 ETF 跟踪的指数代码，
-        再从 index_valuation 中读取对应日期的 pe_percentile。
+        直接用 index_code 从 index_valuation 中读取对应日期的 pe_percentile。
 
         Args:
-            etf_code: ETF 代码。
+            index_code: 指数代码。
             trade_date: 目标交易日。
             ctx: FactorContext。
 
         Returns:
             FactorValue，无估值数据时 numeric 为 None。
         """
-        index_code = ctx.etf_index_map.get(etf_code)
-        if index_code is None:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"reason": "ETF 无跟踪指数映射"},
-            )
-
         val_row = ctx.index_valuation.get((index_code, trade_date))
         if val_row is None or val_row.pe_percentile is None:
             return FactorValue(
@@ -79,7 +69,7 @@ class PEPercentileComputer:
 class PBPercentileComputer:
     """PB 百分位因子计算器。
 
-    读取 ETF 跟踪指数的 PB 历史百分位（0-100），
+    读取指数的 PB 历史百分位（0-100），
     百分位越低表示当前估值越便宜。
     """
 
@@ -90,33 +80,25 @@ class PBPercentileComputer:
             factor_id="pb_percentile",
             name="PB百分位",
             category="valuation",
-            version="1.0.0",
+            version="2.0.0",
             description=(
-                "ETF 跟踪指数的 PB 历史百分位（0-100），数值越低越低估。"
+                "指数的 PB 历史百分位（0-100），数值越低越低估。"
                 "数据来源于 index_valuation 表，仅主要宽基指数有覆盖。"
             ),
             required_data=["index_valuation"],
         )
 
-    def compute(self, etf_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
+    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
         """计算 PB 百分位。
 
         Args:
-            etf_code: ETF 代码。
+            index_code: 指数代码。
             trade_date: 目标交易日。
             ctx: FactorContext。
 
         Returns:
             FactorValue，无估值数据时 numeric 为 None。
         """
-        index_code = ctx.etf_index_map.get(etf_code)
-        if index_code is None:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"reason": "ETF 无跟踪指数映射"},
-            )
-
         val_row = ctx.index_valuation.get((index_code, trade_date))
         if val_row is None or val_row.pb_percentile is None:
             return FactorValue(

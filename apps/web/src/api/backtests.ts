@@ -4,6 +4,7 @@ import type {
   BacktestDetail,
   BacktestDailyResult,
   BacktestEtfResult,
+  BacktestIndexResult,
   BacktestSummary,
   PaginatedResponse,
 } from '../types/api'
@@ -37,7 +38,7 @@ export async function fetchBacktestDaily(backtestId: string): Promise<BacktestDa
   return data
 }
 
-/** 获取回测每日每 ETF 信号与收益，可按 ETF 代码过滤 */
+/** 获取回测每日每 ETF 信号与收益（three_factor_guard 专用），可按 ETF 代码过滤 */
 export async function fetchBacktestEtfResults(
   backtestId: string,
   etfCode?: string,
@@ -45,6 +46,18 @@ export async function fetchBacktestEtfResults(
   const { data } = await apiClient.get<BacktestEtfResult[]>(
     `/backtests/${backtestId}/etf-results`,
     { params: etfCode ? { etf_code: etfCode } : {} },
+  )
+  return data
+}
+
+/** 获取回测每日每指数信号与收益，可按指数代码过滤 */
+export async function fetchBacktestIndexResults(
+  backtestId: string,
+  indexCode?: string,
+): Promise<BacktestIndexResult[]> {
+  const { data } = await apiClient.get<BacktestIndexResult[]>(
+    `/backtests/${backtestId}/index-results`,
+    { params: indexCode ? { index_code: indexCode } : {} },
   )
   return data
 }

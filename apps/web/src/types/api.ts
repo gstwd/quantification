@@ -125,6 +125,7 @@ export interface BacktestCreateRequest {
   end_date: string
   universe_mode: 'all' | 'subset'
   etf_codes: string[]
+  index_codes: string[]
   params?: Record<string, unknown> | null
   weighting: 'equal' | 'signal_weighted'
   backtest_mode?: 'signal' | 'allocation'
@@ -183,6 +184,15 @@ export interface BacktestEtfResult {
   etf_return: number | null
 }
 
+export interface BacktestIndexResult {
+  trade_date: string
+  index_code: string
+  signal_score: number
+  signal_level: string
+  in_portfolio: boolean
+  index_return: number | null
+}
+
 export interface IndexValuation {
   trade_date: string
   index_code: string
@@ -230,7 +240,7 @@ export interface FactorSpec {
 
 export interface FactorRow {
   trade_date: string
-  etf_code: string
+  index_code: string
   factor_id: string
   factor_value_numeric: number | null
   factor_value_text: string | null
@@ -238,9 +248,9 @@ export interface FactorRow {
   strategy_id: string | null
 }
 
-/** 横截面数据行，包含 ETF 中文名 */
+/** 横截面数据行，包含指数中文名 */
 export interface CrossSectionRow {
-  etf_code: string
+  index_code: string
   name_cn: string
   factor_value_numeric: number | null
   factor_value_text: string | null

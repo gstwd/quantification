@@ -13,6 +13,7 @@ from quant_etf_api.schemas.backtest import (
     BacktestDetail,
     BacktestDailyResult,
     BacktestEtfResult,
+    BacktestIndexResult,
     BacktestSummary,
 )
 from quant_etf_api.schemas.pagination import PaginatedResponse
@@ -76,5 +77,15 @@ def get_backtest_etf_results(
     etf_code: str | None = None,
     db: Session = Depends(get_db),
 ) -> list[BacktestEtfResult]:
-    """返回回测每日每 ETF 信号与实际收益，可按 ETF 代码过滤。"""
+    """返回回测每日每 ETF 信号与实际收益（three_factor_guard 专用），可按 ETF 代码过滤。"""
     return BacktestService(db, _registry).get_etf_results(backtest_id, etf_code=etf_code)
+
+
+@router.get("/backtests/{backtest_id}/index-results", response_model=list[BacktestIndexResult])
+def get_backtest_index_results(
+    backtest_id: str,
+    index_code: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[BacktestIndexResult]:
+    """返回回测每日每指数信号与实际收益，可按指数代码过滤。"""
+    return BacktestService(db, _registry).get_index_results(backtest_id, index_code=index_code)

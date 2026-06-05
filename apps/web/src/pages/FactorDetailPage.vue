@@ -47,9 +47,9 @@
         </div>
         <details class="info-block">
           <summary>查看说明</summary>
-          <p><strong>横截面快照</strong>是某一天所有 ETF 的因子值截面，按因子值降序排列。因子值越高，表示该因子维度上信号越强。</p>
-          <p><strong>相对分布</strong>柱显示各 ETF 因子值在当日全量 ETF 中的归一化位置，便于直观对比。</p>
-          <p>点击行尾的「时间序列」按钮，可跳转查看该 ETF 在此因子上的历史走势。</p>
+          <p><strong>横截面快照</strong>是某一天所有指数的因子值截面，按因子值降序排列。因子值越高，表示该因子维度上信号越强。</p>
+          <p><strong>相对分布</strong>柱显示各指数因子值在当日全量指数中的归一化位置，便于直观对比。</p>
+          <p>点击行尾的「时间序列」按钮，可跳转查看该指数在此因子上的历史走势。</p>
         </details>
         <div v-if="crossLoading" class="empty">加载中...</div>
         <div v-else-if="crossRows.length === 0" class="empty">暂无数据</div>
@@ -57,18 +57,18 @@
           <thead>
             <tr>
               <th>排名</th>
-              <th>ETF 代码</th>
-              <th>ETF 名称</th>
+              <th>指数代码</th>
+              <th>指数名称</th>
               <th>因子值</th>
               <th class="bar-col">相对分布</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(row, idx) in crossRows" :key="row.etf_code">
+            <tr v-for="(row, idx) in crossRows" :key="row.index_code">
               <td class="rank">{{ idx + 1 }}</td>
               <td>
-                <RouterLink :to="`/etfs/${row.etf_code}`" class="etf-link">{{ row.etf_code }}</RouterLink>
+                <RouterLink :to="`/indexes/${row.index_code}`" class="etf-link">{{ row.index_code }}</RouterLink>
               </td>
               <td class="name-cell">{{ row.name_cn }}</td>
               <td class="value mono">{{ row.factor_value_numeric != null ? row.factor_value_numeric.toFixed(4) : '—' }}</td>
@@ -81,7 +81,7 @@
                 </div>
               </td>
               <td>
-                <button class="series-btn" @click="goToSeries(row.etf_code)">时间序列</button>
+                <button class="series-btn" @click="goToSeries(row.index_code)">时间序列</button>
               </td>
             </tr>
           </tbody>
@@ -97,7 +97,7 @@
               type="text"
               class="etf-input"
               v-model="seriesEtf"
-              placeholder="ETF代码，如 510300"
+              placeholder="指数代码，如 000300"
               @keyup.enter="() => loadSeries()"
             />
             <input type="date" class="date-input" v-model="seriesStart" />
@@ -111,11 +111,11 @@
         </div>
         <details class="info-block">
           <summary>查看说明</summary>
-          <p><strong>时间序列</strong>展示单个 ETF 在指定日期范围内因子值的变化趋势。输入 ETF 代码和日期范围后点击查询。</p>
+          <p><strong>时间序列</strong>展示单个指数在指定日期范围内因子值的变化趋势。输入指数代码和日期范围后点击查询。</p>
           <p>后端会自动补算缺失日期的因子值，勾选「强制重新计算」可覆盖已有数据。</p>
         </details>
         <div v-if="seriesLoading" class="empty">加载中...</div>
-        <div v-else-if="seriesRows.length === 0" class="empty">输入 ETF 代码并查询，查看因子值走势</div>
+        <div v-else-if="seriesRows.length === 0" class="empty">输入指数代码并查询，查看因子值走势</div>
         <div v-else ref="chartEl" class="chart-container"></div>
       </div>
 
@@ -133,7 +133,7 @@
         <details class="info-block">
           <summary>查看说明</summary>
           <p><strong>Rank IC（Information Coefficient）</strong>是因子值与下期收益率的 Spearman 秩相关系数，衡量因子的预测能力。取值范围 [-1, 1]。</p>
-          <p><strong>计算流程：</strong>取当日所有 ETF 的因子值 → 计算 N 天后的收益率 → 对两个序列做 Spearman 相关。</p>
+          <p><strong>计算流程：</strong>取当日所有指数的因子值 → 计算 N 天后的收益率 → 对两个序列做 Spearman 相关。</p>
           <div class="info-table">
             <div class="info-row"><span class="info-label">IC 均值</span><span class="info-desc">所有交易日 IC 的平均值。<strong>> 0</strong> 表示因子有正向预测力，绝对值 > 0.03 算有效。</span></div>
             <div class="info-row"><span class="info-label">IC 标准差</span><span class="info-desc">IC 的波动程度，<strong>越小越稳定</strong>。</span></div>
@@ -180,7 +180,7 @@
       <div v-show="tab === 'correlation'" class="card">
         <div class="card-header">
           <span class="card-title">因子相关性矩阵</span>
-          <span v-if="corrData" class="card-subtitle">ETF 数量：{{ corrData.etf_count }}</span>
+          <span v-if="corrData" class="card-subtitle">指数数量：{{ corrData.etf_count }}</span>
           <div class="controls">
             <input type="date" class="date-input" v-model="corrDate" />
             <button class="query-btn" @click="loadCorrelation">查询</button>

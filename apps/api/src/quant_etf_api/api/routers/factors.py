@@ -19,6 +19,7 @@ from quant_etf_api.factors.evaluation import (
 from quant_etf_api.schemas.factor import (
     CorrelationResponse,
     CrossSectionResponse,
+    CrossSectionRow,
     FactorSpecResponse,
     FactorUpdateRequest,
     ICResponse,
@@ -128,32 +129,18 @@ def factor_cross_section(
     db: Session = Depends(get_db),
     registry: FactorRegistry = Depends(get_factor_registry),
 ) -> CrossSectionResponse:
-    """查询指定因子的横截面快照（含 ETF 中文名）。
+    """查询指定因子的横截面快照（含指数中文名）。
 
     不传 trade_date 时自动选择最新有数据的日期，若该日无数据则按需计算。
     设置 force_recompute=True 时强制重新计算并覆盖已有数据。
     """
-    # 验证因子存在
     repo = FactorDefinitionRepository(db)
     if repo.find_by_id(factor_id) is None:
         raise HTTPException(status_code=404, detail=f"因子 {factor_id} 不存在")
 
     svc = FactorService(db, registry)
     try:
-        if trade_date is not None:
-            # 指定日期：强制重算或检查是否需要补算
-            if force_recompute:
-                svc.compute_and_store(trade_date)
-            else:
-                missing_codes = repo.find_missing_dates_for_all_etfs(factor_id, trade_date)
-                if missing_codes:
-                    svc.compute_and_store(trade_date)
-            rows = repo.find_cross_section(factor_id, trade_date)
-            result_date = trade_date
-        else:
-            # 自动选择最新日期
-            result_date, _ = svc.get_or_compute_cross_section(factor_id, force_recompute)
-            rows = repo.find_cross_section(factor_id, result_date)
+        result_date, rows = svc.get_or_compute_cross_section(factor_id, force_recompute)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from None
 
@@ -161,12 +148,12 @@ def factor_cross_section(
         factor_id=factor_id,
         trade_date=str(result_date),
         rows=[
-            {
-                "etf_code": r[0],
-                "name_cn": r[1],
-                "factor_value_numeric": r[2],
-                "factor_value_text": r[3],
-            }
+            CrossSectionRow(
+                index_code=r.index_code,
+                name_cn=r.name_cn,
+                factor_value_numeric=r.factor_value_numeric,
+                factor_value_text=r.factor_value_text,
+            )
             for r in rows
         ],
     )
@@ -175,14 +162,14 @@ def factor_cross_section(
 @router.get("/factors/{factor_id}/values", response_model=list[FactorRow])
 def factor_time_series(
     factor_id: str,
-    etf_code: str = Query(..., description="ETF 代码，如 510300"),
+    index_code: str = Query(..., description="指数代码，如 000300"),
     start_date: date = Query(..., description="开始日期（含）"),
     end_date: date = Query(..., description="结束日期（含）"),
     force_recompute: bool = Query(False, description="是否强制重新计算并覆盖已有数据"),
     db: Session = Depends(get_db),
     registry: FactorRegistry = Depends(get_factor_registry),
 ) -> list[FactorRow]:
-    """查询单因子在单 ETF 上的历史时间序列，自动补算缺失日期后返回。
+    """查询单因子在单指数上的历史时间序列，自动补算缺失日期后返回。
 
     设置 force_recompute=True 时强制重新计算并覆盖已有数据。
     """
@@ -193,7 +180,7 @@ def factor_time_series(
     svc = FactorService(db, registry)
     return svc.get_or_compute_time_series(
         factor_id=factor_id,
-        etf_code=etf_code,
+        index_code=index_code,
         start_date=start_date,
         end_date=end_date,
         force_recompute=force_recompute,

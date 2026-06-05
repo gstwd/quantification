@@ -138,12 +138,12 @@ class EtfAllocationPlugin:
                 pb_pct = val.get("pb_percentile")
                 break
 
-        # 选取代表性 ETF 的行情（沪深300 ETF 优先）
+        # 选取代表性标的的行情（沪深300 优先，兼容 ETF 和指数模式）
         close_price: float | None = None
         ma60: float | None = None
         volume_ratio = 1.0
-        for etf_code in ("510300", "510050", "510500"):
-            bars = etf_bars.get(etf_code, {})
+        for code in ("000300", "510300", "000016", "510050", "000905", "510500"):
+            bars = etf_bars.get(code, {})
             if bars.get("close_price") is not None:
                 close_price = bars["close_price"]
                 ma60 = bars.get("ma60")

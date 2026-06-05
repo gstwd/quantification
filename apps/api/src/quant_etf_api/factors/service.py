@@ -1,10 +1,10 @@
-"""因子计算编排与持久化。
+"""因子计算编排与持久化（基于指数数据）。
 
 负责以下职责：
 1. 将 FactorRegistry 中的 FactorSpec 与 factor_definition 表双向同步（幂等）
-2. 批量加载 90 天回望的上下文数据
-3. 对全量活跃 ETF × 全量已启用因子调用 compute()
-4. 使用 PostgreSQL partial index ON CONFLICT upsert 写入 etf_factor_value
+2. 批量加载 90 天回望的指数上下文数据
+3. 对全量指数 × 全量已启用因子调用 compute()
+4. 使用 PostgreSQL partial index ON CONFLICT upsert 写入 index_factor_value
 5. 提供横截面和时间序列查询，支持按需自动计算缺失数据
 """
 
@@ -20,14 +20,14 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.factors.base import FactorContext
 from quant_etf_api.infra.db.models.core import (
-    EtfDailyBarModel,
-    EtfDailyShareModel,
-    EtfFactorValueModel,
-    EtfUniverseModel,
+    BenchmarkIndexModel,
     FactorDefinitionModel,
+    IndexDailyBarModel,
+    IndexFactorValueModel,
     IndexValuationModel,
 )
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
+from quant_etf_api.infra.db.repositories.index_factor_value import IndexFactorValueRepository
 from quant_etf_api.schemas.factor import CrossSectionRow
 from quant_etf_api.schemas.signal import FactorRow
 
@@ -41,7 +41,7 @@ _LOOKBACK_DAYS = 90
 
 
 class FactorService:
-    """因子计算与持久化服务。
+    """因子计算与持久化服务（基于指数数据）。
 
     Args:
         db: SQLAlchemy 同步 Session。
@@ -58,6 +58,7 @@ class FactorService:
         self._db = db
         self._registry = registry
         self._repo = FactorDefinitionRepository(db)
+        self._index_repo = IndexFactorValueRepository(db)
 
     # ==================================================================
     # 公开接口
@@ -66,7 +67,6 @@ class FactorService:
     def sync_factor_definitions(self) -> dict[str, int]:
         """将注册表中的 FactorSpec 同步到 factor_definition 表（幂等）。
 
-        这是唯一的因子定义同步入口，需要显式调用。
         同步策略：
         - 代码中有、DB 中没有 → INSERT（新因子）
         - 代码和 DB 都有 → 仅更新 version、required_data（代码管控字段）
@@ -82,7 +82,6 @@ class FactorService:
         update_count = 0
         deactivate_count = 0
 
-        # 新增：代码中有、DB 中没有
         for factor_id, spec in specs.items():
             if factor_id not in existing:
                 self._db.add(
@@ -99,7 +98,6 @@ class FactorService:
                 )
                 new_count += 1
             else:
-                # 更新：仅同步代码管控的字段
                 row = existing[factor_id]
                 changed = False
                 if row.version != spec.version:
@@ -111,7 +109,6 @@ class FactorService:
                 if changed:
                     update_count += 1
 
-        # 标记失效：DB 中有、代码中没有 → 设为 is_active=False
         for factor_id, row in existing.items():
             if factor_id not in specs and row.is_active:
                 row.is_active = False
@@ -134,55 +131,50 @@ class FactorService:
         return {"new": new_count, "updated": update_count, "deactivated": deactivate_count}
 
     def compute_and_store(self, trade_date: date) -> dict[str, Any]:
-        """计算指定交易日全量 ETF × 全量已启用因子并写入 DB。
+        """计算指定交易日全量指数 × 全量已启用因子并写入 DB。
 
         执行流程：
-        1. 查询活跃 ETF 列表
-        2. _load_context：批量加载 90 天回望数据
-        3. 对每个 ETF × 每个已启用因子调用 compute()
-        4. upsert（partial index ON CONFLICT DO UPDATE）写入 etf_factor_value
-
-        注意：因子定义必须已存在于 DB 中，否则不会参与计算。
-        使用 sync_factor_definitions() 或 POST /factors/init 初始化因子定义。
+        1. 查询 benchmark_index 中所有指数
+        2. _load_context：批量加载 90 天回望的指数数据
+        3. 对每个指数 × 每个已启用因子调用 compute()
+        4. upsert（partial index ON CONFLICT DO UPDATE）写入 index_factor_value
 
         Args:
             trade_date: 要计算的交易日。
 
         Returns:
-            汇总统计字典，包含 etf_count / factor_count / upsert_count / errors。
+            汇总统计字典，包含 index_count / factor_count / upsert_count / errors。
         """
-        etfs = (
-            self._db.query(EtfUniverseModel)
-            .filter(EtfUniverseModel.is_active.is_(True))
-            .order_by(EtfUniverseModel.etf_code)
+        indexes = (
+            self._db.query(BenchmarkIndexModel)
+            .order_by(BenchmarkIndexModel.index_code)
             .all()
         )
-        if not etfs:
-            logger.warning("compute_and_store: 无活跃 ETF，跳过因子计算")
-            return {"etf_count": 0, "factor_count": 0, "upsert_count": 0, "errors": 0}
+        if not indexes:
+            logger.warning("compute_and_store: 无指数，跳过因子计算")
+            return {"index_count": 0, "factor_count": 0, "upsert_count": 0, "errors": 0}
 
-        etf_codes = [e.etf_code for e in etfs]
-        ctx = self._load_context(trade_date, etf_codes)
+        index_codes = [idx.index_code for idx in indexes]
+        ctx = self._load_context(trade_date, index_codes)
 
-        # 仅计算 DB 中 is_active=True 的因子
         active_ids = {d.factor_id for d in self._repo.find_active()}
         computers = [c for c in self._registry.all() if c.spec.factor_id in active_ids]
 
         if not computers:
             logger.warning("compute_and_store: 无已启用的因子，跳过计算")
-            return {"etf_count": len(etfs), "factor_count": 0, "upsert_count": 0, "errors": 0}
+            return {"index_count": len(indexes), "factor_count": 0, "upsert_count": 0, "errors": 0}
 
         rows_to_upsert: list[dict] = []
         errors = 0
 
-        for etf in etfs:
+        for idx in indexes:
             for computer in computers:
                 try:
-                    fv = computer.compute(etf.etf_code, trade_date, ctx)
+                    fv = computer.compute(idx.index_code, trade_date, ctx)
                     rows_to_upsert.append(
                         {
                             "trade_date": trade_date,
-                            "etf_code": etf.etf_code,
+                            "index_code": idx.index_code,
                             "factor_id": fv.factor_id,
                             "factor_value_numeric": fv.numeric,
                             "factor_value_text": fv.text,
@@ -193,23 +185,23 @@ class FactorService:
                 except Exception:
                     errors += 1
                     logger.warning(
-                        "因子计算失败: etf=%s factor=%s",
-                        etf.etf_code,
+                        "因子计算失败: index=%s factor=%s",
+                        idx.index_code,
                         computer.spec.factor_id,
                         exc_info=True,
                     )
 
         upsert_count = self._bulk_upsert(rows_to_upsert)
         logger.info(
-            "因子计算完成: trade_date=%s etf=%d factor=%d upsert=%d errors=%d",
+            "因子计算完成: trade_date=%s index=%d factor=%d upsert=%d errors=%d",
             trade_date,
-            len(etfs),
+            len(indexes),
             len(computers),
             upsert_count,
             errors,
         )
         return {
-            "etf_count": len(etfs),
+            "index_count": len(indexes),
             "factor_count": len(computers),
             "upsert_count": upsert_count,
             "errors": errors,
@@ -219,12 +211,6 @@ class FactorService:
         self, factor_id: str, force_recompute: bool = False
     ) -> tuple[date, list[CrossSectionRow]]:
         """获取指定因子的横截面数据，自动选择最新日期并按需计算。
-
-        流程：
-        1. 查询该因子在 etf_factor_value 中的最大 trade_date
-        2. 若无记录，取 etf_daily_bar 的最大 trade_date 作为基准日
-        3. 若基准日该因子无数据或 force_recompute=True，调用 compute_and_store 计算
-        4. 返回横截面数据（含 ETF 中文名）
 
         Args:
             factor_id: 因子标识。
@@ -236,22 +222,19 @@ class FactorService:
         Raises:
             ValueError: 无任何行情数据时抛出。
         """
-        # 查询因子最新数据日期
-        latest = self._repo.find_latest_date(factor_id)
+        latest = self._index_repo.find_latest_date(factor_id)
 
         if latest is None or force_recompute:
-            # 因子从未计算过或强制重算，取行情最新日期
-            bar_latest = self._repo.find_latest_bar_date()
+            bar_latest = self._index_repo.find_latest_bar_date()
             if bar_latest is None:
-                raise ValueError("无任何行情数据，无法计算因子")
-            # 强制重新计算，覆盖已有数据
+                raise ValueError("无任何指数行情数据，无法计算因子")
             self.compute_and_store(bar_latest)
             latest = bar_latest
 
-        rows = self._repo.find_cross_section(factor_id, latest)
+        rows = self._index_repo.find_cross_section(factor_id, latest)
         return latest, [
             CrossSectionRow(
-                etf_code=r[0],
+                index_code=r[0],
                 name_cn=r[1],
                 factor_value_numeric=r[2],
                 factor_value_text=r[3],
@@ -262,67 +245,58 @@ class FactorService:
     def get_or_compute_time_series(
         self,
         factor_id: str,
-        etf_code: str,
+        index_code: str,
         start_date: date,
         end_date: date,
         force_recompute: bool = False,
     ) -> list[FactorRow]:
         """获取因子时间序列，自动补算缺失日期后返回。
 
-        流程：
-        1. 查询 etf_daily_bar 中该 ETF 在 [start, end] 有数据的日期集合
-        2. 查询 etf_factor_value 中已有的日期集合
-        3. 差集 = 缺失日期，逐日调用 compute_and_store 补算
-        4. 若 force_recompute=True，强制重新计算所有日期
-        5. 返回完整时间序列
-
         Args:
             factor_id: 因子标识。
-            etf_code: ETF 代码。
+            index_code: 指数代码。
             start_date: 开始日期（含）。
-            end_date: 结束日期（含）。
+            end_date: 截止日期（含）。
             force_recompute: 是否强制重新计算，覆盖已有数据。
 
         Returns:
             按 trade_date 升序排列的 FactorRow 列表。
         """
         if force_recompute:
-            # 强制重算：获取所有有行情数据的日期并重新计算
-            dates_to_compute = self._repo.find_all_bar_dates(etf_code, start_date, end_date)
+            dates_to_compute = self._index_repo.find_all_bar_dates(index_code, start_date, end_date)
         else:
-            # 正常模式：仅补算缺失日期
-            dates_to_compute = self._repo.find_missing_dates(
-                factor_id, etf_code, start_date, end_date
+            dates_to_compute = self._index_repo.find_missing_dates(
+                factor_id, index_code, start_date, end_date
             )
 
         for d in dates_to_compute:
             self.compute_and_store(d)
 
-        rows = self._repo.find_factor_values(factor_id, etf_code, start_date, end_date)
+        rows = self._index_repo.find_factor_values(factor_id, index_code, start_date, end_date)
         return [_row_to_factor_row(r) for r in rows]
 
     def factor_history(
         self,
         factor_id: str,
-        etf_code: str,
+        index_code: str,
         start_date: date,
         end_date: date,
     ) -> list[FactorRow]:
-        """查询单因子在单 ETF 上的时间序列。
+        """查询单因子在单指数上的时间序列。
 
         仅返回独立因子值（strategy_id IS NULL）。
 
         Args:
             factor_id: 因子标识。
-            etf_code: ETF 代码。
+            index_code: 指数代码。
             start_date: 开始日期（含）。
-            end_date: 结束日期（含）。
+            end_date: 截止日期（含）。
 
         Returns:
             按 trade_date 升序排列的 FactorRow 列表。
         """
         try:
-            rows = self._repo.find_factor_values(factor_id, etf_code, start_date, end_date)
+            rows = self._index_repo.find_factor_values(factor_id, index_code, start_date, end_date)
             return [_row_to_factor_row(r) for r in rows]
         except Exception:
             logger.warning("factor_history 查询失败", exc_info=True)
@@ -332,59 +306,32 @@ class FactorService:
     # 内部方法
     # ==================================================================
 
-    def _load_context(self, trade_date: date, etf_codes: list[str]) -> FactorContext:
-        """批量加载 90 天回望的所有数据，构建 FactorContext。
-
-        覆盖 Return60dComputer 所需的 61 个收盘价（约 84 个自然日）。
-        etf_shares 加载 trade_date 当日快照数据（shares_delta_pct 为当日值）。
-        index_valuation 加载 trade_date 当日的估值数据（PE/PB 百分位）。
+    def _load_context(self, trade_date: date, index_codes: list[str]) -> FactorContext:
+        """批量加载 90 天回望的指数数据，构建 FactorContext。
 
         Args:
             trade_date: 目标交易日。
-            etf_codes: 活跃 ETF 代码列表。
+            index_codes: 指数代码列表。
 
         Returns:
-            填充了 etf_bars / etf_shares / index_valuation / etf_index_map 的 FactorContext。
+            填充了 index_bars / index_valuation 的 FactorContext。
         """
         lookback_start = trade_date - timedelta(days=_LOOKBACK_DAYS)
 
-        bar_rows = (
-            self._db.query(EtfDailyBarModel)
+        # 加载指数日线
+        index_bar_rows = (
+            self._db.query(IndexDailyBarModel)
             .filter(
                 and_(
-                    EtfDailyBarModel.trade_date >= lookback_start,
-                    EtfDailyBarModel.trade_date <= trade_date,
-                    EtfDailyBarModel.etf_code.in_(etf_codes),
+                    IndexDailyBarModel.trade_date >= lookback_start,
+                    IndexDailyBarModel.trade_date <= trade_date,
+                    IndexDailyBarModel.index_code.in_(index_codes),
                 )
             )
             .all()
         )
 
-        # 仅加载当日份额快照，shares_delta_pct 是当日计算的差值
-        share_rows = (
-            self._db.query(EtfDailyShareModel)
-            .filter(
-                and_(
-                    EtfDailyShareModel.trade_date == trade_date,
-                    EtfDailyShareModel.etf_code.in_(etf_codes),
-                )
-            )
-            .all()
-        )
-
-        # 构建 ETF 代码到跟踪指数代码的映射
-        etf_models = (
-            self._db.query(EtfUniverseModel)
-            .filter(EtfUniverseModel.etf_code.in_(etf_codes))
-            .all()
-        )
-        etf_index_map: dict[str, str] = {}
-        for etf in etf_models:
-            if etf.tracking_index_code:
-                etf_index_map[etf.etf_code] = etf.tracking_index_code
-
-        # 加载当日指数估值数据（仅跟踪指数覆盖的）
-        index_codes = list(set(etf_index_map.values()))
+        # 加载指数估值数据
         valuation_rows = (
             self._db.query(IndexValuationModel)
             .filter(
@@ -397,21 +344,12 @@ class FactorService:
         ) if index_codes else []
 
         return FactorContext(
-            etf_bars={(r.etf_code, r.trade_date): r for r in bar_rows},
-            etf_shares={(r.etf_code, r.trade_date): r for r in share_rows},
+            index_bars={(r.index_code, r.trade_date): r for r in index_bar_rows},
             index_valuation={(r.index_code, r.trade_date): r for r in valuation_rows},
-            etf_index_map=etf_index_map,
         )
 
     def _bulk_upsert(self, rows: list[dict[str, Any]]) -> int:
-        """批量 upsert etf_factor_value，使用 partial unique index 处理 NULL strategy_id。
-
-        ON CONFLICT 目标：partial index uq_etf_factor_value_builtin
-        （trade_date, etf_code, factor_id WHERE strategy_id IS NULL）。
-        冲突时更新 factor_value_numeric / factor_value_text / factor_payload。
-
-        index_where 与 migration 中的 postgresql_where=sa.text("strategy_id IS NULL")
-        语义完全一致，PostgreSQL 能正确识别为同一 partial index。
+        """批量 upsert index_factor_value，使用 partial unique index 处理 NULL strategy_id。
 
         Args:
             rows: 待写入的字典列表。
@@ -422,10 +360,10 @@ class FactorService:
         if not rows:
             return 0
 
-        stmt = insert(EtfFactorValueModel).values(rows)
+        stmt = insert(IndexFactorValueModel).values(rows)
         stmt = stmt.on_conflict_do_update(
-            index_elements=["trade_date", "etf_code", "factor_id"],
-            index_where=EtfFactorValueModel.strategy_id.is_(None),
+            index_elements=["trade_date", "index_code", "factor_id"],
+            index_where=IndexFactorValueModel.strategy_id.is_(None),
             set_={
                 "factor_value_numeric": stmt.excluded.factor_value_numeric,
                 "factor_value_text": stmt.excluded.factor_value_text,
@@ -442,7 +380,7 @@ class FactorService:
             return 0
 
 
-def _row_to_factor_row(row: EtfFactorValueModel) -> FactorRow:
+def _row_to_factor_row(row: IndexFactorValueModel) -> FactorRow:
     """将 ORM 行转换为 FactorRow schema。"""
     payload = row.factor_payload
     if isinstance(payload, str):
@@ -454,7 +392,7 @@ def _row_to_factor_row(row: EtfFactorValueModel) -> FactorRow:
             payload = {}
     return FactorRow(
         trade_date=row.trade_date,
-        etf_code=row.etf_code,
+        index_code=row.index_code,
         factor_id=row.factor_id,
         factor_value_numeric=row.factor_value_numeric,
         factor_value_text=row.factor_value_text,

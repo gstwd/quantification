@@ -34,14 +34,14 @@
         <div class="radio-group">
           <label class="radio-label">
             <input v-model="form.universe_mode" type="radio" value="all" />
-            全部活跃 ETF
+            {{ isEtfMode ? '全部活跃 ETF' : '全部指数' }}
           </label>
           <label class="radio-label">
             <input v-model="form.universe_mode" type="radio" value="subset" />
-            指定 ETF 子集
+            {{ isEtfMode ? '指定 ETF 子集' : '指定指数子集' }}
           </label>
         </div>
-        <div v-if="form.universe_mode === 'subset'" class="etf-checkboxes">
+        <div v-if="form.universe_mode === 'subset' && isEtfMode" class="etf-checkboxes">
           <label v-for="etf in etfStore.items" :key="etf.etf_code" class="checkbox-label">
             <input
               type="checkbox"
@@ -50,6 +50,17 @@
               @change="toggleEtf(etf.etf_code)"
             />
             {{ etf.etf_code }} {{ etf.name_cn }}
+          </label>
+        </div>
+        <div v-if="form.universe_mode === 'subset' && !isEtfMode" class="etf-checkboxes">
+          <label v-for="idx in indexes" :key="idx.index_code" class="checkbox-label">
+            <input
+              type="checkbox"
+              :value="idx.index_code"
+              :checked="form.index_codes.includes(idx.index_code)"
+              @change="toggleIndex(idx.index_code)"
+            />
+            {{ idx.index_code }} {{ idx.index_name }}
           </label>
         </div>
       </div>
@@ -98,14 +109,21 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 
+import { fetchBenchmarkIndexes } from '../api/market_data'
 import { useBacktestStore } from '../stores/backtests'
 import { useEtfStore } from '../stores/etfs'
 import { useStrategyStore } from '../stores/strategies'
+import type { BenchmarkIndex } from '../types/api'
+
+/** ETF 专用策略列表 */
+const ETF_STRATEGY_IDS = ['three_factor_guard']
 
 const router = useRouter()
 const store = useBacktestStore()
 const etfStore = useEtfStore()
 const strategyStore = useStrategyStore()
+
+const indexes = ref<BenchmarkIndex[]>([])
 
 const form = reactive({
   strategy_id: '',
@@ -113,6 +131,7 @@ const form = reactive({
   end_date: '',
   universe_mode: 'all' as 'all' | 'subset',
   etf_codes: [] as string[],
+  index_codes: [] as string[],
   weighting: 'equal' as 'equal' | 'signal_weighted',
   backtest_mode: 'signal' as 'signal' | 'allocation',
 })
@@ -120,18 +139,27 @@ const form = reactive({
 const submitting = ref(false)
 const error = ref('')
 
+/** 当前选中策略是否为 ETF 模式 */
+const isEtfMode = computed(() => ETF_STRATEGY_IDS.includes(form.strategy_id))
+
 const isValid = computed(() =>
   form.strategy_id !== '' &&
   form.start_date !== '' &&
   form.end_date !== '' &&
   form.start_date <= form.end_date &&
-  (form.universe_mode === 'all' || form.etf_codes.length > 0),
+  (form.universe_mode === 'all' || (isEtfMode.value ? form.etf_codes.length > 0 : form.index_codes.length > 0)),
 )
 
 function toggleEtf(code: string) {
   const idx = form.etf_codes.indexOf(code)
   if (idx === -1) form.etf_codes.push(code)
   else form.etf_codes.splice(idx, 1)
+}
+
+function toggleIndex(code: string) {
+  const idx = form.index_codes.indexOf(code)
+  if (idx === -1) form.index_codes.push(code)
+  else form.index_codes.splice(idx, 1)
 }
 
 async function submit() {
@@ -143,7 +171,8 @@ async function submit() {
       start_date: form.start_date,
       end_date: form.end_date,
       universe_mode: form.universe_mode,
-      etf_codes: form.etf_codes,
+      etf_codes: isEtfMode.value ? form.etf_codes : [],
+      index_codes: isEtfMode.value ? [] : form.index_codes,
       weighting: form.weighting,
       backtest_mode: form.backtest_mode,
     })
@@ -155,9 +184,14 @@ async function submit() {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   if (strategyStore.items.length === 0) strategyStore.loadAll()
   if (etfStore.items.length === 0) etfStore.loadAll()
+  try {
+    indexes.value = await fetchBenchmarkIndexes()
+  } catch {
+    indexes.value = []
+  }
 })
 </script>
 

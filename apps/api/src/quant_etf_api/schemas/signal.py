@@ -17,8 +17,10 @@ class SignalRow(BaseModel):
 
 
 class FactorRow(BaseModel):
+    """因子值行，用于时间序列和横截面查询响应。"""
+
     trade_date: date
-    etf_code: str
+    index_code: str
     factor_id: str
     factor_value_numeric: float | None = None
     factor_value_text: str | None = None

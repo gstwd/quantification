@@ -23,7 +23,7 @@ export async function updateFactor(
   return data
 }
 
-/** 查询单因子在指定交易日的横截面（含 ETF 中文名），不传日期时自动选最新 */
+/** 查询单因子在指定交易日的横截面（含指数中文名），不传日期时自动选最新 */
 export async function fetchFactorCrossSection(
   factorId: string,
   tradeDate?: string,
@@ -43,16 +43,16 @@ export async function fetchFactorCrossSection(
   return data
 }
 
-/** 查询单因子在单 ETF 上的时间序列（后端自动补算缺失日期） */
+/** 查询单因子在单指数上的时间序列（后端自动补算缺失日期） */
 export async function fetchFactorTimeSeries(
   factorId: string,
-  etfCode: string,
+  indexCode: string,
   startDate: string,
   endDate: string,
   forceRecompute = false,
 ): Promise<FactorRow[]> {
   const params: Record<string, string | boolean> = {
-    etf_code: etfCode,
+    index_code: indexCode,
     start_date: startDate,
     end_date: endDate,
   }

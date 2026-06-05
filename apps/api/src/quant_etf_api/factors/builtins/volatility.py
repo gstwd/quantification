@@ -1,4 +1,4 @@
-"""波动率类因子：20日年化波动率。"""
+"""波动率类因子：20 日年化波动率（基于指数数据）。"""
 
 from __future__ import annotations
 
@@ -12,47 +12,47 @@ _ANNUALIZE_FACTOR = math.sqrt(252)
 
 
 class Volatility20dComputer:
-    """20日年化波动率因子计算器。
+    """20 日年化波动率因子计算器。
 
-    计算公式：std(近20个日收益率序列) × sqrt(252) × 100。
+    计算公式：std(近 20 个日收益率序列) × sqrt(252) × 100。
     使用样本标准差（除以 n-1，贝塞尔修正），与金融实践一致。
-    需要至少21个连续收盘价才能算出20个日收益率。
+    需要至少 21 个连续收盘价才能算出 20 个日收益率。
     结果单位为 %（年化标准差 × 100）。
     """
 
     @property
     def spec(self) -> FactorSpec:
-        """返回20日年化波动率的因子元数据。"""
+        """返回 20 日年化波动率的因子元数据。"""
         return FactorSpec(
             factor_id="volatility_20d",
             name="20日年化波动率",
             category="volatility",
-            version="1.0.0",
+            version="2.0.0",
             description=(
-                "近20个交易日日收益率的年化标准差（%）。"
-                "公式：std(20个日收益率, ddof=1) × sqrt(252) × 100。需21个连续收盘价。"
+                "指数近 20 个交易日日收益率的年化标准差（%）。"
+                "公式：std(20 个日收益率, ddof=1) × sqrt(252) × 100。需 21 个连续收盘价。"
             ),
-            required_data=["etf_bars"],
+            required_data=["index_bars"],
         )
 
-    def compute(self, etf_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算20日年化波动率。
+    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
+        """计算 20 日年化波动率。
 
         Args:
-            etf_code: ETF 代码。
+            index_code: 指数代码。
             trade_date: 目标交易日。
             ctx: FactorContext。
 
         Returns:
-            FactorValue，需21个收盘价，不足时 numeric 为 None。
+            FactorValue，需 21 个收盘价，不足时 numeric 为 None。
             payload 包含 sample_count（实际使用的日收益率数量）。
         """
         # 收集含 trade_date 在内的历史收盘价，按日期升序排列
         closes = sorted(
             [
                 (dt, v.close_price)
-                for (code, dt), v in ctx.etf_bars.items()
-                if code == etf_code and dt <= trade_date and v.close_price is not None
+                for (code, dt), v in ctx.index_bars.items()
+                if code == index_code and dt <= trade_date and v.close_price is not None
             ],
             key=lambda x: x[0],
         )

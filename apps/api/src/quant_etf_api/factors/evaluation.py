@@ -16,8 +16,8 @@ from scipy.stats import spearmanr
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.db.models.core import (
-    EtfDailyBarModel,
-    EtfFactorValueModel,
+    IndexDailyBarModel,
+    IndexFactorValueModel,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ def calc_rank_ic(
     """计算单日 Rank IC（因子值与下期收益的 Spearman 秩相关系数）。
 
     流程：
-    1. 取 trade_date 当日所有 ETF 的因子值
+    1. 取 trade_date 当日所有指数的因子值
     2. 取 trade_date + forward_days 个交易日后的收盘价（或最近可用日期）
     3. 计算 forward_days 收益率
     4. 计算因子值与收益率的 Spearman 相关系数
@@ -48,12 +48,12 @@ def calc_rank_ic(
     """
     # 获取当日因子值
     factor_rows = (
-        db.query(EtfFactorValueModel.etf_code, EtfFactorValueModel.factor_value_numeric)
+        db.query(IndexFactorValueModel.index_code, IndexFactorValueModel.factor_value_numeric)
         .filter(
-            EtfFactorValueModel.factor_id == factor_id,
-            EtfFactorValueModel.trade_date == trade_date,
-            EtfFactorValueModel.strategy_id.is_(None),
-            EtfFactorValueModel.factor_value_numeric.isnot(None),
+            IndexFactorValueModel.factor_id == factor_id,
+            IndexFactorValueModel.trade_date == trade_date,
+            IndexFactorValueModel.strategy_id.is_(None),
+            IndexFactorValueModel.factor_value_numeric.isnot(None),
         )
         .all()
     )
@@ -61,15 +61,15 @@ def calc_rank_ic(
         return None
 
     factor_dict = {r[0]: r[1] for r in factor_rows}
-    etf_codes = list(factor_dict.keys())
+    index_codes = list(factor_dict.keys())
 
     # 获取 trade_date 当日收盘价
     current_bars = (
-        db.query(EtfDailyBarModel.etf_code, EtfDailyBarModel.close_price)
+        db.query(IndexDailyBarModel.index_code, IndexDailyBarModel.close_price)
         .filter(
-            EtfDailyBarModel.trade_date == trade_date,
-            EtfDailyBarModel.etf_code.in_(etf_codes),
-            EtfDailyBarModel.close_price.isnot(None),
+            IndexDailyBarModel.trade_date == trade_date,
+            IndexDailyBarModel.index_code.in_(index_codes),
+            IndexDailyBarModel.close_price.isnot(None),
         )
         .all()
     )
@@ -77,27 +77,27 @@ def calc_rank_ic(
 
     # 获取 forward 日期后的收盘价（取 trade_date 之后第 forward_days 个交易日）
     forward_bars = (
-        db.query(EtfDailyBarModel.etf_code, EtfDailyBarModel.close_price)
+        db.query(IndexDailyBarModel.index_code, IndexDailyBarModel.close_price)
         .filter(
-            EtfDailyBarModel.trade_date > trade_date,
-            EtfDailyBarModel.etf_code.in_(etf_codes),
-            EtfDailyBarModel.close_price.isnot(None),
+            IndexDailyBarModel.trade_date > trade_date,
+            IndexDailyBarModel.index_code.in_(index_codes),
+            IndexDailyBarModel.close_price.isnot(None),
         )
-        .order_by(EtfDailyBarModel.trade_date.asc())
+        .order_by(IndexDailyBarModel.trade_date.asc())
         .all()
     )
-    # 按 ETF 分组，取每个 ETF 的第 forward_days 条记录
+    # 按指数分组，取每个指数的第 forward_days 条记录
     forward_dict: dict[str, float] = {}
-    etf_count: dict[str, int] = {}
+    idx_count: dict[str, int] = {}
     for code, price in forward_bars:
-        etf_count[code] = etf_count.get(code, 0) + 1
-        if etf_count[code] == forward_days:
+        idx_count[code] = idx_count.get(code, 0) + 1
+        if idx_count[code] == forward_days:
             forward_dict[code] = price
 
     # 构建配对序列
     factor_vals = []
     returns = []
-    for code in etf_codes:
+    for code in index_codes:
         if code in current_dict and code in forward_dict and current_dict[code] > 0:
             ret = (forward_dict[code] / current_dict[code] - 1) * 100
             factor_vals.append(factor_dict[code])
@@ -131,15 +131,15 @@ def calc_ic_series(
     """
     # 获取有因子值的日期列表
     dates = (
-        db.query(EtfFactorValueModel.trade_date)
+        db.query(IndexFactorValueModel.trade_date)
         .filter(
-            EtfFactorValueModel.factor_id == factor_id,
-            EtfFactorValueModel.trade_date >= start_date,
-            EtfFactorValueModel.trade_date <= end_date,
-            EtfFactorValueModel.strategy_id.is_(None),
+            IndexFactorValueModel.factor_id == factor_id,
+            IndexFactorValueModel.trade_date >= start_date,
+            IndexFactorValueModel.trade_date <= end_date,
+            IndexFactorValueModel.strategy_id.is_(None),
         )
         .distinct()
-        .order_by(EtfFactorValueModel.trade_date.asc())
+        .order_by(IndexFactorValueModel.trade_date.asc())
         .all()
     )
 
@@ -205,7 +205,7 @@ def calc_factor_correlation_matrix(
 ) -> dict[str, Any]:
     """计算因子间截面 Rank 相关矩阵。
 
-    对指定日期的所有 ETF，计算各因子值之间的 Spearman 相关系数。
+    对指定日期的所有指数，计算各因子值之间的 Spearman 相关系数。
 
     Args:
         db: SQLAlchemy 同步 Session。
@@ -218,46 +218,46 @@ def calc_factor_correlation_matrix(
     # 查询当日所有因子值
     query = (
         db.query(
-            EtfFactorValueModel.etf_code,
-            EtfFactorValueModel.factor_id,
-            EtfFactorValueModel.factor_value_numeric,
+            IndexFactorValueModel.index_code,
+            IndexFactorValueModel.factor_id,
+            IndexFactorValueModel.factor_value_numeric,
         )
         .filter(
-            EtfFactorValueModel.trade_date == trade_date,
-            EtfFactorValueModel.strategy_id.is_(None),
-            EtfFactorValueModel.factor_value_numeric.isnot(None),
+            IndexFactorValueModel.trade_date == trade_date,
+            IndexFactorValueModel.strategy_id.is_(None),
+            IndexFactorValueModel.factor_value_numeric.isnot(None),
         )
     )
     if factor_ids:
-        query = query.filter(EtfFactorValueModel.factor_id.in_(factor_ids))
+        query = query.filter(IndexFactorValueModel.factor_id.in_(factor_ids))
 
     rows = query.all()
 
-    # 按 (etf_code, factor_id) 组织数据
+    # 按 (index_code, factor_id) 组织数据
     data: dict[str, dict[str, float]] = {}
     all_factor_ids: set[str] = set()
-    for etf_code, fid, value in rows:
+    for index_code, fid, value in rows:
         all_factor_ids.add(fid)
-        if etf_code not in data:
-            data[etf_code] = {}
-        data[etf_code][fid] = value
+        if index_code not in data:
+            data[index_code] = {}
+        data[index_code][fid] = value
 
     sorted_factor_ids = sorted(all_factor_ids)
     if len(sorted_factor_ids) < 2:
         return {"factor_ids": sorted_factor_ids, "matrix": []}
 
-    # 只保留所有因子都有值的 ETF
-    valid_etfs = [
+    # 只保留所有因子都有值的指数
+    valid_indexes = [
         code
         for code, vals in data.items()
         if all(fid in vals for fid in sorted_factor_ids)
     ]
-    if len(valid_etfs) < 3:
+    if len(valid_indexes) < 3:
         return {"factor_ids": sorted_factor_ids, "matrix": []}
 
     # 构建各因子的值向量
     vectors = {
-        fid: [data[code][fid] for code in valid_etfs] for fid in sorted_factor_ids
+        fid: [data[code][fid] for code in valid_indexes] for fid in sorted_factor_ids
     }
 
     # 计算相关矩阵
@@ -274,6 +274,6 @@ def calc_factor_correlation_matrix(
     return {
         "factor_ids": sorted_factor_ids,
         "matrix": matrix,
-        "etf_count": len(valid_etfs),
+        "etf_count": len(valid_indexes),
         "trade_date": str(trade_date),
     }
