@@ -55,8 +55,8 @@ class StrategyExecutionService:
             run_id: 研究运行 ID。
             params: 策略参数覆盖（暂未使用）。
         """
-        # 构建上下文
-        context = self._context_builder.build_live_context(trade_date)
+        # 构建上下文（使用统一 build 方法，由策略配置驱动因子选择）
+        context = self._context_builder.build(config, trade_date)
         if not context.universe:
             logger.warning("execute: 无活跃资产，跳过策略运行")
             return

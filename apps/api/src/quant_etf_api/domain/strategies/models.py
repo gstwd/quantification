@@ -5,7 +5,6 @@
 - StrategyResult：单只 ETF 的策略执行结果，包含信号得分、因子值等
 - TimingSignal：市场择时信号，输出 regime + confidence
 - AssetRanking：资产轮动排名项，含动量/估值排名
-- AllocationPlan：仓位分配方案，含目标仓位和现金比例
 """
 
 from __future__ import annotations
@@ -98,22 +97,3 @@ class AssetRanking:
     momentum_rank: int = 0
     valuation_rank: int = 0
     details: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class AllocationPlan:
-    """仓位分配方案，由策略插件的 allocate_positions() 方法输出。
-
-    根据择时信号和资产排名，确定每只 ETF 的目标仓位比例。
-
-    Attributes:
-        positions: 每只 ETF 的目标仓位比例，key=ETF 代码，value=0~1。
-        total_exposure: 总仓位比例，0~1，等于 positions 之和。
-        cash_ratio: 现金比例，1 - total_exposure。
-        reasoning: 分配理由说明。
-    """
-
-    positions: dict[str, float] = field(default_factory=dict)
-    total_exposure: float = 0.0
-    cash_ratio: float = 1.0
-    reasoning: str = ""

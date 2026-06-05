@@ -20,33 +20,99 @@
       <div v-if="polling" class="polling-banner">回测执行中，自动刷新结果...</div>
 
       <!-- 汇总指标卡片 -->
-      <div v-if="store.current.metrics" class="metrics-grid">
-        <div class="metric-card">
-          <div class="metric-label">累计收益</div>
-          <div class="metric-value" :class="store.current.metrics.cumulative_return_pct >= 0 ? 'success' : 'danger'">
-            {{ formatPct(store.current.metrics.cumulative_return_pct) }}
+      <div v-if="store.current.metrics" class="metrics-section">
+        <div class="section-label">核心绩效</div>
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-label">累计收益</div>
+            <div class="metric-value" :class="store.current.metrics.cumulative_return_pct >= 0 ? 'success' : 'danger'">
+              {{ formatPct(store.current.metrics.cumulative_return_pct) }}
+            </div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">年化收益</div>
+            <div class="metric-value" :class="store.current.metrics.annualized_return_pct >= 0 ? 'success' : 'danger'">
+              {{ formatPct(store.current.metrics.annualized_return_pct) }}
+            </div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">最大回撤</div>
+            <div class="metric-value danger">{{ formatPct(store.current.metrics.max_drawdown_pct) }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">回撤持续</div>
+            <div class="metric-value">{{ store.current.metrics.max_drawdown_days }} 天</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">夏普比率</div>
+            <div class="metric-value">{{ store.current.metrics.sharpe_ratio.toFixed(2) }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">卡玛比率</div>
+            <div class="metric-value">{{ store.current.metrics.calmar_ratio.toFixed(2) }}</div>
           </div>
         </div>
-        <div class="metric-card">
-          <div class="metric-label">最大回撤</div>
-          <div class="metric-value danger">{{ formatPct(store.current.metrics.max_drawdown_pct) }}</div>
+
+        <div class="section-label" style="margin-top: 16px;">风险与胜率</div>
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-label">索提诺比率</div>
+            <div class="metric-value">{{ store.current.metrics.sortino_ratio.toFixed(2) }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">胜率</div>
+            <div class="metric-value">{{ store.current.metrics.win_rate_pct.toFixed(1) }}%</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">信号准确率</div>
+            <div class="metric-value">{{ store.current.metrics.signal_accuracy_pct.toFixed(1) }}%</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">盈亏比</div>
+            <div class="metric-value">{{ store.current.metrics.profit_loss_ratio !== null ? store.current.metrics.profit_loss_ratio.toFixed(2) : '-' }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">交易日</div>
+            <div class="metric-value">{{ store.current.metrics.total_trading_days }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">持仓日</div>
+            <div class="metric-value">{{ store.current.metrics.active_days }}</div>
+          </div>
         </div>
-        <div class="metric-card">
-          <div class="metric-label">夏普比率</div>
-          <div class="metric-value">{{ store.current.metrics.sharpe_ratio.toFixed(2) }}</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">胜率</div>
-          <div class="metric-value">{{ store.current.metrics.win_rate_pct.toFixed(1) }}%</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">信号准确率</div>
-          <div class="metric-value">{{ store.current.metrics.signal_accuracy_pct.toFixed(1) }}%</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">交易日 / 持仓日</div>
-          <div class="metric-value">{{ store.current.metrics.total_trading_days }} / {{ store.current.metrics.active_days }}</div>
-        </div>
+
+        <!-- 基准对比（有基准数据时显示） -->
+        <template v-if="store.current.metrics.benchmark_return_pct !== null && store.current.metrics.benchmark_return_pct !== undefined">
+          <div class="section-label" style="margin-top: 16px;">基准对比</div>
+          <div class="metrics-grid">
+            <div class="metric-card">
+              <div class="metric-label">基准收益</div>
+              <div class="metric-value" :class="store.current.metrics.benchmark_return_pct >= 0 ? 'success' : 'danger'">
+                {{ formatPct(store.current.metrics.benchmark_return_pct) }}
+              </div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">超额收益</div>
+              <div class="metric-value" :class="(store.current.metrics.excess_return_pct ?? 0) >= 0 ? 'success' : 'danger'">
+                {{ formatPct(store.current.metrics.excess_return_pct ?? 0) }}
+              </div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">Alpha</div>
+              <div class="metric-value" :class="(store.current.metrics.alpha ?? 0) >= 0 ? 'success' : 'danger'">
+                {{ store.current.metrics.alpha !== null ? formatPct(store.current.metrics.alpha) : '-' }}
+              </div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">Beta</div>
+              <div class="metric-value">{{ store.current.metrics.beta !== null ? store.current.metrics.beta.toFixed(2) : '-' }}</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">信息比率</div>
+              <div class="metric-value">{{ store.current.metrics.information_ratio !== null ? store.current.metrics.information_ratio.toFixed(2) : '-' }}</div>
+            </div>
+          </div>
+        </template>
       </div>
 
       <!-- 权益曲线 -->
@@ -97,6 +163,7 @@
               <th>指数代码</th>
               <th>HIGH 次数</th>
               <th>平均得分</th>
+              <th>原始均分</th>
               <th>信号准确率</th>
             </tr>
           </thead>
@@ -105,6 +172,7 @@
               <td class="mono">{{ row.index_code }}</td>
               <td>{{ row.high_count }}</td>
               <td>{{ row.avg_score.toFixed(1) }}</td>
+              <td>{{ row.avg_original_score !== null ? row.avg_original_score.toFixed(1) : '-' }}</td>
               <td :class="row.accuracy >= 50 ? 'success' : 'danger'">{{ row.accuracy.toFixed(1) }}%</td>
             </tr>
           </tbody>
@@ -164,11 +232,14 @@ const regimeTimeline = computed(() => {
 
 /** 按指数汇总信号统计 */
 const indexSummary = computed(() => {
-  const map = new Map<string, { high_count: number; scores: number[]; correct: number; total: number }>()
+  const map = new Map<string, { high_count: number; scores: number[]; original_scores: number[]; correct: number; total: number }>()
   for (const r of store.indexResults) {
-    if (!map.has(r.index_code)) map.set(r.index_code, { high_count: 0, scores: [], correct: 0, total: 0 })
+    if (!map.has(r.index_code)) map.set(r.index_code, { high_count: 0, scores: [], original_scores: [], correct: 0, total: 0 })
     const entry = map.get(r.index_code)!
     entry.scores.push(r.signal_score)
+    if (r.original_score !== null && r.original_score !== undefined) {
+      entry.original_scores.push(r.original_score)
+    }
     if (r.signal_level === 'HIGH') entry.high_count++
     if (r.in_portfolio && r.index_return !== null) {
       entry.total++
@@ -180,6 +251,9 @@ const indexSummary = computed(() => {
       index_code,
       high_count: v.high_count,
       avg_score: v.scores.reduce((a, b) => a + b, 0) / (v.scores.length || 1),
+      avg_original_score: v.original_scores.length > 0
+        ? v.original_scores.reduce((a, b) => a + b, 0) / v.original_scores.length
+        : null as number | null,
       accuracy: v.total > 0 ? (v.correct / v.total) * 100 : 0,
     }))
     .sort((a, b) => b.high_count - a.high_count)
@@ -196,24 +270,60 @@ async function initCharts() {
   const midCounts = store.dailyResults.map((r) => r.mid_signal_count)
   const lowCounts = store.dailyResults.map((r) => r.low_signal_count)
 
-  // 权益曲线
+  // 计算基准累计收益（从日收益率累加）
+  const hasBenchmark = store.dailyResults.some((r) => r.benchmark_return !== null && r.benchmark_return !== undefined)
+  const benchmarkCum: number[] = []
+  if (hasBenchmark) {
+    let benchCum = 0
+    for (const r of store.dailyResults) {
+      if (r.benchmark_return !== null && r.benchmark_return !== undefined) {
+        benchCum = (1 + benchCum / 100) * (1 + r.benchmark_return / 100) - 1
+        benchCum = benchCum * 100
+      }
+      benchmarkCum.push(Number(benchCum.toFixed(4)))
+    }
+  }
+
+  // 权益曲线（含基准对比叠加）
   if (equityChartEl.value) {
     equityChart?.dispose()
     equityChart = echarts.init(equityChartEl.value)
-    equityChart.setOption({
-      backgroundColor: 'transparent',
-      tooltip: { trigger: 'axis', formatter: (p: { name: string; value: number }[]) => `${p[0].name}<br/>累计收益: ${p[0].value.toFixed(2)}%` },
-      grid: { left: 60, right: 20, top: 20, bottom: 40 },
-      xAxis: { type: 'category', data: dates, axisLabel: { color: '#94a3b8', fontSize: 11 }, axisLine: { lineStyle: { color: '#334155' } } },
-      yAxis: { type: 'value', axisLabel: { color: '#94a3b8', fontSize: 11, formatter: (v: number) => v.toFixed(1) + '%' }, splitLine: { lineStyle: { color: '#1e293b' } } },
-      series: [{
+    const series: Record<string, unknown>[] = [{
+      name: '策略',
+      type: 'line',
+      data: cumReturns,
+      smooth: true,
+      symbol: 'none',
+      lineStyle: { color: '#3b82f6', width: 2 },
+      areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(59,130,246,0.2)' }, { offset: 1, color: 'rgba(59,130,246,0.02)' }] } },
+    }]
+    if (hasBenchmark) {
+      series.push({
+        name: '基准',
         type: 'line',
-        data: cumReturns,
+        data: benchmarkCum,
         smooth: true,
         symbol: 'none',
-        lineStyle: { color: '#3b82f6', width: 2 },
-        areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(59,130,246,0.2)' }, { offset: 1, color: 'rgba(59,130,246,0.02)' }] } },
-      }],
+        lineStyle: { color: '#f59e0b', width: 1.5, type: 'dashed' },
+      })
+    }
+    equityChart.setOption({
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'axis',
+        formatter: (params: { seriesName: string; value: number }[]) => {
+          let tip = ''
+          for (const p of params) {
+            tip += `${p.seriesName}: ${p.value.toFixed(2)}%<br/>`
+          }
+          return tip
+        },
+      },
+      legend: hasBenchmark ? { data: ['策略', '基准'], textStyle: { color: '#94a3b8', fontSize: 11 }, top: 0 } : undefined,
+      grid: { left: 60, right: 20, top: hasBenchmark ? 30 : 20, bottom: 40 },
+      xAxis: { type: 'category', data: dates, axisLabel: { color: '#94a3b8', fontSize: 11 }, axisLine: { lineStyle: { color: '#334155' } } },
+      yAxis: { type: 'value', axisLabel: { color: '#94a3b8', fontSize: 11, formatter: (v: number) => v.toFixed(1) + '%' }, splitLine: { lineStyle: { color: '#1e293b' } } },
+      series,
     })
   }
 
@@ -363,10 +473,25 @@ onUnmounted(() => {
   font-size: 13px;
 }
 
+.section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+.metrics-section {
+  display: flex;
+  flex-direction: column;
+}
 .metrics-grid {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
   gap: 12px;
+}
+@media (max-width: 1200px) {
+  .metrics-grid { grid-template-columns: repeat(3, 1fr); }
 }
 .metric-card {
   background: var(--surface);

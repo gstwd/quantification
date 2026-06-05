@@ -80,9 +80,9 @@ class StrategyService:
         if config is None:
             return None
 
-        # 构建上下文
+        # 构建上下文（使用统一 build 方法，由策略配置驱动因子选择）
         builder = ContextBuilder(self._db)
-        context = builder.build_live_context(date.today())
+        context = builder.build(config, date.today())
 
         # 执行引擎
         result = self._engine.run(config, context)

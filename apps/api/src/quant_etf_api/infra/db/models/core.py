@@ -575,6 +575,12 @@ class BacktestDailyResultModel(Base):
     positions: Mapped[dict | None] = mapped_column(
         JSON, comment="持仓明细，etf_code → 权重（配置模式）"
     )
+    benchmark_return: Mapped[float | None] = mapped_column(
+        Float, comment="基准指数当日收益率，单位 %"
+    )
+    turnover: Mapped[float | None] = mapped_column(
+        Float, comment="当日换手率，0-1"
+    )
 
 
 class BacktestEtfResultModel(Base):
@@ -642,6 +648,9 @@ class BacktestIndexResultModel(Base):
     )
     index_return: Mapped[float | None] = mapped_column(
         Float, comment="T+1 日指数收益率，单位 %，末日为 NULL"
+    )
+    original_score: Mapped[float | None] = mapped_column(
+        Float, comment="保留原始综合得分（配置模式下不会被权重值覆盖）"
     )
 
 

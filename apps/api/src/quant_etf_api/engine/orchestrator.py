@@ -9,6 +9,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from quant_etf_api.domain.common.constants import (
+    SIGNAL_LABELS,
+    SIGNAL_THRESHOLD_HIGH,
+    SIGNAL_THRESHOLD_MID,
+)
 from quant_etf_api.domain.strategies.models import (
     AssetRanking,
     StrategyResult,
@@ -155,16 +160,16 @@ class StrategyEngine:
             ranking = rank_map.get(code)
             target_weight = positions.get(code, 0.0)
 
-            # 信号等级判定
+            # 信号等级判定（阈值来自领域常量，避免散落硬编码）
             if timing and timing.regime == "defensive":
                 level, label = "LOW", "防守减仓"
             elif target_weight > 0:
-                level = "HIGH" if score >= 70 else "MID"
-                label = "推荐配置" if level == "HIGH" else "可选配置"
+                level = "HIGH" if score >= SIGNAL_THRESHOLD_HIGH else "MID"
+                label = SIGNAL_LABELS[level]
             elif score > 0:
-                level, label = "MID", "可选配置"
+                level, label = "MID", SIGNAL_LABELS["MID"]
             else:
-                level, label = "LOW", "暂不配置"
+                level, label = "LOW", SIGNAL_LABELS["LOW"]
 
             # 构建因子值列表
             factor_values = []

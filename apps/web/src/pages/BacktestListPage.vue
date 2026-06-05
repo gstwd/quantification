@@ -15,6 +15,7 @@
             <th>日期范围</th>
             <th>状态</th>
             <th>累计收益</th>
+            <th>年化收益</th>
             <th>最大回撤</th>
             <th>夏普</th>
             <th>创建时间</th>
@@ -33,6 +34,9 @@
             <td><span class="status-badge" :class="'status-' + item.status">{{ statusLabel(item.status) }}</span></td>
             <td :class="returnClass(item.metrics?.cumulative_return_pct)">
               {{ item.metrics ? formatPct(item.metrics.cumulative_return_pct) : '—' }}
+            </td>
+            <td :class="returnClass(item.metrics?.annualized_return_pct)">
+              {{ item.metrics ? formatPct(item.metrics.annualized_return_pct) : '—' }}
             </td>
             <td class="danger">{{ item.metrics ? formatPct(item.metrics.max_drawdown_pct) : '—' }}</td>
             <td>{{ item.metrics ? item.metrics.sharpe_ratio.toFixed(2) : '—' }}</td>

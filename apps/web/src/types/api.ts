@@ -158,6 +158,10 @@ export interface BacktestCreateRequest {
   params?: Record<string, unknown> | null
   weighting: 'equal' | 'signal_weighted'
   backtest_mode?: 'signal' | 'allocation'
+  /** 是否启用基准对比，默认 true */
+  enable_benchmark?: boolean
+  /** 基准指数代码，默认 000300（沪深300） */
+  benchmark_index_code?: string
 }
 
 export interface BacktestMetrics {
@@ -168,6 +172,26 @@ export interface BacktestMetrics {
   signal_accuracy_pct: number
   total_trading_days: number
   active_days: number
+  /** 年化收益率（%） */
+  annualized_return_pct: number
+  /** 索提诺比率（下行风险调整） */
+  sortino_ratio: number
+  /** 卡玛比率（年化收益/最大回撤） */
+  calmar_ratio: number
+  /** 最大回撤持续天数 */
+  max_drawdown_days: number
+  /** 盈亏比（平均盈利/平均亏损） */
+  profit_loss_ratio: number | null
+  /** vs 基准的年化 Alpha（%） */
+  alpha: number | null
+  /** vs 基准的 Beta 系数 */
+  beta: number | null
+  /** 信息比率 */
+  information_ratio: number | null
+  /** 基准累计收益率（%） */
+  benchmark_return_pct: number | null
+  /** 超额收益率（%） */
+  excess_return_pct: number | null
 }
 
 export interface BacktestSummary {
@@ -202,6 +226,10 @@ export interface BacktestDailyResult {
   total_exposure?: number | null
   cash_ratio?: number | null
   positions?: Record<string, number> | null
+  /** 基准指数当日收益率（%） */
+  benchmark_return?: number | null
+  /** 当日换手率（0-1） */
+  turnover?: number | null
 }
 
 export interface BacktestIndexResult {
@@ -211,6 +239,8 @@ export interface BacktestIndexResult {
   signal_level: string
   in_portfolio: boolean
   index_return: number | null
+  /** 保留原始综合得分，配置模式下不会被权重值覆盖 */
+  original_score?: number | null
 }
 
 export interface IndexValuation {

@@ -12,7 +12,7 @@ class BacktestCreateRequest(BaseModel):
     """创建回测请求体。
 
     Attributes:
-        strategy_id: 策略插件标识。
+        strategy_id: 策略唯一标识。
         start_date: 回测起始日期。
         end_date: 回测截止日期。
         universe_mode: 标的范围，all=全部指数，subset=指定指数代码列表。
@@ -20,6 +20,8 @@ class BacktestCreateRequest(BaseModel):
         params: 策略参数透传。
         weighting: 信号评分模式的加权方式。
         backtest_mode: 回测模式，signal=信号评分模式（默认），allocation=资产配置模式。
+        enable_benchmark: 是否启用基准对比。
+        benchmark_index_code: 基准指数代码，默认沪深300。
     """
 
     strategy_id: str
@@ -30,6 +32,8 @@ class BacktestCreateRequest(BaseModel):
     params: dict[str, Any] | None = None
     weighting: Literal["equal", "signal_weighted"] = "equal"
     backtest_mode: Literal["signal", "allocation"] = "signal"
+    enable_benchmark: bool = True
+    benchmark_index_code: str = "000300"
 
 
 class BacktestMetrics(BaseModel):
@@ -42,6 +46,17 @@ class BacktestMetrics(BaseModel):
     signal_accuracy_pct: float
     total_trading_days: int
     active_days: int
+    # 专业指标（Phase 3 新增）
+    annualized_return_pct: float = 0.0
+    sortino_ratio: float = 0.0
+    calmar_ratio: float = 0.0
+    max_drawdown_days: int = 0
+    profit_loss_ratio: float | None = None
+    alpha: float | None = None
+    beta: float | None = None
+    information_ratio: float | None = None
+    benchmark_return_pct: float | None = None
+    excess_return_pct: float | None = None
 
 
 class BacktestSummary(BaseModel):
@@ -83,6 +98,8 @@ class BacktestDailyResult(BaseModel):
         total_exposure: 总仓位比例（资产配置模式）。
         cash_ratio: 现金比例（资产配置模式）。
         positions: 持仓明细（资产配置模式），index_code → 权重。
+        benchmark_return: 基准日收益率（%）。
+        turnover: 当日换手率。
     """
 
     trade_date: date
@@ -96,6 +113,8 @@ class BacktestDailyResult(BaseModel):
     total_exposure: float | None = None
     cash_ratio: float | None = None
     positions: dict[str, float] | None = None
+    benchmark_return: float | None = None
+    turnover: float | None = None
 
 
 class BacktestIndexResult(BaseModel):
@@ -107,3 +126,4 @@ class BacktestIndexResult(BaseModel):
     signal_level: str
     in_portfolio: bool
     index_return: float | None = None
+    original_score: float | None = None

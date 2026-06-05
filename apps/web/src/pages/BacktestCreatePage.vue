@@ -82,6 +82,30 @@
         </div>
       </div>
 
+      <div class="form-section">
+        <label class="form-label">基准对比</label>
+        <div class="radio-group">
+          <label class="radio-label">
+            <input v-model="form.enable_benchmark" type="radio" :value="true" />
+            启用基准对比（买入持有参考基准）
+          </label>
+          <label class="radio-label">
+            <input v-model="form.enable_benchmark" type="radio" :value="false" />
+            不启用
+          </label>
+        </div>
+        <div v-if="form.enable_benchmark" class="form-row" style="margin-top: 8px;">
+          <div class="form-section">
+            <label class="form-label">基准指数</label>
+            <select v-model="form.benchmark_index_code" class="form-select">
+              <option v-for="idx in indexes" :key="idx.index_code" :value="idx.index_code">
+                {{ idx.index_code }} {{ idx.index_name }}
+              </option>
+            </select>
+          </div>
+        </div>
+      </div>
+
       <div v-if="error" class="error-msg">{{ error }}</div>
 
       <div class="form-actions">
@@ -117,6 +141,8 @@ const form = reactive({
   index_codes: [] as string[],
   weighting: 'equal' as 'equal' | 'signal_weighted',
   backtest_mode: 'signal' as 'signal' | 'allocation',
+  enable_benchmark: true,
+  benchmark_index_code: '000300',
 })
 
 const submitting = ref(false)
@@ -148,6 +174,8 @@ async function submit() {
       index_codes: form.index_codes,
       weighting: form.weighting,
       backtest_mode: form.backtest_mode,
+      enable_benchmark: form.enable_benchmark,
+      benchmark_index_code: form.benchmark_index_code,
     })
     router.push(`/backtests/${summary.backtest_id}`)
   } catch (e: unknown) {

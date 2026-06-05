@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 from quant_etf_api.domain.strategies.models import (
-    AllocationPlan,
     AssetRanking,
     StrategyContextData,
     StrategyResult,
@@ -16,7 +15,6 @@ from quant_etf_api.domain.strategies.models import (
 )
 
 __all__ = [
-    "AllocationPlan",
     "AssetRanking",
     "StrategyContextData",
     "StrategyResult",

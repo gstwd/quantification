@@ -14,6 +14,10 @@ from quant_etf_api.engine.config import RankConfig
 
 logger = logging.getLogger(__name__)
 
+# 子排名默认因子 ID（引擎内部使用，非策略配置项）
+_SUB_RANK_MOMENTUM_FACTOR = "return_20d"
+_SUB_RANK_VALUATION_FACTOR = "pe_percentile"
+
 # 板块分类中文映射
 _CATEGORY_LABELS: dict[str, str] = {
     "broad_index": "宽基",
@@ -95,14 +99,14 @@ class DefaultRankEngine:
         self, rankings: list[AssetRanking], context: EngineContext
     ) -> None:
         """为排名项分配动量和估值子排名。"""
-        # 动量排名（按 return_20d 降序）
+        # 动量排名（按动量因子降序）
         with_momentum = [
             (i, r)
             for i, r in enumerate(rankings)
-            if context.asset_factors.get((r.etf_code, "return_20d")) is not None
+            if context.asset_factors.get((r.etf_code, _SUB_RANK_MOMENTUM_FACTOR)) is not None
         ]
         with_momentum.sort(
-            key=lambda x: context.asset_factors.get((x[1].etf_code, "return_20d"), 0),
+            key=lambda x: context.asset_factors.get((x[1].etf_code, _SUB_RANK_MOMENTUM_FACTOR), 0),
             reverse=True,
         )
         for sub_rank, (idx, r) in enumerate(with_momentum, 1):
@@ -112,10 +116,10 @@ class DefaultRankEngine:
         with_valuation = [
             (i, r)
             for i, r in enumerate(rankings)
-            if context.asset_factors.get((r.etf_code, "pe_percentile")) is not None
+            if context.asset_factors.get((r.etf_code, _SUB_RANK_VALUATION_FACTOR)) is not None
         ]
         with_valuation.sort(
-            key=lambda x: 100 - (context.asset_factors.get((x[1].etf_code, "pe_percentile")) or 0),
+            key=lambda x: 100 - (context.asset_factors.get((x[1].etf_code, _SUB_RANK_VALUATION_FACTOR)) or 0),
             reverse=True,
         )
         for sub_rank, (idx, r) in enumerate(with_valuation, 1):
