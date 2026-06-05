@@ -16,8 +16,7 @@ from sqlalchemy.orm import Session
 from quant_etf_api.domain.common.bar_metrics import calc_5d_return, calc_volume_ratio_20d
 from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.infra.db.models.core import (
-    EtfDailyBarModel,
-    EtfUniverseModel,
+    BenchmarkIndexModel,
     IndexDailyBarModel,
     IndexFactorValueModel,
     IndexValuationModel,
@@ -38,10 +37,10 @@ class ContextBuilder:
         self._db = db
 
     def build_live_context(self, trade_date: date) -> EngineContext:
-        """为实时策略运行构建引擎上下文。
+        """为实时策略运行构建引擎上下文（指数模式）。
 
-        从 DB 加载 ETF 宇宙、指数行情、估值、预计算因子值，
-        构建标准化的 EngineContext。
+        从 DB 加载指数宇宙、指数行情、估值、预计算因子值，
+        构建标准化的 EngineContext。所有资产使用指数代码标识。
 
         Args:
             trade_date: 交易日。
@@ -49,47 +48,31 @@ class ContextBuilder:
         Returns:
             引擎上下文。
         """
-        # 获取活跃 ETF
-        etfs = (
-            self._db.query(EtfUniverseModel)
-            .filter(EtfUniverseModel.is_active.is_(True))
-            .all()
-        )
+        # 获取所有指数
+        indexes = self._db.query(BenchmarkIndexModel).all()
+        index_codes = [idx.index_code for idx in indexes]
         universe = [
-            {"etf_code": e.etf_code, "name_cn": e.name_cn, "category": e.category}
-            for e in etfs
+            {"etf_code": idx.index_code, "name_cn": idx.name_cn, "category": "broad_index"}
+            for idx in indexes
         ]
         asset_metadata = {
-            e.etf_code: {"name_cn": e.name_cn, "category": e.category, "tracking_index_code": e.tracking_index_code}
-            for e in etfs
+            idx.index_code: {"name_cn": idx.name_cn, "category": "broad_index"}
+            for idx in indexes
         }
-        etf_codes = [e.etf_code for e in etfs]
-        asset_index_map = {e.etf_code: e.tracking_index_code for e in etfs if e.tracking_index_code}
 
         lookback = trade_date - timedelta(days=90)
 
-        # 加载 ETF 日线
+        # 加载指数日线
         bars = (
-            self._db.query(EtfDailyBarModel)
-            .filter(
-                EtfDailyBarModel.trade_date >= lookback,
-                EtfDailyBarModel.trade_date <= trade_date,
-                EtfDailyBarModel.etf_code.in_(etf_codes),
-            )
-            .all()
-        )
-        all_bars = {(r.etf_code, r.trade_date): r for r in bars}
-
-        # 加载指数日线（用于择时参考指数）
-        index_bars_rows = (
             self._db.query(IndexDailyBarModel)
             .filter(
                 IndexDailyBarModel.trade_date >= lookback,
                 IndexDailyBarModel.trade_date <= trade_date,
+                IndexDailyBarModel.index_code.in_(index_codes),
             )
             .all()
         )
-        all_index_bars = {(r.index_code, r.trade_date): r for r in index_bars_rows}
+        all_bars = {(r.index_code, r.trade_date): r for r in bars}
 
         # 加载指数估值
         val_rows = (
@@ -107,14 +90,13 @@ class ContextBuilder:
         # 加载预计算因子值
         precomputed = self._load_precomputed_factors(trade_date)
 
-        # 构建 asset_factors
+        # 构建 asset_factors（基于指数数据）
         asset_factors: dict[tuple[str, str], float | None] = {}
-        for code in etf_codes:
+        for code in index_codes:
             bar = all_bars.get((code, trade_date))
             if bar is None or bar.close_price is None:
                 continue
 
-            # 从预计算因子值获取，缺失时回退计算
             factors = precomputed.get(code, {})
             volume_ratio = factors.get("volume_ratio_20d", calc_volume_ratio_20d(code, trade_date, all_bars))
             return_5d = factors.get("return_5d", calc_5d_return(code, trade_date, all_bars))
@@ -123,16 +105,13 @@ class ContextBuilder:
             asset_factors[(code, "return_5d")] = return_5d
             asset_factors[(code, "change_pct")] = bar.change_pct or 0.0
 
-            # 关联指数的估值因子
-            idx_code = asset_index_map.get(code)
-            if idx_code:
-                val = index_valuation.get(idx_code, {})
-                asset_factors[(code, "pe_percentile")] = val.get("pe_percentile")
-                asset_factors[(code, "pb_percentile")] = val.get("pb_percentile")
+            # 估值因子直接从指数估值获取
+            val = index_valuation.get(code, {})
+            asset_factors[(code, "pe_percentile")] = val.get("pe_percentile")
+            asset_factors[(code, "pb_percentile")] = val.get("pb_percentile")
 
         # 构建 market_factors（择时用的市场级因子）
         market_factors: dict[str, float | None] = {}
-        # 选取代表性指数的估值
         for rep_code in ("000300", "000016", "000905"):
             val = index_valuation.get(rep_code, {})
             if val.get("pe_percentile") is not None:
@@ -140,14 +119,12 @@ class ContextBuilder:
                 market_factors["pb_percentile"] = val.get("pb_percentile")
                 break
 
-        # 代表性指数的量比和趋势
         for rep_code in ("000300", "000016", "000905"):
-            bar = all_index_bars.get((rep_code, trade_date))
+            bar = all_bars.get((rep_code, trade_date))
             if bar and bar.close_price:
-                market_factors["volume_ratio_20d"] = calc_volume_ratio_20d(rep_code, trade_date, all_index_bars)
-                # 计算 MA60 偏离度
+                market_factors["volume_ratio_20d"] = calc_volume_ratio_20d(rep_code, trade_date, all_bars)
                 closes = sorted(
-                    [v.close_price for (c, dt), v in all_index_bars.items()
+                    [v.close_price for (c, dt), v in all_bars.items()
                      if c == rep_code and dt <= trade_date and v.close_price is not None],
                 )
                 if len(closes) >= 60:
@@ -162,10 +139,7 @@ class ContextBuilder:
             asset_factors=asset_factors,
             market_factors=market_factors,
             asset_metadata=asset_metadata,
-            extra={
-                "asset_index_map": asset_index_map,
-                "index_valuation": index_valuation,
-            },
+            extra={"index_valuation": index_valuation},
         )
 
     def build_backtest_context(

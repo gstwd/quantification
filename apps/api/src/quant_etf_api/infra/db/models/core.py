@@ -359,6 +359,43 @@ class EtfSignalModel(Base):
     )
 
 
+class IndexSignalModel(Base):
+    """指数信号表，存储策略引擎对指数的信号计算结果。"""
+
+    __tablename__ = "index_signal"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "index_code", "strategy_id", name="uq_index_signal"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, comment="自增主键"
+    )
+    trade_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="信号对应的交易日期")
+    index_code: Mapped[str] = mapped_column(
+        ForeignKey("benchmark_index.index_code"),
+        nullable=False,
+        comment="指数代码，外键关联 benchmark_index",
+    )
+    strategy_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="产生该信号的策略 ID"
+    )
+    signal_score: Mapped[float] = mapped_column(
+        Float, nullable=False, comment="综合得分，0-100"
+    )
+    signal_level: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="信号等级：HIGH/MID/LOW"
+    )
+    signal_label: Mapped[str] = mapped_column(
+        String(128), nullable=False, comment="信号中文标签"
+    )
+    signal_payload: Mapped[dict | None] = mapped_column(
+        JSON, comment="信号计算明细"
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        String(64), comment="产生该信号的研究运行 ID"
+    )
+
+
 class StrategyPluginModel(Base):
     __tablename__ = "strategy_plugin"
 

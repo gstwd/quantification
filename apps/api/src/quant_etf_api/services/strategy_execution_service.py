@@ -14,8 +14,8 @@ from sqlalchemy.orm import Session
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.engine.orchestrator import StrategyEngine
 from quant_etf_api.infra.db.models.core import (
-    EtfFactorValueModel,
-    EtfSignalModel,
+    IndexFactorValueModel,
+    IndexSignalModel,
 )
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.services.context_builder import ContextBuilder
@@ -47,7 +47,7 @@ class StrategyExecutionService:
         run_id: str,
         params: dict[str, Any] | None = None,
     ) -> None:
-        """执行单日策略信号计算，写入 etf_signal 和 etf_factor_value。
+        """执行单日策略信号计算，写入 index_signal 和 index_factor_value。
 
         Args:
             config: 策略配置。
@@ -69,15 +69,15 @@ class StrategyExecutionService:
             self._mark_run_failed(run_id, f"策略 {config.strategy_id} 执行异常")
             return
 
-        # 写入信号和因子值
+        # 写入指数信号和因子值
         signal_count = 0
         factor_count = 0
         for r in result.strategy_results:
             try:
                 self._db.add(
-                    EtfSignalModel(
+                    IndexSignalModel(
                         trade_date=r.trade_date,
-                        etf_code=r.etf_code,
+                        index_code=r.etf_code,
                         strategy_id=r.strategy_id,
                         signal_score=r.signal_score,
                         signal_level=r.signal_level,
@@ -89,14 +89,14 @@ class StrategyExecutionService:
                 signal_count += 1
             except Exception:
                 self._db.rollback()
-                logger.warning("写入信号失败: %s %s", r.etf_code, r.strategy_id)
+                logger.warning("写入指数信号失败: %s %s", r.etf_code, r.strategy_id)
 
             for fv in r.factor_values:
                 try:
                     self._db.add(
-                        EtfFactorValueModel(
+                        IndexFactorValueModel(
                             trade_date=r.trade_date,
-                            etf_code=r.etf_code,
+                            index_code=r.etf_code,
                             factor_id=fv["factor_id"],
                             factor_value_numeric=fv.get("value"),
                             factor_value_text=fv.get("text"),
@@ -107,7 +107,7 @@ class StrategyExecutionService:
                     factor_count += 1
                 except Exception:
                     self._db.rollback()
-                    logger.warning("写入因子值失败: %s %s %s", r.etf_code, fv["factor_id"])
+                    logger.warning("写入指数因子值失败: %s %s %s", r.etf_code, fv["factor_id"])
 
         self._db.commit()
 

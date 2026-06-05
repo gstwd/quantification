@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 class SignalRow(BaseModel):
     trade_date: date
-    etf_code: str
+    index_code: str
     strategy_id: str
     signal_score: float
     signal_level: str

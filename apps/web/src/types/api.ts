@@ -58,7 +58,7 @@ export interface StrategyValidationResult {
 
 export interface SignalRow {
   trade_date: string
-  etf_code: string
+  index_code: string
   strategy_id: string
   signal_score: number
   signal_level: string

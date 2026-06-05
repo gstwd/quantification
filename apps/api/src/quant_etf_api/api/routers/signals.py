@@ -18,7 +18,7 @@ def latest_signals(
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
 ) -> PaginatedResponse[SignalRow]:
-    """分页返回指定策略最新交易日的所有 ETF 信号，按得分降序。"""
+    """分页返回指定策略最新交易日的所有指数信号，按得分降序。"""
     items, total = SignalService(db).latest_signals(strategy_id, offset=offset, limit=limit)
     return PaginatedResponse(items=items, total=total, offset=offset, limit=limit)
 
@@ -26,13 +26,13 @@ def latest_signals(
 @router.get("/signals/history", response_model=PaginatedResponse[SignalRow])
 def signal_history(
     strategy_id: str = Query(...),
-    etf_code: str = Query(...),
+    index_code: str = Query(...),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
 ) -> PaginatedResponse[SignalRow]:
-    """分页查询某策略在某 ETF 上的历史信号。"""
+    """分页查询某策略在某指数上的历史信号。"""
     items, total = SignalService(db).signal_history(
-        strategy_id, etf_code, offset=offset, limit=limit
+        strategy_id, index_code, offset=offset, limit=limit
     )
     return PaginatedResponse(items=items, total=total, offset=offset, limit=limit)

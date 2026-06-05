@@ -82,7 +82,7 @@ class BacktestDailyResult(BaseModel):
         timing_regime: 择时状态（资产配置模式）。
         total_exposure: 总仓位比例（资产配置模式）。
         cash_ratio: 现金比例（资产配置模式）。
-        positions: 持仓明细（资产配置模式），etf_code → 权重。
+        positions: 持仓明细（资产配置模式），index_code → 权重。
     """
 
     trade_date: date

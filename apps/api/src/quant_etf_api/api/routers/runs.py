@@ -103,7 +103,7 @@ def cold_start(db: Session = Depends(get_db)) -> dict[str, str]:
 
 @router.post("/runs/strategies/{strategy_id}/run")
 def run_strategy(strategy_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发指定策略的信号计算任务，后台线程执行并写入 etf_signal 表。"""
+    """触发指定策略的信号计算任务，后台线程执行并写入 index_signal 表。"""
     summary = RunService(db).create_run("strategy_run", strategy_id, date.today())
     thread = threading.Thread(
         target=_run_strategy_bg,

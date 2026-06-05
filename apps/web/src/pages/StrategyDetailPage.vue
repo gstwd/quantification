@@ -194,7 +194,7 @@
             <thead>
               <tr>
                 <th>排名</th>
-                <th>ETF 代码</th>
+                <th>指数代码</th>
                 <th>得分</th>
                 <th>信号等级</th>
                 <th>信号标签</th>
@@ -202,9 +202,9 @@
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(sig, i) in signals" :key="sig.etf_code">
+              <tr v-for="(sig, i) in signals" :key="sig.index_code">
                 <td class="text-muted">{{ i + 1 }}</td>
-                <td class="mono">{{ sig.etf_code }}</td>
+                <td class="mono">{{ sig.index_code }}</td>
                 <td class="mono">{{ sig.signal_score.toFixed(1) }}</td>
                 <td>
                   <span :class="['level-tag', `level-${sig.signal_level.toLowerCase()}`]">
@@ -213,8 +213,8 @@
                 </td>
                 <td>{{ sig.signal_label }}</td>
                 <td>
-                  <button class="toggle-detail-btn" @click="toggleSignalDetail(sig.etf_code)">
-                    {{ expandedSignal === sig.etf_code ? '收起' : '详情' }}
+                  <button class="toggle-detail-btn" @click="toggleSignalDetail(sig.index_code)">
+                    {{ expandedSignal === sig.index_code ? '收起' : '详情' }}
                   </button>
                 </td>
               </tr>
@@ -451,7 +451,7 @@ async function handleUpdate(): Promise<void> {
 /** 展开的信号详情 payload */
 const expandedSignalPayload = computed(() => {
   if (!expandedSignal.value) return null
-  const sig = signals.value.find((s) => s.etf_code === expandedSignal.value)
+  const sig = signals.value.find((s) => s.index_code === expandedSignal.value)
   return sig?.signal_payload ?? null
 })
 
@@ -476,8 +476,8 @@ async function handleLoadSignals(): Promise<void> {
 }
 
 /** 切换信号详情展开 */
-function toggleSignalDetail(etfCode: string): void {
-  expandedSignal.value = expandedSignal.value === etfCode ? null : etfCode
+function toggleSignalDetail(indexCode: string): void {
+  expandedSignal.value = expandedSignal.value === indexCode ? null : indexCode
 }
 
 /** 运行信号计算 */
