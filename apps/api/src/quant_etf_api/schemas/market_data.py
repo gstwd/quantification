@@ -11,6 +11,7 @@ class DailyBar(BaseModel):
     high_price: float | None = None
     low_price: float | None = None
     close_price: float | None = None
+    prev_close_price: float | None = None
     change_pct: float | None = None
     volume: float | None = None
     turnover: float | None = None

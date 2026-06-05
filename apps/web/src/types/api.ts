@@ -102,6 +102,7 @@ export interface DailyBar {
   high_price: number | null
   low_price: number | null
   close_price: number | null
+  prev_close_price: number | null
   change_pct: number | null
   volume: number | null
   turnover: number | null

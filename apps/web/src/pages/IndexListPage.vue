@@ -16,6 +16,12 @@
           <tr>
             <th>指数代码</th>
             <th>名称</th>
+            <th>最新收盘</th>
+            <th>涨跌幅</th>
+            <th>PE(TTM)</th>
+            <th>PE分位</th>
+            <th>PB</th>
+            <th>PB分位</th>
             <th>操作</th>
           </tr>
         </thead>
@@ -28,6 +34,14 @@
           >
             <td><span class="code-mono">{{ item.index_code }}</span></td>
             <td>{{ item.index_name }}</td>
+            <td class="num-cell">{{ getLatestClose(item.index_code) }}</td>
+            <td class="num-cell" :class="getChangePctClass(item.index_code)">
+              {{ getChangePct(item.index_code) }}
+            </td>
+            <td class="num-cell">{{ getPE(item.index_code) }}</td>
+            <td class="num-cell">{{ getPEPercentile(item.index_code) }}</td>
+            <td class="num-cell">{{ getPB(item.index_code) }}</td>
+            <td class="num-cell">{{ getPBPercentile(item.index_code) }}</td>
             <td>
               <button class="btn-delete" @click.stop="handleDelete(item.index_code, item.index_name)">删除</button>
             </td>
@@ -79,20 +93,93 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 
-import { createIndex, deleteIndex, fetchBenchmarkIndexes } from '../api/market_data'
-import type { BenchmarkIndex } from '../types/api'
+import {
+  createIndex,
+  deleteIndex,
+  fetchBenchmarkIndexes,
+  fetchIndexDailyBars,
+  fetchIndexValuation,
+} from '../api/market_data'
+import type { BenchmarkIndex, DailyBar, IndexValuation } from '../types/api'
 
 const indexes = ref<BenchmarkIndex[]>([])
 const loading = ref(false)
+const latestBars = ref<Record<string, DailyBar>>({})
+const latestValuations = ref<Record<string, IndexValuation>>({})
 
 /** 加载指数列表 */
 async function loadIndexes() {
   loading.value = true
   try {
     indexes.value = await fetchBenchmarkIndexes()
+    await loadLatestData()
   } finally {
     loading.value = false
   }
+}
+
+/** 加载所有指数的最新行情和估值数据 */
+async function loadLatestData() {
+  const promises = indexes.value.map(async (idx) => {
+    const code = idx.index_code
+    try {
+      const [bars, valuations] = await Promise.all([
+        fetchIndexDailyBars(code, { limit: 1 }),
+        fetchIndexValuation(code, { limit: 1 }),
+      ])
+      if (bars.length > 0) {
+        latestBars.value[code] = bars[0]
+      }
+      if (valuations.length > 0) {
+        latestValuations.value[code] = valuations[0]
+      }
+    } catch {
+      // 单个指数数据获取失败不影响其他指数
+    }
+  })
+  await Promise.all(promises)
+}
+
+/** 获取最新收盘价 */
+function getLatestClose(code: string): string {
+  const bar = latestBars.value[code]
+  return bar?.close_price?.toFixed(2) ?? '—'
+}
+
+/** 获取涨跌幅文本 */
+function getChangePct(code: string): string {
+  const bar = latestBars.value[code]
+  if (!bar || bar.change_pct === null || bar.change_pct === undefined) return '—'
+  return (bar.change_pct >= 0 ? '+' : '') + bar.change_pct.toFixed(2) + '%'
+}
+
+/** 获取涨跌幅样式类 */
+function getChangePctClass(code: string): string {
+  const bar = latestBars.value[code]
+  if (!bar || bar.change_pct === null || bar.change_pct === undefined) return ''
+  return bar.change_pct >= 0 ? 'text-rise' : 'text-fall'
+}
+
+/** 获取 PE 值 */
+function getPE(code: string): string {
+  return latestValuations.value[code]?.pe?.toFixed(1) ?? '—'
+}
+
+/** 获取 PE 分位 */
+function getPEPercentile(code: string): string {
+  const p = latestValuations.value[code]?.pe_percentile
+  return p !== null && p !== undefined ? p.toFixed(0) + '%' : '—'
+}
+
+/** 获取 PB 值 */
+function getPB(code: string): string {
+  return latestValuations.value[code]?.pb?.toFixed(2) ?? '—'
+}
+
+/** 获取 PB 分位 */
+function getPBPercentile(code: string): string {
+  const p = latestValuations.value[code]?.pb_percentile
+  return p !== null && p !== undefined ? p.toFixed(0) + '%' : '—'
 }
 
 onMounted(loadIndexes)
@@ -195,18 +282,23 @@ async function handleDelete(indexCode: string, indexName: string) {
 }
 .data-table { width: 100%; border-collapse: collapse; }
 .data-table th {
-  text-align: left; padding: 10px 20px;
+  text-align: left; padding: 10px 16px;
   font-size: 11px; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.05em;
   color: var(--text-muted);
   border-bottom: 1px solid var(--border);
   background: rgba(0,0,0,0.1);
+  white-space: nowrap;
 }
-.data-table td { padding: 12px 20px; border-bottom: 1px solid rgba(51,65,85,0.5); }
+.data-table th:nth-child(n+3) { text-align: right; }
+.data-table td { padding: 12px 16px; border-bottom: 1px solid rgba(51,65,85,0.5); }
 .data-table tr:last-child td { border-bottom: none; }
 .clickable-row { cursor: pointer; transition: background 0.1s; }
 .clickable-row:hover td { background: rgba(59,130,246,0.06); }
 .code-mono { font-family: monospace; font-size: 13px; font-weight: 600; color: var(--accent); }
+.num-cell { font-family: monospace; font-size: 13px; text-align: right; }
+.text-rise { color: #22c55e; }
+.text-fall { color: #ef4444; }
 
 .btn-delete {
   background: transparent;

@@ -7,22 +7,30 @@
           <h1 class="page-title">{{ indexName }}</h1>
           <span class="code-badge">{{ indexCode }}</span>
         </div>
-        <div v-if="latestValuation" class="stat-row">
-          <div class="stat-item">
+        <div class="stat-row">
+          <div v-if="latestBar" class="stat-item">
+            <span class="stat-label">最新收盘</span>
+            <span class="stat-value">{{ latestBar.close_price?.toFixed(2) ?? '—' }}</span>
+            <span class="stat-sub" :class="changePctClass">
+              {{ latestBar.change_pct !== null ? (latestBar.change_pct >= 0 ? '+' : '') + latestBar.change_pct.toFixed(2) + '%' : '—' }}
+            </span>
+          </div>
+          <div v-if="latestValuation" class="stat-item">
             <span class="stat-label">PE(TTM)</span>
             <span class="stat-value">{{ latestValuation.pe?.toFixed(1) ?? '—' }}</span>
             <span class="stat-sub">分位 {{ latestValuation.pe_percentile?.toFixed(0) ?? '—' }}%</span>
           </div>
-          <div class="stat-item">
+          <div v-if="latestValuation" class="stat-item">
             <span class="stat-label">PB</span>
             <span class="stat-value">{{ latestValuation.pb?.toFixed(2) ?? '—' }}</span>
             <span class="stat-sub">分位 {{ latestValuation.pb_percentile?.toFixed(0) ?? '—' }}%</span>
           </div>
-          <div class="stat-item">
+          <div v-if="latestValuation" class="stat-item">
             <span class="stat-label">股息率</span>
             <span class="stat-value">{{ latestValuation.dividend_yield?.toFixed(2) ?? '—' }}%</span>
           </div>
         </div>
+        <div v-if="!latestValuation && !latestBar" class="no-valuation">暂无数据</div>
         <div v-else class="no-valuation">暂无估值数据</div>
       </div>
 
@@ -51,7 +59,7 @@
 
       <div class="chart-card">
         <div class="card-header">
-          <span class="card-title">PE / PB 估值</span>
+          <span class="card-title">PE / PB 历史分位</span>
           <div class="range-controls">
             <button
               v-for="preset in rangePresets"
@@ -100,6 +108,16 @@ let valuationChartInstance: any = null
 const latestValuation = computed(() =>
   valuation.value.length ? valuation.value[valuation.value.length - 1] : null,
 )
+
+const latestBar = computed(() =>
+  bars.value.length ? bars.value[bars.value.length - 1] : null,
+)
+
+const changePctClass = computed(() => {
+  const pct = latestBar.value?.change_pct
+  if (pct === null || pct === undefined) return ''
+  return pct >= 0 ? 'text-rise' : 'text-fall'
+})
 
 /** 日期范围元数据 */
 const dateRange = ref<DateRange>({ min_date: null, max_date: null })
@@ -240,17 +258,50 @@ async function initCharts() {
     const dates = valuation.value.map(v => v.trade_date)
     valuationChartInstance.setOption({
       backgroundColor: 'transparent',
-      tooltip: { trigger: 'axis', backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#f1f5f9', fontSize: 12 } },
-      legend: { data: ['PE', 'PB'], textStyle: { color: '#94a3b8' }, top: 4 },
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#1e293b',
+        borderColor: '#334155',
+        textStyle: { color: '#f1f5f9', fontSize: 12 },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        formatter: (params: any) => {
+          const list = Array.isArray(params) ? params : [params]
+          let html = `<div style="margin-bottom:4px">${list[0]?.axisValue ?? ''}</div>`
+          for (const p of list) {
+            const val = p.value !== null && p.value !== undefined ? Number(p.value).toFixed(1) + '%' : '—'
+            html += `<div>${p.color} ${p.seriesName}: ${val}</div>`
+          }
+          return html
+        },
+      },
+      legend: { data: ['PE分位', 'PB分位'], textStyle: { color: '#94a3b8' }, top: 4 },
       grid: { left: 60, right: 60, top: 40, bottom: 30 },
       xAxis: { type: 'category', data: dates, axisLine: { lineStyle: { color: '#334155' } }, axisLabel: { color: '#94a3b8', fontSize: 11 } },
-      yAxis: [
-        { name: 'PE', nameTextStyle: { color: '#3b82f6' }, splitLine: { lineStyle: { color: '#334155', type: 'dashed' } }, axisLabel: { color: '#3b82f6', fontSize: 11 } },
-        { name: 'PB', nameTextStyle: { color: '#f59e0b' }, splitLine: { show: false }, axisLabel: { color: '#f59e0b', fontSize: 11 } },
-      ],
+      yAxis: {
+        min: 0,
+        max: 100,
+        splitLine: { lineStyle: { color: '#334155', type: 'dashed' } },
+        axisLabel: { color: '#94a3b8', fontSize: 11, formatter: '{value}%' },
+      },
       series: [
-        { name: 'PE', type: 'line', yAxisIndex: 0, data: valuation.value.map(v => v.pe), smooth: true, lineStyle: { color: '#3b82f6', width: 2 }, symbol: 'none' },
-        { name: 'PB', type: 'line', yAxisIndex: 1, data: valuation.value.map(v => v.pb), smooth: true, lineStyle: { color: '#f59e0b', width: 2 }, symbol: 'none' },
+        {
+          name: 'PE分位',
+          type: 'line',
+          data: valuation.value.map(v => v.pe_percentile),
+          smooth: true,
+          lineStyle: { color: '#3b82f6', width: 2 },
+          symbol: 'none',
+          areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(59,130,246,0.15)' }, { offset: 1, color: 'rgba(59,130,246,0)' }] } },
+        },
+        {
+          name: 'PB分位',
+          type: 'line',
+          data: valuation.value.map(v => v.pb_percentile),
+          smooth: true,
+          lineStyle: { color: '#f59e0b', width: 2 },
+          symbol: 'none',
+          areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(245,158,11,0.15)' }, { offset: 1, color: 'rgba(245,158,11,0)' }] } },
+        },
       ],
     })
   }
@@ -321,6 +372,8 @@ onUnmounted(() => {
 .stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
 .stat-value { font-size: 22px; font-weight: 700; }
 .stat-sub { font-size: 12px; color: var(--text-muted); }
+.text-rise { color: #22c55e; }
+.text-fall { color: #ef4444; }
 
 .no-valuation { font-size: 13px; color: var(--text-muted); padding: 8px 0; }
 
