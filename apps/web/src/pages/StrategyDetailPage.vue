@@ -188,9 +188,19 @@
             <textarea v-model="editForm.description" class="form-textarea" rows="2"></textarea>
           </div>
           <div class="form-group">
-            <label class="form-label">配置 JSON</label>
-            <textarea v-model="editConfigText" class="form-textarea mono" rows="14"></textarea>
-            <div v-if="editJsonError" class="form-error">{{ editJsonError }}</div>
+            <div class="config-header-row">
+              <label class="form-label">策略配置</label>
+              <button class="toggle-json-btn" @click="editAdvancedMode = !editAdvancedMode">
+                {{ editAdvancedMode ? '表单模式' : '高级模式 (JSON)' }}
+              </button>
+            </div>
+
+            <StrategyConfigForm v-if="!editAdvancedMode" v-model="editConfigJson" />
+
+            <template v-else>
+              <textarea v-model="editConfigText" class="form-textarea mono" rows="14"></textarea>
+              <div v-if="editJsonError" class="form-error">{{ editJsonError }}</div>
+            </template>
           </div>
           <div class="modal-actions">
             <button class="btn-secondary" @click="showEdit = false">取消</button>
@@ -215,6 +225,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
+import StrategyConfigForm from '../components/StrategyConfigForm.vue'
 import { useStrategyStore } from '../stores/strategies'
 
 const props = defineProps<{ strategyId: string }>()
@@ -223,7 +234,9 @@ const router = useRouter()
 
 const showEdit = ref(false)
 const editJsonError = ref('')
+const editAdvancedMode = ref(false)
 const editForm = ref({ display_name: '', description: '' })
+const editConfigJson = ref<Record<string, unknown>>({})
 const editConfigText = ref('')
 
 /** 从 config_json 中提取各模块配置 */
@@ -251,25 +264,31 @@ watch(showEdit, (val) => {
       display_name: store.current.display_name,
       description: store.current.description,
     }
+    editConfigJson.value = JSON.parse(JSON.stringify(store.current.config_json))
     editConfigText.value = JSON.stringify(store.current.config_json, null, 2)
     editJsonError.value = ''
+    editAdvancedMode.value = false
   }
 })
 
 /** 保存编辑 */
 async function handleUpdate(): Promise<void> {
   editJsonError.value = ''
-  let configJson: Record<string, unknown>
-  try {
-    configJson = JSON.parse(editConfigText.value)
-  } catch {
-    editJsonError.value = 'JSON 格式错误'
-    return
+  let finalConfig: Record<string, unknown>
+  if (editAdvancedMode.value) {
+    try {
+      finalConfig = JSON.parse(editConfigText.value)
+    } catch {
+      editJsonError.value = 'JSON 格式错误'
+      return
+    }
+  } else {
+    finalConfig = editConfigJson.value
   }
 
   const success = await store.update(props.strategyId, {
     ...editForm.value,
-    config_json: configJson,
+    config_json: finalConfig,
   })
   if (success) {
     showEdit.value = false
@@ -422,7 +441,7 @@ onMounted(() => store.loadOne(props.strategyId))
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 24px;
-  width: 560px;
+  width: 720px;
   max-height: 90vh;
   overflow-y: auto;
   display: flex;
@@ -446,4 +465,17 @@ onMounted(() => store.loadOne(props.strategyId))
 .form-error { font-size: 12px; color: #f87171; }
 
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+
+.config-header-row { display: flex; align-items: center; justify-content: space-between; }
+.toggle-json-btn {
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.toggle-json-btn:hover { border-color: var(--accent); color: var(--accent); }
 </style>

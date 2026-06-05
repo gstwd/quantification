@@ -59,11 +59,24 @@
             <option value="monthly">每月</option>
           </select>
         </div>
+
+        <!-- 配置区域 -->
         <div class="form-group">
-          <label class="form-label">配置 JSON</label>
-          <textarea v-model="configJsonText" class="form-textarea mono" rows="12" placeholder='{"score": {"factors": {...}}}'></textarea>
-          <div v-if="jsonError" class="form-error">{{ jsonError }}</div>
+          <div class="config-header-row">
+            <label class="form-label">策略配置</label>
+            <button class="toggle-json-btn" @click="advancedMode = !advancedMode">
+              {{ advancedMode ? '表单模式' : '高级模式 (JSON)' }}
+            </button>
+          </div>
+
+          <StrategyConfigForm v-if="!advancedMode" v-model="configJson" />
+
+          <template v-else>
+            <textarea v-model="configJsonText" class="form-textarea mono" rows="12" placeholder='{"score": {"factors": {...}}}'></textarea>
+            <div v-if="jsonError" class="form-error">{{ jsonError }}</div>
+          </template>
         </div>
+
         <div v-if="store.validationResult && !store.validationResult.valid" class="validation-errors">
           <div v-for="(err, i) in store.validationResult.errors" :key="i" class="validation-error">{{ err }}</div>
         </div>
@@ -89,11 +102,13 @@
 import { onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
+import StrategyConfigForm from '../components/StrategyConfigForm.vue'
 import { useStrategyStore } from '../stores/strategies'
 
 const store = useStrategyStore()
 const showCreate = ref(false)
 const jsonError = ref('')
+const advancedMode = ref(false)
 
 const form = ref({
   strategy_id: '',
@@ -103,14 +118,20 @@ const form = ref({
   asset_scope: 'a_share_etf',
 })
 
-const configJsonText = ref('{\n  "score": {\n    "factors": {},\n    "transforms": {}\n  }\n}')
+/** 表单模式下的 config_json 对象 */
+const configJson = ref<Record<string, unknown>>({ score: { factors: {} } })
+
+/** 高级模式下的 JSON 文本 */
+const configJsonText = ref('{\n  "score": {\n    "factors": {}\n  }\n}')
 
 /** 监听弹窗关闭，重置表单 */
 watch(showCreate, (val) => {
   if (!val) {
     form.value = { strategy_id: '', display_name: '', description: '', frequency: 'daily', asset_scope: 'a_share_etf' }
-    configJsonText.value = '{\n  "score": {\n    "factors": {},\n    "transforms": {}\n  }\n}'
+    configJson.value = { score: { factors: {} } }
+    configJsonText.value = '{\n  "score": {\n    "factors": {}\n  }\n}'
     jsonError.value = ''
+    advancedMode.value = false
     store.validationResult = null
   }
 })
@@ -118,17 +139,21 @@ watch(showCreate, (val) => {
 /** 创建策略 */
 async function handleCreate(): Promise<void> {
   jsonError.value = ''
-  let configJson: Record<string, unknown>
-  try {
-    configJson = JSON.parse(configJsonText.value)
-  } catch {
-    jsonError.value = 'JSON 格式错误'
-    return
+  let finalConfig: Record<string, unknown>
+  if (advancedMode.value) {
+    try {
+      finalConfig = JSON.parse(configJsonText.value)
+    } catch {
+      jsonError.value = 'JSON 格式错误'
+      return
+    }
+  } else {
+    finalConfig = configJson.value
   }
 
   const success = await store.create({
     ...form.value,
-    config_json: configJson,
+    config_json: finalConfig,
   })
   if (success) {
     showCreate.value = false
@@ -226,7 +251,7 @@ onMounted(() => store.loadAll())
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 24px;
-  width: 560px;
+  width: 720px;
   max-height: 90vh;
   overflow-y: auto;
   display: flex;
@@ -251,6 +276,19 @@ onMounted(() => store.loadAll())
 
 .validation-errors { display: flex; flex-direction: column; gap: 4px; }
 .validation-error { font-size: 12px; color: #f87171; padding: 4px 8px; background: rgba(239,68,68,0.08); border-radius: 4px; }
+
+.config-header-row { display: flex; align-items: center; justify-content: space-between; }
+.toggle-json-btn {
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.toggle-json-btn:hover { border-color: var(--accent); color: var(--accent); }
 
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 </style>

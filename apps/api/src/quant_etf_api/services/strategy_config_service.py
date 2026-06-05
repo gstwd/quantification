@@ -160,7 +160,7 @@ class StrategyConfigService:
         """校验策略配置 JSON 是否合法。
 
         Args:
-            config_json: 策略配置 JSON。
+            config_json: 策略配置 JSON（仅含引擎配置，不含 strategy_id/display_name 等元数据字段）。
 
         Returns:
             校验结果。
@@ -169,7 +169,13 @@ class StrategyConfigService:
         warnings: list[str] = []
 
         try:
-            config = StrategyConfig(**config_json)
+            # strategy_id 和 display_name 存储在顶层列中，校验时补入占位值
+            validation_input = {
+                "strategy_id": "_validate_",
+                "display_name": "_validate_",
+                **config_json,
+            }
+            config = StrategyConfig(**validation_input)
         except Exception as e:
             return StrategyValidationResult(valid=False, errors=[f"配置解析失败: {e}"])
 
