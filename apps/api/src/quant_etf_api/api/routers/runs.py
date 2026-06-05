@@ -1,3 +1,5 @@
+"""研究运行路由：触发各种后台任务。"""
+
 from __future__ import annotations
 
 import threading
@@ -30,16 +32,16 @@ def _run_strategy_bg(strategy_id: str, run_id: str, params: dict[str, Any] | Non
     """在独立 Session 中执行策略信号计算。"""
     db = SessionLocal()
     try:
-        from quant_etf_api.plugins.registry import build_default_registry
         from quant_etf_api.services.run_service import RunService
+        from quant_etf_api.services.strategy_config_service import StrategyConfigService
         from quant_etf_api.services.strategy_execution_service import StrategyExecutionService
 
-        registry = build_default_registry()
-        plugin = registry.get(strategy_id)
-        if plugin is None:
-            RunService(db).mark_failed(run_id, f"未注册的策略: {strategy_id}")
+        config_svc = StrategyConfigService(db)
+        config = config_svc.get_parsed_config(strategy_id)
+        if config is None:
+            RunService(db).mark_failed(run_id, f"未找到策略配置: {strategy_id}")
             return
-        StrategyExecutionService(db).execute(plugin, date.today(), run_id, params)
+        StrategyExecutionService(db).execute(config, date.today(), run_id, params)
     finally:
         db.close()
 
@@ -84,7 +86,6 @@ def refresh_universe(db: Session = Depends(get_db)) -> dict[str, str]:
 
 @router.post("/runs/daily-ingest")
 def daily_ingest(db: Session = Depends(get_db)) -> dict[str, str]:
-    # 创建 pending 记录后立即返回，后台线程执行实际的数据拉取
     summary = RunService(db).create_run("daily_ingest", None, date.today())
     thread = threading.Thread(target=_run_ingest_bg, args=(summary.run_id,), daemon=True)
     thread.start()
@@ -93,11 +94,7 @@ def daily_ingest(db: Session = Depends(get_db)) -> dict[str, str]:
 
 @router.post("/runs/cold-start")
 def cold_start(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发冷启动：拉取全部 ETF 和指数从成立至今的全量历史日线数据。
-
-    与 /runs/daily-ingest 的区别在于 ETF 日线拉取完整历史（ETF 上市日至今），
-    适用于首次部署或数据回补场景。
-    """
+    """触发冷启动：拉取全部 ETF 和指数从成立至今的全量历史日线数据。"""
     summary = RunService(db).create_run("cold_start", None, date.today())
     thread = threading.Thread(target=_run_cold_start_bg, args=(summary.run_id,), daemon=True)
     thread.start()

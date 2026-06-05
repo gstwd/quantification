@@ -92,7 +92,7 @@
             </div>
           </div>
           <div v-else class="empty-small">暂无持仓建议</div>
-          <div class="alloc-reasoning">{{ allocation.plan.reasoning }}</div>
+          <div class="alloc-method">分配方法：{{ allocation.plan.method }}</div>
         </div>
         <!-- 资产排名 -->
         <div v-if="allocation.rankings.length > 0" class="alloc-rankings">

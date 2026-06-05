@@ -1,63 +1,37 @@
+"""策略注册表（已废弃）。
+
+策略管理已迁移至 StrategyConfigService + strategy_config 表。
+此模块仅保留空壳以避免导入错误。
+"""
+
 from __future__ import annotations
 
 from typing import Any
 
-from quant_etf_api.plugins.base import StrategyPlugin
-from quant_etf_api.plugins.builtins.etf_allocation.plugin import EtfAllocationPlugin
-from quant_etf_api.plugins.builtins.volume_breakout.plugin import VolumeBreakoutDailyPlugin
-
 
 class StrategyRegistry:
-    def __init__(self) -> None:
-        # 以 strategy_id 为 key 存储所有已注册插件
-        self._plugins: dict[str, StrategyPlugin] = {}
+    """空壳注册表，所有方法返回空结果。"""
 
-    def register(self, plugin: StrategyPlugin) -> None:
-        self._plugins[plugin.strategy_id] = plugin
+    def register(self, plugin: Any) -> None:
+        """不再支持注册。"""
 
-    def all(self) -> list[StrategyPlugin]:
-        return list(self._plugins.values())
+    def all(self) -> list[Any]:
+        """返回空列表。"""
+        return []
 
-    def get(self, strategy_id: str) -> StrategyPlugin | None:
-        """按 strategy_id 查找插件。"""
-        return self._plugins.get(strategy_id)
+    def get(self, strategy_id: str) -> Any:
+        """始终返回 None。"""
+        return None
 
     def has_decision_pipeline(self, strategy_id: str) -> bool:
-        """检查指定插件是否实现了决策管线方法（assess_market_timing）。
-
-        Args:
-            strategy_id: 策略标识。
-
-        Returns:
-            True 表示插件支持决策管线模式。
-        """
-        plugin = self.get(strategy_id)
-        return plugin is not None and hasattr(plugin, "assess_market_timing")
+        """始终返回 False。"""
+        return False
 
     def as_summaries(self) -> list[dict[str, Any]]:
-        # 将所有插件元数据序列化为字典列表，供 API 层返回给前端
-        summaries = []
-        for plugin in self.all():
-            summaries.append(
-                {
-                    "strategy_id": plugin.strategy_id,
-                    "display_name": plugin.display_name,
-                    "version": plugin.version,
-                    "frequency": plugin.frequency,
-                    "asset_scope": plugin.asset_scope,
-                    "description": plugin.description,
-                    "parameter_schema": plugin.parameter_schema(),
-                    "required_inputs": plugin.required_inputs(),
-                    "factors": plugin.factor_definitions(),
-                    "signal_definition": plugin.signal_definition(),
-                }
-            )
-        return summaries
+        """返回空列表。"""
+        return []
 
 
 def build_default_registry() -> StrategyRegistry:
-    """构建包含所有内置策略插件的默认注册表，进程启动时调用一次。"""
-    registry = StrategyRegistry()
-    registry.register(EtfAllocationPlugin())
-    registry.register(VolumeBreakoutDailyPlugin())
-    return registry
+    """构建空注册表。"""
+    return StrategyRegistry()

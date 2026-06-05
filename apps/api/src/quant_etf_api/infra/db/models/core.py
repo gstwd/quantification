@@ -628,6 +628,48 @@ class IndexValuationModel(Base):
     )
 
 
+class StrategyConfigModel(Base):
+    """策略配置表，存储 JSON 格式的完整策略定义。
+
+    所有策略通过 config_json 字段的 JSON 配置驱动，
+    引擎运行时动态加载，无需硬编码策略逻辑。
+    """
+
+    __tablename__ = "strategy_config"
+
+    strategy_id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, comment="策略唯一标识，如 etf_allocation"
+    )
+    display_name: Mapped[str] = mapped_column(
+        String(128), nullable=False, comment="策略中文显示名称"
+    )
+    version: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="1.0.0", comment="策略版本号"
+    )
+    description: Mapped[str | None] = mapped_column(Text, comment="策略描述")
+    frequency: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="daily", comment="运行频率：daily/weekly/monthly"
+    )
+    asset_scope: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="a_share_etf", comment="资产范围"
+    )
+    config_json: Mapped[dict] = mapped_column(
+        JSON, nullable=False, comment="完整策略配置 JSON，包含 score/filters/rank/portfolio/risk 等模块"
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="active", comment="状态：active=启用, disabled=禁用"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), comment="记录创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        comment="记录最后更新时间（UTC）",
+    )
+
+
 class MacroIndicatorModel(Base):
     """宏观经济指标数据，按指标代码 + 周期唯一。
 

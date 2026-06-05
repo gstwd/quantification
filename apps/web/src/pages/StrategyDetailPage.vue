@@ -1,51 +1,202 @@
 <template>
+  <!--
+    策略详情页面。
+
+    展示策略配置的完整内容，包括各模块配置（评分、过滤、排名、组合、风控）。
+    支持编辑和删除策略。
+  -->
   <div class="page">
-    <div v-if="store.loading" class="loading">加载中...</div>
+    <div v-if="store.error" class="error-tip">{{ store.error }}</div>
+    <div v-else-if="store.loading" class="loading">加载中...</div>
     <template v-else-if="store.current">
       <div class="page-header">
-        <h1 class="page-title">{{ store.current.display_name }}</h1>
-        <div class="chips">
-          <span class="chip chip-version">v{{ store.current.version }}</span>
-          <span class="chip chip-freq">{{ store.current.frequency }}</span>
-          <span class="chip chip-scope">{{ store.current.asset_scope }}</span>
+        <div class="header-left">
+          <h1 class="page-title">{{ store.current.display_name }}</h1>
+          <div class="chips">
+            <span class="chip chip-version">v{{ store.current.version }}</span>
+            <span class="chip chip-freq">{{ store.current.frequency }}</span>
+            <span :class="['chip', store.current.status === 'active' ? 'chip-active' : 'chip-disabled']">
+              {{ store.current.status === 'active' ? '启用' : '禁用' }}
+            </span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button class="btn-secondary" @click="showEdit = true">编辑</button>
+          <button class="btn-danger" @click="handleDelete">删除</button>
         </div>
       </div>
-      <p class="description">{{ store.current.description }}</p>
 
-      <div class="two-col">
-        <div class="card">
-          <div class="card-header">元数据</div>
-          <div class="meta-list">
-            <div class="meta-row">
-              <span class="meta-key">策略 ID</span>
-              <span class="meta-val mono">{{ store.current.strategy_id }}</span>
-            </div>
-            <div class="meta-row">
-              <span class="meta-key">频率</span>
-              <span class="meta-val">{{ store.current.frequency }}</span>
-            </div>
-            <div class="meta-row">
-              <span class="meta-key">资产范围</span>
-              <span class="meta-val">{{ store.current.asset_scope }}</span>
-            </div>
-            <div class="meta-row">
-              <span class="meta-key">必要输入</span>
-              <div class="chips-inline">
-                <span v-for="inp in store.current.required_inputs" :key="inp" class="chip chip-input">{{ inp }}</span>
+      <p class="description">{{ store.current.description || '暂无描述' }}</p>
+
+      <!-- 策略配置模块 -->
+      <div class="config-grid">
+        <!-- 评分模块 -->
+        <div class="config-card">
+          <div class="config-header">评分模块 (Score)</div>
+          <div class="config-body">
+            <div v-if="scoreConfig" class="config-section">
+              <div class="config-row">
+                <span class="config-key">因子权重</span>
+                <div class="factor-weights">
+                  <span v-for="(weight, fid) in scoreConfig.factors" :key="fid" class="factor-tag">
+                    <span class="factor-name">{{ fid }}</span>
+                    <span class="factor-weight">{{ weight }}</span>
+                  </span>
+                </div>
+              </div>
+              <div v-if="scoreConfig.transforms && Object.keys(scoreConfig.transforms).length > 0" class="config-row">
+                <span class="config-key">变换函数</span>
+                <div class="factor-weights">
+                  <span v-for="(fn, fid) in scoreConfig.transforms" :key="fid" class="factor-tag transform">
+                    <span class="factor-name">{{ fid }}</span>
+                    <span class="factor-weight">{{ fn }}</span>
+                  </span>
+                </div>
+              </div>
+              <div class="config-row">
+                <span class="config-key">缺失策略</span>
+                <span class="config-val">{{ scoreConfig.missing_factor_strategy || 'ignore' }}</span>
               </div>
             </div>
+            <div v-else class="config-empty">未配置</div>
           </div>
         </div>
 
-        <div class="card">
-          <div class="card-header">因子定义</div>
-          <div v-if="store.current.factors.length === 0" class="empty">无因子定义</div>
-          <div v-else class="factor-list">
-            <div v-for="(f, i) in store.current.factors" :key="i" class="factor-item">
-              <div class="factor-id mono">{{ f.factor_id ?? f.id ?? `factor_${i}` }}</div>
-              <div class="factor-desc text-muted">{{ f.description ?? f.name ?? '' }}</div>
-              <div v-if="f.weight !== undefined" class="factor-weight">权重 {{ f.weight }}</div>
+        <!-- 择时模块 -->
+        <div class="config-card">
+          <div class="config-header">择时模块 (Timing)</div>
+          <div class="config-body">
+            <div v-if="timingConfig" class="config-section">
+              <div class="config-row">
+                <span class="config-key">因子权重</span>
+                <div class="factor-weights">
+                  <span v-for="(weight, fid) in timingConfig.factors" :key="fid" class="factor-tag">
+                    <span class="factor-name">{{ fid }}</span>
+                    <span class="factor-weight">{{ weight }}</span>
+                  </span>
+                </div>
+              </div>
+              <div class="config-row">
+                <span class="config-key">阈值</span>
+                <span class="config-val">
+                  进攻 ≥ {{ timingConfig.thresholds?.offensive ?? 65 }}，防守 ≤ {{ timingConfig.thresholds?.defensive ?? 35 }}
+                </span>
+              </div>
             </div>
+            <div v-else class="config-empty">未配置（无择时）</div>
+          </div>
+        </div>
+
+        <!-- 过滤模块 -->
+        <div class="config-card">
+          <div class="config-header">过滤模块 (Filter)</div>
+          <div class="config-body">
+            <div v-if="filterConfig && filterConfig.rules && filterConfig.rules.length > 0" class="config-section">
+              <div class="config-row">
+                <span class="config-key">逻辑</span>
+                <span class="config-val">{{ filterConfig.logic || 'AND' }}</span>
+              </div>
+              <div v-for="(rule, i) in filterConfig.rules" :key="i" class="config-row">
+                <span class="config-key">规则 {{ i + 1 }}</span>
+                <span class="config-val mono">{{ rule.factor }} {{ rule.op }} {{ rule.value }}</span>
+              </div>
+            </div>
+            <div v-else class="config-empty">未配置（无过滤）</div>
+          </div>
+        </div>
+
+        <!-- 排名模块 -->
+        <div class="config-card">
+          <div class="config-header">排名模块 (Rank)</div>
+          <div class="config-body">
+            <div v-if="rankConfig" class="config-section">
+              <div class="config-row">
+                <span class="config-key">排序</span>
+                <span class="config-val">{{ rankConfig.sort_by || 'score' }} {{ rankConfig.order || 'desc' }}</span>
+              </div>
+              <div v-if="rankConfig.top_n" class="config-row">
+                <span class="config-key">Top N</span>
+                <span class="config-val">{{ rankConfig.top_n }}</span>
+              </div>
+            </div>
+            <div v-else class="config-empty">默认排名</div>
+          </div>
+        </div>
+
+        <!-- 组合模块 -->
+        <div class="config-card">
+          <div class="config-header">组合模块 (Portfolio)</div>
+          <div class="config-body">
+            <div v-if="portfolioConfig" class="config-section">
+              <div class="config-row">
+                <span class="config-key">分配方法</span>
+                <span class="config-val">{{ portfolioConfig.method }}</span>
+              </div>
+              <div v-if="portfolioConfig.timing_exposure" class="config-row">
+                <span class="config-key">择时仓位</span>
+                <div class="factor-weights">
+                  <span v-for="(exp, regime) in portfolioConfig.timing_exposure" :key="regime" class="factor-tag">
+                    <span class="factor-name">{{ regime }}</span>
+                    <span class="factor-weight">{{ (exp * 100).toFixed(0) }}%</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div v-else class="config-empty">未配置（信号模式）</div>
+          </div>
+        </div>
+
+        <!-- 风控模块 -->
+        <div class="config-card">
+          <div class="config-header">风控模块 (Risk)</div>
+          <div class="config-body">
+            <div v-if="riskConfig" class="config-section">
+              <div v-if="riskConfig.max_asset_weight != null" class="config-row">
+                <span class="config-key">单资产上限</span>
+                <span class="config-val">{{ (riskConfig.max_asset_weight * 100).toFixed(0) }}%</span>
+              </div>
+              <div v-if="riskConfig.max_portfolio_exposure != null && riskConfig.max_portfolio_exposure < 1" class="config-row">
+                <span class="config-key">组合上限</span>
+                <span class="config-val">{{ (riskConfig.max_portfolio_exposure * 100).toFixed(0) }}%</span>
+              </div>
+              <div v-if="riskConfig.min_cash_ratio != null && riskConfig.min_cash_ratio > 0" class="config-row">
+                <span class="config-key">最低现金</span>
+                <span class="config-val">{{ (riskConfig.min_cash_ratio * 100).toFixed(0) }}%</span>
+              </div>
+            </div>
+            <div v-else class="config-empty">未配置（无风控）</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 原始配置 JSON -->
+      <details class="json-section">
+        <summary class="json-toggle">原始配置 JSON</summary>
+        <pre class="json-block mono">{{ formattedJson }}</pre>
+      </details>
+
+      <!-- 编辑弹窗 -->
+      <div v-if="showEdit" class="modal-overlay" @click.self="showEdit = false">
+        <div class="modal">
+          <h2 class="modal-title">编辑策略</h2>
+          <div class="form-group">
+            <label class="form-label">策略名称</label>
+            <input v-model="editForm.display_name" class="form-input" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">描述</label>
+            <textarea v-model="editForm.description" class="form-textarea" rows="2"></textarea>
+          </div>
+          <div class="form-group">
+            <label class="form-label">配置 JSON</label>
+            <textarea v-model="editConfigText" class="form-textarea mono" rows="14"></textarea>
+            <div v-if="editJsonError" class="form-error">{{ editJsonError }}</div>
+          </div>
+          <div class="modal-actions">
+            <button class="btn-secondary" @click="showEdit = false">取消</button>
+            <button class="btn-primary" @click="handleUpdate" :disabled="store.loading">
+              {{ store.loading ? '保存中...' : '保存' }}
+            </button>
           </div>
         </div>
       </div>
@@ -55,78 +206,244 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+/**
+ * 策略详情页面。
+ *
+ * 展示策略配置的各模块详情，支持编辑和删除操作。
+ */
+
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 import { useStrategyStore } from '../stores/strategies'
 
 const props = defineProps<{ strategyId: string }>()
 const store = useStrategyStore()
+const router = useRouter()
+
+const showEdit = ref(false)
+const editJsonError = ref('')
+const editForm = ref({ display_name: '', description: '' })
+const editConfigText = ref('')
+
+/** 从 config_json 中提取各模块配置 */
+const configJson = computed(() => store.current?.config_json ?? {})
+const scoreConfig = computed(() => configJson.value.score as { factors?: Record<string, number>; transforms?: Record<string, string>; missing_factor_strategy?: string } | undefined)
+const timingConfig = computed(() => configJson.value.timing as { factors?: Record<string, number>; transforms?: Record<string, string>; thresholds?: { offensive?: number; defensive?: number } } | undefined)
+const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value: number | number[] }> } | undefined)
+const rankConfig = computed(() => configJson.value.rank as { sort_by?: string; order?: string; top_n?: number } | undefined)
+const portfolioConfig = computed(() => configJson.value.portfolio as { method?: string; timing_exposure?: Record<string, number> } | undefined)
+const riskConfig = computed(() => configJson.value.risk as { max_asset_weight?: number; max_portfolio_exposure?: number; min_cash_ratio?: number } | undefined)
+
+/** 格式化 JSON 用于展示 */
+const formattedJson = computed(() => {
+  try {
+    return JSON.stringify(configJson.value, null, 2)
+  } catch {
+    return '{}'
+  }
+})
+
+/** 监听编辑弹窗打开，初始化表单 */
+watch(showEdit, (val) => {
+  if (val && store.current) {
+    editForm.value = {
+      display_name: store.current.display_name,
+      description: store.current.description,
+    }
+    editConfigText.value = JSON.stringify(store.current.config_json, null, 2)
+    editJsonError.value = ''
+  }
+})
+
+/** 保存编辑 */
+async function handleUpdate(): Promise<void> {
+  editJsonError.value = ''
+  let configJson: Record<string, unknown>
+  try {
+    configJson = JSON.parse(editConfigText.value)
+  } catch {
+    editJsonError.value = 'JSON 格式错误'
+    return
+  }
+
+  const success = await store.update(props.strategyId, {
+    ...editForm.value,
+    config_json: configJson,
+  })
+  if (success) {
+    showEdit.value = false
+  }
+}
+
+/** 删除策略 */
+async function handleDelete(): Promise<void> {
+  if (!confirm('确定删除此策略？此操作不可撤销。')) return
+  const success = await store.remove(props.strategyId)
+  if (success) {
+    router.push('/strategies')
+  }
+}
+
 onMounted(() => store.loadOne(props.strategyId))
 </script>
 
 <style scoped>
 .page { display: flex; flex-direction: column; gap: 20px; }
 .loading { padding: 60px; text-align: center; color: var(--text-muted); }
+.error-tip { padding: 12px 16px; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); border-radius: var(--radius); color: #f87171; font-size: 13px; }
 
-.page-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.header-left { display: flex; flex-direction: column; gap: 8px; }
 .page-title { font-size: 22px; font-weight: 700; }
+.header-actions { display: flex; gap: 8px; }
 
 .chips { display: flex; gap: 6px; }
 .chip { font-size: 11px; padding: 2px 8px; border-radius: 20px; font-weight: 500; }
 .chip-version { background: rgba(59,130,246,0.15); color: #60a5fa; }
 .chip-freq { background: rgba(34,197,94,0.12); color: #4ade80; }
-.chip-scope { background: var(--surface-2); color: var(--text-muted); }
-.chip-input { background: var(--surface-2); color: var(--text-muted); }
+.chip-active { background: rgba(34,197,94,0.12); color: #4ade80; }
+.chip-disabled { background: rgba(239,68,68,0.12); color: #f87171; }
 
 .description { color: var(--text-muted); font-size: 14px; line-height: 1.7; max-width: 700px; }
 
-.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-
-.card {
+/* 配置网格 */
+.config-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.config-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
 }
-
-.card-header {
-  padding: 12px 20px;
+.config-header {
+  padding: 10px 16px;
   font-size: 13px;
   font-weight: 600;
   border-bottom: 1px solid var(--border);
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
 }
-
-.meta-list { padding: 8px 0; }
-.meta-row {
+.config-body { padding: 8px 0; }
+.config-section { display: flex; flex-direction: column; }
+.config-row {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
-  padding: 10px 20px;
-  border-bottom: 1px solid rgba(51,65,85,0.4);
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid rgba(51,65,85,0.3);
 }
-.meta-row:last-child { border-bottom: none; }
-.meta-key { font-size: 12px; color: var(--text-muted); min-width: 80px; padding-top: 2px; }
-.meta-val { font-size: 13px; }
-.chips-inline { display: flex; gap: 4px; flex-wrap: wrap; }
+.config-row:last-child { border-bottom: none; }
+.config-key { font-size: 12px; color: var(--text-muted); min-width: 70px; flex-shrink: 0; }
+.config-val { font-size: 12px; }
+.config-empty { padding: 20px 16px; text-align: center; color: var(--text-muted); font-size: 12px; }
 
-.empty { padding: 32px 20px; text-align: center; color: var(--text-muted); }
-
-.factor-list { padding: 8px 0; }
-.factor-item {
-  padding: 12px 20px;
-  border-bottom: 1px solid rgba(51,65,85,0.4);
-  display: flex;
-  flex-direction: column;
+.factor-weights { display: flex; gap: 4px; flex-wrap: wrap; }
+.factor-tag {
+  display: inline-flex;
+  align-items: center;
   gap: 4px;
+  padding: 2px 8px;
+  background: var(--surface-2);
+  border-radius: 12px;
+  font-size: 11px;
 }
-.factor-item:last-child { border-bottom: none; }
-.factor-id { font-size: 13px; font-weight: 600; }
-.factor-desc { font-size: 12px; }
-.factor-weight { font-size: 11px; color: var(--accent); }
+.factor-tag.transform { background: rgba(168,85,247,0.12); }
+.factor-name { color: var(--text-muted); }
+.factor-weight { color: var(--accent); font-weight: 600; }
+
+/* JSON 区域 */
+.json-section { margin-top: 4px; }
+.json-toggle {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 8px 0;
+}
+.json-block {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  font-size: 12px;
+  overflow-x: auto;
+  max-height: 400px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 
 .mono { font-family: monospace; }
-.text-muted { color: var(--text-muted); }
+
+/* 按钮 */
+.btn-primary {
+  padding: 8px 16px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-secondary {
+  padding: 8px 16px;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.btn-danger {
+  padding: 8px 16px;
+  background: rgba(239,68,68,0.1);
+  color: #f87171;
+  border: 1px solid rgba(239,68,68,0.3);
+  border-radius: var(--radius);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* 弹窗 */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  width: 560px;
+  max-height: 90vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.modal-title { font-size: 18px; font-weight: 600; }
+
+.form-group { display: flex; flex-direction: column; gap: 6px; }
+.form-label { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+.form-input, .form-textarea {
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+}
+.form-textarea { resize: vertical; }
+.form-error { font-size: 12px; color: #f87171; }
+
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 </style>

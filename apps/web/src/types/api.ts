@@ -14,17 +14,46 @@ export interface EtfCreatePayload {
   etf_code: string
 }
 
-export interface StrategyDetail {
+export interface StrategySummary {
   strategy_id: string
   display_name: string
   version: string
   frequency: string
   asset_scope: string
   description: string
-  parameter_schema: Record<string, unknown>
-  required_inputs: string[]
-  factors: Array<Record<string, unknown>>
-  signal_definition: Record<string, unknown>
+  status: string
+}
+
+export interface StrategyDetail extends StrategySummary {
+  config_json: Record<string, unknown>
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface StrategyConfigCreate {
+  strategy_id: string
+  display_name: string
+  version?: string
+  description?: string
+  frequency?: string
+  asset_scope?: string
+  config_json: Record<string, unknown>
+}
+
+export interface StrategyConfigUpdate {
+  display_name?: string
+  version?: string
+  description?: string
+  frequency?: string
+  asset_scope?: string
+  config_json?: Record<string, unknown>
+  status?: string
+}
+
+export interface StrategyValidationResult {
+  valid: boolean
+  errors: string[]
+  warnings: string[]
 }
 
 export interface SignalRow {
@@ -314,7 +343,7 @@ export interface AllocationPlan {
   positions: Record<string, number>
   total_exposure: number
   cash_ratio: number
-  reasoning: string
+  method: string
 }
 
 export interface AllocationResponse {

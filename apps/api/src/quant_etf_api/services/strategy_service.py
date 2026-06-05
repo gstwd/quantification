@@ -1,3 +1,9 @@
+"""策略服务，提供策略列表、详情和决策管线调用。
+
+重构后使用 StrategyEngine + StrategyConfig 驱动策略执行，
+替代旧的 StrategyPlugin + StrategyRegistry 模式。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -7,47 +13,46 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from quant_etf_api.domain.strategies.models import StrategyContextData
-from quant_etf_api.plugins.registry import StrategyRegistry, build_default_registry
-from quant_etf_api.schemas.strategy import AllocationResponse, StrategyDetail
+from quant_etf_api.engine.orchestrator import StrategyEngine
+from quant_etf_api.schemas.strategy import (
+    AllocationResponse,
+    StrategyConfigCreate,
+    StrategyConfigUpdate,
+    StrategyDetail,
+    StrategySummary,
+    StrategyValidationResult,
+)
+from quant_etf_api.services.context_builder import ContextBuilder
+from quant_etf_api.services.strategy_config_service import StrategyConfigService
 
 logger = logging.getLogger(__name__)
 
 
 class StrategyService:
-    """策略服务，提供策略列表、详情和决策管线调用。"""
+    """策略服务，提供策略列表、详情、配置管理和决策管线调用。"""
 
-    def __init__(self, registry: StrategyRegistry | None = None, db: Session | None = None) -> None:
+    def __init__(self, db: Session | None = None) -> None:
         """初始化策略服务。
 
         Args:
-            registry: 策略注册表，默认使用内置插件。
-            db: SQLAlchemy Session，仅 run_allocation 需要。
+            db: SQLAlchemy Session，配置管理和 run_allocation 需要。
         """
-        self.registry = registry or build_default_registry()
         self._db = db
+        self._engine = StrategyEngine()
 
-    def list_strategies(self) -> list[StrategyDetail]:
-        """返回所有已注册策略的摘要列表。"""
-        return [StrategyDetail(**item) for item in self.registry.as_summaries()]
+    def list_strategies(self) -> list[StrategySummary]:
+        """返回所有已启用策略的摘要列表。"""
+        if self._db is None:
+            return []
+        svc = StrategyConfigService(self._db)
+        return svc.list_configs()
 
     def get_strategy(self, strategy_id: str) -> StrategyDetail | None:
         """按 ID 获取策略详情。"""
-        plugin = self.registry.get(strategy_id)
-        if plugin is None:
+        if self._db is None:
             return None
-        return StrategyDetail(
-            strategy_id=plugin.strategy_id,
-            display_name=plugin.display_name,
-            version=plugin.version,
-            frequency=plugin.frequency,
-            asset_scope=plugin.asset_scope,
-            description=plugin.description,
-            parameter_schema=plugin.parameter_schema(),
-            required_inputs=plugin.required_inputs(),
-            factors=plugin.factor_definitions(),
-            signal_definition=plugin.signal_definition(),
-        )
+        svc = StrategyConfigService(self._db)
+        return svc.get_config(strategy_id)
 
     def run_allocation(
         self,
@@ -56,141 +61,69 @@ class StrategyService:
     ) -> AllocationResponse | None:
         """运行资产配置决策管线。
 
-        调用插件的 assess_market_timing → rank_assets → allocate_positions，
-        返回完整的决策结果。
+        从 strategy_config 表加载配置，构建上下文，调用引擎执行。
 
         Args:
             strategy_id: 策略标识。
-            params: 策略参数。
+            params: 策略参数覆盖（暂未使用，预留扩展）。
 
         Returns:
-            AllocationResponse，插件不支持决策管线时返回 None。
+            AllocationResponse，策略不存在时返回 None。
         """
-        plugin = self.registry.get(strategy_id)
-        if plugin is None or not hasattr(plugin, "assess_market_timing"):
-            return None
-
         if self._db is None:
             logger.warning("run_allocation: 未提供数据库 Session")
             return None
 
-        # 加载数据并构建上下文
-        context, universe = self._build_allocation_context()
+        # 加载策略配置
+        config_svc = StrategyConfigService(self._db)
+        config = config_svc.get_parsed_config(strategy_id)
+        if config is None:
+            return None
 
-        # 运行决策管线
-        timing = plugin.assess_market_timing(date.today(), context, params)
-        rankings = plugin.rank_assets(date.today(), universe, context, params)
-        plan = plugin.allocate_positions(timing, rankings, params)
+        # 构建上下文
+        builder = ContextBuilder(self._db)
+        context = builder.build_live_context(date.today())
+
+        # 执行引擎
+        result = self._engine.run(config, context)
 
         return AllocationResponse(
-            timing=asdict(timing),
-            rankings=[asdict(r) for r in (rankings or [])],
-            plan=asdict(plan),
+            timing=asdict(result.timing) if result.timing else {},
+            rankings=[asdict(r) for r in result.rankings],
+            plan={
+                "positions": result.positions,
+                "total_exposure": result.total_exposure,
+                "cash_ratio": result.cash_ratio,
+                "method": config.portfolio.method if config.portfolio else "signal_only",
+            },
         )
 
-    def _build_allocation_context(
-        self,
-    ) -> tuple[StrategyContextData, list[dict[str, Any]]]:
-        """为决策管线构建上下文和 ETF 宇宙。
+    # ── 配置管理委托 ──────────────────────────────────────────────────────
 
-        优先从 index_factor_value 表读取已计算的因子值（volume_ratio_20d、
-        return_5d），仅在因子值缺失时从原始 K 线回退计算。
-        """
-        from quant_etf_api.domain.common.bar_metrics import calc_5d_return, calc_volume_ratio_20d
-        from quant_etf_api.infra.db.models.core import (
-            EtfDailyBarModel,
-            EtfUniverseModel,
-            IndexFactorValueModel,
-            IndexValuationModel,
-        )
+    def create_config(self, req: StrategyConfigCreate) -> StrategyDetail:
+        """创建策略配置。"""
+        if self._db is None:
+            raise ValueError("未提供数据库 Session")
+        svc = StrategyConfigService(self._db)
+        return svc.create_config(req)
 
-        # 获取活跃 ETF
-        etfs = (
-            self._db.query(EtfUniverseModel)
-            .filter(EtfUniverseModel.is_active.is_(True))
-            .all()
-        )
-        etf_codes = [e.etf_code for e in etfs]
-        universe = [
-            {"etf_code": e.etf_code, "name_cn": e.name_cn, "category": e.category}
-            for e in etfs
-        ]
+    def update_config(
+        self, strategy_id: str, req: StrategyConfigUpdate
+    ) -> StrategyDetail | None:
+        """更新策略配置。"""
+        if self._db is None:
+            return None
+        svc = StrategyConfigService(self._db)
+        return svc.update_config(strategy_id, req)
 
-        from datetime import timedelta
+    def delete_config(self, strategy_id: str) -> bool:
+        """删除策略配置。"""
+        if self._db is None:
+            return False
+        svc = StrategyConfigService(self._db)
+        return svc.delete_config(strategy_id)
 
-        today = date.today()
-        lookback = today - timedelta(days=90)
-
-        # 加载最近 90 天行情（回退计算用）
-        bars = (
-            self._db.query(EtfDailyBarModel)
-            .filter(
-                EtfDailyBarModel.trade_date >= lookback,
-                EtfDailyBarModel.trade_date <= today,
-                EtfDailyBarModel.etf_code.in_(etf_codes),
-            )
-            .all()
-        )
-        all_bars = {(r.etf_code, r.trade_date): r for r in bars}
-
-        # 优先从 index_factor_value 读取已计算的因子值
-        precomputed: dict[str, dict[str, float]] = {}
-        for factor_id in ("volume_ratio_20d", "return_5d"):
-            rows = (
-                self._db.query(
-                    IndexFactorValueModel.index_code,
-                    IndexFactorValueModel.factor_value_numeric,
-                )
-                .filter(
-                    IndexFactorValueModel.factor_id == factor_id,
-                    IndexFactorValueModel.trade_date == today,
-                    IndexFactorValueModel.strategy_id.is_(None),
-                )
-                .all()
-            )
-            for code, value in rows:
-                precomputed.setdefault(code, {})[factor_id] = value
-
-        # 加载指数估值
-        val_rows = (
-            self._db.query(IndexValuationModel)
-            .filter(IndexValuationModel.trade_date >= lookback)
-            .all()
-        )
-        index_valuation: dict[str, dict[str, Any]] = {}
-        for r in val_rows:
-            index_valuation[r.index_code] = {
-                "pe_percentile": r.pe_percentile,
-                "pb_percentile": r.pb_percentile,
-                "pe": r.pe,
-                "pb": r.pb,
-            }
-
-        # 构建 ETF-指数映射
-        asset_index_map = {e.etf_code: e.tracking_index_code for e in etfs if e.tracking_index_code}
-
-        # 构建 asset_bars 上下文（优先用因子值，缺失时回退计算）
-        asset_bars: dict[str, dict[str, Any]] = {}
-        for code in etf_codes:
-            bar = all_bars.get((code, today))
-            if bar and bar.close_price:
-                factors = precomputed.get(code, {})
-                asset_bars[code] = {
-                    "close_price": bar.close_price,
-                    "volume_ratio_20d": factors.get(
-                        "volume_ratio_20d", calc_volume_ratio_20d(code, today, all_bars)
-                    ),
-                    "return_5d": factors.get(
-                        "return_5d", calc_5d_return(code, today, all_bars)
-                    ),
-                    "change_pct": bar.change_pct,
-                }
-
-        context = StrategyContextData(
-            extra={
-                "asset_bars": asset_bars,
-                "index_valuation": index_valuation,
-                "asset_index_map": asset_index_map,
-            }
-        )
-        return context, universe
+    def validate_config(self, config_json: dict[str, Any]) -> StrategyValidationResult:
+        """校验策略配置。"""
+        svc = StrategyConfigService(self._db) if self._db else StrategyConfigService.__new__(StrategyConfigService)
+        return svc.validate_config(config_json)

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Quant ETF Asset Allocation System — an asset allocation decision system for A-share ETFs (daily frequency only, no individual stocks, no trading execution). Full-stack: FastAPI backend + PostgreSQL + Vue 3 frontend. Supports dual-mode backtesting: signal scoring mode and asset allocation mode (timing → rotation → position sizing).
+Quant ETF Asset Allocation System — an asset allocation decision system for A-share ETFs (daily frequency only, no individual stocks, no trading execution). Full-stack: FastAPI backend + PostgreSQL + Vue 3 frontend. Uses a **component-based, configuration-driven** strategy engine: new strategies are created via JSON config stored in the database, no Python code needed.
 
 ## Commands
 
@@ -19,7 +19,7 @@ uvicorn quant_etf_api.main:app --reload --port 8000  # dev server
 ```
 
 ```bash
-pytest                           # run all tests (123 unit tests: services, factors, plugins, domain, allocation)
+pytest                           # run all tests
 pytest tests/path/to/test.py     # run single test file
 ruff check .                     # lint
 ruff format .                    # format
@@ -91,28 +91,50 @@ python -m quant_etf_api.cli init-indexes
 ### Backend layers
 
 ```
-HTTP → api/routers/ → services/ → infra/ → PostgreSQL
-                          ↓           ↑
-                      plugins/ ← domain/ (pure business rules)
-                          ↓
-                      factors/ (single-factor computation)
+HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
+                       ↓    ↑
+                   infra/  domain/ (pure business rules)
+                       ↓
+                   factors/ (single-factor computation)
 ```
 
 - **`api/routers/`** — 9 route groups: `health`, `system`, `etfs`, `market_data`, `strategies`, `signals`, `factors`, `runs`, `backtests`
-- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert)
-- **`infra/db/`** — SQLAlchemy 2 ORM models (`infra/db/models/core.py` has all 18 tables) + 7 repository classes (`infra/db/repositories/`). Repositories own all DB queries; services delegate to them for read operations, own only write logic.
+- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` builds `EngineContext` for both live and backtest modes.
+- **`engine/`** — **策略引擎核心**：组件化、配置驱动的策略执行管线。包含 `config.py`（Pydantic 配置模型）、`score.py`（评分）、`filter.py`（过滤）、`rank.py`（排名）、`portfolio.py`（组合构建）、`risk.py`（风控）、`rebalance.py`（调仓）、`orchestrator.py`（编排器）。
+- **`infra/db/`** — SQLAlchemy 2 ORM models (`infra/db/models/core.py` has 21 tables) + 8 repository classes (`infra/db/repositories/`). Repositories own all DB queries; services delegate to them for read operations, own only write logic.
 - **`infra/clients/`** — 4 data source clients, all inherit from `base.py`:
   - `akshare_fund.py` (ETF K-line via Sina + shares/AUM via fund_etf_spot_em), `exchange_reference.py` (exchange ref)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
 - **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends
-- **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports). Three sub-layers with clear dependency direction: `domain ← factors ← plugins`. Factor layer computes raw values + IC/IR evaluation; strategy layer handles normalization, weighting, and signal generation:
+- **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
   - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, etc.), `values.py` (DateRange)
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, AllocationPlan dataclasses)
-- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `builtins/` (6 built-in computers: volume, momentum×3, volatility, valuation×2). **所有因子基于指数数据计算**（`index_factor_value` 表）。Depends on `domain/common/` for calculations.
-- **`plugins/`** — Strategy plugin layer: `base.py` (StrategyPlugin Protocol, re-exports domain models), `registry.py` (StrategyRegistry), `builtins/` (2 strategy plugins). Each plugin implements `StrategyPlugin` Protocol (structural subtyping — no inheritance required). The Protocol includes 3 optional decision pipeline methods (`assess_market_timing`, `rank_assets`, `allocate_positions`) for asset allocation mode.
+- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `builtins/` (6 built-in computers: volume, momentum×3, volatility, valuation×2). **所有因子基于指数数据计算**（`index_factor_value` 表）。
+- **`plugins/`** — 已废弃，仅保留 re-export 和空壳 `StrategyRegistry`。策略执行已迁移至 `engine/`。
 - **`config/`** — Pydantic settings loaded from `.env`
 
-### Database schema (20 tables, migrations 0001–0007)
+### Strategy Engine（策略引擎）
+
+策略执行管线：`StrategyEngine.run(config, context)`
+
+```
+[可选] Timing  → Score → [可选] Filter → Rank → [可选] Portfolio → [可选] Risk → Output
+```
+
+- **Timing**: 市场择时，综合估值/趋势/量能判断 regime（offensive/neutral/defensive）
+- **Score**: 每资产综合得分 = Σ(transform(factor_value) × weight)
+- **Filter**: 过滤规则（gt/lt/gte/lte/eq/neq/between），AND/OR 逻辑
+- **Rank**: 排序 + TopN/BottomN
+- **Portfolio**: 权重分配（equal_weight / score_weight），择时 regime 控制总仓位
+- **Risk**: 单资产上限、组合上限、最低现金比例
+
+无 `portfolio` 配置 → 信号模式（只输出得分/排名）；有 → 配置模式（输出仓位）。
+
+内置 transform 函数：`invert_percentile`、`momentum_score`、`volume_score`、`trend_score`、`clamp_0_100`。
+
+新建策略只需 JSON 配置，通过 `POST /strategies` 创建，存储在 `strategy_config` 表。
+
+### Database schema (21 tables, migrations 0001–0008)
 
 | Group | Tables |
 |---|---|
@@ -121,24 +143,11 @@ HTTP → api/routers/ → services/ → infra/ → PostgreSQL
 | Analytics | `factor_definition`, `etf_factor_value`, `index_factor_value`, `signal_definition`, `etf_signal` |
 | Runtime | `strategy_plugin`, `research_run`, `research_run_item` |
 | Backtest | `backtest_run`, `backtest_daily_result`, `backtest_etf_result`, `backtest_index_result` |
-
-### Plugin system
-
-Plugins implement the `StrategyPlugin` Protocol (structural subtyping — no inheritance required). Required interface:
-
-- **Metadata attributes:** `strategy_id`, `display_name`, `version`, `frequency`, `asset_scope`, `description`
-- **Methods:** `parameter_schema()`, `required_inputs()`, `factor_definitions()`, `signal_definition()`, `prepare_context()`, `run_for_universe()`, `explain_result()`
-- **Optional decision pipeline methods** (checked via `hasattr`): `assess_market_timing()`, `rank_assets()`, `allocate_positions()`
-
-Built-in plugins in `plugins/builtins/`:
-1. **`volume_breakout_daily`** — Volume breakout baseline（指数模式）
-2. **`etf_allocation`** — Asset allocation strategy with full decision pipeline: timing assessment (valuation 40% + trend 40% + volume 20%) → asset rotation ranking (momentum 60% + valuation 40%) → position sizing (regime-based exposure: offensive 80%, neutral 50%, defensive 20%)（指数模式）
-
-To add a strategy: create a plugin file in `plugins/builtins/`, implement the Protocol, register in `plugins/registry.py`.
+| Strategy | `strategy_config` |
 
 ### Frontend
 
-- **Pages** (`src/pages/`): Dashboard, ETF list, ETF detail, Index list, Index detail, Macro, Strategy list, Strategy detail, Runs, Data status, Backtest list, Backtest create, Backtest detail
+- **Pages** (`src/pages/`): Dashboard, ETF list, ETF detail, Index list, Index detail, Macro, Strategy list, Strategy detail (config viewer + editor), Runs, Data status, Backtest list, Backtest create, Backtest detail
 - **State** (`src/stores/`): 4 Pinia stores — `etfs`, `strategies`, `signals`, `backtests`; stores are for mutable shared state only
 - **API layer** (`src/api/`): Axios wrappers returning typed `PaginatedResponse<T>` (`{ items, total, offset, limit }`); `etfs.ts`, `strategies.ts`, `signals.ts`, `backtests.ts`, `runs.ts`, `market_data.ts`
 - **Read-only data pages** (index/macro): Fetch data **inline** via `ref()` + `onMounted`, no Pinia store — lighter pattern for static data views
@@ -146,11 +155,21 @@ To add a strategy: create a plugin file in `plugins/builtins/`, implement the Pr
 
 ## Current State
 
-Services fully wired to PostgreSQL. 20 tables across 7 migrations (0001→0002→0002_backtest→0003_index_macro→0004→0005_factor_layer→0007_index_factor_backtest). Each data type has exactly **one** source: ETF K-line→Sina, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh.
+Services fully wired to PostgreSQL. 21 tables across 8 migrations (0001→0008). Each data type has exactly **one** source: ETF K-line→Sina, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh.
 
-**Backtesting**: `BacktestService` 以指数模式运行（`index_factor_value` + `backtest_index_result`），收益以百分比展示。适用于所有策略（`etf_allocation`、`volume_breakout_daily`）。Backtest mode（signal/allocation）存储在 `backtest_run.params` JSON 字段。
+**Strategy Engine**: `engine/` 包实现组件化策略执行管线。策略通过 `strategy_config` 表的 JSON 配置驱动，`StrategyConfigService` 管理 CRUD，`StrategyEngine` 执行管线。`BacktestService` 和 `StrategyExecutionService` 统一使用引擎执行。
+
+**Backtesting**: `BacktestService` 以指数模式运行（`index_factor_value` + `backtest_index_result`），收益以百分比展示。引擎输出 positions 非空时为配置模式，为空时为信号模式。
 
 **Asset allocation API**: `GET /strategies/{strategy_id}/allocation` runs the full decision pipeline and returns timing signal, asset rankings, and allocation plan.
+
+**Strategy config API**:
+- `GET /strategies` — 列表
+- `GET /strategies/{id}` — 详情
+- `POST /strategies` — 创建配置
+- `PUT /strategies/{id}` — 更新配置
+- `DELETE /strategies/{id}` — 删除配置
+- `POST /strategies/validate` — 校验配置
 
 ## Gotchas
 
@@ -162,20 +181,20 @@ Services fully wired to PostgreSQL. 20 tables across 7 migrations (0001→0002�
 - **Sync blocking in uvicorn**: Services use synchronous `urlopen` for external APIs. FastAPI runs sync routes in a thread pool (default 40 threads). Concurrent cold-start requests can exhaust the pool and cause timeouts — use a per-resource `threading.Lock` to serialize first-fetch, then read from DB on subsequent requests.
 - **ECharts + TypeScript**: `echarts/index.d.ts` triggers TS1203 with `vue-tsc`. Fix: add `"skipLibCheck": true` to `apps/web/tsconfig.json`.
 - **Backend venv on Windows**: Executables are at `apps/api/.venv/Scripts/` (e.g. `.venv/Scripts/alembic`, `.venv/Scripts/python`).
-- **`strategy_plugin` table is always empty** — strategies are managed by the in-memory `StrategyRegistry`. Never add a FK referencing `strategy_plugin`; it will silently reject all inserts due to FK violation.
-- **Backtest `context.extra["asset_bars"]`**: `BacktestService` injects real historical bar data here before calling `plugin.run_for_universe()`. Plugins check this key first and fall back to stubs when absent (live runs). **指数模式下此 key 实际存放指数数据**（透明映射），插件无需区分。
-- **`universe` 字典 key**: `_resolve_index_universe()` 返回的字典同时包含 `etf_code` 和 `index_code`（值相同），以便插件层通过 `item["etf_code"]` 透明兼容。
+- **`strategy_plugin` table is always empty** — 策略已迁移至 `strategy_config` 表。Never add a FK referencing `strategy_plugin`; it will silently reject all inserts due to FK violation.
+- **`universe` 字典 key**: `_resolve_index_universe()` 返回的字典同时包含 `etf_code` 和 `index_code`（值相同），以便引擎层通过 `item["etf_code"]` 透明兼容。
 - **AkShare index valuation**: Only 沪深300(000300), 上证50(000016), 中证500(000905) return PE/PB from legulegu.com. Other indexes (000688/399001/399006) return empty — must handle gracefully in frontend.
 - **Backend GET endpoints never return 500**: External API failures are caught/logged, returning `[]`. A 200 OK with empty array can mean either "no data yet" or "upstream error".
 - **AkShare API instability**: Upstream network errors (ConnectionResetError, AttributeError) are common. Tests use `_retry_fetch()` with 3 attempts. Frontend pages catch errors silently and show "暂无数据".
 - **PostgreSQL NULL uniqueness in `etf_factor_value`**: `NULL != NULL` means `(trade_date, etf_code, factor_id, strategy_id=NULL)` won't prevent duplicates via the composite unique constraint. Solved by partial unique index `uq_etf_factor_value_builtin` on `(trade_date, etf_code, factor_id) WHERE strategy_id IS NULL` (migration 0005). SQLAlchemy upsert uses `index_where=EtfFactorValueModel.strategy_id.is_(None)` to reference it.
 - **`main.py` circular import via `factor_registry`**: `api/deps.py::get_factor_registry()` and `infra/scheduler/__init__.py` both import `factor_registry` from `main.py` using deferred `from quant_etf_api.main import factor_registry` inside the function body — never at module level, or a circular import will occur.
 - **`FactorRow` (schemas/signal.py) is reused for factor API responses** — no separate factor value schema exists. `schemas/factor.py` only defines `FactorSpecResponse`.
-- **`factor_definition.owner_plugin` is nullable** (migration 0005): independent built-in factors use `owner_plugin=NULL, strategy_id=NULL`. Plugins still set `owner_plugin` to their `strategy_id`.
+- **`factor_definition.owner_plugin` is nullable** (migration 0005): independent built-in factors use `owner_plugin=NULL, strategy_id=NULL`.
 - **`from __future__ import annotations` + `dict[str, Any]` requires explicit `from typing import Any`**: When a file has `from __future__ import annotations`, ruff (F821) treats `Any` as undefined even though it's only used in stringified type hints. Always add `from typing import Any` alongside the future import when using `dict[str, Any]` or similar generic types.
 - **Ruff on Windows**: Installed at `.venv/Scripts/ruff.exe` (inside the project venv, not globally). Use `.venv/Scripts/ruff.exe check .` from `apps/api`.
-- **Backtest mode storage**: `backtest_mode` ("signal" | "allocation") is stored in `backtest_run.params` JSON field, not a separate column. Access via `params.get("backtest_mode", "signal")`.
-- **Optional plugin methods**: Decision pipeline methods (`assess_market_timing`, `rank_assets`, `allocate_positions`) are optional on `StrategyPlugin`. Use `hasattr(plugin, "assess_market_timing")` to check support. `StrategyRegistry.has_decision_pipeline()` wraps this check.
+- **Engine transform 函数**: 内置变换函数在 `engine/score.py` 的 `_TRANSFORM_REGISTRY` 中注册。新增 transform 只需在该注册表中添加。
+- **EngineContext vs StrategyContextData**: `EngineContext` 使用结构化字段（`asset_factors`、`market_factors`），`StrategyContextData` 保留用于旧接口兼容（`plugins/base.py` re-export）。
+- **Backtest mode detection**: 引擎输出 `result.positions` 非空时为配置模式，为空时为信号模式。不再依赖 `backtest_run.params` 中的 `_backtest_mode` 字段。
 
 ## Coding Standards
 

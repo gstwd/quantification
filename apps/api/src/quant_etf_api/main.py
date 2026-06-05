@@ -26,14 +26,11 @@ from quant_etf_api.config.logging_config import setup_logging
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.factors.registry import FactorRegistry, build_default_factor_registry
 from quant_etf_api.infra.scheduler import get_scheduler
-from quant_etf_api.plugins.registry import StrategyRegistry, build_default_registry
 
 logger = logging.getLogger(__name__)
 
 setup_logging()
 settings = get_settings()
-# 策略注册表在进程启动时构建一次，所有请求共享同一实例
-registry: StrategyRegistry = build_default_registry()
 # 因子注册表在进程启动时构建一次，所有请求共享同一实例
 factor_registry: FactorRegistry = build_default_factor_registry()
 
