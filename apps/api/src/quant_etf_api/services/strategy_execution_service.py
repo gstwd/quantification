@@ -93,13 +93,21 @@ class StrategyExecutionService:
 
             for fv in r.factor_values:
                 try:
+                    raw = fv.get("value")
+                    num_val: float | None = None
+                    txt_val: str | None = None
+                    if isinstance(raw, (int, float)):
+                        num_val = float(raw)
+                    elif raw is not None:
+                        txt_val = str(raw)
+
                     self._db.add(
                         IndexFactorValueModel(
                             trade_date=r.trade_date,
                             index_code=r.etf_code,
                             factor_id=fv["factor_id"],
-                            factor_value_numeric=fv.get("value"),
-                            factor_value_text=fv.get("text"),
+                            factor_value_numeric=num_val,
+                            factor_value_text=txt_val,
                             factor_payload=fv.get("payload"),
                             strategy_id=r.strategy_id,
                         )
