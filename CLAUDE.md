@@ -98,20 +98,34 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
                    factors/ (single-factor computation)
 ```
 
-- **`api/routers/`** — 9 route groups: `health`, `system`, `etfs`, `market_data`, `strategies`, `signals`, `factors`, `runs`, `backtests`
-- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` builds `EngineContext` for both live and backtest modes.
-- **`engine/`** — **策略引擎核心**：组件化、配置驱动的策略执行管线。包含 `config.py`（Pydantic 配置模型）、`score.py`（评分）、`filter.py`（过滤）、`rank.py`（排名）、`portfolio.py`（组合构建）、`risk.py`（风控）、`rebalance.py`（调仓）、`orchestrator.py`（编排器）。
-- **`infra/db/`** — SQLAlchemy 2 ORM models (`infra/db/models/core.py` has 21 tables) + 8 repository classes (`infra/db/repositories/`). Repositories own all DB queries; services delegate to them for read operations, own only write logic.
+- **`api/routers/`** — 10 route groups: `health`, `system`, `etfs`, `indexes`, `market_data`, `strategies`, `signals`, `factors`, `runs`, `backtests`
+- **`api/middleware.py`** — `RequestIdMiddleware`：为每个请求注入唯一 request_id，写入响应头和日志 ContextVar
+- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. New services: `metrics.py`（专业绩效指标）、`benchmark.py`（基准收益计算）、`index_service.py`、`universe_service.py`.
+- **`engine/`** — **策略引擎核心**：组件化、配置驱动的策略执行管线（12 个文件）：
+  - `config.py` — Pydantic 配置模型（含 `TimingConfig`、`ScoreConfig`、`FilterConfig`、`RankConfig`、`PortfolioConfig`、`RiskConfig`、`RebalanceConfig`、`BenchmarkConfig`、`TransactionCostConfig`）
+  - `base.py` — `EngineContext`、`EngineResult` 数据结构
+  - `score.py` — `ScoreCalculator` Protocol + `DefaultScoreCalculator`（含 `_TRANSFORM_REGISTRY`）
+  - `filter.py` — `FilterEngine` Protocol + `DefaultFilterEngine`
+  - `rank.py` — `RankEngine` Protocol + `DefaultRankEngine`
+  - `portfolio.py` — `WeightAllocator` Protocol + `EqualWeight`/`ScoreWeight`
+  - `risk.py` — `RiskManager` Protocol + `DefaultRiskManager`
+  - `rebalance.py` — `RebalanceScheduler` Protocol + `DefaultRebalanceScheduler`
+  - `orchestrator.py` — `StrategyEngine` 编排器（管线入口）
+  - `factor_provider.py` — `FactorProvider`：桥接因子层与引擎层，实时模式从 DB 加载预计算因子，回测模式批量预计算
+  - `context_builder.py` — `ContextBuilder`：统一的引擎上下文构建器，同时支持实时和回测两种模式
+- **`infra/db/`** — SQLAlchemy 2 ORM models (`infra/db/models/core.py` has 22 tables) + 11 repository files (`infra/db/repositories/`). Repositories own all DB queries; services delegate to them for read operations, own only write logic.
 - **`infra/clients/`** — 4 data source clients, all inherit from `base.py`:
   - `akshare_fund.py` (ETF K-line via Sina + shares/AUM via fund_etf_spot_em), `exchange_reference.py` (exchange ref)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
 - **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
-  - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, etc.), `values.py` (DateRange)
+  - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, AllocationPlan dataclasses)
-- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `builtins/` (6 built-in computers: volume, momentum×3, volatility, valuation×2). **所有因子基于指数数据计算**（`index_factor_value` 表）。
+  - `etf/`、`market_data/`、`research/` — 预留包目录
+- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `builtins/` (7 built-in computers: volume×1, momentum×3, volatility×1, valuation×2). **所有因子基于指数数据计算**（`index_factor_value` 表）。
 - **`plugins/`** — 已废弃，仅保留 re-export 和空壳 `StrategyRegistry`。策略执行已迁移至 `engine/`。
 - **`config/`** — Pydantic settings loaded from `.env`
+- **`schemas/`** — 11 个 Pydantic schema 文件：`etf.py`、`factor.py`、`market_data.py`、`pagination.py`、`run.py`、`signal.py`、`strategy.py`、`system.py`、`types.py`、`backtest.py`、`__init__.py`
 
 ### Strategy Engine（策略引擎）
 
@@ -122,44 +136,72 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 ```
 
 - **Timing**: 市场择时，综合估值/趋势/量能判断 regime（offensive/neutral/defensive）
-- **Score**: 每资产综合得分 = Σ(transform(factor_value) × weight)
+- **Score**: 每资产综合得分 = Σ(transform(factor_value) × weight) / Σ(|weight|)
 - **Filter**: 过滤规则（gt/lt/gte/lte/eq/neq/between），AND/OR 逻辑
 - **Rank**: 排序 + TopN/BottomN
 - **Portfolio**: 权重分配（equal_weight / score_weight），择时 regime 控制总仓位
 - **Risk**: 单资产上限、组合上限、最低现金比例
+- **Rebalance**: 调仓频率控制（daily/weekly/monthly），回测中非调仓日沿用上次持仓
+- **Benchmark**: 基准对比（买入持有基准、等权组合基准）
+- **TransactionCost**: 交易成本（佣金+滑点），支持仅对换仓部分收费
 
 无 `portfolio` 配置 → 信号模式（只输出得分/排名）；有 → 配置模式（输出仓位）。
 
-内置 transform 函数：`invert_percentile`、`momentum_score`、`volume_score`、`trend_score`、`clamp_0_100`。
+内置 transform 函数（在 `engine/score.py` 的 `_TRANSFORM_REGISTRY` 中注册）：`invert_percentile`、`momentum_score`、`volume_score`、`trend_score`、`clamp_0_100`。
 
 新建策略只需 JSON 配置，通过 `POST /strategies` 创建，存储在 `strategy_config` 表。
 
-### Database schema (21 tables, migrations 0001–0008)
+### FactorProvider（因子供应器）
+
+`engine/factor_provider.py` 桥接因子计算层与策略引擎层：
+
+- **实时模式**：`load_asset_factors()` / `load_market_factors()` 从 `index_factor_value` 表加载预计算因子值
+- **回测模式**：`precompute_backtest_factors()` 利用预加载的 K 线数据，通过 `FactorComputer` 批量计算所有因子，避免逐日查库
+- `collect_required_factor_ids()` 从 `StrategyConfig` 自动推导所有需要的因子 ID（遍历 timing、score、filters）
+
+### ContextBuilder（上下文构建器）
+
+`engine/context_builder.py` 提供统一的 `build()` 方法，同时支持实时和回测两种模式：
+
+- **实时模式**：从 DB 加载全量指数数据、K 线（90 天回望）、估值、因子值
+- **回测模式**：使用预加载数据和预计算因子值构建上下文
+- 通过 `FactorProvider` 加载因子值，消除硬编码因子计算
+- `services/context_builder.py` 是向后兼容 shim，re-export 自 engine 版本
+
+### Database schema (22 tables, migrations 0001–0012)
 
 | Group | Tables |
 |---|---|
 | Reference | `etf_universe`, `benchmark_index` |
 | Market data | `etf_daily_bar`, `index_daily_bar`, `etf_daily_share`, `index_valuation`, `macro_indicator`, `source_payload_log` |
-| Analytics | `factor_definition`, `etf_factor_value`, `index_factor_value`, `signal_definition`, `etf_signal` |
+| Analytics | `factor_definition`, `etf_factor_value`, `index_factor_value`, `signal_definition`, `etf_signal`, `index_signal` |
 | Runtime | `strategy_plugin`, `research_run`, `research_run_item` |
 | Backtest | `backtest_run`, `backtest_daily_result`, `backtest_etf_result`, `backtest_index_result` |
 | Strategy | `strategy_config` |
 
+Key migrations:
+- 0001–0004: 基础表结构、回测表、指数/宏观表、ETF 种子数据
+- 0005–0006: 因子层表、因子定义增强
+- 0007–0008: 指数因子回测、策略配置表
+- 0009–0012: 回测模式字段、`index_signal` 表、回测日基准收益和换手率、回测指数原始得分
+
 ### Frontend
 
-- **Pages** (`src/pages/`): Dashboard, ETF list, ETF detail, Index list, Index detail, Macro, Strategy list, Strategy detail (config viewer + editor), Runs, Data status, Backtest list, Backtest create, Backtest detail
+- **Pages** (`src/pages/`): 14 pages — Dashboard, ETF list, ETF detail, Index list, Index detail, Macro, Strategy list, Strategy detail (config viewer + editor), Factors list, Factor detail, Runs, Backtest list, Backtest create, Backtest detail
 - **State** (`src/stores/`): 4 Pinia stores — `etfs`, `strategies`, `signals`, `backtests`; stores are for mutable shared state only
-- **API layer** (`src/api/`): Axios wrappers returning typed `PaginatedResponse<T>` (`{ items, total, offset, limit }`); `etfs.ts`, `strategies.ts`, `signals.ts`, `backtests.ts`, `runs.ts`, `market_data.ts`
+- **API layer** (`src/api/`): 8 files — `client.ts` (Axios 实例) + 7 API wrapper modules (`etfs.ts`, `strategies.ts`, `signals.ts`, `backtests.ts`, `runs.ts`, `market_data.ts`, `factors.ts`); all return typed `PaginatedResponse<T>` (`{ items, total, offset, limit }`)
 - **Read-only data pages** (index/macro): Fetch data **inline** via `ref()` + `onMounted`, no Pinia store — lighter pattern for static data views
 - Charts use ECharts 5 (dynamic `import('echarts')`, `watch` with `flush: 'post'`, `dispose()` in `onUnmounted`)
 
 ## Current State
 
-Services fully wired to PostgreSQL. 21 tables across 8 migrations (0001→0008). Each data type has exactly **one** source: ETF K-line→Sina, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh.
+Services fully wired to PostgreSQL. 22 tables across 12 migrations (0001→0012). Each data type has exactly **one** source: ETF K-line→Sina, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh. Startup health check triggers `startup_fill` to backfill data gaps.
 
-**Strategy Engine**: `engine/` 包实现组件化策略执行管线。策略通过 `strategy_config` 表的 JSON 配置驱动，`StrategyConfigService` 管理 CRUD，`StrategyEngine` 执行管线。`BacktestService` 和 `StrategyExecutionService` 统一使用引擎执行。
+**Strategy Engine**: `engine/` 包实现组件化策略执行管线。策略通过 `strategy_config` 表的 JSON 配置驱动，`StrategyConfigService` 管理 CRUD，`StrategyEngine` 执行管线。`FactorProvider` 桥接因子层与引擎层，`ContextBuilder` 统一构建实时和回测上下文。`BacktestService` 和 `StrategyExecutionService` 统一使用引擎执行。
 
-**Backtesting**: `BacktestService` 以指数模式运行（`index_factor_value` + `backtest_index_result`），收益以百分比展示。引擎输出 positions 非空时为配置模式，为空时为信号模式。
+**因子系统**: 7 个内置因子（volume_ratio_20d, return_5d, return_20d, return_60d, volatility_20d, pe_percentile, pb_percentile），通过 `FactorRegistry` 注册，`FactorService` 编排计算和持久化。所有因子基于指数数据计算（`index_factor_value` 表）。`evaluation.py` 提供 IC/IR 分析和因子相关性矩阵。
+
+**Backtesting**: `BacktestService` 使用统一 `_run_backtest_loop` 替代旧的 signal/allocation 双分支。集成 `FactorProvider` 预计算因子、`ContextBuilder` 构建上下文、专业绩效指标（`metrics.py`）、基准对比（`benchmark.py`）、交易成本模型（佣金+滑点）。支持调仓频率控制和换手率计算。引擎输出 positions 非空时为配置模式，为空时为信号模式。
 
 **Asset allocation API**: `GET /strategies/{strategy_id}/allocation` runs the full decision pipeline and returns timing signal, asset rankings, and allocation plan.
 
@@ -180,7 +222,7 @@ Services fully wired to PostgreSQL. 21 tables across 8 migrations (0001→0008).
 - **AkShareFundClient share snapshot**: Uses `fund_etf_spot_em` with a 10-minute in-process cache; when `shares_total` is missing, falls back to `AUM / price`. Column names may vary across AkShare versions.
 - **Sync blocking in uvicorn**: Services use synchronous `urlopen` for external APIs. FastAPI runs sync routes in a thread pool (default 40 threads). Concurrent cold-start requests can exhaust the pool and cause timeouts — use a per-resource `threading.Lock` to serialize first-fetch, then read from DB on subsequent requests.
 - **ECharts + TypeScript**: `echarts/index.d.ts` triggers TS1203 with `vue-tsc`. Fix: add `"skipLibCheck": true` to `apps/web/tsconfig.json`.
-- **Backend venv on Windows**: Executables are at `apps/api/.venv/Scripts/` (e.g. `.venv/Scripts/alembic`, `.venv/Scripts/python`).
+- **Backend venv on Windows**: Executables are at `apps/api/.venv/Scripts/` (e.g. `.venv/Scripts/alembic`, `.venv/Scripts/python`). Source code is at `apps/api/src/quant_etf_api/`.
 - **`strategy_plugin` table is always empty** — 策略已迁移至 `strategy_config` 表。Never add a FK referencing `strategy_plugin`; it will silently reject all inserts due to FK violation.
 - **`universe` 字典 key**: `_resolve_index_universe()` 返回的字典同时包含 `etf_code` 和 `index_code`（值相同），以便引擎层通过 `item["etf_code"]` 透明兼容。
 - **AkShare index valuation**: Only 沪深300(000300), 上证50(000016), 中证500(000905) return PE/PB from legulegu.com. Other indexes (000688/399001/399006) return empty — must handle gracefully in frontend.
@@ -195,6 +237,11 @@ Services fully wired to PostgreSQL. 21 tables across 8 migrations (0001→0008).
 - **Engine transform 函数**: 内置变换函数在 `engine/score.py` 的 `_TRANSFORM_REGISTRY` 中注册。新增 transform 只需在该注册表中添加。
 - **EngineContext vs StrategyContextData**: `EngineContext` 使用结构化字段（`asset_factors`、`market_factors`），`StrategyContextData` 保留用于旧接口兼容（`plugins/base.py` re-export）。
 - **Backtest mode detection**: 引擎输出 `result.positions` 非空时为配置模式，为空时为信号模式。不再依赖 `backtest_run.params` 中的 `_backtest_mode` 字段。
+- **FactorProvider 依赖注入**: `FactorProvider` 需要 `db: Session`（实时模式）和 `registry: FactorRegistry`（回测模式）。回测服务在 `__init__` 中构建 `FactorRegistry` 和 `FactorProvider`，通过 `ContextBuilder` 注入。
+- **回测日收益基准（benchmark_return）和换手率（turnover）**: 存储在 `backtest_daily_result` 表中（migration 0011），前端 `BacktestDailyResult` 接口包含这两个可选字段。
+- **index_signal 表** (migration 0010): 与 `etf_signal` 结构对齐，但以 `index_code` 替代 `etf_code`，用于存储基于指数的策略信号。
+- **信号等级判定常量**: 定义在 `domain/common/constants.py`（`SIGNAL_THRESHOLD_HIGH=70`、`SIGNAL_THRESHOLD_MID=50`），引擎和回测服务统一引用，避免硬编码散落。
+- **`backtest_index_result.original_score`** (migration 0012): 配置模式下保留原始综合得分，避免被权重值覆盖，便于分析策略评分与仓位的对应关系。
 
 ## Coding Standards
 

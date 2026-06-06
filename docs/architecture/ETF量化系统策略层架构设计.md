@@ -44,9 +44,15 @@ StrategyEngine.run(config, context)
     │
     ├── RankModule             → 排序 + TopN/BottomN
     │
+    ├── [可选] RebalanceModule → 调仓日检查（非调仓日沿用上次持仓）
+    │
     ├── [可选] PortfolioModule → 目标仓位权重
     │
     ├── [可选] RiskModule      → 风控裁剪
+    │
+    ├── [可选] BenchmarkModule → 基准对比收益计算
+    │
+    ├── [可选] CostModule      → 交易成本扣除（佣金+滑点）
     │
     └── EngineResult           → 统一输出
 ```
@@ -55,6 +61,54 @@ StrategyEngine.run(config, context)
 
 - **信号模式**：无 `portfolio` 配置，只输出得分和排名
 - **配置模式**：有 `portfolio` 配置，输出目标仓位权重
+
+------
+
+## 0. FactorProvider（因子供应器）
+
+**职责**：桥接因子计算层与策略引擎层，消除引擎层对具体因子计算的硬编码依赖。
+
+**两种工作模式**：
+
+| 模式 | 方法 | 说明 |
+|------|------|------|
+| 实时模式 | `load_asset_factors()` / `load_market_factors()` | 从 `index_factor_value` 表加载预计算因子值 |
+| 回测模式 | `precompute_backtest_factors()` | 利用预加载的 K 线数据，通过 `FactorComputer` 批量计算全区间因子值 |
+
+**因子 ID 自动推导**：`collect_required_factor_ids(config)` 遍历 `timing.factors`、`score.factors`、`filters.rules`，自动收集所有需要的因子 ID 列表，去重后返回。
+
+**依赖**：
+- 实时模式：注入 `db: Session` 即可
+- 回测模式：需额外注入 `registry: FactorRegistry`，以调用 `FactorComputer.compute()`
+
+------
+
+## 0.1 ContextBuilder（上下文构建器）
+
+**职责**：构建引擎执行所需的 `EngineContext`，统一实时和回测两种模式。
+
+位于 `engine/context_builder.py`（`services/context_builder.py` 为向后兼容 shim）。
+
+**build() 方法统一入口**：
+
+| 参数 | 实时模式 | 回测模式 |
+|------|----------|----------|
+| `index_codes` | None（从 DB 查询全量） | 传入标的列表 |
+| `all_bars` | None（从 DB 查询） | 预加载的行情数据 |
+| `all_valuation` | None（从 DB 查询） | 预加载的估值数据 |
+| `precomputed_factors` | None（FactorProvider 从 DB 加载） | 预计算的因子值字典 |
+
+**实时模式流程**：
+1. 从 `benchmark_index` 表获取全量指数
+2. 加载 90 天回望 K 线和估值数据
+3. 通过 `FactorProvider.load_asset_factors()` 加载预计算因子值
+4. 补充原始行情数据（change_pct、close_price）和估值因子（pe_percentile、pb_percentile）
+5. 加载市场级择时因子（以沪深300 为代理）
+
+**回测模式流程**：
+1. 使用传入的 `index_codes` 构建 universe
+2. 从 `precomputed_factors` 获取当日因子值
+3. 补充原始行情和估值数据
 
 ------
 
@@ -70,7 +124,7 @@ score = Σ(transform(factor_value) × weight) / Σ(|weight|)
 
 仅对有值因子归一化权重，支持 `missing_factor_strategy` 控制缺失行为。
 
-**内置变换函数**：
+**内置变换函数**（在 `engine/score.py` 的 `_TRANSFORM_REGISTRY` 中注册）：
 
 | 函数名 | 说明 | 来源 |
 |---|---|---|
@@ -213,15 +267,15 @@ score = Σ(transform(factor_value) × weight) / Σ(|weight|)
 
 ## 6. Rebalance Module（调仓模块）
 
-**职责**：控制调仓时间。
+**职责**：控制调仓时间，回测中非调仓日沿用上次持仓。
 
 **支持频率**：
 
 | 频率 | 说明 |
 |---|---|
 | `daily` | 每日调仓 |
-| `weekly` | 每周指定日调仓 |
-| `monthly` | 每月指定日调仓 |
+| `weekly` | 每周指定日调仓（day_of_week，0=周一） |
+| `monthly` | 每月指定日调仓（day_of_month） |
 
 **配置示例**：
 
@@ -233,6 +287,8 @@ score = Σ(transform(factor_value) × weight) / Σ(|weight|)
   }
 }
 ```
+
+无 `rebalance` 配置时默认为每日调仓。
 
 **接口**：`RebalanceScheduler` Protocol
 
@@ -273,9 +329,47 @@ score = Σ(transform(factor_value) × weight) / Σ(|weight|)
 
 ------
 
+## 8. Benchmark & TransactionCost（基准与成本）
+
+### BenchmarkConfig
+
+**职责**：回测中计算基准收益，用于超额收益分析。
+
+```json
+{
+  "benchmark": {
+    "index_code": "000300",
+    "enable_equal_weight": true
+  }
+}
+```
+
+- `index_code`：基准指数代码，默认沪深300
+- `enable_equal_weight`：是否启用等权组合基准
+
+### TransactionCostConfig
+
+**职责**：回测中模拟交易成本对收益的影响。
+
+```json
+{
+  "transaction_cost": {
+    "commission_rate": 0.0003,
+    "slippage_rate": 0.001,
+    "apply_to_turnover": true
+  }
+}
+```
+
+- `commission_rate`：佣金费率，默认万三
+- `slippage_rate`：滑点费率，默认千一
+- `apply_to_turnover`：仅对换仓部分收取（true）或按全仓收取（false）
+
+------
+
 # 完整配置示例
 
-## ETF 资产配置策略
+## ETF 资产配置策略（含回测增强配置）
 
 ```json
 {
@@ -295,11 +389,14 @@ score = Σ(transform(factor_value) × weight) / Σ(|weight|)
     "transforms": {"return_20d": "momentum_score", "pe_percentile": "invert_percentile"}
   },
   "rank": {"sort_by": "score", "order": "desc", "top_n": 5},
+  "rebalance": {"frequency": "weekly", "day_of_week": 4},
   "portfolio": {
     "method": "score_weight",
     "timing_exposure": {"offensive": 0.80, "neutral": 0.50, "defensive": 0.20}
   },
-  "risk": {"max_asset_weight": 0.30}
+  "risk": {"max_asset_weight": 0.30},
+  "benchmark": {"index_code": "000300", "enable_equal_weight": true},
+  "transaction_cost": {"commission_rate": 0.0003, "slippage_rate": 0.001, "apply_to_turnover": true}
 }
 ```
 
@@ -343,7 +440,7 @@ class EngineContext:
     asset_factors: dict[tuple[str, str], float | None]  # 每资产因子值
     market_factors: dict[str, float | None]       # 市场级因子（择时用）
     asset_metadata: dict[str, dict[str, Any]]     # 资产元数据
-    extra: dict[str, Any]                         # 扩展字段
+    extra: dict[str, Any]                         # 扩展字段（原始 K 线/估值数据等）
 ```
 
 ## EngineResult（引擎结果）
@@ -364,54 +461,145 @@ class EngineResult:
 
 ------
 
+# 回测系统
+
+## 统一回测主循环
+
+`BacktestService._run_backtest_loop()` 替代旧的 signal/allocation 双分支：
+
+1. 准备数据（标的、交易日、行情、估值）
+2. 通过 `FactorProvider` 预计算全区间因子值
+3. 逐日通过 `ContextBuilder.build()` 构建上下文
+4. 执行 `StrategyEngine.run()` 管线
+5. 按调仓频率决定是否更新持仓
+6. 按仓位/排名计算组合收益
+7. 计算基准收益（如启用）
+8. 扣除交易成本（如配置）
+9. 写入 `backtest_daily_result` 和 `backtest_index_result`
+10. 汇总绩效指标（年化收益、夏普/索提诺/卡玛比率、Alpha/Beta、信息比率等）
+
+## 绩效指标
+
+由 `services/metrics.py` 提供，专业指标包括：
+
+| 指标 | 说明 |
+|------|------|
+| `cumulative_return_pct` | 累计收益率 |
+| `annualized_return_pct` | 年化收益率 |
+| `max_drawdown_pct` | 最大回撤 |
+| `max_drawdown_days` | 最大回撤持续天数 |
+| `sharpe_ratio` | 年化夏普比率 |
+| `sortino_ratio` | 年化索提诺比率（下行风险调整） |
+| `calmar_ratio` | 年化卡玛比率（收益/最大回撤） |
+| `win_rate_pct` | 胜率（正收益日占比） |
+| `profit_loss_ratio` | 盈亏比 |
+| `alpha` | vs 基准的年化 Alpha |
+| `beta` | vs 基准的 Beta 系数 |
+| `information_ratio` | 信息比率 |
+| `benchmark_return_pct` | 基准累计收益率 |
+| `excess_return_pct` | 超额收益率 |
+
+## 信号等级判定
+
+统一使用 `domain/common/constants.py` 中的常量：
+
+- `SIGNAL_THRESHOLD_HIGH = 70`：得分 ≥70 → 推荐配置
+- `SIGNAL_THRESHOLD_MID = 50`：得分 50-70 → 可选配置
+- 得分 <50 → 暂不配置
+
+引擎和回测服务统一引用这些常量，避免硬编码散落。
+
+------
+
 # 文件结构
 
 ```
 apps/api/src/quant_etf_api/
-├── engine/                          # 策略引擎
+├── engine/                          # 策略引擎（12 个文件）
 │   ├── __init__.py                  # 包初始化，导出核心类
 │   ├── base.py                      # EngineContext, EngineResult
-│   ├── config.py                    # StrategyConfig 及子配置 Pydantic 模型
-│   ├── score.py                     # ScoreCalculator Protocol + DefaultScoreCalculator
+│   ├── config.py                    # StrategyConfig 及子配置 Pydantic 模型（含 BenchmarkConfig、TransactionCostConfig）
+│   ├── score.py                     # ScoreCalculator Protocol + DefaultScoreCalculator + _TRANSFORM_REGISTRY
 │   ├── filter.py                    # FilterEngine Protocol + DefaultFilterEngine
 │   ├── rank.py                      # RankEngine Protocol + DefaultRankEngine
 │   ├── portfolio.py                 # WeightAllocator Protocol + EqualWeight/ScoreWeight
 │   ├── risk.py                      # RiskManager Protocol + DefaultRiskManager
 │   ├── rebalance.py                 # RebalanceScheduler Protocol + DefaultRebalanceScheduler
+│   ├── factor_provider.py           # FactorProvider：因子层→引擎层桥接，支持实时/回测双模式
+│   ├── context_builder.py           # ContextBuilder：统一上下文构建器（实时+回测）
 │   └── orchestrator.py              # StrategyEngine 编排器
 ├── services/
-│   ├── context_builder.py           # 统一上下文构建器
+│   ├── context_builder.py           # 向后兼容 shim，re-export 自 engine/context_builder.py
 │   ├── strategy_config_service.py   # 配置 CRUD 服务
 │   ├── strategy_service.py          # 策略服务（使用引擎）
-│   ├── backtest_service.py          # 回测服务（统一模式）
-│   └── strategy_execution_service.py # 策略执行服务
-└── infra/db/
-    ├── models/core.py               # StrategyConfigModel
-    └── repositories/strategy_config.py # 配置 Repository
+│   ├── strategy_execution_service.py # 策略执行服务
+│   ├── backtest_service.py          # 回测服务（统一主循环）
+│   ├── ingest_service.py            # 数据摄取服务
+│   ├── run_service.py               # 运行管理服务
+│   ├── signal_service.py            # 信号服务
+│   ├── factor_service.py            # 因子计算编排（re-export 自 factors/service.py）
+│   ├── index_service.py             # 指数管理服务
+│   ├── universe_service.py          # ETF 宇宙管理服务
+│   ├── system_service.py            # 系统状态服务
+│   ├── metrics.py                   # 专业绩效指标计算
+│   └── benchmark.py                 # 基准收益计算（买入持有 + 等权组合）
+├── factors/
+│   ├── base.py                      # FactorSpec / FactorContext / FactorValue / FactorComputer Protocol
+│   ├── registry.py                  # FactorRegistry + build_default_factor_registry()
+│   ├── service.py                   # FactorService 编排计算 + 持久化
+│   ├── evaluation.py                # IC/IR 分析 + 因子相关性矩阵
+│   └── builtins/                    # 7 个内置因子计算器
+│       ├── volume.py                # VolumeRatio20dComputer
+│       ├── momentum.py              # Return5d/20d/60dComputer
+│       ├── volatility.py            # Volatility20dComputer
+│       └── valuation.py             # PEPercentileComputer / PBPercentileComputer
+├── infra/db/
+│   ├── models/core.py               # 22 张表的 SQLAlchemy ORM 模型
+│   └── repositories/                # 11 个 Repository 类
+├── api/
+│   ├── routers/                     # 10 个路由组
+│   ├── deps.py                      # FastAPI 依赖注入
+│   └── middleware.py                # RequestIdMiddleware
+├── domain/
+│   ├── common/                      # constants.py, enums.py, values.py, bar_metrics.py
+│   ├── strategies/models.py         # 策略领域模型
+│   ├── etf/                         # ETF 领域（预留）
+│   ├── market_data/                 # 行情领域（预留）
+│   └── research/                    # 研究领域（预留）
+├── schemas/                         # 11 个 Pydantic schema 文件
+└── config/                          # Pydantic settings (.env)
 ```
 
 ------
 
-# 信号输出
-
-最终输出统一结构 `EngineResult`：
-
-- `timing`：择时信号（regime、confidence、label）
-- `scores`：每资产综合得分
-- `rankings`：资产排名列表
-- `positions`：目标仓位权重（配置模式）
-- `strategy_results`：兼容旧接口的信号列表
-
-前端页面展示：
-
-- 择时状态（进攻/观望/防守）
-- 资产排名表
-- 仓位分配图
-- 信号详情
-
-------
-
 # 数据库
+
+## 表结构（22 张表，12 次迁移）
+
+| 分组 | 表名 | 说明 |
+|------|------|------|
+| Reference | `etf_universe` | ETF 基础信息 |
+| Reference | `benchmark_index` | 基准指数 |
+| Market Data | `etf_daily_bar` | ETF 日线行情 |
+| Market Data | `index_daily_bar` | 指数日线行情 |
+| Market Data | `etf_daily_share` | ETF 每日份额 |
+| Market Data | `index_valuation` | 指数估值（PE/PB 百分位） |
+| Market Data | `macro_indicator` | 宏观经济指标 |
+| Market Data | `source_payload_log` | 数据源原始响应日志 |
+| Analytics | `factor_definition` | 因子定义元数据 |
+| Analytics | `etf_factor_value` | ETF 因子计算值 |
+| Analytics | `index_factor_value` | 指数因子计算值 |
+| Analytics | `signal_definition` | 信号定义 |
+| Analytics | `etf_signal` | ETF 策略信号 |
+| Analytics | `index_signal` | 指数策略信号 |
+| Runtime | `strategy_plugin` | 旧策略插件（已弃用，始终为空） |
+| Runtime | `research_run` | 研究运行记录 |
+| Runtime | `research_run_item` | 运行明细 |
+| Backtest | `backtest_run` | 回测任务 |
+| Backtest | `backtest_daily_result` | 回测每日组合绩效 |
+| Backtest | `backtest_etf_result` | 回测 ETF 级别结果 |
+| Backtest | `backtest_index_result` | 回测指数级别结果 |
+| Strategy | `strategy_config` | 策略配置（JSON） |
 
 ## strategy_config 表
 
@@ -439,6 +627,23 @@ CREATE TABLE strategy_config (
 - `DELETE /strategies/{id}` — 删除策略
 - `POST /strategies/validate` — 校验配置
 
+## 迁移历史
+
+| 迁移 | 内容 |
+|------|------|
+| 0001 | 基础表结构（ETF、行情、信号、运行） |
+| 0002 | 回测表（backtest_run/daily/etf/index_result） |
+| 0003 | 指数日线和宏观表 |
+| 0004 | ETF 宇宙种子数据 |
+| 0005 | 因子层表（factor_definition, factor_value） |
+| 0006 | 因子定义增强 |
+| 0007 | 指数因子回测支持 |
+| 0008 | 策略配置表 |
+| 0009 | 回测模式字段 |
+| 0010 | index_signal 表 |
+| 0011 | 回测日基准收益和换手率字段 |
+| 0012 | 回测指数原始得分字段 |
+
 ------
 
 # 扩展指南
@@ -455,6 +660,12 @@ def _my_transform(value: float) -> float:
 _TRANSFORM_REGISTRY["my_transform"] = _my_transform
 ```
 
+## 添加新内置因子
+
+1. 在 `factors/builtins/` 中创建因子计算器，实现 `FactorComputer` Protocol
+2. 在 `factors/registry.py` 的 `build_default_factor_registry()` 中注册
+3. 运行 `python -m quant_etf_api.cli init-factors` 同步到数据库
+
 ## 添加新权重分配方法
 
 实现 `WeightAllocator` Protocol，在 `engine/portfolio.py` 的 `build_allocator` 中注册。
@@ -469,4 +680,6 @@ _TRANSFORM_REGISTRY["my_transform"] = _my_transform
 
 - `EngineResult.strategy_results` 提供兼容旧接口的 `StrategyResult` 列表
 - `EtfSignalModel` 和 `EtfFactorValueModel` 持久化逻辑不变
+- `services/context_builder.py` 是向后兼容 shim，re-export 自 `engine/context_builder.py`
 - 现有 API 端点结构不变
+- `strategy_plugin` 表保留但始终为空，不允许新增 FK 引用
