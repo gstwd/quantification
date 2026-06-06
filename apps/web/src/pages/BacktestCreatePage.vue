@@ -55,7 +55,7 @@
       </div>
 
       <div class="form-section">
-        <label class="form-label">回测模式</label>
+        <label class="form-label">回测模式 <HelpTip :text="configHelp('portfolio')" /></label>
         <div class="radio-group">
           <label class="radio-label">
             <input v-model="form.backtest_mode" type="radio" value="signal" />
@@ -83,7 +83,7 @@
       </div>
 
       <div class="form-section">
-        <label class="form-label">基准对比</label>
+        <label class="form-label">基准对比 <HelpTip :text="configHelp('benchmark')" /></label>
         <div class="radio-group">
           <label class="radio-label">
             <input v-model="form.enable_benchmark" type="radio" :value="true" />
@@ -126,6 +126,13 @@ import { fetchBenchmarkIndexes } from '../api/market_data'
 import { useBacktestStore } from '../stores/backtests'
 import { useStrategyStore } from '../stores/strategies'
 import type { BenchmarkIndex } from '../types/api'
+import HelpTip from '../components/HelpTip.vue'
+import { getIndicator } from '../utils/indicatorDescriptions'
+
+/** 获取配置描述的快捷方法 */
+function configHelp(key: string): string {
+  return getIndicator('strategy_config', key)?.description ?? ''
+}
 
 const router = useRouter()
 const store = useBacktestStore()

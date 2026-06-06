@@ -18,10 +18,10 @@
             <th>名称</th>
             <th>最新收盘</th>
             <th>涨跌幅</th>
-            <th>PE(TTM)</th>
-            <th>PE分位</th>
-            <th>PB</th>
-            <th>PB分位</th>
+            <th>PE(TTM) <HelpTip :text="marketHelp('pe')" /></th>
+            <th>PE分位 <HelpTip :text="factorHelp('pe_percentile')" /></th>
+            <th>PB <HelpTip :text="marketHelp('pb')" /></th>
+            <th>PB分位 <HelpTip :text="factorHelp('pb_percentile')" /></th>
             <th>操作</th>
           </tr>
         </thead>
@@ -101,6 +101,16 @@ import {
   fetchIndexValuation,
 } from '../api/market_data'
 import type { BenchmarkIndex, DailyBar, IndexValuation } from '../types/api'
+import HelpTip from '../components/HelpTip.vue'
+import { getIndicator } from '../utils/indicatorDescriptions'
+
+/** 获取指标描述的快捷方法 */
+function marketHelp(key: string): string {
+  return getIndicator('market_data', key)?.description ?? ''
+}
+function factorHelp(key: string): string {
+  return getIndicator('factors', key)?.description ?? ''
+}
 
 const indexes = ref<BenchmarkIndex[]>([])
 const loading = ref(false)

@@ -16,17 +16,17 @@
             </span>
           </div>
           <div v-if="latestValuation" class="stat-item">
-            <span class="stat-label">PE(TTM)</span>
+            <span class="stat-label">PE(TTM) <HelpTip :text="mktHelp('pe')" /></span>
             <span class="stat-value">{{ latestValuation.pe?.toFixed(1) ?? '—' }}</span>
             <span class="stat-sub">分位 {{ latestValuation.pe_percentile?.toFixed(0) ?? '—' }}%</span>
           </div>
           <div v-if="latestValuation" class="stat-item">
-            <span class="stat-label">PB</span>
+            <span class="stat-label">PB <HelpTip :text="mktHelp('pb')" /></span>
             <span class="stat-value">{{ latestValuation.pb?.toFixed(2) ?? '—' }}</span>
             <span class="stat-sub">分位 {{ latestValuation.pb_percentile?.toFixed(0) ?? '—' }}%</span>
           </div>
           <div v-if="latestValuation" class="stat-item">
-            <span class="stat-label">股息率</span>
+            <span class="stat-label">股息率 <HelpTip :text="mktHelp('dividend_yield')" /></span>
             <span class="stat-value">{{ latestValuation.dividend_yield?.toFixed(2) ?? '—' }}%</span>
           </div>
         </div>
@@ -88,6 +88,16 @@ import {
   fetchIndexValuation,
 } from '../api/market_data'
 import type { DailyBar, DateRange, IndexValuation } from '../types/api'
+import HelpTip from '../components/HelpTip.vue'
+import { getIndicator } from '../utils/indicatorDescriptions'
+
+/** 获取指标描述的快捷方法 */
+function mktHelp(key: string): string {
+  return getIndicator('market_data', key)?.description ?? ''
+}
+function fHelp(key: string): string {
+  return getIndicator('factors', key)?.description ?? ''
+}
 
 const props = defineProps<{ indexCode: string }>()
 

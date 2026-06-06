@@ -24,31 +24,31 @@
         <div class="section-label">核心绩效</div>
         <div class="metrics-grid">
           <div class="metric-card">
-            <div class="metric-label">累计收益</div>
+            <div class="metric-label">累计收益 <HelpTip :text="metricHelp('cumulative_return_pct')" /></div>
             <div class="metric-value" :class="store.current.metrics.cumulative_return_pct >= 0 ? 'success' : 'danger'">
               {{ formatPct(store.current.metrics.cumulative_return_pct) }}
             </div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">年化收益</div>
+            <div class="metric-label">年化收益 <HelpTip :text="metricHelp('annualized_return_pct')" /></div>
             <div class="metric-value" :class="store.current.metrics.annualized_return_pct >= 0 ? 'success' : 'danger'">
               {{ formatPct(store.current.metrics.annualized_return_pct) }}
             </div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">最大回撤</div>
+            <div class="metric-label">最大回撤 <HelpTip :text="metricHelp('max_drawdown_pct')" /></div>
             <div class="metric-value danger">{{ formatPct(store.current.metrics.max_drawdown_pct) }}</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">回撤持续</div>
+            <div class="metric-label">回撤持续 <HelpTip :text="metricHelp('max_drawdown_days')" /></div>
             <div class="metric-value">{{ store.current.metrics.max_drawdown_days }} 天</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">夏普比率</div>
+            <div class="metric-label">夏普比率 <HelpTip :text="metricHelp('sharpe_ratio')" /></div>
             <div class="metric-value">{{ store.current.metrics.sharpe_ratio.toFixed(2) }}</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">卡玛比率</div>
+            <div class="metric-label">卡玛比率 <HelpTip :text="metricHelp('calmar_ratio')" /></div>
             <div class="metric-value">{{ store.current.metrics.calmar_ratio.toFixed(2) }}</div>
           </div>
         </div>
@@ -56,27 +56,27 @@
         <div class="section-label" style="margin-top: 16px;">风险与胜率</div>
         <div class="metrics-grid">
           <div class="metric-card">
-            <div class="metric-label">索提诺比率</div>
+            <div class="metric-label">索提诺比率 <HelpTip :text="metricHelp('sortino_ratio')" /></div>
             <div class="metric-value">{{ store.current.metrics.sortino_ratio.toFixed(2) }}</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">胜率</div>
+            <div class="metric-label">胜率 <HelpTip :text="metricHelp('win_rate_pct')" /></div>
             <div class="metric-value">{{ store.current.metrics.win_rate_pct.toFixed(1) }}%</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">信号准确率</div>
+            <div class="metric-label">信号准确率 <HelpTip :text="metricHelp('signal_accuracy_pct')" /></div>
             <div class="metric-value">{{ store.current.metrics.signal_accuracy_pct.toFixed(1) }}%</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">盈亏比</div>
+            <div class="metric-label">盈亏比 <HelpTip :text="metricHelp('profit_loss_ratio')" /></div>
             <div class="metric-value">{{ store.current.metrics.profit_loss_ratio !== null ? store.current.metrics.profit_loss_ratio.toFixed(2) : '-' }}</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">交易日</div>
+            <div class="metric-label">交易日 <HelpTip :text="metricHelp('total_trading_days')" /></div>
             <div class="metric-value">{{ store.current.metrics.total_trading_days }}</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">持仓日</div>
+            <div class="metric-label">持仓日 <HelpTip :text="metricHelp('active_days')" /></div>
             <div class="metric-value">{{ store.current.metrics.active_days }}</div>
           </div>
         </div>
@@ -86,29 +86,29 @@
           <div class="section-label" style="margin-top: 16px;">基准对比</div>
           <div class="metrics-grid">
             <div class="metric-card">
-              <div class="metric-label">基准收益</div>
+              <div class="metric-label">基准收益 <HelpTip :text="metricHelp('benchmark_return_pct')" /></div>
               <div class="metric-value" :class="store.current.metrics.benchmark_return_pct >= 0 ? 'success' : 'danger'">
                 {{ formatPct(store.current.metrics.benchmark_return_pct) }}
               </div>
             </div>
             <div class="metric-card">
-              <div class="metric-label">超额收益</div>
+              <div class="metric-label">超额收益 <HelpTip :text="metricHelp('excess_return_pct')" /></div>
               <div class="metric-value" :class="(store.current.metrics.excess_return_pct ?? 0) >= 0 ? 'success' : 'danger'">
                 {{ formatPct(store.current.metrics.excess_return_pct ?? 0) }}
               </div>
             </div>
             <div class="metric-card">
-              <div class="metric-label">Alpha</div>
+              <div class="metric-label">Alpha <HelpTip :text="metricHelp('alpha')" /></div>
               <div class="metric-value" :class="(store.current.metrics.alpha ?? 0) >= 0 ? 'success' : 'danger'">
                 {{ store.current.metrics.alpha !== null ? formatPct(store.current.metrics.alpha) : '-' }}
               </div>
             </div>
             <div class="metric-card">
-              <div class="metric-label">Beta</div>
+              <div class="metric-label">Beta <HelpTip :text="metricHelp('beta')" /></div>
               <div class="metric-value">{{ store.current.metrics.beta !== null ? store.current.metrics.beta.toFixed(2) : '-' }}</div>
             </div>
             <div class="metric-card">
-              <div class="metric-label">信息比率</div>
+              <div class="metric-label">信息比率 <HelpTip :text="metricHelp('information_ratio')" /></div>
               <div class="metric-value">{{ store.current.metrics.information_ratio !== null ? store.current.metrics.information_ratio.toFixed(2) : '-' }}</div>
             </div>
           </div>
@@ -187,7 +187,14 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
+import HelpTip from '../components/HelpTip.vue'
+import { getIndicator } from '../utils/indicatorDescriptions'
 import { useBacktestStore } from '../stores/backtests'
+
+/** 获取指标描述的快捷方法 */
+function metricHelp(key: string): string {
+  return getIndicator('metrics', key)?.description ?? ''
+}
 
 const props = defineProps<{ backtestId: string }>()
 const store = useBacktestStore()

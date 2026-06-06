@@ -147,27 +147,27 @@
         <template v-else>
           <div v-if="icSummary && icSummary.count > 0" class="ic-summary-row">
             <div class="stat-card">
-              <span class="stat-label">IC 均值</span>
+              <span class="stat-label">IC 均值 <HelpTip :text="faHelp('ic_mean')" /></span>
               <span class="stat-value" :class="(icSummary.ic_mean ?? 0) >= 0 ? 'positive' : 'negative'">
                 {{ icSummary.ic_mean?.toFixed(4) ?? '—' }}
               </span>
             </div>
             <div class="stat-card">
-              <span class="stat-label">IC 标准差</span>
+              <span class="stat-label">IC 标准差 <HelpTip :text="faHelp('ic_std')" /></span>
               <span class="stat-value">{{ icSummary.ic_std?.toFixed(4) ?? '—' }}</span>
             </div>
             <div class="stat-card">
-              <span class="stat-label">IC_IR</span>
+              <span class="stat-label">IC_IR <HelpTip :text="faHelp('ic_ir')" /></span>
               <span class="stat-value" :class="(icSummary.ic_ir ?? 0) >= 0.5 ? 'positive' : ''">
                 {{ icSummary.ic_ir?.toFixed(4) ?? '—' }}
               </span>
             </div>
             <div class="stat-card">
-              <span class="stat-label">IC>0 占比</span>
+              <span class="stat-label">IC>0 占比 <HelpTip :text="faHelp('ic_positive_ratio')" /></span>
               <span class="stat-value">{{ icSummary.ic_positive_ratio != null ? (icSummary.ic_positive_ratio * 100).toFixed(1) + '%' : '—' }}</span>
             </div>
             <div class="stat-card">
-              <span class="stat-label">数据点</span>
+              <span class="stat-label">数据点 <HelpTip :text="faHelp('rank_ic')" /></span>
               <span class="stat-value">{{ icSummary.count }}</span>
             </div>
           </div>
@@ -222,6 +222,13 @@ import { RouterLink } from 'vue-router'
 
 import { fetchFactorCrossSection, fetchFactorCorrelation, fetchFactorIC, fetchFactorSpecs, fetchFactorTimeSeries } from '../api/factors'
 import type { CorrelationResponse, CrossSectionRow, FactorRow, FactorSpec, ICPoint, ICSummary } from '../types/api'
+import HelpTip from '../components/HelpTip.vue'
+import { getIndicator } from '../utils/indicatorDescriptions'
+
+/** 获取因子分析指标描述的快捷方法 */
+function faHelp(key: string): string {
+  return getIndicator('factor_analysis', key)?.description ?? ''
+}
 
 const props = defineProps<{ factorId: string }>()
 

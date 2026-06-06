@@ -15,7 +15,7 @@
     <!-- ═══ 评分模块（必填） ═══ -->
     <div class="module-card">
       <div class="module-header" @click="toggleModule('score')">
-        <span class="module-title">评分模块 (Score)</span>
+        <span class="module-title">评分模块 (Score) <HelpTip :text="scHelp('score')" /></span>
         <span class="module-badge required">必填</span>
         <span :class="['arrow', expanded.score ? 'open' : '']">▾</span>
       </div>
@@ -61,7 +61,7 @@
     <!-- ═══ 择时模块（可选） ═══ -->
     <div class="module-card">
       <div class="module-header" @click="toggleModule('timing')">
-        <span class="module-title">择时模块 (Timing)</span>
+        <span class="module-title">择时模块 (Timing) <HelpTip :text="scHelp('timing')" /></span>
         <span class="module-badge optional">可选</span>
         <label class="toggle-switch" @click.stop>
           <input type="checkbox" v-model="timingEnabled" />
@@ -124,7 +124,7 @@
     <!-- ═══ 过滤模块（可选） ═══ -->
     <div class="module-card">
       <div class="module-header" @click="toggleModule('filter')">
-        <span class="module-title">过滤模块 (Filter)</span>
+        <span class="module-title">过滤模块 (Filter) <HelpTip :text="scHelp('filter')" /></span>
         <span class="module-badge optional">可选</span>
         <label class="toggle-switch" @click.stop>
           <input type="checkbox" v-model="filterEnabled" />
@@ -215,7 +215,7 @@
     <!-- ═══ 排名模块 ═══ -->
     <div class="module-card">
       <div class="module-header" @click="toggleModule('rank')">
-        <span class="module-title">排名模块 (Rank)</span>
+        <span class="module-title">排名模块 (Rank) <HelpTip :text="scHelp('rank')" /></span>
         <span class="module-badge always">始终启用</span>
         <span :class="['arrow', expanded.rank ? 'open' : '']">▾</span>
       </div>
@@ -269,7 +269,7 @@
     <!-- ═══ 组合模块（可选） ═══ -->
     <div class="module-card">
       <div class="module-header" @click="toggleModule('portfolio')">
-        <span class="module-title">组合模块 (Portfolio)</span>
+        <span class="module-title">组合模块 (Portfolio) <HelpTip :text="scHelp('portfolio')" /></span>
         <span class="module-badge optional">可选</span>
         <label class="toggle-switch" @click.stop>
           <input type="checkbox" v-model="portfolioEnabled" />
@@ -339,7 +339,7 @@
     <!-- ═══ 风控模块（可选） ═══ -->
     <div class="module-card">
       <div class="module-header" @click="toggleModule('risk')">
-        <span class="module-title">风控模块 (Risk)</span>
+        <span class="module-title">风控模块 (Risk) <HelpTip :text="scHelp('risk')" /></span>
         <span class="module-badge optional">可选</span>
         <label class="toggle-switch" @click.stop>
           <input type="checkbox" v-model="riskEnabled" />
@@ -433,6 +433,13 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { fetchFactorSpecs } from '../api/factors'
 import type { FactorSpec } from '../types/api'
 import FactorPicker from './FactorPicker.vue'
+import HelpTip from '../components/HelpTip.vue'
+import { getIndicator } from '../utils/indicatorDescriptions'
+
+/** 获取策略配置描述的快捷方法 */
+function scHelp(key: string): string {
+  return getIndicator('strategy_config', key)?.description ?? ''
+}
 
 /** 因子行数据 */
 interface FactorRowValue {
