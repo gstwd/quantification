@@ -88,13 +88,16 @@ class ContextBuilder:
             IndexValuationModel,
         )
 
-        # 获取全量指数
-        indexes = self._db.query(BenchmarkIndexModel).all()
+        # 获取全量活跃指数（排除已退市/停发的指数，避免幸存者偏差）
+        indexes = (
+            self._db.query(BenchmarkIndexModel)
+            .filter(BenchmarkIndexModel.is_active.is_(True))
+            .all()
+        )
         index_codes = [idx.index_code for idx in indexes]
 
-        # 应用 asset_scope 过滤
-        if config.asset_scope and config.asset_scope != "a_share_etf":
-            index_codes = self._filter_by_scope(indexes, config.asset_scope)
+        # 应用 asset_scope 和 index_codes 过滤
+        index_codes = self._filter_by_scope(indexes, config.asset_scope, config.index_codes)
 
         universe = [
             {"etf_code": idx.index_code, "name_cn": idx.name_cn, "category": "broad_index"}
@@ -252,16 +255,23 @@ class ContextBuilder:
 
     @staticmethod
     def _filter_by_scope(
-        indexes: list[Any], asset_scope: str
+        indexes: list[Any], asset_scope: str, index_codes: list[str] | None = None
     ) -> list[str]:
-        """根据 asset_scope 过滤指数代码列表。
+        """根据 asset_scope 和 index_codes 过滤指数代码列表。
 
         Args:
             indexes: BenchmarkIndexModel 列表。
             asset_scope: 资产范围标识。
+            index_codes: 指定的指数代码列表，非空时仅保留这些指数。
 
         Returns:
             过滤后的指数代码列表。
         """
-        # 当前仅全量 A 股 ETF 模式，预留扩展
+        # 优先级：index_codes 显式指定 > asset_scope 语义过滤
+        if index_codes:
+            all_codes = {idx.index_code for idx in indexes}
+            return [c for c in index_codes if c in all_codes]
+        if asset_scope == "a_share_etf":
+            return [idx.index_code for idx in indexes]
+        # 未来可扩展：broad_only, sector_only 等
         return [idx.index_code for idx in indexes]

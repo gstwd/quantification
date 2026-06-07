@@ -36,6 +36,10 @@ class EngineContext:
     market_factors: dict[str, float | None] = field(default_factory=dict)
     asset_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
+    # 持仓状态（回测/实时模式下由调用方填充，用于止损止盈和再平衡）
+    current_positions: dict[str, float] = field(default_factory=dict)
+    entry_prices: dict[str, float] = field(default_factory=dict)
+    holding_days: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass

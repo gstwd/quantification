@@ -18,6 +18,7 @@ class MacroIndicator:
     period: str
     value: float
     unit: str | None
+    period_date: str | None = None  # 标准化日期：CPI/PMI 取当月首日，LPR 取报价日 ("YYYY-MM-DD")
 
 
 class AkShareMacroClient(BaseDataClient):
@@ -55,6 +56,7 @@ class AkShareMacroClient(BaseDataClient):
             if val is None or (isinstance(val, float) and val != val):
                 continue
             period = d if isinstance(d, str) else d.strftime("%Y-%m")
+            period_date = f"{period}-01"  # 统一为当月首日
             results.append(
                 MacroIndicator(
                     indicator_code="cpi",
@@ -62,6 +64,7 @@ class AkShareMacroClient(BaseDataClient):
                     period=period,
                     value=float(val),
                     unit="%",
+                    period_date=period_date,
                 )
             )
         elapsed = (time.perf_counter() - start) * 1000
@@ -95,6 +98,7 @@ class AkShareMacroClient(BaseDataClient):
             if not m:
                 continue
             period = f"{m.group(1)}-{m.group(2)}"
+            period_date = f"{period}-01"  # 统一为当月首日
             val = row["制造业-指数"]
             if val is None or (isinstance(val, float) and val != val):
                 continue
@@ -105,6 +109,7 @@ class AkShareMacroClient(BaseDataClient):
                     period=period,
                     value=float(val),
                     unit="%",
+                    period_date=period_date,
                 )
             )
         elapsed = (time.perf_counter() - start) * 1000
@@ -144,6 +149,7 @@ class AkShareMacroClient(BaseDataClient):
                         period=trade_date,
                         value=float(lpr1y),
                         unit="%",
+                        period_date=trade_date,  # LPR 报价日即为 period_date
                     )
                 )
             if lpr5y is not None and not (isinstance(lpr5y, float) and lpr5y != lpr5y):
@@ -154,6 +160,7 @@ class AkShareMacroClient(BaseDataClient):
                         period=trade_date,
                         value=float(lpr5y),
                         unit="%",
+                        period_date=trade_date,
                     )
                 )
         elapsed = (time.perf_counter() - start) * 1000

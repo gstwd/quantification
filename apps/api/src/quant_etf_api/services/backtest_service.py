@@ -717,20 +717,25 @@ class BacktestService:
     def _resolve_index_universe(
         self, universe_filter: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        """根据 universe_filter 查询回测指数列表。"""
+        """根据 universe_filter 查询回测指数列表。
+
+        仅返回活跃指数（is_active=True），排除已退市/停发的指数，
+        避免回测中的幸存者偏差。
+        """
+        base_query = self._db.query(BenchmarkIndexModel).filter(
+            BenchmarkIndexModel.is_active.is_(True)
+        )
         if universe_filter.get("mode") == "subset":
             codes = universe_filter.get("index_codes", [])
             if codes:
                 rows = (
-                    self._db.query(BenchmarkIndexModel)
-                    .filter(BenchmarkIndexModel.index_code.in_(codes))
-                    .all()
+                    base_query.filter(BenchmarkIndexModel.index_code.in_(codes)).all()
                 )
                 return [
                     {"etf_code": r.index_code, "index_code": r.index_code, "name_cn": r.name_cn}
                     for r in rows
                 ]
-        rows = self._db.query(BenchmarkIndexModel).all()
+        rows = base_query.all()
         return [
             {"etf_code": r.index_code, "index_code": r.index_code, "name_cn": r.name_cn}
             for r in rows

@@ -12,7 +12,7 @@ from typing import Any
 
 def calc_volume_ratio_20d(
     code: str, trade_date: date, all_bars: dict[tuple[str, date], Any]
-) -> float:
+) -> float | None:
     """计算 20 日量比：当日成交量 / 近 20 日平均成交量。
 
     Args:
@@ -21,11 +21,11 @@ def calc_volume_ratio_20d(
         all_bars: (code, date) → BarRow 的映射，BarRow 需有 .volume 属性。
 
     Returns:
-        量比，默认 1.0。
+        量比，数据不足时返回 None（区分"无数据"与"量比恰好为 1"）。
     """
     today_bar = all_bars.get((code, trade_date))
     if today_bar is None or today_bar.volume is None:
-        return 1.0
+        return None
     past_volumes = [
         v.volume
         for (c, dt), v in all_bars.items()
@@ -34,9 +34,9 @@ def calc_volume_ratio_20d(
     past_volumes.sort()
     recent_20 = past_volumes[-20:] if len(past_volumes) >= 20 else past_volumes
     if not recent_20:
-        return 1.0
+        return None
     avg = sum(recent_20) / len(recent_20)
-    return round(today_bar.volume / avg, 4) if avg > 0 else 1.0
+    return round(today_bar.volume / avg, 4) if avg > 0 else None
 
 
 def calc_5d_return(

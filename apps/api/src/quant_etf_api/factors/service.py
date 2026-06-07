@@ -36,8 +36,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 回望自然日数，覆盖 60 个交易日（约 84 个自然日）再加安全余量
-_LOOKBACK_DAYS = 90
+# 默认回望自然日数（当注册表中无因子时使用）
+_DEFAULT_LOOKBACK_DAYS = 90
+
+
+def _get_max_lookback_days(registry: "FactorRegistry") -> int:
+    """从注册表中获取所有因子所需的最大回望自然日数。
+
+    Args:
+        registry: 因子注册表。
+
+    Returns:
+        最大回望自然日数。
+    """
+    try:
+        max_days = max(
+            (c.spec.lookback_days for c in registry.all()),
+            default=_DEFAULT_LOOKBACK_DAYS,
+        )
+        return max_days
+    except Exception:
+        return _DEFAULT_LOOKBACK_DAYS
 
 
 class FactorService:
@@ -307,16 +326,19 @@ class FactorService:
     # ==================================================================
 
     def _load_context(self, trade_date: date, index_codes: list[str]) -> FactorContext:
-        """批量加载 90 天回望的指数数据，构建 FactorContext。
+        """批量加载回望数据，构建 FactorContext。
+
+        回望窗口由注册表中所有因子的 lookback_days 最大值动态决定。
 
         Args:
             trade_date: 目标交易日。
             index_codes: 指数代码列表。
 
         Returns:
-            填充了 index_bars / index_valuation 的 FactorContext。
+            填充了 index_bars / index_valuation / macro_indicators 的 FactorContext。
         """
-        lookback_start = trade_date - timedelta(days=_LOOKBACK_DAYS)
+        lookback_days = _get_max_lookback_days(self._registry)
+        lookback_start = trade_date - timedelta(days=lookback_days)
 
         # 加载指数日线
         index_bar_rows = (

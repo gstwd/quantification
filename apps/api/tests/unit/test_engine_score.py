@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import pytest
 
 from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.engine.config import ScoreConfig, TimingConfig, TimingThresholds

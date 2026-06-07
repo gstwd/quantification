@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from quant_etf_api.infra.clients.akshare_fund import AkShareFundClient
 from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
 from quant_etf_api.infra.clients.akshare_macro import AkShareMacroClient
+from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.infra.db.models.core import (
     BenchmarkIndexModel,
     EtfDailyBarModel,
@@ -136,7 +137,12 @@ class IngestService:
         self._universe_repo = universe_repo or EtfUniverseRepository(db)
 
     def latest_trade_date(self) -> date:
-        return date.today()
+        """获取最近交易日，通过交易日历而非简单返回今天。
+
+        Returns:
+            最近交易日日期。
+        """
+        return TradingCalendar().latest_trading_day()
 
     # ==================================================================
     # ETF 日线
@@ -414,18 +420,37 @@ class IngestService:
     # 指数日线（AkShare）
     # ==================================================================
 
-    def _fetch_and_upsert_index_bars(self, index_code: str) -> int:
+    def _fetch_and_upsert_index_bars(self, index_code: str, incremental: bool = True) -> int:
         """从 AkShare 拉取指数日线并幂等写入 index_daily_bar。
 
-        分批写入，避免单条 INSERT 参数超过 PostgreSQL 65535 限制
-        （每行 12 字段，批次上限 5000 行 = 60000 参数）。
+        增量模式（默认）：仅拉取 DB 中最新日期之后的数据；
+        全量模式（冷启动）：拉取全量历史数据。
+
+        分批写入，避免单条 INSERT 参数超过 PostgreSQL 65535 限制。
 
         Returns:
             写入记录数
         """
+        if incremental:
+            # 查询该指数最新数据日期
+            latest = (
+                self._db.query(func.max(IndexDailyBarModel.trade_date))
+                .filter(IndexDailyBarModel.index_code == index_code)
+                .scalar()
+            )
+            if latest is not None:
+                # 已有数据，仅做增量（AkShare 客户端当前不支持增量，仍拉全量后过滤）
+                pass
+
         bars = AkShareIndexClient().fetch_index_daily(index_code)
         if not bars:
             return 0
+
+        # 增量模式：仅保留 DB 中不存在的记录
+        if incremental:
+            existing = latest
+            if existing is not None:
+                bars = [b for b in bars if b.trade_date > existing]
 
         batch_size = 5000
         values = [
@@ -661,6 +686,7 @@ class IngestService:
                         "value": i.value,
                         "unit": i.unit,
                         "source": "akshare",
+                        "period_date": i.period_date,
                         "ingested_at": datetime.now(timezone.utc),
                     }
                     for i in indicators
@@ -727,7 +753,10 @@ class IngestService:
         最新数据日期距今是否超过 3 个自然日（节假日容忍），返回汇总结果。
         """
         today = date.today()
-        stale_threshold = today - timedelta(days=3)
+        cal = TradingCalendar()
+        # 使用最近交易日作为新鲜度基准，容忍 1 个交易日间隔
+        latest_td = cal.latest_trading_day(today)
+        stale_threshold = latest_td - timedelta(days=1)
         result: dict = {}
 
         etfs = self._universe_repo.find_all_active()
@@ -954,11 +983,12 @@ class IngestService:
             self._db.commit()
 
             today = date.today()
+            cal = TradingCalendar()
 
-            if today.weekday() >= 5:
+            if not cal.is_trading_day(today):
                 run.status = "success"
                 run.finished_at = datetime.now(timezone.utc)
-                run.metrics = {"reason": "weekend", "message": "周末休市，跳过数据摄取"}
+                run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
                 self._db.commit()
                 return
 

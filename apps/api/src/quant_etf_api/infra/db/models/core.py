@@ -1,6 +1,7 @@
 from __future__ import annotations
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
+import sqlalchemy as sa
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -72,6 +73,12 @@ class BenchmarkIndexModel(Base):
     )
     exchange: Mapped[str] = mapped_column(
         String(16), default="CN", comment="所属市场，CN=中国 A 股"
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("TRUE"), comment="是否活跃，False=已退市/停发"
+    )
+    delisting_date: Mapped[date | None] = mapped_column(
+        Date, nullable=True, comment="退市/停发日期"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc), comment="记录创建时间（UTC）"
@@ -761,6 +768,29 @@ class MacroIndicatorModel(Base):
     source: Mapped[str] = mapped_column(
         String(32), default="akshare", comment="数据来源，akshare=AkShare 客户端"
     )
+    period_date: Mapped[date | None] = mapped_column(
+        Date, nullable=True, comment="标准化周期日期，CPI/PMI 取当月首日，LPR 取报价日"
+    )
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc), comment="数据入库时间（UTC）"
+    )
+
+
+class TradingCalendarModel(Base):
+    """A 股交易日历表，记录每个日期是否为交易日。
+
+    数据来源：AkShare tool_trade_date_hist_sina()，
+    用于替代周末判断，支持正确识别节假日和调休。
+    """
+
+    __tablename__ = "trading_calendar"
+
+    trade_date: Mapped[Date] = mapped_column(
+        Date, primary_key=True, comment="日期"
+    )
+    is_trading_day: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, comment="是否为交易日"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), comment="记录创建时间（UTC）"
     )

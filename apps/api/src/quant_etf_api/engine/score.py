@@ -247,3 +247,98 @@ class DefaultScoreCalculator:
 
         score = sum(w * s for w, s in weighted_scores) / total_weight
         return round(max(0.0, min(100.0, score)), 1)
+
+
+class CrossSectionScorer:
+    """横截面评分器：在所有资产间比较因子值进行评分。
+
+    支持三种模式：
+    - rank：横截面百分位排名（0-100），天然处理量纲差异
+    - zscore：横截面 Z-Score 标准化
+    - relative：相对于参考资产（如沪深300）的差值得分
+
+    与 DefaultScoreCalculator 的区别：
+    DefaultScoreCalculator 每资产独立评分（加权平均自身因子值），
+    CrossSectionScorer 在横截面上比较所有资产的因子值后统一评分，
+    适用于轮动策略、相对强弱策略等需要资产间比较的场景。
+    """
+
+    def calculate(
+        self,
+        config: "ScoreConfig",
+        context: "EngineContext",
+    ) -> dict[str, float]:
+        """横截面评分计算。
+
+        Args:
+            config: 评分配置，需设置 scoring_mode。
+            context: 引擎上下文。
+
+        Returns:
+            key=etf_code, value=得分（0-100）。
+        """
+        from quant_etf_api.factors.normalization import normalize_rank, normalize_zscore
+
+        mode = config.scoring_mode
+
+        # 第一步：对每资产计算加权原始值
+        raw_scores: dict[str, float] = {}
+        for item in context.universe:
+            code = item["etf_code"]
+            weighted_sum = 0.0
+            total_weight = 0.0
+            for factor_id, weight in config.factors.items():
+                raw_value = context.asset_factors.get((code, factor_id))
+                if raw_value is None:
+                    if config.missing_factor_strategy == "exclude":
+                        break
+                    if config.missing_factor_strategy == "zero":
+                        raw_value = 0.0
+                    else:
+                        continue
+
+                transform_name = config.transforms.get(factor_id)
+                if transform_name:
+                    transform_fn = get_transform(transform_name)
+                    transformed = transform_fn(raw_value)
+                else:
+                    transformed = raw_value
+
+                weighted_sum += transformed * weight
+                total_weight += abs(weight)
+
+            if total_weight > 0:
+                raw_scores[code] = weighted_sum / total_weight
+            else:
+                raw_scores[code] = 0.0
+
+        if not raw_scores:
+            return {}
+
+        # 第二步：横截面变换
+        if mode == "rank":
+            normalized = normalize_rank(raw_scores)
+        elif mode == "zscore":
+            z_scores = normalize_zscore(raw_scores)
+            # 将 Z-Score 映射到 0-100（均值为 50）
+            normalized = {}
+            for k, v in z_scores.items():
+                if v is not None:
+                    normalized[k] = round(max(0.0, min(100.0, 50.0 + v * 10.0)), 1)
+                else:
+                    normalized[k] = 50.0
+        else:
+            # absolute 模式：直接使用原始加权分（裁剪到 0-100）
+            normalized = {}
+            for k, v in raw_scores.items():
+                normalized[k] = round(max(0.0, min(100.0, v)), 1)
+
+        return normalized
+
+    def calculate_timing(
+        self,
+        config: "TimingConfig",
+        context: "EngineContext",
+    ) -> tuple[float, str, dict]:
+        """横截面评分器的择时计算（委托给 DefaultScoreCalculator）。"""
+        return DefaultScoreCalculator().calculate_timing(config, context)

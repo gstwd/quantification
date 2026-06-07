@@ -14,10 +14,11 @@ class FactorSpec:
     Attributes:
         factor_id: 因子唯一标识，如 volume_ratio_20d。
         name: 因子中文名称，如 20日量比。
-        category: 因子类别：volume/momentum/volatility/flow/valuation。
+        category: 因子类别：volume/momentum/volatility/flow/valuation/technical。
         version: 语义化版本号，如 1.0.0。
         description: 计算逻辑说明。
         required_data: 依赖的数据源列表，如 ["index_bars", "index_valuation"]。
+        lookback_days: 因子计算所需的自然日回望窗口，默认 90 天。
     """
 
     factor_id: str
@@ -26,6 +27,7 @@ class FactorSpec:
     version: str
     description: str
     required_data: list[str] = field(default_factory=list)
+    lookback_days: int = 90
 
 
 @dataclass
@@ -34,15 +36,17 @@ class FactorContext:
 
     所有 dict 的 key 均为 (index_code, trade_date) 二元组，
     value 为对应的 ORM 行对象（保留 .volume、.close_price 等属性）。
-    回望窗口固定为 90 个自然日，满足 Return60dComputer 需求。
+    回望窗口由各因子的 FactorSpec.lookback_days 最大值动态决定。
 
     Attributes:
         index_bars: 指数日线映射，key=(index_code, date)。
         index_valuation: 指数估值映射，key=(index_code, date)，含 pe_percentile/pb_percentile。
+        macro_indicators: 宏观指标映射，key=indicator_code，value={period_date: value}。
     """
 
     index_bars: dict[tuple[str, date], Any] = field(default_factory=dict)
     index_valuation: dict[tuple[str, date], Any] = field(default_factory=dict)
+    macro_indicators: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 @dataclass

@@ -12,7 +12,6 @@ from typing import Any
 from quant_etf_api.domain.common.constants import (
     SIGNAL_LABELS,
     SIGNAL_THRESHOLD_HIGH,
-    SIGNAL_THRESHOLD_MID,
 )
 from quant_etf_api.domain.strategies.models import (
     AssetRanking,
@@ -25,7 +24,7 @@ from quant_etf_api.engine.filter import DefaultFilterEngine, FilterEngine
 from quant_etf_api.engine.portfolio import build_allocator
 from quant_etf_api.engine.rank import DefaultRankEngine, RankEngine
 from quant_etf_api.engine.risk import DefaultRiskManager, RiskManager
-from quant_etf_api.engine.score import DefaultScoreCalculator, ScoreCalculator
+from quant_etf_api.engine.score import CrossSectionScorer, DefaultScoreCalculator, ScoreCalculator
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +72,11 @@ class StrategyEngine:
         if config.timing:
             timing = self._run_timing(config, context)
 
-        # 2. 资产评分
-        scores = self._score.calculate(config.score, context)
+        # 2. 资产评分（根据 scoring_mode 选择评分器）
+        if config.score.scoring_mode != "absolute":
+            scores = CrossSectionScorer().calculate(config.score, context)
+        else:
+            scores = self._score.calculate(config.score, context)
 
         # 3. 过滤（可选）
         if config.filters:

@@ -33,6 +33,7 @@ class PEPercentileComputer:
                 "数据来源于 index_valuation 表，仅主要宽基指数有覆盖。"
             ),
             required_data=["index_valuation"],
+            lookback_days=730,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
@@ -86,6 +87,7 @@ class PBPercentileComputer:
                 "数据来源于 index_valuation 表，仅主要宽基指数有覆盖。"
             ),
             required_data=["index_valuation"],
+            lookback_days=730,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:

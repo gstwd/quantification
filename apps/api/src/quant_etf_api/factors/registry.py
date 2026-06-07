@@ -54,6 +54,13 @@ def build_default_factor_registry() -> FactorRegistry:
         Return5dComputer,
         Return60dComputer,
     )
+    from quant_etf_api.factors.builtins.technical import (
+        ATRComputer,
+        DonchianHighComputer,
+        DonchianLowComputer,
+        MAComputer,
+        RSIComputer,
+    )
     from quant_etf_api.factors.builtins.valuation import (
         PBPercentileComputer,
         PEPercentileComputer,
@@ -62,11 +69,25 @@ def build_default_factor_registry() -> FactorRegistry:
     from quant_etf_api.factors.builtins.volume import VolumeRatio20dComputer
 
     registry = FactorRegistry()
+    # 量能
     registry.register(VolumeRatio20dComputer())
+    # 动量
     registry.register(Return5dComputer())
     registry.register(Return20dComputer())
     registry.register(Return60dComputer())
+    # 波动
     registry.register(Volatility20dComputer())
+    # 估值
     registry.register(PEPercentileComputer())
     registry.register(PBPercentileComputer())
+    # 技术指标 — 均线
+    for period in (5, 10, 20, 60):
+        registry.register(MAComputer(period=period))
+    # 技术指标 — ATR
+    registry.register(ATRComputer(period=14))
+    # 技术指标 — Donchian 通道
+    registry.register(DonchianHighComputer(period=20))
+    registry.register(DonchianLowComputer(period=20))
+    # 技术指标 — RSI
+    registry.register(RSIComputer(period=14))
     return registry

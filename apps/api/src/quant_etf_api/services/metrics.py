@@ -41,6 +41,9 @@ class PerformanceMetrics:
     calmar_ratio: float
     win_rate_pct: float
     profit_loss_ratio: float | None
+    var_95_pct: float = 0.0
+    cvar_95_pct: float = 0.0
+    max_consecutive_loss_days: int = 0
     alpha: float | None = None
     beta: float | None = None
     information_ratio: float | None = None
@@ -85,6 +88,9 @@ def compute_performance_metrics(
     win_rate_pct = _calc_win_rate(daily_returns)
     profit_loss_ratio = _calc_profit_loss_ratio(daily_returns)
 
+    var_95, cvar_95 = _calc_var_cvar(daily_returns)
+    max_consecutive_loss = _calc_max_consecutive_loss_days(daily_returns)
+
     alpha, beta, ir, tracking_error = None, None, None, None
     if benchmark_returns and len(benchmark_returns) == n:
         alpha, beta = _calc_alpha_beta(daily_returns, benchmark_returns, trading_days_per_year)
@@ -100,6 +106,9 @@ def compute_performance_metrics(
         calmar_ratio=round(calmar, 4),
         win_rate_pct=round(win_rate_pct, 2),
         profit_loss_ratio=round(profit_loss_ratio, 2) if profit_loss_ratio is not None else None,
+        var_95_pct=round(var_95, 2),
+        cvar_95_pct=round(cvar_95, 2),
+        max_consecutive_loss_days=max_consecutive_loss,
         alpha=round(alpha, 2) if alpha is not None else None,
         beta=round(beta, 2) if beta is not None else None,
         information_ratio=round(ir, 4) if ir is not None else None,
@@ -266,3 +275,44 @@ def _calc_information_ratio(
     ir = annualized_excess / tracking_error_annual
 
     return ir, tracking_error_annual
+
+
+def _calc_var_cvar(daily_returns: list[float], confidence: float = 0.95) -> tuple[float, float]:
+    """计算历史模拟法的 VaR 和 CVaR（%）。
+
+    Args:
+        daily_returns: 日收益率序列（%）。
+        confidence: 置信水平，默认 0.95。
+
+    Returns:
+        (var_pct, cvar_pct) 元组，均为正数表示损失。
+    """
+    if len(daily_returns) < 5:
+        return 0.0, 0.0
+    sorted_returns = sorted(daily_returns)
+    idx = int(len(sorted_returns) * (1 - confidence))
+    var_val = sorted_returns[idx] if idx < len(sorted_returns) else sorted_returns[-1]
+    tail = [r for r in sorted_returns if r <= var_val]
+    cvar_val = sum(tail) / len(tail) if tail else var_val
+    # 负收益 → 正损失
+    return round(abs(var_val), 2), round(abs(cvar_val), 2)
+
+
+def _calc_max_consecutive_loss_days(daily_returns: list[float]) -> int:
+    """计算最大连续亏损天数。
+
+    Args:
+        daily_returns: 日收益率序列（%）。
+
+    Returns:
+        最大连续亏损天数。
+    """
+    max_streak = 0
+    current_streak = 0
+    for r in daily_returns:
+        if r < 0:
+            current_streak += 1
+            max_streak = max(max_streak, current_streak)
+        else:
+            current_streak = 0
+    return max_streak

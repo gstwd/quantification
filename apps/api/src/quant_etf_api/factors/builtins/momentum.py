@@ -64,7 +64,9 @@ class Return5dComputer:
             version="2.0.0",
             description="指数近 5 个交易日的价格涨跌幅（%），衡量短期动量。",
             required_data=["index_bars"],
+            lookback_days=15,
         )
+
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
         """计算 5 日收益率。
@@ -101,7 +103,9 @@ class Return20dComputer:
             version="2.0.0",
             description="指数近 20 个交易日的价格涨跌幅（%），衡量中期动量。",
             required_data=["index_bars"],
+            lookback_days=40,
         )
+
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
         """计算 20 日收益率。
@@ -139,10 +143,11 @@ class Return60dComputer:
             version="2.0.0",
             description=(
                 "指数近 60 个交易日的价格涨跌幅（%），衡量中长期趋势。"
-                "需 FactorContext 提供 90 天自然日回望。"
             ),
             required_data=["index_bars"],
+            lookback_days=90,
         )
+
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
         """计算 60 日收益率。

@@ -13,7 +13,7 @@ class VolumeRatio20dComputer:
 
     量比 = 当日成交量 / 近 20 个交易日平均成交量。
     直接复用 domain.common.bar_metrics.calc_volume_ratio_20d，保持计算逻辑单一来源。
-    数据不足时返回 1.0（中性值，与 bar_metrics 的 fallback 一致）。
+    数据不足时返回 None（区分"无数据"与"量比恰好为 1"）。
     """
 
     @property
@@ -26,6 +26,7 @@ class VolumeRatio20dComputer:
             version="2.0.0",
             description="指数当日成交量与近 20 个交易日平均成交量的比值，量比>1 表示相对放量。",
             required_data=["index_bars"],
+            lookback_days=40,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
@@ -34,10 +35,10 @@ class VolumeRatio20dComputer:
         Args:
             index_code: 指数代码。
             trade_date: 目标交易日。
-            ctx: 含 90 天回望的 FactorContext。
+            ctx: FactorContext。
 
         Returns:
-            FactorValue，数据不足时 numeric 为 1.0（中性值）。
+            FactorValue，数据不足时 numeric 为 None。
         """
         ratio = calc_volume_ratio_20d(index_code, trade_date, ctx.index_bars)
         return FactorValue(

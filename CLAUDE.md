@@ -100,7 +100,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 
 - **`api/routers/`** — 10 route groups: `health`, `system`, `etfs`, `indexes`, `market_data`, `strategies`, `signals`, `factors`, `runs`, `backtests`
 - **`api/middleware.py`** — `RequestIdMiddleware`：为每个请求注入唯一 request_id，写入响应头和日志 ContextVar
-- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. New services: `metrics.py`（专业绩效指标）、`benchmark.py`（基准收益计算）、`index_service.py`、`universe_service.py`.
+- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. New services: `metrics.py`（专业绩效指标，含 VaR/CVaR/连续亏损天数）、`benchmark.py`（基准收益计算）、`index_service.py`、`universe_service.py`、`data_quality.py`（日线/估值异常检测 + 连续性缺口检测）.
 - **`engine/`** — **策略引擎核心**：组件化、配置驱动的策略执行管线（12 个文件）：
   - `config.py` — Pydantic 配置模型（含 `TimingConfig`、`ScoreConfig`、`FilterConfig`、`RankConfig`、`PortfolioConfig`、`RiskConfig`、`RebalanceConfig`、`BenchmarkConfig`、`TransactionCostConfig`）
   - `base.py` — `EngineContext`、`EngineResult` 数据结构
@@ -117,12 +117,14 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - **`infra/clients/`** — 4 data source clients, all inherit from `base.py`:
   - `akshare_fund.py` (ETF K-line via Sina + shares/AUM via fund_etf_spot_em), `exchange_reference.py` (exchange ref)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
+  - `retry.py` — `@with_retry()` 装饰器，指数退避重试，参数可通过环境变量 `AKSHARE_RETRY_MAX_ATTEMPTS` / `AKSHARE_RETRY_BASE_DELAY` 配置
+- **`infra/trading_calendar.py`** — `TradingCalendar` 类，通过 `akshare.tool_trade_date_hist_sina()` 获取 A 股交易日历，内存缓存 TTL=1 天，API 不可用时降级为周末判断
 - **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
   - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, AllocationPlan dataclasses)
   - `etf/`、`market_data/`、`research/` — 预留包目录
-- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `builtins/` (7 built-in computers: volume×1, momentum×3, volatility×1, valuation×2). **所有因子基于指数数据计算**（`index_factor_value` 表）。
+- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `normalization.py` (zscore/rank/minmax/winsorize/MAD 横截面标准化), `builtins/` (18 built-in computers: volume×1, momentum×3, volatility×1, valuation×2, ma×4, atr×1, donchian×2, rsi×1). **所有因子基于指数数据计算**（`index_factor_value` 表）。**架构原则：因子层只使用指数数据，不使用 ETF 特有数据（份额/AUM/折溢价等）**。
 - **`plugins/`** — 已废弃，仅保留 re-export 和空壳 `StrategyRegistry`。策略执行已迁移至 `engine/`。
 - **`config/`** — Pydantic settings loaded from `.env`
 - **`schemas/`** — 11 个 Pydantic schema 文件：`etf.py`、`factor.py`、`market_data.py`、`pagination.py`、`run.py`、`signal.py`、`strategy.py`、`system.py`、`types.py`、`backtest.py`、`__init__.py`
@@ -136,10 +138,10 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 ```
 
 - **Timing**: 市场择时，综合估值/趋势/量能判断 regime（offensive/neutral/defensive）
-- **Score**: 每资产综合得分 = Σ(transform(factor_value) × weight) / Σ(|weight|)
+- **Score**: 每资产综合得分 = Σ(transform(factor_value) × weight) / Σ(|weight|)。`scoring_mode` 支持：absolute（每资产独立评分，默认）/ rank（横截面排名分）/ zscore（横截面标准化）。非 absolute 模式时自动使用 `CrossSectionScorer`
 - **Filter**: 过滤规则（gt/lt/gte/lte/eq/neq/between），AND/OR 逻辑
 - **Rank**: 排序 + TopN/BottomN
-- **Portfolio**: 权重分配（equal_weight / score_weight），择时 regime 控制总仓位
+- **Portfolio**: 权重分配（equal_weight / score_weight / winner_take_all），择时 regime 控制总仓位。`default_exposure` 控制无择时时的默认仓位（替代硬编码 0.50）
 - **Risk**: 单资产上限、组合上限、最低现金比例
 - **Rebalance**: 调仓频率控制（daily/weekly/monthly），回测中非调仓日沿用上次持仓
 - **Benchmark**: 基准对比（买入持有基准、等权组合基准）
@@ -168,7 +170,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - 通过 `FactorProvider` 加载因子值，消除硬编码因子计算
 - `services/context_builder.py` 是向后兼容 shim，re-export 自 engine 版本
 
-### Database schema (22 tables, migrations 0001–0012)
+### Database schema (23 tables, migrations 0001–0013)
 
 | Group | Tables |
 |---|---|
@@ -184,6 +186,7 @@ Key migrations:
 - 0005–0006: 因子层表、因子定义增强
 - 0007–0008: 指数因子回测、策略配置表
 - 0009–0012: 回测模式字段、`index_signal` 表、回测日基准收益和换手率、回测指数原始得分
+- 0013: `trading_calendar` 表、`benchmark_index` 增加 `is_active`/`delisting_date`、`macro_indicator` 增加 `period_date`
 
 ### Frontend
 
@@ -199,7 +202,7 @@ Services fully wired to PostgreSQL. 22 tables across 12 migrations (0001→0012)
 
 **Strategy Engine**: `engine/` 包实现组件化策略执行管线。策略通过 `strategy_config` 表的 JSON 配置驱动，`StrategyConfigService` 管理 CRUD，`StrategyEngine` 执行管线。`FactorProvider` 桥接因子层与引擎层，`ContextBuilder` 统一构建实时和回测上下文。`BacktestService` 和 `StrategyExecutionService` 统一使用引擎执行。
 
-**因子系统**: 7 个内置因子（volume_ratio_20d, return_5d, return_20d, return_60d, volatility_20d, pe_percentile, pb_percentile），通过 `FactorRegistry` 注册，`FactorService` 编排计算和持久化。所有因子基于指数数据计算（`index_factor_value` 表）。`evaluation.py` 提供 IC/IR 分析和因子相关性矩阵。
+**因子系统**: 18 个内置因子（7 基础 + 4 均线 ma_5d/10d/20d/60d + atr_14d + donchian_20d_high/low + rsi_14d），通过 `FactorRegistry` 注册，`FactorService` 编排计算和持久化。所有因子基于指数数据计算（`index_factor_value` 表）。`FactorSpec` 增加 `lookback_days` 字段，`FactorService._load_context()` 动态使用所有因子的最大 lookback。`FactorContext` 增加 `macro_indicators` 字段。`normalization.py` 提供 zscore/rank/minmax/winsorize/MAD 横截面标准化。`evaluation.py` 提供 IC/IR 分析和因子相关性矩阵。
 
 **Backtesting**: `BacktestService` 使用统一 `_run_backtest_loop` 替代旧的 signal/allocation 双分支。集成 `FactorProvider` 预计算因子、`ContextBuilder` 构建上下文、专业绩效指标（`metrics.py`）、基准对比（`benchmark.py`）、交易成本模型（佣金+滑点）。支持调仓频率控制和换手率计算。引擎输出 positions 非空时为配置模式，为空时为信号模式。
 
@@ -253,3 +256,10 @@ Key rules (details in the doc):
 - Every TypeScript function must have a Chinese JSDoc comment
 - When refactoring, **update** existing comments — never delete them
 - No `any` types in TypeScript; use semantic HTTP status codes in routers
+- **FactorSpec.lookback_days**: 新增因子时必须设置合理的 `lookback_days`（自然日），`FactorService._load_context()` 取所有因子的最大值。参考：5d→15, 20d→40, 60d→90, 估值百分位→730（2年），技术指标→period×1.5+5。
+- **volume_ratio_20d 返回值变更**: 数据不足时返回 `None`（原为 1.0），区分"无数据"与"量比恰好为 1"。`calc_volume_ratio_20d()` 返回 `float | None`，`calc_5d_return()` 仍返回 `float`（默认 0.0）。
+- **BenchmarkIndexModel.is_active**: `ContextBuilder._build_live()` 和 `BacktestService._resolve_index_universe()` 只查询 `is_active=True` 的指数。新增指数默认 `is_active=True`。
+- **TradingCalendar 缓存**: 首次调用时从 AkShare 加载（`tool_trade_date_hist_sina()`），TTL=1 天。`ingest_service.run_daily_ingest` 和 `check_data_freshness` 已接入，不再用 `weekday()>=5`。
+- **rebalance.py 交易日历对齐**: `DefaultRebalanceScheduler` 接受 `TradingCalendar` 实例，周度/月度调仓如遇非交易日自动顺延至下一交易日。
+- **StrategyConfig.index_codes**: 非空时 `ContextBuilder._filter_by_scope()` 仅保留指定指数，用于二八轮动等需限定标的的场景（实时和回测模式均生效）。
+- **index_daily_bar OHLC 字段**: `IndexDailyBarModel` 有 `open_price`、`high_price`、`low_price`、`close_price` 字段，技术指标因子（ATR/Donchian）通过 `ctx.index_bars` 直接访问。

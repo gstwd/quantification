@@ -33,6 +33,7 @@ class Volatility20dComputer:
                 "公式：std(20 个日收益率, ddof=1) × sqrt(252) × 100。需 21 个连续收盘价。"
             ),
             required_data=["index_bars"],
+            lookback_days=40,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:

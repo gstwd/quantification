@@ -43,11 +43,14 @@ class ScoreConfig(BaseModel):
         transforms: 因子变换函数映射。
         missing_factor_strategy: 因子值缺失时的处理策略。
             ignore=忽略该因子重新归一化权重, zero=按 0 处理, exclude=排除该资产。
+        scoring_mode: 评分模式。
+            absolute=每资产独立评分（默认）, rank=横截面排名分, zscore=横截面 Z-Score。
     """
 
     factors: dict[str, float]
     transforms: dict[str, str] = Field(default_factory=dict)
     missing_factor_strategy: str = "ignore"
+    scoring_mode: str = "absolute"
 
 
 class FilterRule(BaseModel):
@@ -96,12 +99,14 @@ class PortfolioConfig(BaseModel):
     """组合构建配置（可选模块，缺失时为信号模式）。
 
     Attributes:
-        method: 权重分配方法，equal_weight / score_weight。
+        method: 权重分配方法，equal_weight / score_weight / winner_take_all。
         timing_exposure: 择时 regime 对应的总仓位上限。
+        default_exposure: 无择时信号时的默认总仓位上限，默认 0.50。
     """
 
     method: str
     timing_exposure: dict[str, float] | None = None
+    default_exposure: float = 0.50
 
 
 class RiskConfig(BaseModel):
@@ -185,6 +190,7 @@ class StrategyConfig(BaseModel):
     description: str = ""
     frequency: str = "daily"
     asset_scope: str = "a_share_etf"
+    index_codes: list[str] = Field(default_factory=list, description="指定指数代码列表，非空时仅对这些指数运行策略")
     timing: TimingConfig | None = None
     score: ScoreConfig
     filters: FilterConfig | None = None

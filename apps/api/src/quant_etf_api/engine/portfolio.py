@@ -67,10 +67,10 @@ class EqualWeightAllocator:
     ) -> float:
         """根据择时信号确定总仓位上限。"""
         if timing and config.timing_exposure:
-            return config.timing_exposure.get(timing.regime, 0.50)
+            return config.timing_exposure.get(timing.regime, config.default_exposure)
         if timing:
-            return _DEFAULT_TIMING_EXPOSURE.get(timing.regime, 0.50)
-        return 0.50
+            return _DEFAULT_TIMING_EXPOSURE.get(timing.regime, config.default_exposure)
+        return config.default_exposure
 
 
 class ScoreWeightAllocator:
@@ -109,17 +109,58 @@ class ScoreWeightAllocator:
     ) -> float:
         """根据择时信号确定总仓位上限。"""
         if timing and config.timing_exposure:
-            return config.timing_exposure.get(timing.regime, 0.50)
+            return config.timing_exposure.get(timing.regime, config.default_exposure)
         if timing:
-            return _DEFAULT_TIMING_EXPOSURE.get(timing.regime, 0.50)
-        return 0.50
+            return _DEFAULT_TIMING_EXPOSURE.get(timing.regime, config.default_exposure)
+        return config.default_exposure
+
+
+class WinnerTakeAllAllocator:
+    """赢家通吃分配器。
+
+    将全部仓位分配给排名第一的资产，适用于二八轮动等集中持仓策略。
+    """
+
+    def allocate(
+        self,
+        config: PortfolioConfig,
+        rankings: list[AssetRanking],
+        timing: TimingSignal | None = None,
+    ) -> dict[str, float]:
+        """赢家通吃分配。
+
+        Args:
+            config: 组合配置。
+            rankings: 资产排名列表（已排序）。
+            timing: 择时信号。
+
+        Returns:
+            仅包含排名第一资产的仓位字典。
+        """
+        if not rankings:
+            return {}
+
+        total_exposure = self._get_total_exposure(config, timing)
+        winner = rankings[0]
+
+        return {winner.etf_code: round(total_exposure, 4)}
+
+    def _get_total_exposure(
+        self, config: PortfolioConfig, timing: TimingSignal | None
+    ) -> float:
+        """根据择时信号确定总仓位上限。"""
+        if timing and config.timing_exposure:
+            return config.timing_exposure.get(timing.regime, config.default_exposure)
+        if timing:
+            return _DEFAULT_TIMING_EXPOSURE.get(timing.regime, config.default_exposure)
+        return config.default_exposure
 
 
 def build_allocator(method: str) -> WeightAllocator:
     """根据方法名构建权重分配器。
 
     Args:
-        method: 分配方法，equal_weight / score_weight。
+        method: 分配方法，equal_weight / score_weight / winner_take_all。
 
     Returns:
         权重分配器实例。
@@ -130,6 +171,7 @@ def build_allocator(method: str) -> WeightAllocator:
     allocators: dict[str, WeightAllocator] = {
         "equal_weight": EqualWeightAllocator(),
         "score_weight": ScoreWeightAllocator(),
+        "winner_take_all": WinnerTakeAllAllocator(),
     }
     if method not in allocators:
         raise ValueError(f"未知的权重分配方法: {method}，可用: {list(allocators.keys())}")
