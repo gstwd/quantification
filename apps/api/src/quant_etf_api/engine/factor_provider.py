@@ -68,10 +68,12 @@ class FactorProvider:
         if config.timing:
             factor_ids.update(config.timing.factors.keys())
 
-        # 过滤规则引用的因子
+        # 过滤规则引用的因子（含跨因子比较的 compare_to）
         if config.filters:
             for rule in config.filters.rules:
                 factor_ids.add(rule.factor)
+                if rule.compare_to:
+                    factor_ids.add(rule.compare_to)
 
         return sorted(factor_ids)
 
