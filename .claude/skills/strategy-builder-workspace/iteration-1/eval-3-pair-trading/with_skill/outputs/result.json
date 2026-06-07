@@ -1,0 +1,16 @@
+{
+  "status": "gap_identified",
+  "feasible": false,
+  "gap_analysis": {
+    "requirement": "做多涨幅高的指数，同时做空涨幅低的指数",
+    "blocker": "系统仅支持做多（仓位权重 >= 0，总和 <= 1.0）。无 short_weight、leverage 概念",
+    "reference": "limits.md 第1条：仅支持做多，不支持做空/杠杆",
+    "workaround": "只能做多强势方，放弃做空弱势方。等同于常规的二八轮动策略",
+    "improvement_suggestion": "增加做空/杠杆支持：PortfolioConfig 增加 short_enabled 字段，允许负权重表示做空"
+  },
+  "alternative_config": {
+    "note": "变通方案：只做多不做空（等同于二八轮动）",
+    "strategy_id": "er_ba_lun_dong",
+    "config_already_exists": true
+  }
+}

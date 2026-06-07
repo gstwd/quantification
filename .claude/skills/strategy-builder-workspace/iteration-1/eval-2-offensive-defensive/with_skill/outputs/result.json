@@ -1,0 +1,27 @@
+{
+  "status": "success",
+  "strategy_id": "offensive_defensive",
+  "config": {
+    "timing": {
+      "factors": {"pe_percentile": 0.5, "return_60d": 0.5},
+      "transforms": {"pe_percentile": "invert_percentile", "return_60d": "momentum_score"},
+      "thresholds": {"offensive": 60, "defensive": 30}
+    },
+    "score": {
+      "factors": {"return_20d": 0.6, "volatility_20d": -0.4},
+      "transforms": {"return_20d": "momentum_score"},
+      "scoring_mode": "absolute"
+    },
+    "rank": {"sort_by": "score", "order": "desc", "top_n": 2},
+    "portfolio": {
+      "method": "equal_weight",
+      "timing_exposure": {"offensive": 0.90, "neutral": 0.50, "defensive": 0.10}
+    }
+  },
+  "api_result": "created successfully via POST /api/strategies",
+  "pipeline_analysis": "Timing(pe_percentile+return_60d判断regime) → Score(absolute: return_20d正向+volatility_20d反向) → Rank(top_n=2取前2) → Portfolio(equal_weight,择时调节仓位)",
+  "noted_limitations": [
+    "volatility_20d 使用原始值参与负向评分，与 momentum_score(0-100) 量纲不完全匹配，可能影响评分稳定性",
+    "建议增加一个类似 'invert_volatility' 的变换函数来统一量纲"
+  ]
+}

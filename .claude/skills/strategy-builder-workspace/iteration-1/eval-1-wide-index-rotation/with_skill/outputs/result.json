@@ -1,0 +1,20 @@
+{
+  "status": "success",
+  "strategy_id": "wide_index_rotation",
+  "config": {
+    "index_codes": ["000300", "000905", "399006"],
+    "score": {
+      "factors": {"return_20d": 1.0},
+      "scoring_mode": "rank"
+    },
+    "filters": {
+      "logic": "AND",
+      "rules": [{"factor": "return_20d", "op": "gte", "value": 0}]
+    },
+    "rank": {"sort_by": "score", "order": "desc", "top_n": 1},
+    "portfolio": {"method": "winner_take_all", "default_exposure": 1.0}
+  },
+  "api_result": "created successfully via POST /api/strategies",
+  "pipeline_analysis": "Score(rank 横截面排名3选1) → Filter(剔除20日涨幅<0的) → Rank(top_n=1取第一) → Portfolio(winner_take_all满仓第一名)",
+  "verification": "回测验证通过：策略在000300/000905/399006之间正确轮动"
+}

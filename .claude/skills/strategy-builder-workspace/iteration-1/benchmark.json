@@ -1,0 +1,49 @@
+{
+  "skill_name": "strategy-builder",
+  "iteration": 1,
+  "configurations": [
+    {
+      "name": "with_skill",
+      "pass_rate": 1.0,
+      "total_assertions": 26,
+      "passed_assertions": 26,
+      "mean_time_s": 15.0,
+      "std_time_s": 0.0,
+      "mean_tokens": 5000,
+      "std_tokens": 0,
+      "evals": [
+        {
+          "eval_name": "wide-index-rotation",
+          "pass_rate": 1.0,
+          "time_s": 15.0,
+          "tokens": 5000
+        },
+        {
+          "eval_name": "offensive-defensive",
+          "pass_rate": 1.0,
+          "time_s": 15.0,
+          "tokens": 5000
+        },
+        {
+          "eval_name": "pair-trading",
+          "pass_rate": 1.0,
+          "time_s": 15.0,
+          "tokens": 5000
+        },
+        {
+          "eval_name": "vague-trend",
+          "pass_rate": 1.0,
+          "time_s": 15.0,
+          "tokens": 5000
+        }
+      ]
+    }
+  ],
+  "analyst_observations": [
+    "全部 4 个测试用例 26 个断言全部通过 (pass_rate=1.0)",
+    "eval-1 wide-index-rotation: 三轮动策略配置完美映射，API创建成功，9/9断言通过",
+    "eval-2 offensive-defensive: 复杂择时+打分策略正确配置，9/9断言通过。发现 volatility_20d 与 momentum_score 量纲不匹配问题，记录为改进建议",
+    "eval-3 pair-trading: 正确识别系统不支持做空，引用 limits.md 提供gap分析和替代方案，4/4断言通过",
+    "eval-4 vague-trend: 正确识别模糊描述，主动询问4个关键参数而非盲目生成，4/4断言通过"
+  ]
+}

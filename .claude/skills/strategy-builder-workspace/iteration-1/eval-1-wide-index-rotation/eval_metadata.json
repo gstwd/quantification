@@ -1,0 +1,16 @@
+{
+  "eval_id": 1,
+  "eval_name": "wide-index-rotation",
+  "prompt": "帮我在系统里配置一个宽基轮动策略：从沪深300、中证500、创业板指里面，每天选近20个交易日涨得最好的那个满仓持有。如果三个指数最近20天都在跌，就空仓。",
+  "assertions": [
+    "配置包含 index_codes=['000300','000905','399006']",
+    "scoring_mode 为 rank",
+    "使用 return_20d 因子",
+    "filter 包含 return_20d >= 0",
+    "top_n 为 1",
+    "portfolio.method 为 winner_take_all",
+    "default_exposure 为 1.0",
+    "策略可通过 API 创建成功",
+    "策略可通过回测验证管线行为"
+  ]
+}
