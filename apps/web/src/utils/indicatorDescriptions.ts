@@ -239,6 +239,14 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
       description: '为每个资产计算综合得分（0-100），通过因子加权实现。<br>公式：Σ(变换后因子值 × 权重) / Σ(|权重|)。<br>正值权重 = 正向因子（越高越好），负值权重 = 反向因子（越低越好）。<br>缺失因子策略：忽略（重新归一化）/ 按零处理 / 排除资产。<br>至少选择 1 个因子。',
       formula: 'Σ(transform(因子值) × 权重) / Σ(|权重|)',
     },
+    scoring_mode: {
+      label: '评分模式',
+      description: '绝对评分（absolute）：每资产独立计算得分，不同交易日之间不可直接比较。<br>排名分（rank）：横截面排名转换为百分位分（0-100），消除量纲差异。<br>Z-Score（zscore）：横截面标准化为均值 0 标准差 1 的分布，适用于均值回归策略。',
+    },
+    index_codes: {
+      label: '资产范围',
+      description: '指定策略运行的指数代码列表（逗号分隔）。<br>留空时自动使用全部可用指数。<br>非空时仅对指定指数运行策略（如二八轮动只需沪深300+中证500）。',
+    },
     filter: {
       label: '过滤模块',
       description: '按条件过滤不符合要求的资产。<br>支持 7 种比较操作：大于/小于/大于等于/小于等于/等于/不等于/区间。<br>多规则支持 AND（全部满足才保留）或 OR（任一满足即保留）。<br>可选模块，不启用时所有资产均参与后续排名。',

@@ -12,6 +12,25 @@
       <div v-for="(err, i) in errors" :key="i" class="validation-item">{{ err }}</div>
     </div>
 
+    <!-- ═══ 资产范围（策略级配置） ═══ -->
+    <div class="module-card">
+      <div class="module-header" @click="toggleModule('scope')">
+        <span class="module-title">资产范围 <HelpTip :text="scHelp('index_codes')" /></span>
+        <span :class="['arrow', expanded.scope ? 'open' : '']">▾</span>
+      </div>
+      <div v-show="expanded.scope" class="module-body">
+        <div class="module-desc">指定策略运行的目标指数。为空时自动使用全部可用指数。</div>
+        <div class="sub-field">
+          <label class="sub-label">指数代码（逗号分隔）</label>
+          <input
+            v-model="indexCodesInput"
+            class="fp-input"
+            placeholder="如 000300,000905，留空=全部"
+          />
+        </div>
+      </div>
+    </div>
+
     <!-- ═══ 评分模块（必填） ═══ -->
     <div class="module-card">
       <div class="module-header" @click="toggleModule('score')">
@@ -52,6 +71,21 @@
             </label>
             <label class="radio-opt">
               <input type="radio" v-model="scoreMissingStrategy" value="exclude" /> 排除资产
+            </label>
+          </div>
+        </div>
+
+        <div class="sub-field">
+          <label class="sub-label">评分模式 <HelpTip :text="scHelp('scoring_mode')" /></label>
+          <div class="radio-row">
+            <label class="radio-opt">
+              <input type="radio" v-model="scoreScoringMode" value="absolute" /> 绝对评分（每资产独立）
+            </label>
+            <label class="radio-opt">
+              <input type="radio" v-model="scoreScoringMode" value="rank" /> 排名分（横截面排名）
+            </label>
+            <label class="radio-opt">
+              <input type="radio" v-model="scoreScoringMode" value="zscore" /> Z-Score（横截面标准化）
             </label>
           </div>
         </div>
@@ -317,6 +351,31 @@
             <label class="radio-opt">
               <input type="radio" v-model="portfolioMethod" value="score_weight" /> 得分加权
             </label>
+            <label class="radio-opt">
+              <input type="radio" v-model="portfolioMethod" value="winner_take_all" /> 赢家通吃（最高分独占）
+            </label>
+          </div>
+        </div>
+
+        <div class="sub-field">
+          <label class="sub-label">默认仓位（无择时信号时）</label>
+          <div class="slider-row">
+            <input
+              v-model.number="portfolioDefaultExposure"
+              type="range"
+              min="0"
+              max="100"
+              step="5"
+              class="slider"
+            />
+            <input
+              v-model.number="portfolioDefaultExposure"
+              type="number"
+              min="0"
+              max="100"
+              class="fp-input slider-value"
+            />
+            <span class="exposure-unit">%</span>
           </div>
         </div>
 
@@ -445,6 +504,138 @@
         </div>
       </div>
     </div>
+
+    <!-- ═══ 调仓模块（可选） ═══ -->
+    <div class="module-card">
+      <div class="module-header" @click="toggleModule('rebalance')">
+        <span class="module-title">调仓模块 (Rebalance) <HelpTip :text="scHelp('rebalance')" /></span>
+        <span class="module-badge optional">可选</span>
+        <label class="toggle-switch" @click.stop>
+          <input type="checkbox" v-model="rebalanceEnabled" />
+          <span class="toggle-track"></span>
+        </label>
+        <span :class="['arrow', expanded.rebalance ? 'open' : '']">▾</span>
+      </div>
+      <div v-show="rebalanceEnabled && expanded.rebalance" class="module-body">
+        <div class="module-desc">控制策略调仓频率。周度/月度可指定具体调仓日。回测中非调仓日沿用上次持仓。</div>
+
+        <div class="sub-field">
+          <label class="sub-label">调仓频率</label>
+          <select v-model="rebalanceFrequency" class="fp-select">
+            <option value="daily">每日</option>
+            <option value="weekly">每周</option>
+            <option value="monthly">每月</option>
+          </select>
+        </div>
+
+        <div v-if="rebalanceFrequency === 'weekly'" class="sub-field">
+          <label class="sub-label">周调仓日</label>
+          <select v-model.number="rebalanceDayOfWeek" class="fp-select">
+            <option :value="0">周一</option>
+            <option :value="1">周二</option>
+            <option :value="2">周三</option>
+            <option :value="3">周四</option>
+            <option :value="4">周五</option>
+          </select>
+        </div>
+
+        <div v-if="rebalanceFrequency === 'monthly'" class="sub-field">
+          <label class="sub-label">月调仓日</label>
+          <input
+            v-model.number="rebalanceDayOfMonth"
+            type="number"
+            min="1"
+            max="28"
+            class="fp-input"
+            placeholder="1-28"
+          />
+          <span class="threshold-hint">每月第几个交易日进行调仓（1-28）</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ 基准对比模块（可选） ═══ -->
+    <div class="module-card">
+      <div class="module-header" @click="toggleModule('benchmark')">
+        <span class="module-title">基准对比模块 (Benchmark) <HelpTip :text="scHelp('benchmark')" /></span>
+        <span class="module-badge optional">可选</span>
+        <label class="toggle-switch" @click.stop>
+          <input type="checkbox" v-model="benchmarkEnabled" />
+          <span class="toggle-track"></span>
+        </label>
+        <span :class="['arrow', expanded.benchmark ? 'open' : '']">▾</span>
+      </div>
+      <div v-show="benchmarkEnabled && expanded.benchmark" class="module-body">
+        <div class="module-desc">配置基准对比，用于评估策略相对表现。支持买入持有基准和等权组合基准。</div>
+
+        <div class="sub-field">
+          <label class="sub-label">基准指数代码</label>
+          <input v-model="benchmarkIndexCode" class="fp-input" placeholder="如 000300（沪深300）" />
+          <span class="threshold-hint">默认沪深300（000300），用于计算买入持有基准收益</span>
+        </div>
+
+        <div class="sub-field">
+          <label class="checkbox-label">
+            <input type="checkbox" v-model="benchmarkEqualWeight" />
+            启用等权组合基准
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ 交易成本模块（可选） ═══ -->
+    <div class="module-card">
+      <div class="module-header" @click="toggleModule('transaction_cost')">
+        <span class="module-title">交易成本模块 (Transaction Cost) <HelpTip :text="scHelp('transaction_cost')" /></span>
+        <span class="module-badge optional">可选</span>
+        <label class="toggle-switch" @click.stop>
+          <input type="checkbox" v-model="costEnabled" />
+          <span class="toggle-track"></span>
+        </label>
+        <span :class="['arrow', expanded.transaction_cost ? 'open' : '']">▾</span>
+      </div>
+      <div v-show="costEnabled && expanded.transaction_cost" class="module-body">
+        <div class="module-desc">配置交易成本（佣金+滑点），回测中按换仓部分扣减收益。</div>
+
+        <div class="cost-grid">
+          <div class="sub-field">
+            <label class="sub-label">佣金费率</label>
+            <div class="slider-row">
+              <input
+                v-model.number="costCommissionRate"
+                type="number"
+                min="0"
+                max="0.01"
+                step="0.0001"
+                class="fp-input slider-value"
+              />
+              <span class="exposure-unit">{{ (costCommissionRate * 100).toFixed(2) }}%</span>
+            </div>
+          </div>
+          <div class="sub-field">
+            <label class="sub-label">滑点费率</label>
+            <div class="slider-row">
+              <input
+                v-model.number="costSlippageRate"
+                type="number"
+                min="0"
+                max="0.01"
+                step="0.0001"
+                class="fp-input slider-value"
+              />
+              <span class="exposure-unit">{{ (costSlippageRate * 100).toFixed(2) }}%</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="sub-field">
+          <label class="checkbox-label">
+            <input type="checkbox" v-model="costApplyToTurnover" />
+            仅对换仓部分收取成本（关闭则按全仓收取）
+          </label>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -518,21 +709,34 @@ const groupedFactors = computed(() => {
 
 // ── 模块展开状态 ──────────────────────────────────────────────────
 const expanded = reactive({
+  scope: false,
   score: true,
   timing: false,
   filter: false,
   rank: false,
   portfolio: false,
   risk: false,
+  rebalance: false,
+  benchmark: false,
+  transaction_cost: false,
 })
 
 function toggleModule(key: keyof typeof expanded): void {
   expanded[key] = !expanded[key]
 }
 
+// ── 资产范围 ──────────────────────────────────────────────────────
+const indexCodesInput = ref('')
+
+function initScope(): void {
+  const codes = props.modelValue.index_codes as string[] | undefined
+  indexCodesInput.value = codes && codes.length > 0 ? codes.join(', ') : ''
+}
+
 // ── 评分模块 ──────────────────────────────────────────────────────
 const scoreFactors = ref<FactorRowValue[]>([])
 const scoreMissingStrategy = ref('ignore')
+const scoreScoringMode = ref('absolute')
 
 function initScore(): void {
   const score = props.modelValue.score as Record<string, unknown> | undefined
@@ -545,6 +749,7 @@ function initScore(): void {
     transform: transforms[fid] || undefined,
   }))
   scoreMissingStrategy.value = (score.missing_factor_strategy as string) || 'ignore'
+  scoreScoringMode.value = (score.scoring_mode as string) || 'absolute'
 }
 
 function addScoreFactor(): void {
@@ -666,6 +871,7 @@ function initRank(): void {
 // ── 组合模块 ──────────────────────────────────────────────────────
 const portfolioEnabled = ref(false)
 const portfolioMethod = ref('equal_weight')
+const portfolioDefaultExposure = ref(50)
 const exposureOffensive = ref(80)
 const exposureNeutral = ref(50)
 const exposureDefensive = ref(20)
@@ -675,6 +881,7 @@ function initPortfolio(): void {
   if (!portfolio) { portfolioEnabled.value = false; return }
   portfolioEnabled.value = true
   portfolioMethod.value = (portfolio.method as string) || 'equal_weight'
+  portfolioDefaultExposure.value = Math.round(((portfolio.default_exposure as number) ?? 0.5) * 100)
   const te = (portfolio.timing_exposure ?? {}) as Record<string, number>
   exposureOffensive.value = Math.round((te.offensive ?? 0.8) * 100)
   exposureNeutral.value = Math.round((te.neutral ?? 0.5) * 100)
@@ -694,6 +901,49 @@ function initRisk(): void {
   riskMaxAssetWeight.value = Math.round(((risk.max_asset_weight as number) ?? 0.3) * 100)
   riskMaxPortfolioExposure.value = Math.round(((risk.max_portfolio_exposure as number) ?? 1.0) * 100)
   riskMinCashRatio.value = Math.round(((risk.min_cash_ratio as number) ?? 0) * 100)
+}
+
+// ── 调仓模块 ──────────────────────────────────────────────────────
+const rebalanceEnabled = ref(false)
+const rebalanceFrequency = ref('daily')
+const rebalanceDayOfWeek = ref<number | null>(null)
+const rebalanceDayOfMonth = ref<number | null>(null)
+
+function initRebalance(): void {
+  const rebalance = props.modelValue.rebalance as Record<string, unknown> | undefined
+  if (!rebalance) { rebalanceEnabled.value = false; return }
+  rebalanceEnabled.value = true
+  rebalanceFrequency.value = (rebalance.frequency as string) || 'daily'
+  rebalanceDayOfWeek.value = (rebalance.day_of_week as number) ?? null
+  rebalanceDayOfMonth.value = (rebalance.day_of_month as number) ?? null
+}
+
+// ── 基准对比模块 ──────────────────────────────────────────────────
+const benchmarkEnabled = ref(false)
+const benchmarkIndexCode = ref('000300')
+const benchmarkEqualWeight = ref(true)
+
+function initBenchmark(): void {
+  const benchmark = props.modelValue.benchmark as Record<string, unknown> | undefined
+  if (!benchmark) { benchmarkEnabled.value = false; return }
+  benchmarkEnabled.value = true
+  benchmarkIndexCode.value = (benchmark.index_code as string) || '000300'
+  benchmarkEqualWeight.value = (benchmark.enable_equal_weight as boolean) ?? true
+}
+
+// ── 交易成本模块 ──────────────────────────────────────────────────
+const costEnabled = ref(false)
+const costCommissionRate = ref(0.0003)
+const costSlippageRate = ref(0.001)
+const costApplyToTurnover = ref(true)
+
+function initCost(): void {
+  const cost = props.modelValue.transaction_cost as Record<string, unknown> | undefined
+  if (!cost) { costEnabled.value = false; return }
+  costEnabled.value = true
+  costCommissionRate.value = (cost.commission_rate as number) ?? 0.0003
+  costSlippageRate.value = (cost.slippage_rate as number) ?? 0.001
+  costApplyToTurnover.value = (cost.apply_to_turnover as boolean) ?? true
 }
 
 // ── 校验 ──────────────────────────────────────────────────────────
@@ -735,6 +985,15 @@ const errors = computed((): string[] => {
 function buildConfig(): Record<string, unknown> {
   const config: Record<string, unknown> = {}
 
+  // 资产范围
+  const codes = indexCodesInput.value
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+  if (codes.length > 0) {
+    config.index_codes = codes
+  }
+
   // 评分
   const factors: Record<string, number> = {}
   const transforms: Record<string, string> = {}
@@ -746,6 +1005,7 @@ function buildConfig(): Record<string, unknown> {
   const scoreConfig: Record<string, unknown> = { factors }
   if (Object.keys(transforms).length > 0) scoreConfig.transforms = transforms
   if (scoreMissingStrategy.value !== 'ignore') scoreConfig.missing_factor_strategy = scoreMissingStrategy.value
+  if (scoreScoringMode.value !== 'absolute') scoreConfig.scoring_mode = scoreScoringMode.value
   config.score = scoreConfig
 
   // 择时
@@ -799,6 +1059,7 @@ function buildConfig(): Record<string, unknown> {
       neutral: exposureNeutral.value / 100,
       defensive: exposureDefensive.value / 100,
     }
+    if (portfolioDefaultExposure.value !== 50) portfolio.default_exposure = portfolioDefaultExposure.value / 100
     config.portfolio = portfolio
   }
 
@@ -808,6 +1069,35 @@ function buildConfig(): Record<string, unknown> {
       max_asset_weight: riskMaxAssetWeight.value / 100,
       max_portfolio_exposure: riskMaxPortfolioExposure.value / 100,
       min_cash_ratio: riskMinCashRatio.value / 100,
+    }
+  }
+
+  // 调仓
+  if (rebalanceEnabled.value) {
+    const rebalance: Record<string, unknown> = { frequency: rebalanceFrequency.value }
+    if (rebalanceFrequency.value === 'weekly' && rebalanceDayOfWeek.value != null) {
+      rebalance.day_of_week = rebalanceDayOfWeek.value
+    }
+    if (rebalanceFrequency.value === 'monthly' && rebalanceDayOfMonth.value != null) {
+      rebalance.day_of_month = rebalanceDayOfMonth.value
+    }
+    config.rebalance = rebalance
+  }
+
+  // 基准对比
+  if (benchmarkEnabled.value) {
+    config.benchmark = {
+      index_code: benchmarkIndexCode.value,
+      enable_equal_weight: benchmarkEqualWeight.value,
+    }
+  }
+
+  // 交易成本
+  if (costEnabled.value) {
+    config.transaction_cost = {
+      commission_rate: costCommissionRate.value,
+      slippage_rate: costSlippageRate.value,
+      apply_to_turnover: costApplyToTurnover.value,
     }
   }
 
@@ -824,12 +1114,16 @@ function emitConfig(): void {
 // ── 监听所有表单变化，实时 emit ────────────────────────────────────
 watch(
   [
-    scoreFactors, scoreMissingStrategy,
+    indexCodesInput,
+    scoreFactors, scoreMissingStrategy, scoreScoringMode,
     timingEnabled, timingFactors, timingOffensive, timingDefensive,
     filterEnabled, filterLogic, filterRules,
     rankSortBy, rankOrder, rankTopN, rankBottomN,
-    portfolioEnabled, portfolioMethod, exposureOffensive, exposureNeutral, exposureDefensive,
+    portfolioEnabled, portfolioMethod, portfolioDefaultExposure, exposureOffensive, exposureNeutral, exposureDefensive,
     riskEnabled, riskMaxAssetWeight, riskMaxPortfolioExposure, riskMinCashRatio,
+    rebalanceEnabled, rebalanceFrequency, rebalanceDayOfWeek, rebalanceDayOfMonth,
+    benchmarkEnabled, benchmarkIndexCode, benchmarkEqualWeight,
+    costEnabled, costCommissionRate, costSlippageRate, costApplyToTurnover,
   ],
   () => emitConfig(),
   { deep: true },
@@ -837,24 +1131,32 @@ watch(
 
 // ── 初始化：从 modelValue 解析各模块 ──────────────────────────────
 onMounted(() => {
+  initScope()
   initScore()
   initTiming()
   initFilter()
   initRank()
   initPortfolio()
   initRisk()
+  initRebalance()
+  initBenchmark()
+  initCost()
 })
 
 // 外部 modelValue 变化时重新初始化（排除自身 emit 导致的循环更新）
 let selfUpdating = false
 watch(() => props.modelValue, () => {
   if (selfUpdating) return
+  initScope()
   initScore()
   initTiming()
   initFilter()
   initRank()
   initPortfolio()
   initRisk()
+  initRebalance()
+  initBenchmark()
+  initCost()
 }, { deep: true })
 </script>
 
@@ -1086,4 +1388,18 @@ watch(() => props.modelValue, () => {
   cursor: pointer;
 }
 .slider-value { width: 56px; text-align: center; }
+
+/* 复选框标签 */
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.checkbox-label input { accent-color: var(--accent); }
+
+/* 交易成本网格 */
+.cost-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 </style>

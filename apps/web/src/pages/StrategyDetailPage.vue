@@ -39,6 +39,21 @@
 
       <!-- 策略配置模块 -->
       <div class="config-grid">
+        <!-- 资产范围 -->
+        <div v-if="indexCodesList.length > 0" class="config-card">
+          <div class="config-header">资产范围</div>
+          <div class="config-body">
+            <div class="config-row">
+              <span class="config-key">指定指数</span>
+              <div class="factor-weights">
+                <span v-for="code in indexCodesList" :key="code" class="factor-tag">
+                  <span class="factor-name">{{ code }}</span>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- 评分模块 -->
         <div class="config-card">
           <div class="config-header">评分模块 (Score)</div>
@@ -65,6 +80,10 @@
               <div class="config-row">
                 <span class="config-key">缺失策略</span>
                 <span class="config-val">{{ scoreConfig.missing_factor_strategy || 'ignore' }}</span>
+              </div>
+              <div class="config-row">
+                <span class="config-key">评分模式</span>
+                <span class="config-val">{{ scoreConfig.scoring_mode || 'absolute' }}</span>
               </div>
             </div>
             <div v-else class="config-empty">未配置</div>
@@ -130,6 +149,10 @@
                 <span class="config-key">Top N</span>
                 <span class="config-val">{{ rankConfig.top_n }}</span>
               </div>
+              <div v-if="rankConfig.bottom_n" class="config-row">
+                <span class="config-key">Bottom N</span>
+                <span class="config-val">{{ rankConfig.bottom_n }}</span>
+              </div>
             </div>
             <div v-else class="config-empty">默认排名</div>
           </div>
@@ -152,6 +175,10 @@
                     <span class="factor-weight">{{ (exp * 100).toFixed(0) }}%</span>
                   </span>
                 </div>
+              </div>
+              <div v-if="portfolioConfig.default_exposure != null" class="config-row">
+                <span class="config-key">默认仓位</span>
+                <span class="config-val">{{ (portfolioConfig.default_exposure * 100).toFixed(0) }}%（无择时信号时）</span>
               </div>
             </div>
             <div v-else class="config-empty">未配置（信号模式）</div>
@@ -177,6 +204,68 @@
               </div>
             </div>
             <div v-else class="config-empty">未配置（无风控）</div>
+          </div>
+        </div>
+
+        <!-- 调仓模块 -->
+        <div class="config-card">
+          <div class="config-header">调仓模块 (Rebalance)</div>
+          <div class="config-body">
+            <div v-if="rebalanceConfig" class="config-section">
+              <div class="config-row">
+                <span class="config-key">频率</span>
+                <span class="config-val">{{ rebalanceConfig.frequency || 'daily' }}</span>
+              </div>
+              <div v-if="rebalanceConfig.day_of_week != null" class="config-row">
+                <span class="config-key">周调仓日</span>
+                <span class="config-val">周{{ ['一','二','三','四','五'][rebalanceConfig.day_of_week] }}</span>
+              </div>
+              <div v-if="rebalanceConfig.day_of_month != null" class="config-row">
+                <span class="config-key">月调仓日</span>
+                <span class="config-val">每月第 {{ rebalanceConfig.day_of_month }} 个交易日</span>
+              </div>
+            </div>
+            <div v-else class="config-empty">未配置（默认每日调仓）</div>
+          </div>
+        </div>
+
+        <!-- 基准对比模块 -->
+        <div class="config-card">
+          <div class="config-header">基准对比模块 (Benchmark)</div>
+          <div class="config-body">
+            <div v-if="benchmarkConfig" class="config-section">
+              <div class="config-row">
+                <span class="config-key">基准指数</span>
+                <span class="config-val">{{ benchmarkConfig.index_code || '000300' }}</span>
+              </div>
+              <div class="config-row">
+                <span class="config-key">等权组合基准</span>
+                <span class="config-val">{{ benchmarkConfig.enable_equal_weight !== false ? '已启用' : '未启用' }}</span>
+              </div>
+            </div>
+            <div v-else class="config-empty">未配置（不计算基准）</div>
+          </div>
+        </div>
+
+        <!-- 交易成本模块 -->
+        <div class="config-card">
+          <div class="config-header">交易成本模块 (Transaction Cost)</div>
+          <div class="config-body">
+            <div v-if="costConfig" class="config-section">
+              <div class="config-row">
+                <span class="config-key">佣金费率</span>
+                <span class="config-val">{{ ((costConfig.commission_rate ?? 0.0003) * 100).toFixed(2) }}%</span>
+              </div>
+              <div class="config-row">
+                <span class="config-key">滑点费率</span>
+                <span class="config-val">{{ ((costConfig.slippage_rate ?? 0.001) * 100).toFixed(2) }}%</span>
+              </div>
+              <div class="config-row">
+                <span class="config-key">收费方式</span>
+                <span class="config-val">{{ costConfig.apply_to_turnover !== false ? '仅换仓部分' : '全仓收取' }}</span>
+              </div>
+            </div>
+            <div v-else class="config-empty">未配置（不计成本）</div>
           </div>
         </div>
       </div>
@@ -328,6 +417,21 @@
             <textarea v-model="editForm.description" class="form-textarea" rows="2"></textarea>
           </div>
           <div class="form-group">
+            <label class="form-label">频率</label>
+            <select v-model="editForm.frequency" class="form-select">
+              <option value="daily">每日</option>
+              <option value="weekly">每周</option>
+              <option value="monthly">每月</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">资产范围</label>
+            <select v-model="editForm.asset_scope" class="form-select">
+              <option value="a_share_etf">A股 ETF</option>
+              <option value="index">指数</option>
+            </select>
+          </div>
+          <div class="form-group">
             <div class="config-header-row">
               <label class="form-label">策略配置</label>
               <button class="toggle-json-btn" @click="editAdvancedMode = !editAdvancedMode">
@@ -391,18 +495,22 @@ const expandedSignal = ref<string | null>(null)
 const showEdit = ref(false)
 const editJsonError = ref('')
 const editAdvancedMode = ref(false)
-const editForm = ref({ display_name: '', description: '' })
+const editForm = ref({ display_name: '', description: '', frequency: 'daily', asset_scope: 'a_share_etf' })
 const editConfigJson = ref<Record<string, unknown>>({})
 const editConfigText = ref('')
 
 /** 从 config_json 中提取各模块配置 */
 const configJson = computed(() => store.current?.config_json ?? {})
-const scoreConfig = computed(() => configJson.value.score as { factors?: Record<string, number>; transforms?: Record<string, string>; missing_factor_strategy?: string } | undefined)
+const indexCodesList = computed(() => (configJson.value.index_codes as string[]) || [])
+const scoreConfig = computed(() => configJson.value.score as { factors?: Record<string, number>; transforms?: Record<string, string>; missing_factor_strategy?: string; scoring_mode?: string } | undefined)
 const timingConfig = computed(() => configJson.value.timing as { factors?: Record<string, number>; transforms?: Record<string, string>; thresholds?: { offensive?: number; defensive?: number } } | undefined)
 const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string }> } | undefined)
-const rankConfig = computed(() => configJson.value.rank as { sort_by?: string; order?: string; top_n?: number } | undefined)
-const portfolioConfig = computed(() => configJson.value.portfolio as { method?: string; timing_exposure?: Record<string, number> } | undefined)
+const rankConfig = computed(() => configJson.value.rank as { sort_by?: string; order?: string; top_n?: number; bottom_n?: number } | undefined)
+const portfolioConfig = computed(() => configJson.value.portfolio as { method?: string; timing_exposure?: Record<string, number>; default_exposure?: number } | undefined)
 const riskConfig = computed(() => configJson.value.risk as { max_asset_weight?: number; max_portfolio_exposure?: number; min_cash_ratio?: number } | undefined)
+const rebalanceConfig = computed(() => configJson.value.rebalance as { frequency?: string; day_of_week?: number; day_of_month?: number } | undefined)
+const benchmarkConfig = computed(() => configJson.value.benchmark as { index_code?: string; enable_equal_weight?: boolean } | undefined)
+const costConfig = computed(() => configJson.value.transaction_cost as { commission_rate: number; slippage_rate: number; apply_to_turnover?: boolean } | undefined)
 
 /** 格式化 JSON 用于展示 */
 const formattedJson = computed(() => {
@@ -419,6 +527,8 @@ watch(showEdit, (val) => {
     editForm.value = {
       display_name: store.current.display_name,
       description: store.current.description,
+      frequency: store.current.frequency || 'daily',
+      asset_scope: store.current.asset_scope || 'a_share_etf',
     }
     editConfigJson.value = JSON.parse(JSON.stringify(store.current.config_json))
     editConfigText.value = JSON.stringify(store.current.config_json, null, 2)

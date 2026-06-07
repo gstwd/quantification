@@ -59,6 +59,13 @@
             <option value="monthly">每月</option>
           </select>
         </div>
+        <div class="form-group">
+          <label class="form-label">资产范围</label>
+          <select v-model="form.asset_scope" class="form-select">
+            <option value="a_share_etf">A股 ETF</option>
+            <option value="index">指数</option>
+          </select>
+        </div>
 
         <!-- 配置区域 -->
         <div class="form-group">
