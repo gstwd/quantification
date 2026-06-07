@@ -245,6 +245,9 @@ Services fully wired to PostgreSQL. 22 tables across 12 migrations (0001→0012)
 - **index_signal 表** (migration 0010): 与 `etf_signal` 结构对齐，但以 `index_code` 替代 `etf_code`，用于存储基于指数的策略信号。
 - **信号等级判定常量**: 定义在 `domain/common/constants.py`（`SIGNAL_THRESHOLD_HIGH=70`、`SIGNAL_THRESHOLD_MID=50`），引擎和回测服务统一引用，避免硬编码散落。
 - **`backtest_index_result.original_score`** (migration 0012): 配置模式下保留原始综合得分，避免被权重值覆盖，便于分析策略评分与仓位的对应关系。
+- **FilterRule.compare_to**: 过滤器支持跨因子比较（如 `ma_5d > ma_20d`）。`compare_to` 与 `value` 二选一，不能同时设置。`between` 操作符不支持 `compare_to`。
+- **FactorProvider.collect_required_factor_ids() 必须收集 compare_to**: 遍历 filter rules 时不仅要收集 `rule.factor`，还要收集 `rule.compare_to`（若存在）。遗漏会导致被比较的因子值未加载，filter 始终失败 → 空仓。
+- **FilterRuleValue 前端接口**: 定义在 `StrategyConfigForm.vue`（非共享 types 文件）。修改 FilterRule schema 时需同步更新：接口定义、表单模板、`initFilter()`、`buildConfig()`、校验逻辑，以及 `StrategyDetailPage.vue` 的只读展示。
 
 ## Coding Standards
 
