@@ -207,7 +207,7 @@ class StrategyConfigService:
 
         # 组合配置校验
         if config.portfolio:
-            valid_methods = {"equal_weight", "score_weight"}
+            valid_methods = {"equal_weight", "score_weight", "winner_take_all"}
             if config.portfolio.method not in valid_methods:
                 errors.append(f"权重分配方法 '{config.portfolio.method}' 不合法，可用: {valid_methods}")
 
