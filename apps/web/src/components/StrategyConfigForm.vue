@@ -175,6 +175,7 @@
             <option value="between">区间 (between)</option>
           </select>
 
+          <!-- between 模式：双值输入 -->
           <template v-if="rule.op === 'between'">
             <input
               :value="Array.isArray(rule.value) ? rule.value[0] : ''"
@@ -194,15 +195,42 @@
               @input="updateBetweenValue(i, 1, ($event.target as HTMLInputElement).value)"
             />
           </template>
+
+          <!-- 非 between 模式：支持固定值 / 跨因子比较 -->
           <template v-else>
-            <input
-              :value="typeof rule.value === 'number' ? rule.value : ''"
-              type="number"
-              step="any"
-              class="fp-input fr-value"
-              placeholder="值"
-              @input="updateFilterRule(i, 'value', parseFloat(($event.target as HTMLInputElement).value) || 0)"
-            />
+            <select
+              :value="rule.compare_to ? 'compare' : 'value'"
+              class="fp-select fr-mode"
+              @change="onFilterModeChange(i, ($event.target as HTMLSelectElement).value)"
+            >
+              <option value="value">固定值</option>
+              <option value="compare">因子比较</option>
+            </select>
+
+            <template v-if="rule.compare_to">
+              <select
+                :value="rule.compare_to"
+                class="fp-select fr-factor"
+                @change="updateFilterRule(i, 'compare_to', ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="" disabled>选择比较因子</option>
+                <optgroup v-for="group in groupedFactors" :key="group.category" :label="group.category || '其他'">
+                  <option v-for="f in group.items" :key="f.factor_id" :value="f.factor_id">
+                    {{ f.factor_id }}
+                  </option>
+                </optgroup>
+              </select>
+            </template>
+            <template v-else>
+              <input
+                :value="typeof rule.value === 'number' ? rule.value : ''"
+                type="number"
+                step="any"
+                class="fp-input fr-value"
+                placeholder="值"
+                @input="updateFilterRule(i, 'value', parseFloat(($event.target as HTMLInputElement).value) || 0)"
+              />
+            </template>
           </template>
 
           <button class="fp-remove" @click="removeFilterRule(i)" title="移除">×</button>
@@ -453,6 +481,7 @@ interface FilterRuleValue {
   factor: string
   op: string
   value: number | number[]
+  compare_to?: string
 }
 
 const props = defineProps<{
@@ -582,11 +611,12 @@ function initFilter(): void {
     factor: r.factor as string || '',
     op: r.op as string || 'gt',
     value: r.value as number | number[],
+    compare_to: r.compare_to as string | undefined,
   }))
 }
 
 function addFilterRule(): void {
-  filterRules.value.push({ factor: '', op: 'gt', value: 0 })
+  filterRules.value.push({ factor: '', op: 'gt', value: 0, compare_to: undefined })
 }
 
 function updateFilterRule(i: number, key: string, value: unknown): void {
@@ -599,6 +629,17 @@ function updateBetweenValue(i: number, index: number, raw: string): void {
   const arr = Array.isArray(rule.value) ? [...rule.value] : [0, 0]
   arr[index] = raw === '' ? 0 : parseFloat(raw)
   rule.value = arr
+  emitConfig()
+}
+
+function onFilterModeChange(i: number, mode: string): void {
+  const rule = filterRules.value[i]
+  if (mode === 'compare') {
+    rule.compare_to = ''
+    rule.value = 0  // 清空固定值
+  } else {
+    rule.compare_to = undefined
+  }
   emitConfig()
 }
 
@@ -682,6 +723,9 @@ const errors = computed((): string[] => {
       if (!rule.factor) {
         errs.push(`过滤模块：规则 ${i + 1} 未选择因子`)
       }
+      if (rule.compare_to !== undefined && rule.compare_to === '') {
+        errs.push(`过滤模块：规则 ${i + 1} 已切换为因子比较模式，但未选择比较因子`)
+      }
     }
   }
   return errs
@@ -726,11 +770,15 @@ function buildConfig(): Record<string, unknown> {
   if (filterEnabled.value && filterRules.value.length > 0) {
     config.filters = {
       logic: filterLogic.value,
-      rules: filterRules.value.filter(r => r.factor).map(r => ({
-        factor: r.factor,
-        op: r.op,
-        value: r.value,
-      })),
+      rules: filterRules.value.filter(r => r.factor).map(r => {
+        const rule: Record<string, unknown> = { factor: r.factor, op: r.op }
+        if (r.compare_to) {
+          rule.compare_to = r.compare_to
+        } else {
+          rule.value = r.value
+        }
+        return rule
+      }),
     }
   }
 
@@ -1000,6 +1048,7 @@ watch(() => props.modelValue, () => {
 }
 .fr-factor { flex: 1.5; }
 .fr-op { flex: 1; }
+.fr-mode { flex: 0.8; }
 .fr-value { width: 90px; }
 .fr-sep { color: var(--text-muted); font-size: 12px; }
 

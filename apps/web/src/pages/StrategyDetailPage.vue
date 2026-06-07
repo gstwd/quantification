@@ -107,7 +107,10 @@
               </div>
               <div v-for="(rule, i) in filterConfig.rules" :key="i" class="config-row">
                 <span class="config-key">规则 {{ i + 1 }}</span>
-                <span class="config-val mono">{{ rule.factor }} {{ rule.op }} {{ rule.value }}</span>
+                <span class="config-val mono">
+                  {{ rule.factor }} {{ rule.op }}
+                  {{ rule.compare_to ? rule.compare_to : rule.value }}
+                </span>
               </div>
             </div>
             <div v-else class="config-empty">未配置（无过滤）</div>
@@ -396,7 +399,7 @@ const editConfigText = ref('')
 const configJson = computed(() => store.current?.config_json ?? {})
 const scoreConfig = computed(() => configJson.value.score as { factors?: Record<string, number>; transforms?: Record<string, string>; missing_factor_strategy?: string } | undefined)
 const timingConfig = computed(() => configJson.value.timing as { factors?: Record<string, number>; transforms?: Record<string, string>; thresholds?: { offensive?: number; defensive?: number } } | undefined)
-const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value: number | number[] }> } | undefined)
+const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string }> } | undefined)
 const rankConfig = computed(() => configJson.value.rank as { sort_by?: string; order?: string; top_n?: number } | undefined)
 const portfolioConfig = computed(() => configJson.value.portfolio as { method?: string; timing_exposure?: Record<string, number> } | undefined)
 const riskConfig = computed(() => configJson.value.risk as { max_asset_weight?: number; max_portfolio_exposure?: number; min_cash_ratio?: number } | undefined)
