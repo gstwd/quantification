@@ -180,3 +180,88 @@ class TestDefaultFilterEngine:
 
         assert "A" in result
         assert "B" not in result
+
+    def test_cross_factor_gt(self) -> None:
+        """跨因子比较：MA5 > MA20 金叉判定。"""
+        engine = DefaultFilterEngine()
+        config = FilterConfig(
+            logic="AND",
+            rules=[FilterRule(factor="ma_5d", op="gt", compare_to="ma_20d")],
+        )
+        assets = {"A": 80.0, "B": 60.0, "C": 40.0}
+        context = _make_context(
+            asset_factors={
+                ("A", "ma_5d"): 5100.0, ("A", "ma_20d"): 5050.0,  # 金叉
+                ("B", "ma_5d"): 5000.0, ("B", "ma_20d"): 5050.0,  # 死叉
+                ("C", "ma_5d"): 5000.0, ("C", "ma_20d"): 5000.0,  # 相等，不满足 gt
+            },
+        )
+
+        result = engine.filter(config, assets, context)
+
+        assert "A" in result
+        assert "B" not in result
+        assert "C" not in result
+
+    def test_cross_factor_missing_value(self) -> None:
+        """跨因子比较：compare_to 因子值缺失时被过滤掉。"""
+        engine = DefaultFilterEngine()
+        config = FilterConfig(
+            logic="AND",
+            rules=[FilterRule(factor="ma_5d", op="gt", compare_to="ma_20d")],
+        )
+        assets = {"A": 80.0, "B": 60.0}
+        context = _make_context(
+            asset_factors={
+                ("A", "ma_5d"): 5100.0, ("A", "ma_20d"): 5050.0,  # 正常
+                ("B", "ma_5d"): 5100.0,  # B 缺少 ma_20d
+            },
+        )
+
+        result = engine.filter(config, assets, context)
+
+        assert "A" in result
+        assert "B" not in result
+
+    def test_cross_factor_with_and_logic(self) -> None:
+        """跨因子比较 + 固定阈值 AND 组合。"""
+        engine = DefaultFilterEngine()
+        config = FilterConfig(
+            logic="AND",
+            rules=[
+                FilterRule(factor="ma_5d", op="gt", compare_to="ma_20d"),  # 金叉
+                FilterRule(factor="volume_ratio_20d", op="gte", value=0.8),  # 量比正常
+            ],
+        )
+        assets = {"A": 80.0, "B": 60.0}
+        context = _make_context(
+            asset_factors={
+                ("A", "ma_5d"): 5100.0, ("A", "ma_20d"): 5050.0, ("A", "volume_ratio_20d"): 1.2,  # 两个都满足
+                ("B", "ma_5d"): 5100.0, ("B", "ma_20d"): 5050.0, ("B", "volume_ratio_20d"): 0.5,  # 量比不满足
+            },
+        )
+
+        result = engine.filter(config, assets, context)
+
+        assert "A" in result
+        assert "B" not in result
+
+    def test_cross_factor_neq(self) -> None:
+        """跨因子比较：neq 操作符排除相等资产。"""
+        engine = DefaultFilterEngine()
+        config = FilterConfig(
+            logic="AND",
+            rules=[FilterRule(factor="return_5d", op="neq", compare_to="return_20d")],
+        )
+        assets = {"A": 80.0, "B": 60.0}
+        context = _make_context(
+            asset_factors={
+                ("A", "return_5d"): 3.5, ("A", "return_20d"): 8.2,  # 不相等，通过
+                ("B", "return_5d"): 5.0, ("B", "return_20d"): 5.0,  # 相等，不满足 neq
+            },
+        )
+
+        result = engine.filter(config, assets, context)
+
+        assert "A" in result
+        assert "B" not in result

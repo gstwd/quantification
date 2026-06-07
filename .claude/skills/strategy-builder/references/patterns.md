@@ -96,7 +96,7 @@
 }
 ```
 
-**注意**：需要用 `close_price > ma_60d` 判断均线位置，但 filter 只能检查因子原始值，不能算差值。解决方案是：在 conditions 里用 `close_price` 和 `ma_60d` 做 `between` 判断，或改用 `trend_score` 相关的择时信号。
+**注意**：使用跨因子比较 `compare_to` 字段实现价格与均线的关系判断，详见 [模式六](#模式六双均线交叉趋势跟踪)。
 
 ## 模式四：择时 + 仓位控制
 
@@ -149,6 +149,62 @@
 ```
 
 输出结果中 `positions` 为空，`rankings` 正常填充。
+
+## 模式六：双均线交叉趋势跟踪
+
+**特征**：短期均线上穿长期均线（金叉）时持有，下穿（死叉）时空仓。使用跨因子比较 `compare_to` 字段。
+
+**关键配置**：
+- `compare_to` 实现因子 vs 因子比较（如 `ma_5d > ma_20d`）
+- `scoring_mode: "rank"` 跨资产比较
+
+**模板**（单资产双均线）：
+```json
+{
+  "index_codes": ["000300"],
+  "score": {
+    "factors": {"return_20d": 1.0},
+    "scoring_mode": "rank"
+  },
+  "filters": {
+    "logic": "AND",
+    "rules": [
+      {"factor": "ma_5d", "op": "gt", "compare_to": "ma_20d"}
+    ]
+  },
+  "rank": {"sort_by": "score", "order": "desc", "top_n": 1},
+  "portfolio": {"method": "winner_take_all", "default_exposure": 1.0}
+}
+```
+
+管线行为：Score(排名) → Filter(仅保留金叉资产) → Rank(取第一) → Portfolio(满仓)
+
+**模板**（多资产双均线轮动）：
+```json
+{
+  "index_codes": ["000300", "000905"],
+  "score": {
+    "factors": {"return_20d": 1.0},
+    "scoring_mode": "rank"
+  },
+  "filters": {
+    "logic": "AND",
+    "rules": [
+      {"factor": "ma_5d", "op": "gt", "compare_to": "ma_20d"},
+      {"factor": "return_20d", "op": "gte", "value": 0}
+    ]
+  },
+  "rank": {"sort_by": "score", "order": "desc", "top_n": 1},
+  "portfolio": {"method": "winner_take_all", "default_exposure": 1.0}
+}
+```
+
+**变体**：
+- 不同周期均线：替换 `ma_5d`/`ma_20d` 为 `ma_10d`/`ma_60d` 等
+- 价格与均线：`{"factor": "close_price", "op": "gt", "compare_to": "ma_20d"}`
+- 通道突破：`{"factor": "close_price", "op": "gt", "compare_to": "donchian_20d_high"}`
+
+**注意**：跨因子比较的两个因子应属于同一维度（价格/百分比），跨维度比较（如 `ma_5d > volume_ratio_20d`）无实际意义。
 
 ## 反模式与常见错误
 

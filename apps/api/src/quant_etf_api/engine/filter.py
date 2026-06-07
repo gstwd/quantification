@@ -63,7 +63,7 @@ def _check_rule(value: float | None, op: str, threshold: float | list[float]) ->
     Returns:
         是否满足规则，无数据时返回 False。
     """
-    if value is None:
+    if value is None or threshold is None:
         return False
     if op == "between":
         if isinstance(threshold, list) and len(threshold) == 2:
@@ -102,10 +102,22 @@ class DefaultFilterEngine:
     def _evaluate_asset(
         self, code: str, config: FilterConfig, context: EngineContext, use_and: bool
     ) -> bool:
-        """评估单个资产是否通过所有过滤规则。"""
+        """评估单个资产是否通过所有过滤规则。
+
+        支持两种比较模式：
+        - 因子 vs 固定阈值：使用 rule.value。
+        - 因子 vs 因子（跨因子比较）：使用 rule.compare_to 引用另一个因子的值。
+        """
         for rule in config.rules:
             factor_value = context.asset_factors.get((code, rule.factor))
-            rule_passed = _check_rule(factor_value, rule.op, rule.value)
+
+            if rule.compare_to is not None:
+                # 跨因子比较模式
+                compare_value = context.asset_factors.get((code, rule.compare_to))
+                rule_passed = _check_rule(factor_value, rule.op, compare_value)
+            else:
+                # 固定阈值模式（原有逻辑）
+                rule_passed = _check_rule(factor_value, rule.op, rule.value)
 
             if use_and and not rule_passed:
                 return False

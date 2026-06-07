@@ -47,7 +47,27 @@
 |------|------|------|------|
 | `factor` | str | **是** | 因子 ID |
 | `op` | str | **是** | 操作符: `gt`/`lt`/`gte`/`lte`/`eq`/`neq`/`between` |
-| `value` | float 或 [float,float] | **是** | 阈值，`between` 时传 `[min,max]` |
+| `value` | float 或 [float,float] | 条件* | 阈值，`between` 时传 `[min,max]`。与 `compare_to` 二选一 |
+| `compare_to` | str | 条件* | 被比较因子 ID，用于跨因子比较（如 `ma_5d > ma_20d`）。与 `value` 二选一 |
+
+> *`value` 和 `compare_to` 必须恰好提供一个，不能同时设置也不能同时为空。
+
+#### 跨因子比较
+
+`compare_to` 字段允许将同一资产的两个因子值直接比较，无需固定阈值：
+
+```json
+// 金叉：短均线 > 长均线
+{"factor": "ma_5d", "op": "gt", "compare_to": "ma_20d"}
+
+// 价格在均线之上
+{"factor": "close_price", "op": "gt", "compare_to": "ma_60d"}
+```
+
+**注意事项**：
+- `between` 操作符不支持跨因子比较
+- 比较的两个因子应属于同一维度（如同为价格类、同为百分比类），否则结果无意义
+- 任一因子值为 None 时规则自动失败
 
 ### 过滤器行为注意
 

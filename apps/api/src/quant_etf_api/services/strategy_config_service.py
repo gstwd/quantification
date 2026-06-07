@@ -198,8 +198,19 @@ class StrategyConfigService:
             for rule in config.filters.rules:
                 if rule.op not in valid_ops:
                     errors.append(f"过滤规则操作符 '{rule.op}' 不合法，可用: {valid_ops}")
-                if rule.op == "between" and not isinstance(rule.value, list):
-                    errors.append("between 操作符需要 list 类型的 value")
+                # 跨因子比较校验：compare_to 与 value 二选一
+                has_value = rule.value is not None
+                has_compare = bool(rule.compare_to)
+                if has_value and has_compare:
+                    errors.append("过滤规则不能同时设置 value 和 compare_to，只能二选一")
+                if not has_value and not has_compare:
+                    errors.append("过滤规则必须设置 value 或 compare_to 其中之一")
+                if has_compare:
+                    if rule.op == "between":
+                        errors.append("between 操作符不支持跨因子比较（compare_to）")
+                else:
+                    if rule.op == "between" and not isinstance(rule.value, list):
+                        errors.append("between 操作符需要 list 类型的 value")
 
         # 排名配置校验
         if config.rank.top_n is not None and config.rank.bottom_n is not None:

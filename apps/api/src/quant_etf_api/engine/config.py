@@ -56,15 +56,22 @@ class ScoreConfig(BaseModel):
 class FilterRule(BaseModel):
     """单条过滤规则。
 
+    支持两种比较模式：
+    - 因子 vs 固定值：设置 value 字段。
+    - 因子 vs 因子：设置 compare_to 字段引用另一个因子 ID。
+    value 和 compare_to 必须恰好提供一个。
+
     Attributes:
         factor: 因子标识。
         op: 比较操作符：gt / lt / gte / lte / eq / neq / between。
-        value: 比较值，between 时为 [min, max]。
+        value: 比较值（固定阈值），between 时为 [min, max]。与 compare_to 二选一。
+        compare_to: 被比较的因子 ID，用于跨因子比较（如 ma_5d > ma_20d）。与 value 二选一。
     """
 
     factor: str
     op: str
-    value: float | list[float]
+    value: float | list[float] | None = None
+    compare_to: str | None = None
 
 
 class FilterConfig(BaseModel):
