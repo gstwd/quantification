@@ -35,12 +35,7 @@ npm install
 npm run dev                      # dev server at http://localhost:5173
 npm run build
 npm run lint
-```
-
-```bash
-# ruff (inside .venv)
-.venv/Scripts/ruff.exe check .
-.venv/Scripts/ruff.exe format .
+npx vue-tsc --noEmit            # TypeScript type check
 ```
 
 ### Database migrations
@@ -101,7 +96,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - **`api/routers/`** — 10 route groups: `health`, `system`, `etfs`, `indexes`, `market_data`, `strategies`, `signals`, `factors`, `runs`, `backtests`
 - **`api/middleware.py`** — `RequestIdMiddleware`：为每个请求注入唯一 request_id，写入响应头和日志 ContextVar
 - **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. New services: `metrics.py`（专业绩效指标，含 VaR/CVaR/连续亏损天数）、`benchmark.py`（基准收益计算）、`index_service.py`、`universe_service.py`、`data_quality.py`（日线/估值异常检测 + 连续性缺口检测）.
-- **`engine/`** — **策略引擎核心**：组件化、配置驱动的策略执行管线（12 个文件）：
+- **`engine/`** — **策略引擎核心**：组件化、配置驱动的策略执行管线（11 个文件）：
   - `config.py` — Pydantic 配置模型（含 `TimingConfig`、`ScoreConfig`、`FilterConfig`、`RankConfig`、`PortfolioConfig`、`RiskConfig`、`RebalanceConfig`、`BenchmarkConfig`、`TransactionCostConfig`）
   - `base.py` — `EngineContext`、`EngineResult` 数据结构
   - `score.py` — `ScoreCalculator` Protocol + `DefaultScoreCalculator`（含 `_TRANSFORM_REGISTRY`）
@@ -198,7 +193,7 @@ Key migrations:
 
 ## Current State
 
-Services fully wired to PostgreSQL. 22 tables across 12 migrations (0001→0012). Each data type has exactly **one** source: ETF K-line→Sina, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh. Startup health check triggers `startup_fill` to backfill data gaps.
+Services fully wired to PostgreSQL. 23 tables across 13 migrations (0001→0013). Each data type has exactly **one** source: ETF K-line→Sina, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh. Startup health check triggers `startup_fill` to backfill data gaps.
 
 **Strategy Engine**: `engine/` 包实现组件化策略执行管线。策略通过 `strategy_config` 表的 JSON 配置驱动，`StrategyConfigService` 管理 CRUD，`StrategyEngine` 执行管线。`FactorProvider` 桥接因子层与引擎层，`ContextBuilder` 统一构建实时和回测上下文。`BacktestService` 和 `StrategyExecutionService` 统一使用引擎执行。
 
@@ -264,5 +259,9 @@ Key rules (details in the doc):
 - **BenchmarkIndexModel.is_active**: `ContextBuilder._build_live()` 和 `BacktestService._resolve_index_universe()` 只查询 `is_active=True` 的指数。新增指数默认 `is_active=True`。
 - **TradingCalendar 缓存**: 首次调用时从 AkShare 加载（`tool_trade_date_hist_sina()`），TTL=1 天。`ingest_service.run_daily_ingest` 和 `check_data_freshness` 已接入，不再用 `weekday()>=5`。
 - **rebalance.py 交易日历对齐**: `DefaultRebalanceScheduler` 接受 `TradingCalendar` 实例，周度/月度调仓如遇非交易日自动顺延至下一交易日。
-- **StrategyConfig.index_codes**: 非空时 `ContextBuilder._filter_by_scope()` 仅保留指定指数，用于二八轮动等需限定标的的场景（实时和回测模式均生效）。
+- **StrategyConfig.index_codes**: 存储在 `config_json` 内部（非独立 DB 列），通过 `**row.config_json` 展开到 engine 的 `StrategyConfig` 模型。前端 API 请求中 `index_codes` 应在 `config_json` 内传递，非顶层字段。非空时 `_filter_by_scope()` 仅保留指定指数（实时和回测模式均生效）。
+- **index_codes 回测强制应用**: `BacktestService.create_backtest()` 检查策略的 `config.index_codes`，非空时强制覆盖 `universe_filter` 为 subset 模式；`ContextBuilder._build_backtest()` 对传入的 index_codes 做交集过滤（双重保护）。
+- **`asset_scope` 几乎无实际过滤效果**: 目前 `"a_share_etf"` 返回全量活跃指数。真正的指数范围限定由 `config_json.index_codes` 完成，`asset_scope` 是预留扩展点。
+- **StrategyConfigForm 与 engine/config.py 的 StrategyConfig 同步**: 引擎新增配置模块时，需同步更新 `StrategyConfigForm.vue`（表单）、`StrategyDetailPage.vue`（详情展示）。目前已覆盖全部 9 个模块（score/timing/filters/rank/portfolio/risk/rebalance/benchmark/transaction_cost）+ 资产范围 index_codes。
+- **前端获取策略 index_codes 需 `fetchStrategyDetail()`**: 列表 API 的 `StrategySummary` 不含 `config_json`。需要 `index_codes` 时（如回测创建页锁定标的范围），必须额外调用 `GET /strategies/{id}` 获取详情。
 - **index_daily_bar OHLC 字段**: `IndexDailyBarModel` 有 `open_price`、`high_price`、`low_price`、`close_price` 字段，技术指标因子（ATR/Donchian）通过 `ctx.index_bars` 直接访问。
