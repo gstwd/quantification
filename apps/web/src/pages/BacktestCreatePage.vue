@@ -31,22 +31,38 @@
 
       <div class="form-section">
         <label class="form-label">标的范围</label>
+
+        <!-- 策略限定指数范围提示 -->
+        <div v-if="isUniverseLocked" class="scope-notice">
+          <span class="scope-icon">🔒</span>
+          <span>此策略专为以下指数设计，标的范围已锁定：</span>
+          <span class="scope-codes">{{ strategyIndexCodes.join(', ') }}</span>
+        </div>
+
+        <div v-if="loadingStrategy" class="scope-loading">加载策略配置中...</div>
+
         <div class="radio-group">
-          <label class="radio-label">
-            <input v-model="form.universe_mode" type="radio" value="all" />
+          <label class="radio-label" :class="{ disabled: isUniverseLocked }">
+            <input v-model="form.universe_mode" type="radio" value="all" :disabled="isUniverseLocked" />
             全部指数
           </label>
           <label class="radio-label">
-            <input v-model="form.universe_mode" type="radio" value="subset" />
+            <input v-model="form.universe_mode" type="radio" value="subset" :disabled="isUniverseLocked" />
             指定指数子集
           </label>
         </div>
         <div v-if="form.universe_mode === 'subset'" class="etf-checkboxes">
-          <label v-for="idx in indexes" :key="idx.index_code" class="checkbox-label">
+          <label
+            v-for="idx in indexes"
+            :key="idx.index_code"
+            class="checkbox-label"
+            :class="{ disabled: isUniverseLocked }"
+          >
             <input
               type="checkbox"
               :value="idx.index_code"
               :checked="form.index_codes.includes(idx.index_code)"
+              :disabled="isUniverseLocked"
               @change="toggleIndex(idx.index_code)"
             />
             {{ idx.index_code }} {{ idx.index_name }}
@@ -119,10 +135,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 
 import { fetchBenchmarkIndexes } from '../api/market_data'
+import { fetchStrategyDetail } from '../api/strategies'
 import { useBacktestStore } from '../stores/backtests'
 import { useStrategyStore } from '../stores/strategies'
 import type { BenchmarkIndex } from '../types/api'
@@ -155,6 +172,13 @@ const form = reactive({
 const submitting = ref(false)
 const error = ref('')
 
+/** 当前选中策略的 index_codes 限定（来自 config_json）。非空时表示策略有标的范围限定。 */
+const strategyIndexCodes = ref<string[]>([])
+/** 正在加载策略详情 */
+const loadingStrategy = ref(false)
+/** 策略是否限定了标的范围 */
+const isUniverseLocked = computed(() => strategyIndexCodes.value.length > 0)
+
 const isValid = computed(() =>
   form.strategy_id !== '' &&
   form.start_date !== '' &&
@@ -164,10 +188,37 @@ const isValid = computed(() =>
 )
 
 function toggleIndex(code: string) {
+  if (isUniverseLocked.value) return
   const idx = form.index_codes.indexOf(code)
   if (idx === -1) form.index_codes.push(code)
   else form.index_codes.splice(idx, 1)
 }
+
+/** 监听策略选择，获取策略的 index_codes 限定 */
+watch(
+  () => form.strategy_id,
+  async (strategyId) => {
+    strategyIndexCodes.value = []
+    if (!strategyId) return
+
+    loadingStrategy.value = true
+    try {
+      const detail = await fetchStrategyDetail(strategyId)
+      const codes = (detail.config_json as Record<string, unknown>)?.index_codes as string[] | undefined
+      if (codes && codes.length > 0) {
+        strategyIndexCodes.value = codes
+        // 强制设为子集模式，使用策略限定的指数
+        form.universe_mode = 'subset'
+        form.index_codes = [...codes]
+      }
+    } catch {
+      strategyIndexCodes.value = []
+    } finally {
+      loadingStrategy.value = false
+    }
+  },
+  { immediate: true },
+)
 
 async function submit() {
   error.value = ''
@@ -269,6 +320,26 @@ onMounted(async () => {
   cursor: pointer;
 }
 .checkbox-label input { accent-color: var(--accent); }
+
+/* 策略标的范围锁定提示 */
+.scope-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: rgba(59,130,246,0.08);
+  border: 1px solid rgba(59,130,246,0.25);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+.scope-icon { font-size: 14px; }
+.scope-codes { font-weight: 600; color: var(--accent); }
+.scope-loading { font-size: 12px; color: var(--text-muted); padding: 4px 0; }
+
+/* 禁用态 */
+.radio-label.disabled, .checkbox-label.disabled { opacity: 0.5; cursor: not-allowed; }
 
 .error-msg {
   padding: 10px 14px;

@@ -79,15 +79,32 @@ class BacktestService:
         self._context_builder = ContextBuilder(db, factor_provider=self._factor_provider)
 
     def create_backtest(self, req: BacktestCreateRequest) -> BacktestSummary:
-        """创建回测记录，状态为 pending，立即返回。"""
+        """创建回测记录，状态为 pending，立即返回。
+
+        如果策略配置了 index_codes（非空），则强制将回测标的范围限定为这些指数，
+        忽略请求中的 universe_mode 和 index_codes。空 index_codes 表示全指数通用策略。
+        """
         backtest_id = str(uuid4())
         now = datetime.now(timezone.utc)
 
-        universe_filter = (
-            {"mode": "all"}
-            if req.universe_mode == "all"
-            else {"mode": "subset", "index_codes": req.index_codes}
-        )
+        # 加载策略配置，检查是否有 index_codes 限定
+        config_svc = StrategyConfigService(self._db)
+        strategy_config = config_svc.get_parsed_config(req.strategy_id)
+        strategy_index_codes = strategy_config.index_codes if strategy_config else []
+
+        if strategy_index_codes:
+            # 策略有指数范围限定，强制使用策略的 index_codes
+            universe_filter = {"mode": "subset", "index_codes": strategy_index_codes}
+            logger.info(
+                "回测 %s：策略 %s 限定指数范围 %s，强制应用",
+                backtest_id, req.strategy_id, strategy_index_codes,
+            )
+        else:
+            universe_filter = (
+                {"mode": "all"}
+                if req.universe_mode == "all"
+                else {"mode": "subset", "index_codes": req.index_codes}
+            )
 
         params = dict(req.params) if req.params else {}
         # 保存基准配置到 params，供执行时读取

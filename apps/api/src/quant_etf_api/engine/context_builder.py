@@ -197,8 +197,17 @@ class ContextBuilder:
         all_valuation: dict[tuple[str, date], Any] | None,
         precomputed_factors: dict[tuple[str, str], float | None] | None,
     ) -> EngineContext:
-        """回测模式：使用预加载数据构建上下文。"""
+        """回测模式：使用预加载数据构建上下文。
+
+        如果策略的 index_codes 非空，对传入的 codes 做交集过滤，
+        确保回测标的范围不超出策略设计范围。
+        """
         codes = index_codes or []
+
+        # 策略 index_codes 过滤：取回测标的与策略限定标的的交集
+        if config.index_codes:
+            strategy_codes = set(config.index_codes)
+            codes = [c for c in codes if c in strategy_codes]
 
         universe = [
             {"etf_code": code, "name_cn": code, "category": "broad_index"}
