@@ -1109,6 +1109,230 @@ class IngestService:
                 logger.warning("更新失败状态时出错", exc_info=True)
                 self._db.rollback()
 
+    # ==================================================================
+    # 按类型拆分的数据刷新（后台线程入口）
+    # ==================================================================
+
+    def refresh_etf_data(self, run_id: str) -> None:
+        """刷新所有活跃 ETF 的日线和份额数据（后台线程入口）。
+
+        仅处理 ETF 相关数据，不涉及指数和宏观。
+
+        Args:
+            run_id: 运行记录 ID。
+        """
+        start_time = datetime.now(timezone.utc)
+        try:
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is None:
+                logger.error("refresh_etf_data: run_id %s 不存在", run_id)
+                return
+
+            run.status = "running"
+            run.started_at = start_time
+            self._db.commit()
+
+            etfs = self._universe_repo.find_all_active()
+            etf_success = 0
+            etf_failed = 0
+            etf_skipped = 0
+            today = date.today()
+
+            if etfs:
+                for etf in etfs:
+                    etf_code = etf.etf_code
+                    item_status = "success"
+                    item_message = ""
+
+                    try:
+                        latest_bar_date = self._fetch_and_upsert_bars_incremental(etf_code)
+                        if not latest_bar_date:
+                            item_status = "skipped"
+                            item_message = "未获取到 K 线数据"
+                            etf_skipped += 1
+                        elif latest_bar_date == str(today):
+                            try:
+                                self._fetch_and_upsert_shares(etf_code, today)
+                            except Exception:
+                                item_message = "份额数据拉取失败"
+                            etf_success += 1
+                        else:
+                            item_status = "skipped"
+                            item_message = f"非交易日，最新行情日期为 {latest_bar_date}"
+                            etf_skipped += 1
+                    except Exception as e:
+                        item_status = "failed"
+                        item_message = str(e)[:500]
+                        etf_failed += 1
+                        self._db.rollback()
+                        logger.warning("ETF %s 数据摄取失败: %s", etf_code, e)
+
+                    try:
+                        item = ResearchRunItemModel(
+                            run_id=run_id,
+                            etf_code=etf_code,
+                            status=item_status,
+                            message=item_message or None,
+                        )
+                        self._db.add(item)
+                        self._db.commit()
+                    except Exception:
+                        self._db.rollback()
+                        logger.warning("写入 ResearchRunItem 失败: %s", etf_code, exc_info=True)
+
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is None:
+                return
+            run.status = "success"
+            run.finished_at = datetime.now(timezone.utc)
+            run.metrics = {
+                "total": len(etfs),
+                "success": etf_success,
+                "failed": etf_failed,
+                "skipped": etf_skipped,
+                "duration_seconds": round(
+                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                ),
+            }
+            self._db.commit()
+
+        except Exception as e:
+            self._db.rollback()
+            logger.warning("refresh_etf_data 整体失败: %s", e, exc_info=True)
+            try:
+                run = (
+                    self._db.query(ResearchRunModel)
+                    .filter(ResearchRunModel.run_id == run_id)
+                    .first()
+                )
+                if run is not None:
+                    run.status = "failed"
+                    run.finished_at = datetime.now(timezone.utc)
+                    run.error_message = str(e)[:1000]
+                    self._db.commit()
+            except Exception:
+                logger.warning("更新失败状态时出错", exc_info=True)
+                self._db.rollback()
+
+    def refresh_index_data(self, run_id: str) -> None:
+        """刷新所有基准指数的日线和估值数据（后台线程入口）。
+
+        Args:
+            run_id: 运行记录 ID。
+        """
+        start_time = datetime.now(timezone.utc)
+        try:
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is None:
+                logger.error("refresh_index_data: run_id %s 不存在", run_id)
+                return
+
+            run.status = "running"
+            run.started_at = start_time
+            self._db.commit()
+
+            indexes = (
+                self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
+            )
+            index_bar_count = 0
+            index_valuation_count = 0
+
+            for idx in indexes:
+                try:
+                    index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code)
+                except Exception as e:
+                    logger.warning("指数 %s 日线拉取失败: %s", idx.index_code, e)
+
+                try:
+                    index_valuation_count += self._fetch_and_upsert_index_valuation(idx.index_code)
+                except Exception as e:
+                    logger.warning("指数 %s 估值拉取失败: %s", idx.index_code, e)
+
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is None:
+                return
+            run.status = "success"
+            run.finished_at = datetime.now(timezone.utc)
+            run.metrics = {
+                "index_total": len(indexes),
+                "bar_records": index_bar_count,
+                "valuation_records": index_valuation_count,
+                "duration_seconds": round(
+                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                ),
+            }
+            self._db.commit()
+
+        except Exception as e:
+            self._db.rollback()
+            logger.warning("refresh_index_data 整体失败: %s", e, exc_info=True)
+            try:
+                run = (
+                    self._db.query(ResearchRunModel)
+                    .filter(ResearchRunModel.run_id == run_id)
+                    .first()
+                )
+                if run is not None:
+                    run.status = "failed"
+                    run.finished_at = datetime.now(timezone.utc)
+                    run.error_message = str(e)[:1000]
+                    self._db.commit()
+            except Exception:
+                logger.warning("更新失败状态时出错", exc_info=True)
+                self._db.rollback()
+
+    def refresh_macro_data(self, run_id: str) -> None:
+        """刷新宏观指标数据（后台线程入口）。
+
+        拉取 CPI、PMI、LPR 等宏观指标。
+
+        Args:
+            run_id: 运行记录 ID。
+        """
+        start_time = datetime.now(timezone.utc)
+        try:
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is None:
+                logger.error("refresh_macro_data: run_id %s 不存在", run_id)
+                return
+
+            run.status = "running"
+            run.started_at = start_time
+            self._db.commit()
+
+            macro_count = self._fetch_and_upsert_macro()
+
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is None:
+                return
+            run.status = "success"
+            run.finished_at = datetime.now(timezone.utc)
+            run.metrics = {
+                "records": macro_count,
+                "duration_seconds": round(
+                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                ),
+            }
+            self._db.commit()
+
+        except Exception as e:
+            self._db.rollback()
+            logger.warning("refresh_macro_data 整体失败: %s", e, exc_info=True)
+            try:
+                run = (
+                    self._db.query(ResearchRunModel)
+                    .filter(ResearchRunModel.run_id == run_id)
+                    .first()
+                )
+                if run is not None:
+                    run.status = "failed"
+                    run.finished_at = datetime.now(timezone.utc)
+                    run.error_message = str(e)[:1000]
+                    self._db.commit()
+            except Exception:
+                logger.warning("更新失败状态时出错", exc_info=True)
+                self._db.rollback()
+
     def run_cold_start(self, run_id: str) -> None:
         """冷启动：拉取全部 ETF 和指数的全量历史数据（后台线程入口）。
 

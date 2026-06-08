@@ -2,7 +2,11 @@
   <div class="page">
     <div class="page-header">
       <h1 class="page-title">宏观指标</h1>
+      <button class="btn-secondary" :disabled="refreshing" @click="handleRefreshData">{{ refreshing ? '刷新中...' : '刷新数据' }}</button>
     </div>
+
+    <!-- 刷新提示 -->
+    <div v-if="refreshMsg" class="refresh-banner" :class="refreshOk ? 'banner-ok' : 'banner-err'">{{ refreshMsg }}</div>
 
     <div v-if="loading" class="loading">加载中...</div>
     <template v-else>
@@ -45,6 +49,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 
+import { triggerMacroRefresh } from '../api/runs'
 import { fetchMacroIndicator } from '../api/market_data'
 import type { MacroIndicator } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
@@ -60,6 +65,9 @@ const pmi = ref<MacroIndicator[]>([])
 const lpr1y = ref<MacroIndicator[]>([])
 const lpr5y = ref<MacroIndicator[]>([])
 const loading = ref(true)
+const refreshing = ref(false)
+const refreshMsg = ref('')
+const refreshOk = ref(true)
 
 const cpiChartEl = ref<HTMLElement | null>(null)
 const pmiChartEl = ref<HTMLElement | null>(null)
@@ -70,6 +78,23 @@ let cpiChart: any = null
 let pmiChart: any = null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let lprChart: any = null
+
+/** 触发宏观数据刷新 */
+async function handleRefreshData() {
+  refreshing.value = true
+  refreshMsg.value = ''
+  try {
+    const res = await triggerMacroRefresh()
+    refreshMsg.value = `宏观数据刷新已触发，可在运行记录中查看进度 (${res.run_id.slice(0, 8)}…)`
+    refreshOk.value = true
+  } catch {
+    refreshMsg.value = '触发失败，请重试'
+    refreshOk.value = false
+  } finally {
+    refreshing.value = false
+    setTimeout(() => { refreshMsg.value = '' }, 5000)
+  }
+}
 
 async function loadData() {
   try {
@@ -168,6 +193,26 @@ onUnmounted(() => {
 .page { display: flex; flex-direction: column; gap: 24px; }
 .page-header { display: flex; align-items: center; justify-content: space-between; }
 .page-title { font-size: 22px; font-weight: 700; }
+.btn-secondary {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-secondary:hover { background: var(--surface-2); border-color: var(--accent); }
+.btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+.refresh-banner {
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+.banner-ok { background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.3); color: var(--success); }
+.banner-err { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: var(--danger); }
 .loading { padding: 60px; text-align: center; color: var(--text-muted); }
 
 .chart-card {

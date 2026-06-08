@@ -10,8 +10,14 @@
         <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input v-model="query" class="search-input" placeholder="搜索代码或名称..." />
       </div>
-      <button class="btn-add" @click="openAddModal">+ 添加 ETF</button>
+      <div class="toolbar-actions">
+        <button class="btn-secondary" :disabled="refreshing" @click="handleRefreshData">{{ refreshing ? '刷新中...' : '刷新数据' }}</button>
+        <button class="btn-add" @click="openAddModal">+ 添加 ETF</button>
+      </div>
     </div>
+
+    <!-- 刷新提示 -->
+    <div v-if="refreshMsg" class="refresh-banner" :class="refreshOk ? 'banner-ok' : 'banner-err'">{{ refreshMsg }}</div>
 
     <div class="table-wrap">
       <div v-if="store.loading" class="loading">加载中...</div>
@@ -92,10 +98,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
+import { triggerEtfRefresh } from '../api/runs'
 import { useEtfStore } from '../stores/etfs'
 
 const store = useEtfStore()
 const query = ref('')
+const refreshing = ref(false)
+const refreshMsg = ref('')
+const refreshOk = ref(true)
 const offset = ref(0)
 const pageSize = 200
 
@@ -104,6 +114,23 @@ const filtered = computed(() => {
   if (!q) return store.items
   return store.items.filter(e => e.etf_code.includes(q) || e.name_cn.toLowerCase().includes(q))
 })
+
+/** 触发 ETF 数据刷新 */
+async function handleRefreshData() {
+  refreshing.value = true
+  refreshMsg.value = ''
+  try {
+    const res = await triggerEtfRefresh()
+    refreshMsg.value = `ETF 数据刷新已触发，可在运行记录中查看进度 (${res.run_id.slice(0, 8)}…)`
+    refreshOk.value = true
+  } catch {
+    refreshMsg.value = '触发失败，请重试'
+    refreshOk.value = false
+  } finally {
+    refreshing.value = false
+    setTimeout(() => { refreshMsg.value = '' }, 5000)
+  }
+}
 
 async function goPage(newOffset: number) {
   offset.value = newOffset
@@ -171,6 +198,27 @@ async function handleDelete(etfCode: string) {
 }
 
 .toolbar { display: flex; justify-content: space-between; align-items: center; }
+.toolbar-actions { display: flex; gap: 8px; }
+.btn-secondary {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-secondary:hover { background: var(--surface-2); border-color: var(--accent); }
+.btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+.refresh-banner {
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+.banner-ok { background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.3); color: var(--success); }
+.banner-err { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: var(--danger); }
 .search-wrap { position: relative; display: flex; align-items: center; }
 .search-icon { position: absolute; left: 10px; color: var(--text-muted); pointer-events: none; }
 .search-input {

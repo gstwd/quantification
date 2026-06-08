@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from quant_etf_api.infra.db.models.core import ResearchRunModel
+from quant_etf_api.infra.db.models.core import ResearchRunItemModel, ResearchRunModel
 from quant_etf_api.infra.db.repositories.base import BaseRepository
 
 
@@ -39,6 +39,34 @@ class ResearchRunRepository(BaseRepository):
             .limit(limit)
             .all()
         )
+
+    def find_items_by_run_id(self, run_id: str) -> list[ResearchRunItemModel]:
+        """查询指定运行的所有子项明细。"""
+        return (
+            self._db.query(ResearchRunItemModel)
+            .filter(ResearchRunItemModel.run_id == run_id)
+            .order_by(ResearchRunItemModel.id)
+            .all()
+        )
+
+    def find_stuck_runs(self) -> list[ResearchRunModel]:
+        """查询所有卡在 pending 或 running 状态的运行记录。
+
+        用于进程重启后恢复卡死任务。
+        """
+        return (
+            self._db.query(ResearchRunModel)
+            .filter(ResearchRunModel.status.in_(["pending", "running"]))
+            .all()
+        )
+
+    def mark_running(self, run_id: str) -> None:
+        """将运行标记为执行中状态，自动 commit。"""
+        run = self.find_by_id(run_id)
+        if run is None:
+            return
+        run.status = "running"
+        self._db.commit()
 
     def mark_success(self, run_id: str, metrics: dict[str, Any] | None = None) -> None:
         """将运行标记为成功并记录指标，自动 commit。"""

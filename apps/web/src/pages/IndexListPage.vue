@@ -5,8 +5,14 @@
         <h1 class="page-title">指数数据</h1>
         <span class="count-badge">{{ indexes.length }} 个</span>
       </div>
-      <button class="btn-add" @click="openAddModal">+ 添加指数</button>
+      <div class="header-actions">
+        <button class="btn-secondary" :disabled="refreshing" @click="handleRefreshData">{{ refreshing ? '刷新中...' : '刷新数据' }}</button>
+        <button class="btn-add" @click="openAddModal">+ 添加指数</button>
+      </div>
     </div>
+
+    <!-- 刷新提示 -->
+    <div v-if="refreshMsg" class="refresh-banner" :class="refreshOk ? 'banner-ok' : 'banner-err'">{{ refreshMsg }}</div>
 
     <div v-if="loading" class="loading">加载中...</div>
     <div v-else-if="indexes.length === 0" class="empty">暂无指数数据</div>
@@ -93,6 +99,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 
+import { triggerIndexRefresh } from '../api/runs'
 import {
   createIndex,
   deleteIndex,
@@ -116,6 +123,26 @@ const indexes = ref<BenchmarkIndex[]>([])
 const loading = ref(false)
 const latestBars = ref<Record<string, DailyBar>>({})
 const latestValuations = ref<Record<string, IndexValuation>>({})
+const refreshing = ref(false)
+const refreshMsg = ref('')
+const refreshOk = ref(true)
+
+/** 触发指数数据刷新 */
+async function handleRefreshData() {
+  refreshing.value = true
+  refreshMsg.value = ''
+  try {
+    const res = await triggerIndexRefresh()
+    refreshMsg.value = `指数数据刷新已触发，可在运行记录中查看进度 (${res.run_id.slice(0, 8)}…)`
+    refreshOk.value = true
+  } catch {
+    refreshMsg.value = '触发失败，请重试'
+    refreshOk.value = false
+  } finally {
+    refreshing.value = false
+    setTimeout(() => { refreshMsg.value = '' }, 5000)
+  }
+}
 
 /** 加载指数列表 */
 async function loadIndexes() {
@@ -260,6 +287,7 @@ async function handleDelete(indexCode: string, indexName: string) {
 .page { display: flex; flex-direction: column; gap: 24px; }
 .page-header { display: flex; align-items: center; justify-content: space-between; }
 .header-left { display: flex; align-items: center; gap: 10px; }
+.header-actions { display: flex; gap: 8px; }
 .page-title { font-size: 22px; font-weight: 700; }
 .count-badge {
   font-size: 11px;
@@ -283,6 +311,26 @@ async function handleDelete(indexCode: string, indexName: string) {
   transition: opacity 0.15s;
 }
 .btn-add:hover { opacity: 0.85; }
+.btn-secondary {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-secondary:hover { background: var(--surface-2); border-color: var(--accent); }
+.btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+.refresh-banner {
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+.banner-ok { background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.3); color: var(--success); }
+.banner-err { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: var(--danger); }
 
 .table-wrap {
   background: var(--surface);

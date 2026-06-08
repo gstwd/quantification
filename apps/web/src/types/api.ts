@@ -74,6 +74,31 @@ export interface ResearchRunSummary {
   error_message?: string | null
 }
 
+/** 运行记录详情，包含完整指标和耗时 */
+export interface ResearchRunDetail {
+  run_id: string
+  run_type: string
+  strategy_id?: string | null
+  trade_date?: string | null
+  status: string
+  params?: Record<string, unknown> | null
+  metrics?: Record<string, unknown> | null
+  error_message?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+  duration_seconds?: number | null
+}
+
+/** 单条运行明细，对应一只 ETF 的处理结果 */
+export interface ResearchRunItem {
+  id: number
+  run_id: string
+  etf_code: string
+  status: string
+  message?: string | null
+  metrics?: Record<string, unknown> | null
+}
+
 /** 单个数据表/数据源的快照信息 */
 export interface DataSourceSnapshot {
   source_name: string

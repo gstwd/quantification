@@ -56,12 +56,16 @@ def _trigger_startup_fill() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    # 启动时恢复卡死的运行记录
+    runs.recover_stuck_runs_on_startup()
     if settings.schedule_enabled:
         get_scheduler().start()
     if settings.startup_fill_enabled:
         _trigger_startup_fill()
     yield
     get_scheduler().stop()
+    # 关闭后台任务线程池
+    runs._executor.shutdown(wait=False, cancel_futures=True)
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
