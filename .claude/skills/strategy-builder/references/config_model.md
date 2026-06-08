@@ -14,7 +14,6 @@
 | `portfolio` | PortfolioConfig | 否 | null | 组合配置，null = 仅信号模式 |
 | `risk` | RiskConfig | 否 | null | 风控配置 |
 | `rebalance` | RebalanceConfig | 否 | null | 调仓频率配置 |
-| `benchmark` | BenchmarkConfig | 否 | null | 基准对比配置 |
 | `transaction_cost` | TransactionCostConfig | 否 | null | 交易成本配置 |
 
 ## ScoreConfig
@@ -141,13 +140,6 @@
 | `day_of_month` | int | null | 月度：目标日 (1-31)。默认 1 号 |
 
 非交易日自动顺延至下一交易日。
-
-## BenchmarkConfig
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `index_code` | str | `"000300"` | 基准指数代码 |
-| `enable_equal_weight` | bool | true | 是否同时计算等权基准 |
 
 ## TransactionCostConfig
 

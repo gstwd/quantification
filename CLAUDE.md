@@ -97,7 +97,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - **`api/middleware.py`** — `RequestIdMiddleware`：为每个请求注入唯一 request_id，写入响应头和日志 ContextVar
 - **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. New services: `metrics.py`（专业绩效指标，含 VaR/CVaR/连续亏损天数）、`benchmark.py`（基准收益计算）、`index_service.py`、`universe_service.py`、`data_quality.py`（日线/估值异常检测 + 连续性缺口检测）.
 - **`engine/`** — **策略引擎核心**：组件化、配置驱动的策略执行管线（11 个文件）：
-  - `config.py` — Pydantic 配置模型（含 `TimingConfig`、`ScoreConfig`、`FilterConfig`、`RankConfig`、`PortfolioConfig`、`RiskConfig`、`RebalanceConfig`、`BenchmarkConfig`、`TransactionCostConfig`）
+  - `config.py` — Pydantic 配置模型（含 `TimingConfig`、`ScoreConfig`、`FilterConfig`、`RankConfig`、`PortfolioConfig`、`RiskConfig`、`RebalanceConfig`、`TransactionCostConfig`）
   - `base.py` — `EngineContext`、`EngineResult` 数据结构
   - `score.py` — `ScoreCalculator` Protocol + `DefaultScoreCalculator`（含 `_TRANSFORM_REGISTRY`）
   - `filter.py` — `FilterEngine` Protocol + `DefaultFilterEngine`
@@ -139,7 +139,6 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - **Portfolio**: 权重分配（equal_weight / score_weight / winner_take_all），择时 regime 控制总仓位。`default_exposure` 控制无择时时的默认仓位（替代硬编码 0.50）
 - **Risk**: 单资产上限、组合上限、最低现金比例
 - **Rebalance**: 调仓频率控制（daily/weekly/monthly），回测中非调仓日沿用上次持仓
-- **Benchmark**: 基准对比（买入持有基准、等权组合基准）
 - **TransactionCost**: 交易成本（佣金+滑点），支持仅对换仓部分收费
 
 无 `portfolio` 配置 → 信号模式（只输出得分/排名）；有 → 配置模式（输出仓位）。
@@ -261,6 +260,6 @@ Key rules (details in the doc):
 - **rebalance.py 交易日历对齐**: `DefaultRebalanceScheduler` 接受 `TradingCalendar` 实例，周度/月度调仓如遇非交易日自动顺延至下一交易日。
 - **StrategyConfig.index_codes**: 存储在 `config_json` 内部（非独立 DB 列），通过 `**row.config_json` 展开到 engine 的 `StrategyConfig` 模型。前端 API 请求中 `index_codes` 应在 `config_json` 内传递，非顶层字段。非空时 `_filter_by_scope()` 仅保留指定指数（实时和回测模式均生效）。
 - **index_codes 回测强制应用**: `BacktestService.create_backtest()` 检查策略的 `config.index_codes`，非空时强制覆盖 `universe_filter` 为 subset 模式；`ContextBuilder._build_backtest()` 对传入的 index_codes 做交集过滤（双重保护）。
-- **StrategyConfigForm 与 engine/config.py 的 StrategyConfig 同步**: 引擎新增配置模块时，需同步更新 `StrategyConfigForm.vue`（表单）、`StrategyDetailPage.vue`（详情展示）。目前已覆盖全部 9 个模块（score/timing/filters/rank/portfolio/risk/rebalance/benchmark/transaction_cost）+ 资产范围 index_codes。
+- **StrategyConfigForm 与 engine/config.py 的 StrategyConfig 同步**: 引擎新增配置模块时，需同步更新 `StrategyConfigForm.vue`（表单）、`StrategyDetailPage.vue`（详情展示）。目前已覆盖全部 8 个模块（score/timing/filters/rank/portfolio/risk/rebalance/transaction_cost）+ 资产范围 index_codes。
 - **前端获取策略 index_codes 需 `fetchStrategyDetail()`**: 列表 API 的 `StrategySummary` 不含 `config_json`。需要 `index_codes` 时（如回测创建页锁定标的范围），必须额外调用 `GET /strategies/{id}` 获取详情。
 - **index_daily_bar OHLC 字段**: `IndexDailyBarModel` 有 `open_price`、`high_price`、`low_price`、`close_price` 字段，技术指标因子（ATR/Donchian）通过 `ctx.index_bars` 直接访问。

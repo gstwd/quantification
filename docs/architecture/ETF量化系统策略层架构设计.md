@@ -329,23 +329,7 @@ score = Σ(transform(factor_value) × weight) / Σ(|weight|)
 
 ------
 
-## 8. Benchmark & TransactionCost（基准与成本）
-
-### BenchmarkConfig
-
-**职责**：回测中计算基准收益，用于超额收益分析。
-
-```json
-{
-  "benchmark": {
-    "index_code": "000300",
-    "enable_equal_weight": true
-  }
-}
-```
-
-- `index_code`：基准指数代码，默认沪深300
-- `enable_equal_weight`：是否启用等权组合基准
+## 8. TransactionCost（交易成本）
 
 ### TransactionCostConfig
 
@@ -394,7 +378,6 @@ score = Σ(transform(factor_value) × weight) / Σ(|weight|)
     "timing_exposure": {"offensive": 0.80, "neutral": 0.50, "defensive": 0.20}
   },
   "risk": {"max_asset_weight": 0.30},
-  "benchmark": {"index_code": "000300", "enable_equal_weight": true},
   "transaction_cost": {"commission_rate": 0.0003, "slippage_rate": 0.001, "apply_to_turnover": true}
 }
 ```
@@ -516,7 +499,7 @@ apps/api/src/quant_etf_api/
 ├── engine/                          # 策略引擎（12 个文件）
 │   ├── __init__.py                  # 包初始化，导出核心类
 │   ├── base.py                      # EngineContext, EngineResult
-│   ├── config.py                    # StrategyConfig 及子配置 Pydantic 模型（含 BenchmarkConfig、TransactionCostConfig）
+│   ├── config.py                    # StrategyConfig 及子配置 Pydantic 模型（含 TransactionCostConfig）
 │   ├── score.py                     # ScoreCalculator Protocol + DefaultScoreCalculator + _TRANSFORM_REGISTRY
 │   ├── filter.py                    # FilterEngine Protocol + DefaultFilterEngine
 │   ├── rank.py                      # RankEngine Protocol + DefaultRankEngine

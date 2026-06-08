@@ -229,24 +229,6 @@
           </div>
         </div>
 
-        <!-- 基准对比模块 -->
-        <div class="config-card">
-          <div class="config-header">基准对比模块 (Benchmark)</div>
-          <div class="config-body">
-            <div v-if="benchmarkConfig" class="config-section">
-              <div class="config-row">
-                <span class="config-key">基准指数</span>
-                <span class="config-val">{{ benchmarkConfig.index_code || '000300' }}</span>
-              </div>
-              <div class="config-row">
-                <span class="config-key">等权组合基准</span>
-                <span class="config-val">{{ benchmarkConfig.enable_equal_weight !== false ? '已启用' : '未启用' }}</span>
-              </div>
-            </div>
-            <div v-else class="config-empty">未配置（不计算基准）</div>
-          </div>
-        </div>
-
         <!-- 交易成本模块 -->
         <div class="config-card">
           <div class="config-header">交易成本模块 (Transaction Cost)</div>
@@ -502,7 +484,6 @@ const rankConfig = computed(() => configJson.value.rank as { sort_by?: string; o
 const portfolioConfig = computed(() => configJson.value.portfolio as { method?: string; timing_exposure?: Record<string, number>; default_exposure?: number } | undefined)
 const riskConfig = computed(() => configJson.value.risk as { max_asset_weight?: number; max_portfolio_exposure?: number; min_cash_ratio?: number } | undefined)
 const rebalanceConfig = computed(() => configJson.value.rebalance as { frequency?: string; day_of_week?: number; day_of_month?: number } | undefined)
-const benchmarkConfig = computed(() => configJson.value.benchmark as { index_code?: string; enable_equal_weight?: boolean } | undefined)
 const costConfig = computed(() => configJson.value.transaction_cost as { commission_rate: number; slippage_rate: number; apply_to_turnover?: boolean } | undefined)
 
 /** 格式化 JSON 用于展示 */

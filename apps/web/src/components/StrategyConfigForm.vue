@@ -554,35 +554,6 @@
       </div>
     </div>
 
-    <!-- ═══ 基准对比模块（可选） ═══ -->
-    <div class="module-card">
-      <div class="module-header" @click="toggleModule('benchmark')">
-        <span class="module-title">基准对比模块 (Benchmark) <HelpTip :text="scHelp('benchmark')" /></span>
-        <span class="module-badge optional">可选</span>
-        <label class="toggle-switch" @click.stop>
-          <input type="checkbox" v-model="benchmarkEnabled" />
-          <span class="toggle-track"></span>
-        </label>
-        <span :class="['arrow', expanded.benchmark ? 'open' : '']">▾</span>
-      </div>
-      <div v-show="benchmarkEnabled && expanded.benchmark" class="module-body">
-        <div class="module-desc">配置基准对比，用于评估策略相对表现。支持买入持有基准和等权组合基准。</div>
-
-        <div class="sub-field">
-          <label class="sub-label">基准指数代码</label>
-          <input v-model="benchmarkIndexCode" class="fp-input" placeholder="如 000300（沪深300）" />
-          <span class="threshold-hint">默认沪深300（000300），用于计算买入持有基准收益</span>
-        </div>
-
-        <div class="sub-field">
-          <label class="checkbox-label">
-            <input type="checkbox" v-model="benchmarkEqualWeight" />
-            启用等权组合基准
-          </label>
-        </div>
-      </div>
-    </div>
-
     <!-- ═══ 交易成本模块（可选） ═══ -->
     <div class="module-card">
       <div class="module-header" @click="toggleModule('transaction_cost')">
@@ -717,7 +688,6 @@ const expanded = reactive({
   portfolio: false,
   risk: false,
   rebalance: false,
-  benchmark: false,
   transaction_cost: false,
 })
 
@@ -918,19 +888,6 @@ function initRebalance(): void {
   rebalanceDayOfMonth.value = (rebalance.day_of_month as number) ?? null
 }
 
-// ── 基准对比模块 ──────────────────────────────────────────────────
-const benchmarkEnabled = ref(false)
-const benchmarkIndexCode = ref('000300')
-const benchmarkEqualWeight = ref(true)
-
-function initBenchmark(): void {
-  const benchmark = props.modelValue.benchmark as Record<string, unknown> | undefined
-  if (!benchmark) { benchmarkEnabled.value = false; return }
-  benchmarkEnabled.value = true
-  benchmarkIndexCode.value = (benchmark.index_code as string) || '000300'
-  benchmarkEqualWeight.value = (benchmark.enable_equal_weight as boolean) ?? true
-}
-
 // ── 交易成本模块 ──────────────────────────────────────────────────
 const costEnabled = ref(false)
 const costCommissionRate = ref(0.0003)
@@ -1084,14 +1041,6 @@ function buildConfig(): Record<string, unknown> {
     config.rebalance = rebalance
   }
 
-  // 基准对比
-  if (benchmarkEnabled.value) {
-    config.benchmark = {
-      index_code: benchmarkIndexCode.value,
-      enable_equal_weight: benchmarkEqualWeight.value,
-    }
-  }
-
   // 交易成本
   if (costEnabled.value) {
     config.transaction_cost = {
@@ -1122,7 +1071,6 @@ watch(
     portfolioEnabled, portfolioMethod, portfolioDefaultExposure, exposureOffensive, exposureNeutral, exposureDefensive,
     riskEnabled, riskMaxAssetWeight, riskMaxPortfolioExposure, riskMinCashRatio,
     rebalanceEnabled, rebalanceFrequency, rebalanceDayOfWeek, rebalanceDayOfMonth,
-    benchmarkEnabled, benchmarkIndexCode, benchmarkEqualWeight,
     costEnabled, costCommissionRate, costSlippageRate, costApplyToTurnover,
   ],
   () => emitConfig(),
@@ -1139,7 +1087,6 @@ onMounted(() => {
   initPortfolio()
   initRisk()
   initRebalance()
-  initBenchmark()
   initCost()
 })
 
@@ -1155,7 +1102,6 @@ watch(() => props.modelValue, () => {
   initPortfolio()
   initRisk()
   initRebalance()
-  initBenchmark()
   initCost()
 }, { deep: true })
 </script>

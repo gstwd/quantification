@@ -144,18 +144,6 @@ class RebalanceConfig(BaseModel):
     day_of_month: int | None = None
 
 
-class BenchmarkConfig(BaseModel):
-    """基准对比配置（可选模块）。
-
-    Attributes:
-        index_code: 基准指数代码，默认沪深300。
-        enable_equal_weight: 是否启用等权组合基准。
-    """
-
-    index_code: str = "000300"
-    enable_equal_weight: bool = True
-
-
 class TransactionCostConfig(BaseModel):
     """交易成本配置（可选模块）。
 
@@ -186,7 +174,6 @@ class StrategyConfig(BaseModel):
         portfolio: 组合配置，None 表示信号模式。
         risk: 风控配置，None 表示无风控。
         rebalance: 调仓配置，None 表示每日调仓。
-        benchmark: 基准对比配置，None 表示不计算基准。
         transaction_cost: 交易成本配置，None 表示不计成本。
     """
 
@@ -203,5 +190,4 @@ class StrategyConfig(BaseModel):
     portfolio: PortfolioConfig | None = None
     risk: RiskConfig | None = None
     rebalance: RebalanceConfig | None = None
-    benchmark: BenchmarkConfig | None = None
     transaction_cost: TransactionCostConfig | None = None
