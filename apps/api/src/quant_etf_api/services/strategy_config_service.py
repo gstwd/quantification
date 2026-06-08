@@ -42,7 +42,6 @@ class StrategyConfigService:
                 display_name=r.display_name,
                 version=r.version,
                 frequency=r.frequency,
-                asset_scope=r.asset_scope,
                 description=r.description or "",
                 status=r.status,
             )
@@ -59,7 +58,6 @@ class StrategyConfigService:
             display_name=row.display_name,
             version=row.version,
             frequency=row.frequency,
-            asset_scope=row.asset_scope,
             description=row.description or "",
             status=row.status,
             config_json=row.config_json,
@@ -94,7 +92,6 @@ class StrategyConfigService:
             version=req.version,
             description=req.description,
             frequency=req.frequency,
-            asset_scope=req.asset_scope,
             config_json=req.config_json,
             status="active",
         )
@@ -132,8 +129,6 @@ class StrategyConfigService:
             existing.description = req.description
         if req.frequency is not None:
             existing.frequency = req.frequency
-        if req.asset_scope is not None:
-            existing.asset_scope = req.asset_scope
         if req.config_json is not None:
             existing.config_json = req.config_json
         if req.status is not None:
@@ -254,7 +249,6 @@ class StrategyConfigService:
                 "version": row.version,
                 "description": row.description or "",
                 "frequency": row.frequency,
-                "asset_scope": row.asset_scope,
                 **row.config_json,
             }
             return StrategyConfig(**full_config)

@@ -261,7 +261,6 @@ Key rules (details in the doc):
 - **rebalance.py 交易日历对齐**: `DefaultRebalanceScheduler` 接受 `TradingCalendar` 实例，周度/月度调仓如遇非交易日自动顺延至下一交易日。
 - **StrategyConfig.index_codes**: 存储在 `config_json` 内部（非独立 DB 列），通过 `**row.config_json` 展开到 engine 的 `StrategyConfig` 模型。前端 API 请求中 `index_codes` 应在 `config_json` 内传递，非顶层字段。非空时 `_filter_by_scope()` 仅保留指定指数（实时和回测模式均生效）。
 - **index_codes 回测强制应用**: `BacktestService.create_backtest()` 检查策略的 `config.index_codes`，非空时强制覆盖 `universe_filter` 为 subset 模式；`ContextBuilder._build_backtest()` 对传入的 index_codes 做交集过滤（双重保护）。
-- **`asset_scope` 几乎无实际过滤效果**: 目前 `"a_share_etf"` 返回全量活跃指数。真正的指数范围限定由 `config_json.index_codes` 完成，`asset_scope` 是预留扩展点。
 - **StrategyConfigForm 与 engine/config.py 的 StrategyConfig 同步**: 引擎新增配置模块时，需同步更新 `StrategyConfigForm.vue`（表单）、`StrategyDetailPage.vue`（详情展示）。目前已覆盖全部 9 个模块（score/timing/filters/rank/portfolio/risk/rebalance/benchmark/transaction_cost）+ 资产范围 index_codes。
 - **前端获取策略 index_codes 需 `fetchStrategyDetail()`**: 列表 API 的 `StrategySummary` 不含 `config_json`。需要 `index_codes` 时（如回测创建页锁定标的范围），必须额外调用 `GET /strategies/{id}` 获取详情。
 - **index_daily_bar OHLC 字段**: `IndexDailyBarModel` 有 `open_price`、`high_price`、`low_price`、`close_price` 字段，技术指标因子（ATR/Donchian）通过 `ctx.index_bars` 直接访问。

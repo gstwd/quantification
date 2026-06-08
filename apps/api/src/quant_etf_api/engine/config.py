@@ -179,7 +179,6 @@ class StrategyConfig(BaseModel):
         version: 版本号。
         description: 策略描述。
         frequency: 运行频率。
-        asset_scope: 资产范围。
         timing: 择时配置，None 表示无择时。
         score: 评分配置（必填）。
         filters: 过滤配置，None 表示无过滤。
@@ -196,7 +195,6 @@ class StrategyConfig(BaseModel):
     version: str = "1.0.0"
     description: str = ""
     frequency: str = "daily"
-    asset_scope: str = "a_share_etf"
     index_codes: list[str] = Field(default_factory=list, description="指定指数代码列表，非空时仅对这些指数运行策略")
     timing: TimingConfig | None = None
     score: ScoreConfig

@@ -719,9 +719,6 @@ class StrategyConfigModel(Base):
     frequency: Mapped[str] = mapped_column(
         String(32), nullable=False, default="daily", comment="运行频率：daily/weekly/monthly"
     )
-    asset_scope: Mapped[str] = mapped_column(
-        String(64), nullable=False, default="a_share_etf", comment="资产范围"
-    )
     config_json: Mapped[dict] = mapped_column(
         JSON, nullable=False, comment="完整策略配置 JSON，包含 score/filters/rank/portfolio/risk 等模块"
     )

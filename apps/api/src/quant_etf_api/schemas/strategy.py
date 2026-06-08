@@ -16,7 +16,6 @@ class StrategySummary(BaseModel):
         display_name: 策略中文名称。
         version: 版本号。
         frequency: 运行频率。
-        asset_scope: 资产范围。
         description: 策略描述。
         status: 状态。
     """
@@ -25,7 +24,6 @@ class StrategySummary(BaseModel):
     display_name: str
     version: str
     frequency: str
-    asset_scope: str
     description: str
     status: str = "active"
 
@@ -53,7 +51,6 @@ class StrategyConfigCreate(BaseModel):
         version: 版本号。
         description: 策略描述。
         frequency: 运行频率。
-        asset_scope: 资产范围。
         config_json: 完整策略配置 JSON。
     """
 
@@ -62,7 +59,6 @@ class StrategyConfigCreate(BaseModel):
     version: str = "1.0.0"
     description: str = ""
     frequency: str = "daily"
-    asset_scope: str = "a_share_etf"
     config_json: dict[str, Any]
 
 
@@ -74,7 +70,6 @@ class StrategyConfigUpdate(BaseModel):
         version: 版本号。
         description: 策略描述。
         frequency: 运行频率。
-        asset_scope: 资产范围。
         config_json: 完整策略配置 JSON。
         status: 状态。
     """
@@ -83,7 +78,6 @@ class StrategyConfigUpdate(BaseModel):
     version: str | None = None
     description: str | None = None
     frequency: str | None = None
-    asset_scope: str | None = None
     config_json: dict[str, Any] | None = None
     status: str | None = None
 

@@ -378,7 +378,6 @@ score = Σ(transform(factor_value) × weight) / Σ(|weight|)
   "version": "1.0.0",
   "description": "择时 → 轮动 → 仓位分配",
   "frequency": "daily",
-  "asset_scope": "a_share_etf",
   "timing": {
     "factors": {"pe_percentile": 0.4, "pb_percentile": 0.4, "volume_ratio_20d": 0.2},
     "transforms": {"pe_percentile": "invert_percentile", "pb_percentile": "invert_percentile", "volume_ratio_20d": "volume_score"},
@@ -409,7 +408,6 @@ score = Σ(transform(factor_value) × weight) / Σ(|weight|)
   "version": "1.0.0",
   "description": "基于量比的突破信号",
   "frequency": "daily",
-  "asset_scope": "a_share_etf",
   "score": {
     "factors": {"volume_ratio_20d": 0.5, "return_5d": 0.3, "change_pct": 0.2},
     "transforms": {"volume_ratio_20d": "volume_score"}
@@ -610,7 +608,6 @@ CREATE TABLE strategy_config (
     version       VARCHAR(32) NOT NULL,
     description   TEXT,
     frequency     VARCHAR(32) NOT NULL DEFAULT 'daily',
-    asset_scope   VARCHAR(64) NOT NULL DEFAULT 'a_share_etf',
     config_json   JSONB NOT NULL,
     status        VARCHAR(32) NOT NULL DEFAULT 'active',
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),

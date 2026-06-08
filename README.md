@@ -200,7 +200,6 @@ class StrategyPlugin(Protocol):
     display_name: str       # 展示名称
     version: str            # 版本号
     frequency: str          # 频率，固定为 "daily"
-    asset_scope: str        # 资产范围，固定为 "a_share_etf"
     description: str        # 策略描述
 
     def parameter_schema(self) -> dict: ...         # 参数 JSON Schema
@@ -435,7 +434,6 @@ class MyStrategyPlugin:
     display_name = "我的策略"
     version = "1.0.0"
     frequency = "daily"
-    asset_scope = "a_share_etf"
     description = "策略描述"
 
     def parameter_schema(self) -> dict:

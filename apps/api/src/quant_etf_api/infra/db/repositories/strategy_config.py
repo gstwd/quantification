@@ -30,7 +30,6 @@ class StrategyConfigRepository(BaseRepository):
             existing.version = model.version
             existing.description = model.description
             existing.frequency = model.frequency
-            existing.asset_scope = model.asset_scope
             existing.config_json = model.config_json
             existing.status = model.status
         else:

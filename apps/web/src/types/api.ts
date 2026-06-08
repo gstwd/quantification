@@ -19,7 +19,6 @@ export interface StrategySummary {
   display_name: string
   version: string
   frequency: string
-  asset_scope: string
   description: string
   status: string
 }
@@ -36,7 +35,6 @@ export interface StrategyConfigCreate {
   version?: string
   description?: string
   frequency?: string
-  asset_scope?: string
   config_json: Record<string, unknown>
 }
 
@@ -45,7 +43,6 @@ export interface StrategyConfigUpdate {
   version?: string
   description?: string
   frequency?: string
-  asset_scope?: string
   config_json?: Record<string, unknown>
   status?: string
 }
@@ -92,7 +89,6 @@ export interface SystemStatusResponse {
   latest_trade_date: string | null
   data_sources: DataSourceSnapshot[]
   recent_runs: ResearchRunSummary[]
-  asset_scope: string
   frequency: string
   database: string
   db_connected: boolean

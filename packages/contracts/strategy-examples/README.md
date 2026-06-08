@@ -11,7 +11,6 @@
   "version": "1.0.0",
   "description": "策略描述",
   "frequency": "daily | weekly | monthly",
-  "asset_scope": "a_share_etf",
   "timing": { ... },           // 可选：择时配置
   "score": { ... },            // 必填：评分配置
   "filters": { ... },          // 可选：过滤规则

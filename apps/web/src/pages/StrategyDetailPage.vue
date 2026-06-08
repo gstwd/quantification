@@ -425,13 +425,6 @@
             </select>
           </div>
           <div class="form-group">
-            <label class="form-label">资产范围</label>
-            <select v-model="editForm.asset_scope" class="form-select">
-              <option value="a_share_etf">A股 ETF</option>
-              <option value="index">指数</option>
-            </select>
-          </div>
-          <div class="form-group">
             <div class="config-header-row">
               <label class="form-label">策略配置</label>
               <button class="toggle-json-btn" @click="editAdvancedMode = !editAdvancedMode">
@@ -495,7 +488,7 @@ const expandedSignal = ref<string | null>(null)
 const showEdit = ref(false)
 const editJsonError = ref('')
 const editAdvancedMode = ref(false)
-const editForm = ref({ display_name: '', description: '', frequency: 'daily', asset_scope: 'a_share_etf' })
+const editForm = ref({ display_name: '', description: '', frequency: 'daily' })
 const editConfigJson = ref<Record<string, unknown>>({})
 const editConfigText = ref('')
 
@@ -528,7 +521,6 @@ watch(showEdit, (val) => {
       display_name: store.current.display_name,
       description: store.current.description,
       frequency: store.current.frequency || 'daily',
-      asset_scope: store.current.asset_scope || 'a_share_etf',
     }
     editConfigJson.value = JSON.parse(JSON.stringify(store.current.config_json))
     editConfigText.value = JSON.stringify(store.current.config_json, null, 2)

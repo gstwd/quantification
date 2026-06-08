@@ -21,7 +21,6 @@
           <div class="chips">
             <span class="chip chip-version">v{{ item.version }}</span>
             <span class="chip chip-freq">{{ item.frequency }}</span>
-            <span class="chip chip-scope">{{ item.asset_scope }}</span>
             <span :class="['chip', item.status === 'active' ? 'chip-active' : 'chip-disabled']">
               {{ item.status === 'active' ? '启用' : '禁用' }}
             </span>
@@ -57,13 +56,6 @@
             <option value="daily">每日</option>
             <option value="weekly">每周</option>
             <option value="monthly">每月</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">资产范围</label>
-          <select v-model="form.asset_scope" class="form-select">
-            <option value="a_share_etf">A股 ETF</option>
-            <option value="index">指数</option>
           </select>
         </div>
 
@@ -122,7 +114,6 @@ const form = ref({
   display_name: '',
   description: '',
   frequency: 'daily',
-  asset_scope: 'a_share_etf',
 })
 
 /** 表单模式下的 config_json 对象 */
@@ -134,7 +125,7 @@ const configJsonText = ref('{\n  "score": {\n    "factors": {}\n  }\n}')
 /** 监听弹窗关闭，重置表单 */
 watch(showCreate, (val) => {
   if (!val) {
-    form.value = { strategy_id: '', display_name: '', description: '', frequency: 'daily', asset_scope: 'a_share_etf' }
+    form.value = { strategy_id: '', display_name: '', description: '', frequency: 'daily' }
     configJson.value = { score: { factors: {} } }
     configJsonText.value = '{\n  "score": {\n    "factors": {}\n  }\n}'
     jsonError.value = ''
