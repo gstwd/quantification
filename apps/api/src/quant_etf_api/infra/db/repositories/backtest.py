@@ -54,6 +54,9 @@ class BacktestRepository(BaseRepository):
 
     def mark_success(self, backtest_id: str, metrics: dict[str, Any] | None = None) -> None:
         """将回测标记为成功。"""
+        # 如果 session 处于 pending rollback 状态，先回滚以恢复可用状态
+        if self._db.is_active is False:
+            self._db.rollback()
         run = self.find_by_id(backtest_id)
         if run is None:
             return
@@ -65,6 +68,9 @@ class BacktestRepository(BaseRepository):
 
     def mark_failed(self, backtest_id: str, error_message: str) -> None:
         """将回测标记为失败。"""
+        # 如果 session 处于 pending rollback 状态，先回滚以恢复可用状态
+        if self._db.is_active is False:
+            self._db.rollback()
         run = self.find_by_id(backtest_id)
         if run is None:
             return

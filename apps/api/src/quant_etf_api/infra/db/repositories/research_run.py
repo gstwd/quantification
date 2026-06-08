@@ -62,6 +62,9 @@ class ResearchRunRepository(BaseRepository):
 
     def mark_running(self, run_id: str) -> None:
         """将运行标记为执行中状态，自动 commit。"""
+        # 如果 session 处于 pending rollback 状态，先回滚以恢复可用状态
+        if self._db.is_active is False:
+            self._db.rollback()
         run = self.find_by_id(run_id)
         if run is None:
             return
@@ -70,6 +73,9 @@ class ResearchRunRepository(BaseRepository):
 
     def mark_success(self, run_id: str, metrics: dict[str, Any] | None = None) -> None:
         """将运行标记为成功并记录指标，自动 commit。"""
+        # 如果 session 处于 pending rollback 状态，先回滚以恢复可用状态
+        if self._db.is_active is False:
+            self._db.rollback()
         run = self.find_by_id(run_id)
         if run is None:
             return
@@ -81,6 +87,9 @@ class ResearchRunRepository(BaseRepository):
 
     def mark_failed(self, run_id: str, error_message: str) -> None:
         """将运行标记为失败并记录错误信息，自动 commit。"""
+        # 如果 session 处于 pending rollback 状态，先回滚以恢复可用状态
+        if self._db.is_active is False:
+            self._db.rollback()
         run = self.find_by_id(run_id)
         if run is None:
             return

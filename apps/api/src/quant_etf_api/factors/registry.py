@@ -54,6 +54,7 @@ def build_default_factor_registry() -> FactorRegistry:
         Return5dComputer,
         Return60dComputer,
     )
+    from quant_etf_api.factors.builtins.price import ChangePctComputer, ClosePriceComputer
     from quant_etf_api.factors.builtins.technical import (
         ATRComputer,
         DonchianHighComputer,
@@ -69,6 +70,9 @@ def build_default_factor_registry() -> FactorRegistry:
     from quant_etf_api.factors.builtins.volume import VolumeRatio20dComputer
 
     registry = FactorRegistry()
+    # 价格（原始字段，无需计算）
+    registry.register(ClosePriceComputer())
+    registry.register(ChangePctComputer())
     # 量能
     registry.register(VolumeRatio20dComputer())
     # 动量
