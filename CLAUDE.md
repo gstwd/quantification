@@ -114,7 +114,8 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
   - `retry.py` — `@with_retry()` 装饰器，指数退避重试，参数可通过环境变量 `AKSHARE_RETRY_MAX_ATTEMPTS` / `AKSHARE_RETRY_BASE_DELAY` 配置
 - **`infra/trading_calendar.py`** — `TradingCalendar` 类，通过 `akshare.tool_trade_date_hist_sina()` 获取 A 股交易日历，内存缓存 TTL=1 天，API 不可用时降级为周末判断
-- **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends
+- **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends. 调度器同步执行，不走线程池
+- **`api/routers/runs.py`** — 后台任务使用 `ThreadPoolExecutor(max_workers=3)`（模块级 `_executor`），进程退出时在 `main.py` lifespan 中 `shutdown(wait=False, cancel_futures=True)`。所有 bg 函数统一 `mark_running` → `mark_success/failed` 状态流转，外层 try/except 兜底。启动时 `recover_stuck_runs_on_startup()` 将卡在 pending/running 的记录标记为 failed
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
   - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, AllocationPlan dataclasses)
@@ -241,6 +242,9 @@ Services fully wired to PostgreSQL. 23 tables across 13 migrations (0001→0013)
 - **FilterRule.compare_to**: 过滤器支持跨因子比较（如 `ma_5d > ma_20d`）。`compare_to` 与 `value` 二选一，不能同时设置。`between` 操作符不支持 `compare_to`。
 - **FactorProvider.collect_required_factor_ids() 必须收集 compare_to**: 遍历 filter rules 时不仅要收集 `rule.factor`，还要收集 `rule.compare_to`（若存在）。遗漏会导致被比较的因子值未加载，filter 始终失败 → 空仓。
 - **FilterRuleValue 前端接口**: 定义在 `StrategyConfigForm.vue`（非共享 types 文件）。修改 FilterRule schema 时需同步更新：接口定义、表单模板、`initFilter()`、`buildConfig()`、校验逻辑，以及 `StrategyDetailPage.vue` 的只读展示。
+- **后台任务状态流转**: `research_run` 状态链：pending → running → success/failed。`RunService.mark_running()` 在 bg 函数开始时调用，`mark_success(run_id, metrics)` / `mark_failed(run_id, error_message)` 在结束时调用。进程重启后 `recover_stuck_runs_on_startup()` 自动恢复卡死任务。
+- **数据刷新按类型拆分**: `IngestService` 提供 `refresh_etf_data()`、`refresh_index_data()`、`refresh_macro_data()` 三个公共方法，各有独立 run 生命周期。对应 API 端点：`POST /runs/etf-refresh`、`/runs/index-refresh`、`/runs/macro-refresh`。各数据页面（ETF/指数/宏观）有自己的"刷新数据"按钮，RunsPage 纯做监控。
+- **Run detail API**: `GET /runs/{run_id}` 返回 `ResearchRunDetail`（含 metrics、duration_seconds），`GET /runs/{run_id}/items` 返回 `ResearchRunItemSchema` 逐条明细，`POST /runs/{run_id}/retry` 重试失败任务（创建新 run 并提交到线程池）。
 
 ## Coding Standards
 
