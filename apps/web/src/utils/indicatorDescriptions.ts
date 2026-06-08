@@ -267,10 +267,6 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
       label: '调仓配置',
       description: '控制策略调仓频率。每日/每周/每月调仓。<br>周度可指定调仓日（0=周一, 4=周五）。<br>月度可指定调仓日（1-28）。<br>回测中非调仓日沿用上次持仓，减少交易频率。',
     },
-    transaction_cost: {
-      label: '交易成本',
-      description: '回测时模拟交易成本。<br>佣金费率默认万三（0.03%），滑点费率默认千一（0.1%）。<br>apply_to_turnover=true：仅对换仓部分收费（更贴近实际）。<br>apply_to_turnover=false：按全仓收费（保守估计）。<br>成本从日收益中扣除，影响净值曲线。',
-    },
   },
 
   // ═══════════════════════════════════════════════════════════════════

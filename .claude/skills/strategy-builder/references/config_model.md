@@ -14,7 +14,6 @@
 | `portfolio` | PortfolioConfig | 否 | null | 组合配置，null = 仅信号模式 |
 | `risk` | RiskConfig | 否 | null | 风控配置 |
 | `rebalance` | RebalanceConfig | 否 | null | 调仓频率配置 |
-| `transaction_cost` | TransactionCostConfig | 否 | null | 交易成本配置 |
 
 ## ScoreConfig
 
@@ -140,11 +139,3 @@
 | `day_of_month` | int | null | 月度：目标日 (1-31)。默认 1 号 |
 
 非交易日自动顺延至下一交易日。
-
-## TransactionCostConfig
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `commission_rate` | float | 0.0003 | 佣金费率（默认万三） |
-| `slippage_rate` | float | 0.001 | 滑点费率（默认千一） |
-| `apply_to_turnover` | bool | true | 仅对换仓部分收费 |

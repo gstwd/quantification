@@ -144,20 +144,6 @@ class RebalanceConfig(BaseModel):
     day_of_month: int | None = None
 
 
-class TransactionCostConfig(BaseModel):
-    """交易成本配置（可选模块）。
-
-    Attributes:
-        commission_rate: 佣金费率，默认万三。
-        slippage_rate: 滑点费率，默认千一。
-        apply_to_turnover: 是否仅对换仓部分收取成本，False 时按全仓收取。
-    """
-
-    commission_rate: float = 0.0003
-    slippage_rate: float = 0.001
-    apply_to_turnover: bool = True
-
-
 class StrategyConfig(BaseModel):
     """完整策略配置。
 
@@ -174,7 +160,6 @@ class StrategyConfig(BaseModel):
         portfolio: 组合配置，None 表示信号模式。
         risk: 风控配置，None 表示无风控。
         rebalance: 调仓配置，None 表示每日调仓。
-        transaction_cost: 交易成本配置，None 表示不计成本。
     """
 
     strategy_id: str
@@ -190,4 +175,3 @@ class StrategyConfig(BaseModel):
     portfolio: PortfolioConfig | None = None
     risk: RiskConfig | None = None
     rebalance: RebalanceConfig | None = None
-    transaction_cost: TransactionCostConfig | None = None

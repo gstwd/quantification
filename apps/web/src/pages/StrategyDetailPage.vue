@@ -229,27 +229,6 @@
           </div>
         </div>
 
-        <!-- 交易成本模块 -->
-        <div class="config-card">
-          <div class="config-header">交易成本模块 (Transaction Cost)</div>
-          <div class="config-body">
-            <div v-if="costConfig" class="config-section">
-              <div class="config-row">
-                <span class="config-key">佣金费率</span>
-                <span class="config-val">{{ ((costConfig.commission_rate ?? 0.0003) * 100).toFixed(2) }}%</span>
-              </div>
-              <div class="config-row">
-                <span class="config-key">滑点费率</span>
-                <span class="config-val">{{ ((costConfig.slippage_rate ?? 0.001) * 100).toFixed(2) }}%</span>
-              </div>
-              <div class="config-row">
-                <span class="config-key">收费方式</span>
-                <span class="config-val">{{ costConfig.apply_to_turnover !== false ? '仅换仓部分' : '全仓收取' }}</span>
-              </div>
-            </div>
-            <div v-else class="config-empty">未配置（不计成本）</div>
-          </div>
-        </div>
       </div>
 
       <!-- 执行结果提示 -->
@@ -484,7 +463,6 @@ const rankConfig = computed(() => configJson.value.rank as { sort_by?: string; o
 const portfolioConfig = computed(() => configJson.value.portfolio as { method?: string; timing_exposure?: Record<string, number>; default_exposure?: number } | undefined)
 const riskConfig = computed(() => configJson.value.risk as { max_asset_weight?: number; max_portfolio_exposure?: number; min_cash_ratio?: number } | undefined)
 const rebalanceConfig = computed(() => configJson.value.rebalance as { frequency?: string; day_of_week?: number; day_of_month?: number } | undefined)
-const costConfig = computed(() => configJson.value.transaction_cost as { commission_rate: number; slippage_rate: number; apply_to_turnover?: boolean } | undefined)
 
 /** 格式化 JSON 用于展示 */
 const formattedJson = computed(() => {

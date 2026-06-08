@@ -329,28 +329,6 @@ score = Σ(transform(factor_value) × weight) / Σ(|weight|)
 
 ------
 
-## 8. TransactionCost（交易成本）
-
-### TransactionCostConfig
-
-**职责**：回测中模拟交易成本对收益的影响。
-
-```json
-{
-  "transaction_cost": {
-    "commission_rate": 0.0003,
-    "slippage_rate": 0.001,
-    "apply_to_turnover": true
-  }
-}
-```
-
-- `commission_rate`：佣金费率，默认万三
-- `slippage_rate`：滑点费率，默认千一
-- `apply_to_turnover`：仅对换仓部分收取（true）或按全仓收取（false）
-
-------
-
 # 完整配置示例
 
 ## ETF 资产配置策略（含回测增强配置）
@@ -377,8 +355,7 @@ score = Σ(transform(factor_value) × weight) / Σ(|weight|)
     "method": "score_weight",
     "timing_exposure": {"offensive": 0.80, "neutral": 0.50, "defensive": 0.20}
   },
-  "risk": {"max_asset_weight": 0.30},
-  "transaction_cost": {"commission_rate": 0.0003, "slippage_rate": 0.001, "apply_to_turnover": true}
+  "risk": {"max_asset_weight": 0.30}
 }
 ```
 
@@ -499,7 +476,7 @@ apps/api/src/quant_etf_api/
 ├── engine/                          # 策略引擎（12 个文件）
 │   ├── __init__.py                  # 包初始化，导出核心类
 │   ├── base.py                      # EngineContext, EngineResult
-│   ├── config.py                    # StrategyConfig 及子配置 Pydantic 模型（含 TransactionCostConfig）
+│   ├── config.py                    # StrategyConfig 及子配置 Pydantic 模型
 │   ├── score.py                     # ScoreCalculator Protocol + DefaultScoreCalculator + _TRANSFORM_REGISTRY
 │   ├── filter.py                    # FilterEngine Protocol + DefaultFilterEngine
 │   ├── rank.py                      # RankEngine Protocol + DefaultRankEngine

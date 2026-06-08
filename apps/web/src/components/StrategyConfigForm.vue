@@ -554,59 +554,6 @@
       </div>
     </div>
 
-    <!-- ═══ 交易成本模块（可选） ═══ -->
-    <div class="module-card">
-      <div class="module-header" @click="toggleModule('transaction_cost')">
-        <span class="module-title">交易成本模块 (Transaction Cost) <HelpTip :text="scHelp('transaction_cost')" /></span>
-        <span class="module-badge optional">可选</span>
-        <label class="toggle-switch" @click.stop>
-          <input type="checkbox" v-model="costEnabled" />
-          <span class="toggle-track"></span>
-        </label>
-        <span :class="['arrow', expanded.transaction_cost ? 'open' : '']">▾</span>
-      </div>
-      <div v-show="costEnabled && expanded.transaction_cost" class="module-body">
-        <div class="module-desc">配置交易成本（佣金+滑点），回测中按换仓部分扣减收益。</div>
-
-        <div class="cost-grid">
-          <div class="sub-field">
-            <label class="sub-label">佣金费率</label>
-            <div class="slider-row">
-              <input
-                v-model.number="costCommissionRate"
-                type="number"
-                min="0"
-                max="0.01"
-                step="0.0001"
-                class="fp-input slider-value"
-              />
-              <span class="exposure-unit">{{ (costCommissionRate * 100).toFixed(2) }}%</span>
-            </div>
-          </div>
-          <div class="sub-field">
-            <label class="sub-label">滑点费率</label>
-            <div class="slider-row">
-              <input
-                v-model.number="costSlippageRate"
-                type="number"
-                min="0"
-                max="0.01"
-                step="0.0001"
-                class="fp-input slider-value"
-              />
-              <span class="exposure-unit">{{ (costSlippageRate * 100).toFixed(2) }}%</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="sub-field">
-          <label class="checkbox-label">
-            <input type="checkbox" v-model="costApplyToTurnover" />
-            仅对换仓部分收取成本（关闭则按全仓收取）
-          </label>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -688,7 +635,6 @@ const expanded = reactive({
   portfolio: false,
   risk: false,
   rebalance: false,
-  transaction_cost: false,
 })
 
 function toggleModule(key: keyof typeof expanded): void {
@@ -888,21 +834,6 @@ function initRebalance(): void {
   rebalanceDayOfMonth.value = (rebalance.day_of_month as number) ?? null
 }
 
-// ── 交易成本模块 ──────────────────────────────────────────────────
-const costEnabled = ref(false)
-const costCommissionRate = ref(0.0003)
-const costSlippageRate = ref(0.001)
-const costApplyToTurnover = ref(true)
-
-function initCost(): void {
-  const cost = props.modelValue.transaction_cost as Record<string, unknown> | undefined
-  if (!cost) { costEnabled.value = false; return }
-  costEnabled.value = true
-  costCommissionRate.value = (cost.commission_rate as number) ?? 0.0003
-  costSlippageRate.value = (cost.slippage_rate as number) ?? 0.001
-  costApplyToTurnover.value = (cost.apply_to_turnover as boolean) ?? true
-}
-
 // ── 校验 ──────────────────────────────────────────────────────────
 const errors = computed((): string[] => {
   const errs: string[] = []
@@ -1041,15 +972,6 @@ function buildConfig(): Record<string, unknown> {
     config.rebalance = rebalance
   }
 
-  // 交易成本
-  if (costEnabled.value) {
-    config.transaction_cost = {
-      commission_rate: costCommissionRate.value,
-      slippage_rate: costSlippageRate.value,
-      apply_to_turnover: costApplyToTurnover.value,
-    }
-  }
-
   return config
 }
 
@@ -1071,7 +993,6 @@ watch(
     portfolioEnabled, portfolioMethod, portfolioDefaultExposure, exposureOffensive, exposureNeutral, exposureDefensive,
     riskEnabled, riskMaxAssetWeight, riskMaxPortfolioExposure, riskMinCashRatio,
     rebalanceEnabled, rebalanceFrequency, rebalanceDayOfWeek, rebalanceDayOfMonth,
-    costEnabled, costCommissionRate, costSlippageRate, costApplyToTurnover,
   ],
   () => emitConfig(),
   { deep: true },
@@ -1087,7 +1008,6 @@ onMounted(() => {
   initPortfolio()
   initRisk()
   initRebalance()
-  initCost()
 })
 
 // 外部 modelValue 变化时重新初始化（排除自身 emit 导致的循环更新）
@@ -1102,7 +1022,6 @@ watch(() => props.modelValue, () => {
   initPortfolio()
   initRisk()
   initRebalance()
-  initCost()
 }, { deep: true })
 </script>
 
@@ -1346,6 +1265,4 @@ watch(() => props.modelValue, () => {
 }
 .checkbox-label input { accent-color: var(--accent); }
 
-/* 交易成本网格 */
-.cost-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 </style>

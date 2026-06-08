@@ -336,14 +336,10 @@ class BacktestService:
                     result, row.weighting, config.rank.top_n, next_date, all_bars
                 )
 
-            # 交易成本
+            # 换手率（仅在调仓日计算）
             turnover = 0.0
-            if config.transaction_cost and prev_positions and should_rebalance:
+            if prev_positions and should_rebalance:
                 turnover = self._compute_turnover(prev_positions, positions)
-                cost = self._apply_transaction_costs(
-                    turnover, config.transaction_cost, positions
-                )
-                portfolio_return -= cost
 
             # 更新累计和回撤
             cumulative *= 1 + portfolio_return / 100
@@ -582,35 +578,6 @@ class BacktestService:
             curr_w = curr_positions.get(code, 0.0)
             turnover += abs(curr_w - prev_w)
         return turnover / 2.0
-
-    @staticmethod
-    def _apply_transaction_costs(
-        turnover: float,
-        cost_config: Any,
-        positions: dict[str, float],
-    ) -> float:
-        """计算交易成本对组合收益的影响（%）。
-
-        Args:
-            turnover: 换手率，0-1。
-            cost_config: TransactionCostConfig 实例。
-            positions: 当前仓位权重，用于判断是否按 turnover 计费。
-
-        Returns:
-            应扣减的收益百分比。
-        """
-        from quant_etf_api.engine.config import TransactionCostConfig
-
-        cfg: TransactionCostConfig = cost_config
-        total_cost_rate = cfg.commission_rate + cfg.slippage_rate
-
-        if cfg.apply_to_turnover:
-            # 仅对换仓部分收费
-            return round(turnover * total_cost_rate * 100, 4)
-        else:
-            # 按全仓收费
-            total_exposure = sum(positions.values())
-            return round(total_exposure * total_cost_rate * 100, 4)
 
     # ── 调仓检查 ───────────────────────────────────────────────────────────
 
