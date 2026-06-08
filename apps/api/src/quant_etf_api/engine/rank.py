@@ -14,10 +14,6 @@ from quant_etf_api.engine.config import RankConfig
 
 logger = logging.getLogger(__name__)
 
-# 子排名默认因子 ID（引擎内部使用，非策略配置项）
-_SUB_RANK_MOMENTUM_FACTOR = "return_20d"
-_SUB_RANK_VALUATION_FACTOR = "pe_percentile"
-
 # 板块分类中文映射
 _CATEGORY_LABELS: dict[str, str] = {
     "broad_index": "宽基",
@@ -91,35 +87,38 @@ class DefaultRankEngine:
             rankings = rankings[-config.bottom_n :]
 
         # 分配子维度排名（动量和估值）
-        self._assign_sub_rankings(rankings, context)
+        self._assign_sub_rankings(config, rankings, context)
 
         return rankings
 
     def _assign_sub_rankings(
-        self, rankings: list[AssetRanking], context: EngineContext
+        self, config: RankConfig, rankings: list[AssetRanking], context: EngineContext
     ) -> None:
         """为排名项分配动量和估值子排名。"""
+        momentum_factor = config.momentum_factor
+        valuation_factor = config.valuation_factor
+
         # 动量排名（按动量因子降序）
         with_momentum = [
             (i, r)
             for i, r in enumerate(rankings)
-            if context.asset_factors.get((r.etf_code, _SUB_RANK_MOMENTUM_FACTOR)) is not None
+            if context.asset_factors.get((r.etf_code, momentum_factor)) is not None
         ]
         with_momentum.sort(
-            key=lambda x: context.asset_factors.get((x[1].etf_code, _SUB_RANK_MOMENTUM_FACTOR), 0),
+            key=lambda x: context.asset_factors.get((x[1].etf_code, momentum_factor), 0),
             reverse=True,
         )
         for sub_rank, (idx, r) in enumerate(with_momentum, 1):
             rankings[idx].momentum_rank = sub_rank
 
-        # 估值排名（按估值吸引力降序，吸引力 = 100 - pe_percentile）
+        # 估值排名（按估值吸引力降序，吸引力 = 100 - 因子值）
         with_valuation = [
             (i, r)
             for i, r in enumerate(rankings)
-            if context.asset_factors.get((r.etf_code, _SUB_RANK_VALUATION_FACTOR)) is not None
+            if context.asset_factors.get((r.etf_code, valuation_factor)) is not None
         ]
         with_valuation.sort(
-            key=lambda x: 100 - (context.asset_factors.get((x[1].etf_code, _SUB_RANK_VALUATION_FACTOR)) or 0),
+            key=lambda x: 100 - (context.asset_factors.get((x[1].etf_code, valuation_factor)) or 0),
             reverse=True,
         )
         for sub_rank, (idx, r) in enumerate(with_valuation, 1):

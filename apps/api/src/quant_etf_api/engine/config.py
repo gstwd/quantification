@@ -28,11 +28,13 @@ class TimingConfig(BaseModel):
         factors: 因子权重映射，key=factor_id, value=权重。
         transforms: 因子变换函数映射，key=factor_id, value=transform 名称。
         thresholds: regime 判定阈值。
+        proxy_index_codes: 择时代理指数代码列表，用于加载市场级因子值。默认沪深300。
     """
 
     factors: dict[str, float]
     transforms: dict[str, str] = Field(default_factory=dict)
     thresholds: TimingThresholds = Field(default_factory=TimingThresholds)
+    proxy_index_codes: list[str] = Field(default_factory=lambda: ["000300"])
 
 
 class ScoreConfig(BaseModel):
@@ -94,12 +96,16 @@ class RankConfig(BaseModel):
         order: 排序方向，desc / asc。
         top_n: 取前 N 名，None 表示全部。
         bottom_n: 取后 N 名，与 top_n 二选一。
+        momentum_factor: 动量子排名所用因子 ID，默认 return_20d。
+        valuation_factor: 估值子排名所用因子 ID，默认 pe_percentile。
     """
 
     sort_by: str = "score"
     order: str = "desc"
     top_n: int | None = None
     bottom_n: int | None = None
+    momentum_factor: str = "return_20d"
+    valuation_factor: str = "pe_percentile"
 
 
 class PortfolioConfig(BaseModel):
@@ -167,7 +173,9 @@ class StrategyConfig(BaseModel):
     version: str = "1.0.0"
     description: str = ""
     frequency: str = "daily"
-    index_codes: list[str] = Field(default_factory=list, description="指定指数代码列表，非空时仅对这些指数运行策略")
+    index_codes: list[str] = Field(
+        default_factory=list, description="指定指数代码列表，非空时仅对这些指数运行策略"
+    )
     timing: TimingConfig | None = None
     score: ScoreConfig
     filters: FilterConfig | None = None

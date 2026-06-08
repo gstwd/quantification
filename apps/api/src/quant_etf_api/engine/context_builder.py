@@ -137,9 +137,7 @@ class ContextBuilder:
             }
 
         # 通过 FactorProvider 加载因子值
-        asset_factors = self._factor_provider.load_asset_factors(
-            config, trade_date, index_codes
-        )
+        asset_factors = self._factor_provider.load_asset_factors(config, trade_date, index_codes)
 
         # 补充原始行情数据（change_pct、close_price 不是因子，是原始字段）
         for code in index_codes:
@@ -163,7 +161,7 @@ class ContextBuilder:
 
         # 补充市场因子：如果 FactorProvider 未返回估值因子，从估值表获取
         if config.timing:
-            for rep_code in ("000300", "000016", "000905"):
+            for rep_code in config.timing.proxy_index_codes:
                 val = index_valuation.get(rep_code, {})
                 if "pe_percentile" not in market_factors and val.get("pe_percentile") is not None:
                     market_factors["pe_percentile"] = val["pe_percentile"]
@@ -210,13 +208,14 @@ class ContextBuilder:
             codes = [c for c in codes if c in strategy_codes]
 
         universe = [
-            {"etf_code": code, "name_cn": code, "category": "broad_index"}
-            for code in codes
+            {"etf_code": code, "name_cn": code, "category": "broad_index"} for code in codes
         ]
         asset_metadata = {code: {"name_cn": code, "category": "broad_index"} for code in codes}
 
         # 使用预计算的因子值
-        asset_factors: dict[tuple[str, str], float | None] = dict(precomputed_factors) if precomputed_factors else {}
+        asset_factors: dict[tuple[str, str], float | None] = (
+            dict(precomputed_factors) if precomputed_factors else {}
+        )
 
         # 补充原始行情数据
         for code in codes:
@@ -240,7 +239,7 @@ class ContextBuilder:
         # 市场级择时因子
         market_factors: dict[str, float | None] = {}
         if config.timing and all_valuation:
-            for rep_code in ("000300", "000016", "000905"):
+            for rep_code in config.timing.proxy_index_codes:
                 if rep_code not in codes:
                     continue
                 val_row = all_valuation.get((rep_code, trade_date))
@@ -263,9 +262,7 @@ class ContextBuilder:
     # ==================================================================
 
     @staticmethod
-    def _filter_by_scope(
-        indexes: list[Any], index_codes: list[str] | None = None
-    ) -> list[str]:
+    def _filter_by_scope(indexes: list[Any], index_codes: list[str] | None = None) -> list[str]:
         """根据 index_codes 过滤指数代码列表。
 
         Args:

@@ -152,6 +152,15 @@
             </div>
           </div>
         </div>
+        <div class="sub-field">
+          <label class="sub-label">代理指数代码（逗号分隔）</label>
+          <input
+            v-model="timingProxyIndexCodes"
+            class="fp-input"
+            placeholder="如 000300,000016，留空=默认沪深300"
+          />
+          <span class="threshold-hint">用于加载市场级择时因子的代表性指数</span>
+        </div>
       </div>
     </div>
 
@@ -687,6 +696,7 @@ const timingEnabled = ref(false)
 const timingFactors = ref<FactorRowValue[]>([])
 const timingOffensive = ref(65)
 const timingDefensive = ref(35)
+const timingProxyIndexCodes = ref('')
 
 function initTiming(): void {
   const timing = props.modelValue.timing as Record<string, unknown> | undefined
@@ -702,6 +712,8 @@ function initTiming(): void {
   const thresholds = (timing.thresholds ?? {}) as Record<string, number>
   timingOffensive.value = thresholds.offensive ?? 65
   timingDefensive.value = thresholds.defensive ?? 35
+  const proxyCodes = (timing.proxy_index_codes ?? []) as string[]
+  timingProxyIndexCodes.value = proxyCodes.length > 0 ? proxyCodes.join(', ') : ''
 }
 
 function addTimingFactor(): void {
@@ -911,6 +923,11 @@ function buildConfig(): Record<string, unknown> {
       offensive: timingOffensive.value,
       defensive: timingDefensive.value,
     }
+    const proxyCodes = timingProxyIndexCodes.value
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean)
+    if (proxyCodes.length > 0) timingConfig.proxy_index_codes = proxyCodes
     config.timing = timingConfig
   }
 
@@ -987,7 +1004,7 @@ watch(
   [
     indexCodesInput,
     scoreFactors, scoreMissingStrategy, scoreScoringMode,
-    timingEnabled, timingFactors, timingOffensive, timingDefensive,
+    timingEnabled, timingFactors, timingOffensive, timingDefensive, timingProxyIndexCodes,
     filterEnabled, filterLogic, filterRules,
     rankSortBy, rankOrder, rankTopN, rankBottomN,
     portfolioEnabled, portfolioMethod, portfolioDefaultExposure, exposureOffensive, exposureNeutral, exposureDefensive,

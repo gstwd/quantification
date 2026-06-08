@@ -14,11 +14,9 @@ from uuid import uuid4
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
-from quant_etf_api.domain.common.constants import (
-    SIGNAL_THRESHOLD_HIGH,
-    SIGNAL_THRESHOLD_MID,
-)
+from quant_etf_api.domain.common.signal_level import determine_signal_level
 from quant_etf_api.engine.config import StrategyConfig
+from quant_etf_api.engine.rebalance import DefaultRebalanceScheduler
 from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.orchestrator import StrategyEngine
@@ -70,6 +68,7 @@ class BacktestService:
         self._engine = StrategyEngine()
         self._backtest_repo = backtest_repo or BacktestRepository(db)
         self._index_bar_repo = index_bar_repo or IndexDailyBarRepository(db)
+        self._rebalance_scheduler = DefaultRebalanceScheduler()
 
         # 构建 FactorRegistry 供回测因子预计算使用
         from quant_etf_api.factors.registry import build_default_factor_registry
@@ -97,7 +96,9 @@ class BacktestService:
             universe_filter = {"mode": "subset", "index_codes": strategy_index_codes}
             logger.info(
                 "回测 %s：策略 %s 限定指数范围 %s，强制应用",
-                backtest_id, req.strategy_id, strategy_index_codes,
+                backtest_id,
+                req.strategy_id,
+                strategy_index_codes,
             )
         else:
             universe_filter = (
@@ -141,9 +142,7 @@ class BacktestService:
             created_at=now,
         )
 
-    def list_backtests(
-        self, offset: int = 0, limit: int = 50
-    ) -> tuple[list[BacktestSummary], int]:
+    def list_backtests(self, offset: int = 0, limit: int = 50) -> tuple[list[BacktestSummary], int]:
         """分页返回回测列表，按创建时间倒序。"""
         try:
             rows, total = self._backtest_repo.find_all(offset=offset, limit=limit)
@@ -195,9 +194,8 @@ class BacktestService:
     ) -> list[BacktestIndexResult]:
         """返回回测每日每指数信号与收益。"""
         try:
-            rows = (
-                self._db.query(BacktestIndexResultModel)
-                .filter(BacktestIndexResultModel.backtest_id == backtest_id)
+            rows = self._db.query(BacktestIndexResultModel).filter(
+                BacktestIndexResultModel.backtest_id == backtest_id
             )
             if index_code:
                 rows = rows.filter(BacktestIndexResultModel.index_code == index_code)
@@ -269,8 +267,8 @@ class BacktestService:
         7. 写入每日结果和指数结果
         8. 计算汇总绩效指标
         """
-        universe, index_codes, trading_dates, all_bars, all_valuation = (
-            self._prepare_backtest_data(row)
+        universe, index_codes, trading_dates, all_bars, all_valuation = self._prepare_backtest_data(
+            row
         )
 
         # 预计算所有因子值
@@ -291,6 +289,8 @@ class BacktestService:
             )
 
         daily_results: list[BacktestDailyResultModel] = []
+        # 轻量累积器：保存计算汇总指标所需的字段，避免长区间回测内存溢出
+        metric_accumulator: list[tuple[float, int]] = []
         cumulative = 1.0
         peak = 1.0
         prev_positions: dict[str, float] = {}
@@ -376,6 +376,7 @@ class BacktestService:
             )
             self._db.add(daily_row)
             daily_results.append(daily_row)
+            metric_accumulator.append((portfolio_return, high_cnt))
 
             self._write_index_results(
                 backtest_id, trade_date, next_date, universe, result, all_bars, positions
@@ -383,10 +384,15 @@ class BacktestService:
 
             prev_positions = positions
 
+            # 每 100 天 flush 一次，释放内存中的 ORM 对象
+            if (i + 1) % 100 == 0:
+                self._db.flush()
+                daily_results.clear()  # 释放 ORM 对象，metric_accumulator 已保留关键数据
+
         self._db.flush()
 
-        # 计算汇总指标
-        metrics = self._compute_summary_metrics(daily_results, benchmark_returns)
+        # 计算汇总指标（使用轻量累积器，避免依赖已 flush 的 ORM 对象）
+        metrics = self._compute_summary_metrics(metric_accumulator, benchmark_returns, backtest_id)
         self._backtest_repo.mark_success(backtest_id, metrics)
 
     # ── 数据准备 ───────────────────────────────────────────────────────────
@@ -404,14 +410,12 @@ class BacktestService:
             raise ValueError("回测标的范围为空，请检查 universe_filter 配置")
 
         index_codes = [u["index_code"] for u in universe]
-        trading_dates = self._get_index_trading_dates(
-            row.start_date, row.end_date, index_codes
-        )
+        trading_dates = self._get_index_trading_dates(row.start_date, row.end_date, index_codes)
         if not trading_dates:
             raise ValueError(f"区间 {row.start_date} ~ {row.end_date} 内无交易日数据")
 
         all_bars = self._load_all_index_bars(trading_dates, index_codes)
-        all_valuation = self._load_all_valuation(trading_dates)
+        all_valuation = self._load_all_valuation(trading_dates, index_codes)
 
         return universe, index_codes, trading_dates, all_bars, all_valuation
 
@@ -427,45 +431,32 @@ class BacktestService:
     ) -> None:
         """写入每日每指数的回测结果，使用统一的信号等级判定逻辑。"""
         score_map = result.scores
-        rank_map = {r.etf_code: r for r in result.rankings}
 
         for item in universe:
             code = item["index_code"]
             target_weight = positions.get(code, 0.0)
             score = score_map.get(code, 0.0)
-            ranking = rank_map.get(code)
             original_score = score
 
             if positions:
-                # 配置模式：使用统一信号等级判定
+                # 配置模式：统一信号等级判定
+                level, _ = determine_signal_level(
+                    score=score,
+                    target_weight=target_weight,
+                    has_positions=True,
+                )
                 in_portfolio = target_weight > 0
-                if in_portfolio:
-                    level = "HIGH" if score >= SIGNAL_THRESHOLD_HIGH else "MID"
-                else:
-                    level = "LOW"
                 signal_score = round(target_weight * 100, 2)
-                # 配置模式下保留原始得分
                 original_score = round(score, 2)
             else:
-                # 信号模式：使用领域常量阈值
-                if ranking:
-                    if ranking.score >= SIGNAL_THRESHOLD_HIGH:
-                        level = "HIGH"
-                    elif ranking.score >= SIGNAL_THRESHOLD_MID:
-                        level = "MID"
-                    else:
-                        level = "LOW"
-                    in_portfolio = level == "HIGH"
-                else:
-                    in_portfolio = False
-                    level = "LOW"
+                # 信号模式：统一信号等级判定
+                level, _ = determine_signal_level(score=score)
+                in_portfolio = level == "HIGH"
                 signal_score = round(score, 2)
 
             idx_ret = None
             if next_date and in_portfolio:
-                idx_ret = self._get_index_return(
-                    code, trade_date, next_date, all_bars
-                )
+                idx_ret = self._get_index_return(code, trade_date, next_date, all_bars)
 
             self._db.add(
                 BacktestIndexResultModel(
@@ -537,22 +528,16 @@ class BacktestService:
         returns = []
         weights = []
         for r in selected:
-            ret = self._get_index_return(
-                r.etf_code, r.trade_date, next_date, all_bars
-            )
+            ret = self._get_index_return(r.etf_code, r.trade_date, next_date, all_bars)
             if ret is not None:
                 returns.append(ret)
-                weights.append(
-                    r.signal_score if weighting == "signal_weighted" else 1.0
-                )
+                weights.append(r.signal_score if weighting == "signal_weighted" else 1.0)
 
         if not returns:
             return 0.0, len(high), len(mid), len(low)
 
         total_weight = sum(weights)
-        portfolio_return = (
-            sum(r * w for r, w in zip(returns, weights)) / total_weight
-        )
+        portfolio_return = sum(r * w for r, w in zip(returns, weights)) / total_weight
         return round(portfolio_return, 4), len(high), len(mid), len(low)
 
     # ── 交易成本 ───────────────────────────────────────────────────────────
@@ -581,14 +566,15 @@ class BacktestService:
 
     # ── 调仓检查 ───────────────────────────────────────────────────────────
 
-    @staticmethod
     def _check_rebalance(
+        self,
         config: StrategyConfig,
         trade_date: date,
         last_rebalance_date: date | None,
     ) -> bool:
         """检查当日是否为调仓日。
 
+        委托给 DefaultRebalanceScheduler，与实盘模式使用相同的交易日历对齐逻辑。
         无 rebalance 配置时默认为每日调仓。
 
         Args:
@@ -601,28 +587,26 @@ class BacktestService:
         """
         if config.rebalance is None:
             return True
-
-        rebalance = config.rebalance
-        if rebalance.frequency == "daily":
-            return True
-        if rebalance.frequency == "weekly":
-            target_day = rebalance.day_of_week if rebalance.day_of_week is not None else 4
-            return trade_date.weekday() == target_day
-        if rebalance.frequency == "monthly":
-            target_day = rebalance.day_of_month if rebalance.day_of_month is not None else 1
-            return trade_date.day == target_day
-
-        return True
+        return self._rebalance_scheduler.should_rebalance(
+            config.rebalance, trade_date, last_rebalance_date
+        )
 
     # ── 汇总指标 ───────────────────────────────────────────────────────────
 
     def _compute_summary_metrics(
         self,
-        daily_results: list[BacktestDailyResultModel],
+        metric_accumulator: list[tuple[float, int]],
         benchmark_returns: list[float],
+        backtest_id: str,
     ) -> dict[str, Any]:
-        """计算回测汇总绩效指标，集成专业指标和基准对比。"""
-        if not daily_results:
+        """计算回测汇总绩效指标，集成专业指标和基准对比。
+
+        Args:
+            metric_accumulator: 轻量累积器，每项为 (portfolio_return, high_signal_count)。
+            benchmark_returns: 基准日收益率序列。
+            backtest_id: 回测 ID，用于查询 DB 中的指数结果。
+        """
+        if not metric_accumulator:
             return BacktestMetrics(
                 cumulative_return_pct=0.0,
                 max_drawdown_pct=0.0,
@@ -633,10 +617,8 @@ class BacktestService:
                 active_days=0,
             ).model_dump()
 
-        daily_rets = [r.portfolio_return for r in daily_results]
-        active_rets = [
-            r.portfolio_return for r in daily_results if r.high_signal_count > 0
-        ]
+        daily_rets = [r[0] for r in metric_accumulator]
+        active_rets = [r[0] for r in metric_accumulator if r[1] > 0]
 
         # 专业指标
         perf = compute_performance_metrics(
@@ -647,7 +629,6 @@ class BacktestService:
         # 信号准确率
         signal_accuracy_pct = 0.0
         try:
-            backtest_id = daily_results[0].backtest_id
             idx_rows = (
                 self._db.query(BacktestIndexResultModel)
                 .filter(
@@ -659,8 +640,7 @@ class BacktestService:
             )
             if idx_rows:
                 positive = sum(
-                    1 for r in idx_rows
-                    if r.index_return is not None and r.index_return > 0
+                    1 for r in idx_rows if r.index_return is not None and r.index_return > 0
                 )
                 signal_accuracy_pct = round(positive / len(idx_rows) * 100, 2)
         except Exception:
@@ -682,7 +662,7 @@ class BacktestService:
             sharpe_ratio=perf.sharpe_ratio,
             win_rate_pct=perf.win_rate_pct,
             signal_accuracy_pct=signal_accuracy_pct,
-            total_trading_days=len(daily_results),
+            total_trading_days=len(metric_accumulator),
             active_days=len(active_rets),
             annualized_return_pct=perf.annualized_return_pct,
             sortino_ratio=perf.sortino_ratio,
@@ -698,9 +678,7 @@ class BacktestService:
 
     # ── 辅助方法 ───────────────────────────────────────────────────────────
 
-    def _resolve_index_universe(
-        self, universe_filter: dict[str, Any]
-    ) -> list[dict[str, Any]]:
+    def _resolve_index_universe(self, universe_filter: dict[str, Any]) -> list[dict[str, Any]]:
         """根据 universe_filter 查询回测指数列表。
 
         仅返回活跃指数（is_active=True），排除已退市/停发的指数，
@@ -712,9 +690,7 @@ class BacktestService:
         if universe_filter.get("mode") == "subset":
             codes = universe_filter.get("index_codes", [])
             if codes:
-                rows = (
-                    base_query.filter(BenchmarkIndexModel.index_code.in_(codes)).all()
-                )
+                rows = base_query.filter(BenchmarkIndexModel.index_code.in_(codes)).all()
                 return [
                     {"etf_code": r.index_code, "index_code": r.index_code, "name_cn": r.name_cn}
                     for r in rows
@@ -751,14 +727,12 @@ class BacktestService:
         if not trading_dates:
             return {}
         lookback_start = trading_dates[0] - timedelta(days=_BACKTEST_LOOKBACK_DAYS)
-        return self._index_bar_repo.find_all_date_range(
-            lookback_start, trading_dates[-1]
-        )
+        return self._index_bar_repo.find_all_date_range(lookback_start, trading_dates[-1])
 
     def _load_all_valuation(
-        self, trading_dates: list[date]
+        self, trading_dates: list[date], index_codes: list[str]
     ) -> dict[tuple[str, date], Any]:
-        """批量加载指数估值数据。"""
+        """批量加载指数估值数据，按 index_codes 过滤。"""
         if not trading_dates:
             return {}
         rows = (
@@ -767,6 +741,7 @@ class BacktestService:
                 and_(
                     IndexValuationModel.trade_date >= trading_dates[0],
                     IndexValuationModel.trade_date <= trading_dates[-1],
+                    IndexValuationModel.index_code.in_(index_codes),
                 )
             )
             .all()
@@ -791,9 +766,7 @@ class BacktestService:
             or today_bar.close_price == 0
         ):
             return None
-        return round(
-            (next_bar.close_price / today_bar.close_price - 1) * 100, 4
-        )
+        return round((next_bar.close_price / today_bar.close_price - 1) * 100, 4)
 
     # ── Schema 转换辅助 ────────────────────────────────────────────────────
 

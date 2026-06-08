@@ -100,9 +100,7 @@ class StrategyConfigService:
 
         return self.get_config(req.strategy_id)
 
-    def update_config(
-        self, strategy_id: str, req: StrategyConfigUpdate
-    ) -> StrategyDetail | None:
+    def update_config(self, strategy_id: str, req: StrategyConfigUpdate) -> StrategyDetail | None:
         """更新策略配置。
 
         Args:
@@ -182,6 +180,10 @@ class StrategyConfigService:
         if not config.score.factors:
             errors.append("score.factors 不能为空")
 
+        # 择时代理指数校验
+        if config.timing and not config.timing.proxy_index_codes:
+            errors.append("timing.proxy_index_codes 不能为空")
+
         # 评分权重校验
         for factor_id, weight in config.score.factors.items():
             if weight == 0:
@@ -215,7 +217,9 @@ class StrategyConfigService:
         if config.portfolio:
             valid_methods = {"equal_weight", "score_weight", "winner_take_all"}
             if config.portfolio.method not in valid_methods:
-                errors.append(f"权重分配方法 '{config.portfolio.method}' 不合法，可用: {valid_methods}")
+                errors.append(
+                    f"权重分配方法 '{config.portfolio.method}' 不合法，可用: {valid_methods}"
+                )
 
         # 风控配置校验
         if config.risk:

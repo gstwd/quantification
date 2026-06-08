@@ -113,7 +113,7 @@ class FactorProvider:
         """加载市场级因子值（用于择时）。
 
         根据 config.timing.factors 中配置的因子 ID，
-        从代表性指数（默认沪深300）加载因子值作为市场代理。
+        从择时代理指数（config.timing.proxy_index_codes）加载因子值。
 
         Args:
             config: 策略配置，需包含 timing 配置。
@@ -129,12 +129,17 @@ class FactorProvider:
         if not factor_ids:
             return {}
 
-        # 使用代表性指数作为市场代理
-        rep_code = "000300"
+        proxy_codes = config.timing.proxy_index_codes
         result: dict[str, float | None] = {}
         for factor_id in factor_ids:
-            values = self._query_factor_values([factor_id], trade_date, [rep_code])
-            result[factor_id] = values.get((rep_code, factor_id))
+            for rep_code in proxy_codes:
+                values = self._query_factor_values([factor_id], trade_date, [rep_code])
+                val = values.get((rep_code, factor_id))
+                if val is not None:
+                    result[factor_id] = val
+                    break
+            else:
+                result[factor_id] = None
 
         return result
 
@@ -180,9 +185,7 @@ class FactorProvider:
             ctx = FactorContext(
                 index_bars=all_bars,
                 index_valuation={
-                    (code, dt): val
-                    for (code, dt), val in all_valuation.items()
-                    if dt == trade_date
+                    (code, dt): val for (code, dt), val in all_valuation.items() if dt == trade_date
                 },
             )
             day_factors: dict[tuple[str, str], float | None] = {}

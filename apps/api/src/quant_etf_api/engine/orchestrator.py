@@ -9,10 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from quant_etf_api.domain.common.constants import (
-    SIGNAL_LABELS,
-    SIGNAL_THRESHOLD_HIGH,
-)
+from quant_etf_api.domain.common.signal_level import determine_signal_level
 from quant_etf_api.domain.strategies.models import (
     AssetRanking,
     StrategyResult,
@@ -119,9 +116,7 @@ class StrategyEngine:
 
     def _run_timing(self, config: StrategyConfig, context: EngineContext) -> TimingSignal:
         """运行择时评估，返回 TimingSignal。"""
-        composite_score, regime, factors = self._score.calculate_timing(
-            config.timing, context
-        )
+        composite_score, regime, factors = self._score.calculate_timing(config.timing, context)
 
         # 计算确信度
         thresholds = config.timing.thresholds
@@ -162,16 +157,13 @@ class StrategyEngine:
             ranking = rank_map.get(code)
             target_weight = positions.get(code, 0.0)
 
-            # 信号等级判定（阈值来自领域常量，避免散落硬编码）
-            if timing and timing.regime == "defensive":
-                level, label = "LOW", "防守减仓"
-            elif target_weight > 0:
-                level = "HIGH" if score >= SIGNAL_THRESHOLD_HIGH else "MID"
-                label = SIGNAL_LABELS[level]
-            elif score > 0:
-                level, label = "MID", SIGNAL_LABELS["MID"]
-            else:
-                level, label = "LOW", SIGNAL_LABELS["LOW"]
+            # 统一信号等级判定
+            level, label = determine_signal_level(
+                score=score,
+                target_weight=target_weight,
+                has_positions=bool(positions),
+                timing_regime=timing.regime if timing else None,
+            )
 
             # 构建因子值列表（仅含 config.score.factors 中定义的真实因子，
             # timing_regime 和 target_weight 已在 payload 中记录，不重复写入因子值表）

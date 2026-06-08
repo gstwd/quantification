@@ -110,6 +110,10 @@
                   进攻 ≥ {{ timingConfig.thresholds?.offensive ?? 65 }}，防守 ≤ {{ timingConfig.thresholds?.defensive ?? 35 }}
                 </span>
               </div>
+              <div v-if="timingConfig.proxy_index_codes && timingConfig.proxy_index_codes.length > 0" class="config-row">
+                <span class="config-key">代理指数</span>
+                <span class="config-val">{{ timingConfig.proxy_index_codes.join(', ') }}</span>
+              </div>
             </div>
             <div v-else class="config-empty">未配置（无择时）</div>
           </div>
@@ -457,7 +461,7 @@ const editConfigText = ref('')
 const configJson = computed(() => store.current?.config_json ?? {})
 const indexCodesList = computed(() => (configJson.value.index_codes as string[]) || [])
 const scoreConfig = computed(() => configJson.value.score as { factors?: Record<string, number>; transforms?: Record<string, string>; missing_factor_strategy?: string; scoring_mode?: string } | undefined)
-const timingConfig = computed(() => configJson.value.timing as { factors?: Record<string, number>; transforms?: Record<string, string>; thresholds?: { offensive?: number; defensive?: number } } | undefined)
+const timingConfig = computed(() => configJson.value.timing as { factors?: Record<string, number>; transforms?: Record<string, string>; thresholds?: { offensive?: number; defensive?: number }; proxy_index_codes?: string[] } | undefined)
 const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string }> } | undefined)
 const rankConfig = computed(() => configJson.value.rank as { sort_by?: string; order?: string; top_n?: number; bottom_n?: number } | undefined)
 const portfolioConfig = computed(() => configJson.value.portfolio as { method?: string; timing_exposure?: Record<string, number>; default_exposure?: number } | undefined)
