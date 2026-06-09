@@ -87,12 +87,54 @@ def _clamp_0_100(value: float) -> float:
     return max(0.0, min(100.0, value))
 
 
+def _erp_score(value: float) -> float:
+    """ERP 映射为得分（0-100）。
+
+    ERP 越高表示股票相对债券越有吸引力。
+    分段线性映射：>5→95, >3→80, >2→65, >1→50, >0→35, <=0→15。
+    """
+    if value > 5:
+        return 95.0
+    if value > 3:
+        return 80.0
+    if value > 2:
+        return 65.0
+    if value > 1:
+        return 50.0
+    if value > 0:
+        return 35.0
+    return 15.0
+
+
+def _drawdown_score(value: float) -> float:
+    """回撤幅度映射为得分（0-100）。
+
+    value 为负数（如 -12.5 表示回撤 12.5%），回撤越小得分越高。
+    分段线性映射：0→100, -5→80, -10→60, -15→40, -20→20, <=-25→5。
+    """
+    if value >= 0:
+        return 100.0
+    if value >= -5:
+        return 80.0 + (value + 5) / 5 * 20  # -5→80, 0→100
+    if value >= -10:
+        return 60.0 + (value + 10) / 5 * 20  # -10→60, -5→80
+    if value >= -15:
+        return 40.0 + (value + 15) / 5 * 20  # -15→40, -10→60
+    if value >= -20:
+        return 20.0 + (value + 20) / 5 * 20  # -20→20, -15→40
+    if value >= -25:
+        return 5.0 + (value + 25) / 5 * 15  # -25→5, -20→20
+    return 5.0
+
+
 _TRANSFORM_REGISTRY: dict[str, Any] = {
     "invert_percentile": _invert_percentile,
     "momentum_score": _momentum_score,
     "volume_score": _volume_score,
     "trend_score": _trend_score,
     "clamp_0_100": _clamp_0_100,
+    "erp_score": _erp_score,
+    "drawdown_score": _drawdown_score,
 }
 
 

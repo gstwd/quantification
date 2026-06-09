@@ -49,7 +49,9 @@ def build_default_factor_registry() -> FactorRegistry:
     Returns:
         已注册全部内置因子的 FactorRegistry 实例。
     """
+    from quant_etf_api.factors.builtins.erp import ERPComputer
     from quant_etf_api.factors.builtins.momentum import (
+        Return120dComputer,
         Return20dComputer,
         Return5dComputer,
         Return60dComputer,
@@ -60,6 +62,7 @@ def build_default_factor_registry() -> FactorRegistry:
         DonchianHighComputer,
         DonchianLowComputer,
         MAComputer,
+        MaxDrawdown60dComputer,
         RSIComputer,
     )
     from quant_etf_api.factors.builtins.valuation import (
@@ -79,6 +82,7 @@ def build_default_factor_registry() -> FactorRegistry:
     registry.register(Return5dComputer())
     registry.register(Return20dComputer())
     registry.register(Return60dComputer())
+    registry.register(Return120dComputer())
     # 波动
     registry.register(Volatility20dComputer())
     # 估值
@@ -94,4 +98,8 @@ def build_default_factor_registry() -> FactorRegistry:
     registry.register(DonchianLowComputer(period=20))
     # 技术指标 — RSI
     registry.register(RSIComputer(period=14))
+    # 技术指标 — 最大回撤
+    registry.register(MaxDrawdown60dComputer())
+    # 估值 — 股权风险溢价
+    registry.register(ERPComputer())
     return registry

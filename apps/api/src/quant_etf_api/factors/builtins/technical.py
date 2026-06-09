@@ -380,3 +380,59 @@ class RSIComputer:
             numeric=rsi,
             payload={"period": self._period, "avg_gain": round(avg_gain, 4), "avg_loss": round(avg_loss, 4)},
         )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 最大回撤因子（60 日）
+# ══════════════════════════════════════════════════════════════════════
+
+
+class MaxDrawdown60dComputer:
+    """60 日最大回撤因子计算器。
+
+    计算当前收盘价相对近 60 个交易日最高价的回撤幅度（%）。
+    返回值为负数或零，如 -12.5 表示当前价格比 60 日最高价低 12.5%。
+    用于沪深300波段策略中的回调幅度判断。
+    """
+
+    @property
+    def spec(self) -> FactorSpec:
+        """返回 60 日最大回撤的因子元数据。"""
+        return FactorSpec(
+            factor_id="max_drawdown_60d",
+            name="60日回撤幅度",
+            category="technical",
+            version="1.0.0",
+            description=(
+                "当前收盘价相对近 60 个交易日最高价的回撤幅度（%），"
+                "返回负数或零，如 -12.5 表示回撤 12.5%。"
+            ),
+            required_data=["index_bars"],
+            lookback_days=90,
+        )
+
+    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
+        """计算 60 日回撤幅度。
+
+        Returns:
+            FactorValue，数据不足时 numeric 为 None。
+        """
+        closes = _get_historical_closes(index_code, trade_date, ctx, 60)
+        if closes is None:
+            return FactorValue(
+                factor_id=self.spec.factor_id, numeric=None,
+                payload={"reason": "收盘价数据不足 60 条"},
+            )
+        current_close = closes[-1]
+        highest = max(closes)
+        if highest <= 0:
+            return FactorValue(
+                factor_id=self.spec.factor_id, numeric=None,
+                payload={"reason": "最高价异常"},
+            )
+        drawdown = round((current_close - highest) / highest * 100, 2)
+        return FactorValue(
+            factor_id=self.spec.factor_id,
+            numeric=drawdown,
+            payload={"highest_60d": round(highest, 2), "current_close": round(current_close, 2)},
+        )

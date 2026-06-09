@@ -150,6 +150,7 @@ class FactorProvider:
         index_codes: list[str],
         all_bars: dict[tuple[str, date], Any],
         all_valuation: dict[tuple[str, date], Any],
+        all_macro: dict[str, dict[str, float]] | None = None,
     ) -> dict[date, dict[tuple[str, str], float | None]]:
         """回测模式：一次性计算所有因子值，避免逐日查库。
 
@@ -162,6 +163,7 @@ class FactorProvider:
             index_codes: 回测指数代码列表。
             all_bars: 预加载的指数日线数据，key=(index_code, trade_date)。
             all_valuation: 预加载的估值数据，key=(index_code, trade_date)。
+            all_macro: 预加载的宏观指标数据，key=indicator_code, value={period: value}。
 
         Returns:
             三维映射：date → (index_code, factor_id) → factor_value。
@@ -187,6 +189,7 @@ class FactorProvider:
                 index_valuation={
                     (code, dt): val for (code, dt), val in all_valuation.items() if dt == trade_date
                 },
+                macro_indicators=all_macro or {},
             )
             day_factors: dict[tuple[str, str], float | None] = {}
             for code in index_codes:

@@ -25,6 +25,7 @@ from quant_etf_api.infra.db.models.core import (
     IndexDailyBarModel,
     IndexFactorValueModel,
     IndexValuationModel,
+    MacroIndicatorModel,
 )
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
 from quant_etf_api.infra.db.repositories.index_factor_value import IndexFactorValueRepository
@@ -365,9 +366,25 @@ class FactorService:
             .all()
         ) if index_codes else []
 
+        # 加载宏观指标数据（LPR 等），取每个指标代码的全部历史记录
+        macro_rows = (
+            self._db.query(MacroIndicatorModel)
+            .filter(
+                MacroIndicatorModel.indicator_code.in_(["lpr1y", "lpr5y", "cpi", "pmi"])
+            )
+            .all()
+        )
+        macro_indicators: dict[str, dict[str, float]] = {}
+        for row in macro_rows:
+            code = row.indicator_code
+            if code not in macro_indicators:
+                macro_indicators[code] = {}
+            macro_indicators[code][row.period] = row.value
+
         return FactorContext(
             index_bars={(r.index_code, r.trade_date): r for r in index_bar_rows},
             index_valuation={(r.index_code, r.trade_date): r for r in valuation_rows},
+            macro_indicators=macro_indicators,
         )
 
     def _bulk_upsert(self, rows: list[dict[str, Any]]) -> int:

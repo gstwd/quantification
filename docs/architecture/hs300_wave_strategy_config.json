@@ -1,0 +1,77 @@
+{
+  "strategy_id": "hs300_wave",
+  "display_name": "沪深300波段策略",
+  "version": "1.0.0",
+  "description": "基于趋势+估值的沪深300波段策略（简化版）。用趋势判断牛熊，牛市做趋势波段，熊市做超跌反弹，用估值控制仓位上限。详见 docs/architecture/沪深300波段策略.md",
+  "frequency": "daily",
+  "index_codes": ["000300"],
+  "timing": {
+    "factors": {
+      "ma_60d": 0.4,
+      "return_60d": 0.3,
+      "erp": 0.3
+    },
+    "transforms": {
+      "ma_60d": "trend_score",
+      "return_60d": "momentum_score",
+      "erp": "erp_score"
+    },
+    "thresholds": {
+      "offensive": 60,
+      "defensive": 35
+    },
+    "proxy_index_codes": ["000300"]
+  },
+  "score": {
+    "factors": {
+      "max_drawdown_60d": 0.4,
+      "erp": 0.3,
+      "return_60d": 0.3
+    },
+    "transforms": {
+      "max_drawdown_60d": "drawdown_score",
+      "erp": "erp_score",
+      "return_60d": "momentum_score"
+    },
+    "missing_factor_strategy": "ignore",
+    "scoring_mode": "absolute"
+  },
+  "filters": {
+    "logic": "AND",
+    "rules": [
+      {
+        "factor": "pe_percentile",
+        "op": "lt",
+        "value": 80
+      },
+      {
+        "factor": "close_price",
+        "op": "gt",
+        "compare_to": "ma_60d"
+      }
+    ]
+  },
+  "rank": {
+    "sort_by": "score",
+    "order": "desc",
+    "top_n": 1
+  },
+  "portfolio": {
+    "method": "winner_take_all",
+    "timing_exposure": {
+      "offensive": 0.80,
+      "neutral": 0.50,
+      "defensive": 0.20
+    },
+    "default_exposure": 0.50
+  },
+  "risk": {
+    "max_asset_weight": 1.0,
+    "max_portfolio_exposure": 0.80,
+    "min_cash_ratio": 0.20
+  },
+  "rebalance": {
+    "frequency": "monthly",
+    "day_of_month": 28
+  }
+}

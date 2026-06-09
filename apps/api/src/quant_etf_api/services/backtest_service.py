@@ -27,6 +27,7 @@ from quant_etf_api.infra.db.models.core import (
     BenchmarkIndexModel,
     IndexDailyBarModel,
     IndexValuationModel,
+    MacroIndicatorModel,
 )
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
@@ -267,13 +268,13 @@ class BacktestService:
         7. 写入每日结果和指数结果
         8. 计算汇总绩效指标
         """
-        universe, index_codes, trading_dates, all_bars, all_valuation = self._prepare_backtest_data(
+        universe, index_codes, trading_dates, all_bars, all_valuation, all_macro = self._prepare_backtest_data(
             row
         )
 
         # 预计算所有因子值
         precomputed = self._factor_provider.precompute_backtest_factors(
-            config, trading_dates, index_codes, all_bars, all_valuation
+            config, trading_dates, index_codes, all_bars, all_valuation, all_macro
         )
 
         # 基准配置
@@ -399,11 +400,11 @@ class BacktestService:
 
     def _prepare_backtest_data(
         self, row: BacktestRunModel
-    ) -> tuple[list[dict[str, Any]], list[str], list[date], dict, dict]:
-        """准备回测通用数据：标的、交易日、行情、估值。
+    ) -> tuple[list[dict[str, Any]], list[str], list[date], dict, dict, dict[str, dict[str, float]]]:
+        """准备回测通用数据：标的、交易日、行情、估值、宏观指标。
 
         Returns:
-            (universe, index_codes, trading_dates, all_bars, all_valuation) 元组。
+            (universe, index_codes, trading_dates, all_bars, all_valuation, all_macro) 元组。
         """
         universe = self._resolve_index_universe(row.universe_filter)
         if not universe:
@@ -416,8 +417,9 @@ class BacktestService:
 
         all_bars = self._load_all_index_bars(trading_dates, index_codes)
         all_valuation = self._load_all_valuation(trading_dates, index_codes)
+        all_macro = self._load_all_macro()
 
-        return universe, index_codes, trading_dates, all_bars, all_valuation
+        return universe, index_codes, trading_dates, all_bars, all_valuation, all_macro
 
     def _write_index_results(
         self,
@@ -747,6 +749,27 @@ class BacktestService:
             .all()
         )
         return {(r.index_code, r.trade_date): r for r in rows}
+
+    def _load_all_macro(self) -> dict[str, dict[str, float]]:
+        """加载全部宏观指标数据（LPR 等），用于因子计算。
+
+        Returns:
+            key=indicator_code, value={period: value} 的字典。
+        """
+        rows = (
+            self._db.query(MacroIndicatorModel)
+            .filter(
+                MacroIndicatorModel.indicator_code.in_(["lpr1y", "lpr5y", "cpi", "pmi"])
+            )
+            .all()
+        )
+        result: dict[str, dict[str, float]] = {}
+        for row in rows:
+            code = row.indicator_code
+            if code not in result:
+                result[code] = {}
+            result[code][row.period] = row.value
+        return result
 
     def _get_index_return(
         self,

@@ -166,3 +166,44 @@ class Return60dComputer:
             numeric=value,
             payload={"lookback_days": 60},
         )
+
+
+class Return120dComputer:
+    """120 日动量因子计算器（约 6 个月）。
+
+    计算近 120 个交易日的指数价格涨跌幅（%），衡量中长期趋势。
+    用于沪深300波段策略中的 6 个月动量判断。
+    """
+
+    @property
+    def spec(self) -> FactorSpec:
+        """返回 120 日收益率的因子元数据。"""
+        return FactorSpec(
+            factor_id="return_120d",
+            name="120日收益率",
+            category="momentum",
+            version="1.0.0",
+            description=(
+                "指数近 120 个交易日的价格涨跌幅（%），衡量中长期趋势。"
+            ),
+            required_data=["index_bars"],
+            lookback_days=180,
+        )
+
+    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
+        """计算 120 日收益率。
+
+        Args:
+            index_code: 指数代码。
+            trade_date: 目标交易日。
+            ctx: FactorContext，需包含至少 121 条历史收盘价。
+
+        Returns:
+            FactorValue，历史数据不足 120 条时 numeric 为 None。
+        """
+        value = _calc_nd_return(index_code, trade_date, ctx, n=120)
+        return FactorValue(
+            factor_id=self.spec.factor_id,
+            numeric=value,
+            payload={"lookback_days": 120},
+        )
