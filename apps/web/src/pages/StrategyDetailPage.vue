@@ -185,7 +185,7 @@
                 <span class="config-val">{{ (portfolioConfig.default_exposure * 100).toFixed(0) }}%（无择时信号时）</span>
               </div>
             </div>
-            <div v-else class="config-empty">未配置（信号模式）</div>
+            <div v-else class="config-empty">未配置（无法用于回测）</div>
           </div>
         </div>
 

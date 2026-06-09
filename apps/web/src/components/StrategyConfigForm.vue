@@ -19,14 +19,29 @@
         <span :class="['arrow', expanded.scope ? 'open' : '']">▾</span>
       </div>
       <div v-show="expanded.scope" class="module-body">
-        <div class="module-desc">指定策略运行的目标指数。为空时自动使用全部可用指数。</div>
+        <div class="module-desc">指定策略运行的目标指数。不选则自动使用全部可用指数。</div>
         <div class="sub-field">
-          <label class="sub-label">指数代码（逗号分隔）</label>
-          <input
-            v-model="indexCodesInput"
-            class="fp-input"
-            placeholder="如 000300,000905，留空=全部"
-          />
+          <label class="sub-label">选择指数</label>
+          <div class="index-checkboxes">
+            <label
+              v-for="idx in availableIndexes"
+              :key="idx.index_code"
+              class="checkbox-label"
+            >
+              <input
+                type="checkbox"
+                :checked="selectedIndexCodes.includes(idx.index_code)"
+                @change="toggleIndexCode(idx.index_code)"
+              />
+              <span class="index-code">{{ idx.index_code }}</span>
+              <span class="index-name">{{ idx.index_name }}</span>
+            </label>
+          </div>
+          <div v-if="selectedIndexCodes.length > 0" class="index-summary">
+            已选 <strong>{{ selectedIndexCodes.length }}</strong> 个：
+            <span class="index-codes">{{ selectedIndexCodes.join(', ') }}</span>
+          </div>
+          <div v-else class="index-summary empty">未选择（使用全部可用指数）</div>
         </div>
       </div>
     </div>
@@ -348,8 +363,11 @@
         </label>
         <span :class="['arrow', expanded.portfolio ? 'open' : '']">▾</span>
       </div>
+      <div v-if="!portfolioEnabled" class="portfolio-warn">
+        未启用组合模块，此策略<strong>无法用于回测</strong>。如需回测，请开启此模块并配置仓位参数。
+      </div>
       <div v-show="portfolioEnabled && expanded.portfolio" class="module-body">
-        <div class="module-desc">配置权重分配方法。未启用时为信号模式（只输出得分和排名，不分配仓位）。</div>
+        <div class="module-desc">配置权重分配方法，决定各资产的仓位比例。<strong>回测功能要求策略必须配置此模块。</strong></div>
 
         <div class="sub-field">
           <label class="sub-label">分配方法</label>
@@ -577,7 +595,8 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { fetchFactorSpecs } from '../api/factors'
-import type { FactorSpec } from '../types/api'
+import { fetchBenchmarkIndexes } from '../api/market_data'
+import type { BenchmarkIndex, FactorSpec } from '../types/api'
 import FactorPicker from './FactorPicker.vue'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
@@ -613,12 +632,19 @@ const emit = defineEmits<{
 
 // ── 可用因子列表 ──────────────────────────────────────────────────
 const availableFactors = ref<FactorSpec[]>([])
+/** 可用指数列表（用于资产范围多选） */
+const availableIndexes = ref<BenchmarkIndex[]>([])
 
 onMounted(async () => {
   try {
     availableFactors.value = await fetchFactorSpecs()
   } catch {
     availableFactors.value = []
+  }
+  try {
+    availableIndexes.value = await fetchBenchmarkIndexes()
+  } catch {
+    availableIndexes.value = []
   }
 })
 
@@ -652,6 +678,24 @@ function toggleModule(key: keyof typeof expanded): void {
 
 // ── 资产范围 ──────────────────────────────────────────────────────
 const indexCodesInput = ref('')
+
+/** 当前已选的指数代码列表（从输入解析） */
+const selectedIndexCodes = computed(() =>
+  indexCodesInput.value
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean),
+)
+
+function toggleIndexCode(code: string): void {
+  const current = new Set(selectedIndexCodes.value)
+  if (current.has(code)) {
+    current.delete(code)
+  } else {
+    current.add(code)
+  }
+  indexCodesInput.value = Array.from(current).join(', ')
+}
 
 function initScope(): void {
   const codes = props.modelValue.index_codes as string[] | undefined
@@ -1280,6 +1324,41 @@ watch(() => props.modelValue, () => {
   color: var(--text-muted);
   cursor: pointer;
 }
-.checkbox-label input { accent-color: var(--accent); }
+.checkbox-label input { accent-color: var(--accent); flex-shrink: 0; }
+
+/* 指数多选区域 */
+.index-checkboxes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-height: 200px;
+  overflow-y: auto;
+}
+.index-code { font-family: monospace; font-size: 12px; color: var(--accent); min-width: 52px; }
+.index-name { font-size: 12px; color: var(--text-muted); }
+
+.index-summary {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 4px 0;
+}
+.index-summary.empty { font-style: italic; }
+.index-codes { font-family: monospace; color: var(--accent); }
+
+/* 组合模块未启用警告 */
+.portfolio-warn {
+  padding: 10px 14px;
+  margin-top: 4px;
+  background: rgba(245,158,11,0.08);
+  border: 1px solid rgba(245,158,11,0.25);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: #f59e0b;
+  line-height: 1.6;
+}
 
 </style>
