@@ -49,7 +49,12 @@ def build_default_factor_registry() -> FactorRegistry:
     Returns:
         已注册全部内置因子的 FactorRegistry 实例。
     """
-    from quant_etf_api.factors.builtins.erp import ERPComputer
+    from quant_etf_api.factors.builtins.erp import ERPComputer, ERPPercentileComputer
+    from quant_etf_api.factors.builtins.monthly import (
+        MonthlyMAComputer,
+        MonthlyReturnComputer,
+        MonthlyStreakComputer,
+    )
     from quant_etf_api.factors.builtins.momentum import (
         Return120dComputer,
         Return20dComputer,
@@ -102,4 +107,11 @@ def build_default_factor_registry() -> FactorRegistry:
     registry.register(MaxDrawdown60dComputer())
     # 估值 — 股权风险溢价
     registry.register(ERPComputer())
+    registry.register(ERPPercentileComputer())
+    # 月线级别因子
+    registry.register(MonthlyMAComputer(period=5))
+    registry.register(MonthlyMAComputer(period=10))
+    registry.register(MonthlyReturnComputer(period=2))
+    registry.register(MonthlyReturnComputer(period=3))
+    registry.register(MonthlyStreakComputer())
     return registry

@@ -51,6 +51,7 @@ class FactorProvider:
         """从策略配置中收集所有需要的因子 ID。
 
         遍历 timing.factors、score.factors、filters.rules，
+        以及 regime_rules 中所有 regime 的 score/filters 配置，
         去重后返回完整的因子 ID 列表。
 
         Args:
@@ -74,6 +75,16 @@ class FactorProvider:
                 factor_ids.add(rule.factor)
                 if rule.compare_to:
                     factor_ids.add(rule.compare_to)
+
+        # regime 条件化配置中引用的因子
+        for regime_rule in config.regime_rules.values():
+            if regime_rule.score:
+                factor_ids.update(regime_rule.score.factors.keys())
+            if regime_rule.filters:
+                for rule in regime_rule.filters.rules:
+                    factor_ids.add(rule.factor)
+                    if rule.compare_to:
+                        factor_ids.add(rule.compare_to)
 
         return sorted(factor_ids)
 

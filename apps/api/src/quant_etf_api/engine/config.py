@@ -150,6 +150,25 @@ class RebalanceConfig(BaseModel):
     day_of_month: int | None = None
 
 
+class RegimeRuleConfig(BaseModel):
+    """单个 regime 下的策略配置覆盖。
+
+    用于条件化策略逻辑：不同市场状态（offensive/neutral/defensive）使用不同的
+    评分、过滤、排名和组合配置。未指定的字段保持默认配置值。
+
+    Attributes:
+        score: 评分配置覆盖，None 表示使用默认 score。
+        filters: 过滤配置覆盖，None 表示使用默认 filters。
+        rank: 排名配置覆盖，None 表示使用默认 rank。
+        portfolio: 组合配置覆盖，None 表示使用默认 portfolio。
+    """
+
+    score: ScoreConfig | None = None
+    filters: FilterConfig | None = None
+    rank: RankConfig | None = None
+    portfolio: PortfolioConfig | None = None
+
+
 class StrategyConfig(BaseModel):
     """完整策略配置。
 
@@ -183,3 +202,7 @@ class StrategyConfig(BaseModel):
     portfolio: PortfolioConfig | None = None
     risk: RiskConfig | None = None
     rebalance: RebalanceConfig | None = None
+    regime_rules: dict[str, RegimeRuleConfig] = Field(
+        default_factory=dict,
+        description="regime 条件化配置，key=regime 名称（offensive/neutral/defensive），value=该 regime 下的配置覆盖",
+    )

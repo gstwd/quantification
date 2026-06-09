@@ -54,7 +54,8 @@ class ERPComputer:
         val_row = ctx.index_valuation.get((index_code, trade_date))
         if val_row is None or val_row.pe is None or val_row.pe <= 0:
             return FactorValue(
-                factor_id=self.spec.factor_id, numeric=None,
+                factor_id=self.spec.factor_id,
+                numeric=None,
                 payload={"index_code": index_code, "reason": "无有效 PE 数据"},
             )
 
@@ -62,14 +63,16 @@ class ERPComputer:
         lpr_data = ctx.macro_indicators.get("lpr1y")
         if not lpr_data:
             return FactorValue(
-                factor_id=self.spec.factor_id, numeric=None,
+                factor_id=self.spec.factor_id,
+                numeric=None,
                 payload={"index_code": index_code, "reason": "无 LPR 数据"},
             )
         # 取最新一期 LPR
         latest_lpr = max(lpr_data.values()) if lpr_data else None
         if latest_lpr is None:
             return FactorValue(
-                factor_id=self.spec.factor_id, numeric=None,
+                factor_id=self.spec.factor_id,
+                numeric=None,
                 payload={"index_code": index_code, "reason": "LPR 值为空"},
             )
 
@@ -86,4 +89,47 @@ class ERPComputer:
                 "earnings_yield": round(earnings_yield, 4),
                 "lpr_1y": latest_lpr,
             },
+        )
+
+
+class ERPPercentileComputer:
+    """ERP 历史百分位因子计算器（派生因子）。
+
+    计算当前 ERP 值在近 2 年历史分布中的百分位排名。
+    实际计算在 FactorService._compute_percentile_derived() 中完成后处理，
+    此类仅提供 FactorSpec 元数据用于注册和同步。
+    """
+
+    @property
+    def spec(self) -> FactorSpec:
+        """返回 ERP 百分位因子的元数据。"""
+        return FactorSpec(
+            factor_id="erp_percentile",
+            name="ERP 历史百分位",
+            category="valuation",
+            version="1.0.0",
+            description=(
+                "当前 ERP 在近 2 年历史分布中的百分位排名（0-100）。"
+                "ERP 百分位 > 80 表示股票相对债券极具吸引力，用于熊市超跌判断。"
+                "由 FactorService 后处理计算，依赖 erp 基础因子。"
+            ),
+            required_data=["index_valuation", "macro_indicators"],
+            lookback_days=730,
+        )
+
+    def compute(self, index_code: str, trade_date: date, ctx: "FactorContext") -> "FactorValue":
+        """ERP 百分位由 FactorService 后处理计算，此处返回 None。
+
+        Args:
+            index_code: 指数代码。
+            trade_date: 目标交易日。
+            ctx: 因子上下文。
+
+        Returns:
+            FactorValue，numeric 始终为 None（实际值由 service 层写入）。
+        """
+        return FactorValue(
+            factor_id=self.spec.factor_id,
+            numeric=None,
+            payload={"note": "由 FactorService._compute_percentile_derived() 后处理计算"},
         )

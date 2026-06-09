@@ -69,37 +69,40 @@ class StrategyEngine:
         if config.timing:
             timing = self._run_timing(config, context)
 
+        # 1.5 regime 条件化配置覆盖
+        effective = self._resolve_regime_config(config, timing)
+
         # 2. 资产评分（根据 scoring_mode 选择评分器）
-        if config.score.scoring_mode != "absolute":
-            scores = CrossSectionScorer().calculate(config.score, context)
+        if effective.score.scoring_mode != "absolute":
+            scores = CrossSectionScorer().calculate(effective.score, context)
         else:
-            scores = self._score.calculate(config.score, context)
+            scores = self._score.calculate(effective.score, context)
 
         # 3. 过滤（可选）
-        if config.filters:
-            scores = self._filter.filter(config.filters, scores, context)
+        if effective.filters:
+            scores = self._filter.filter(effective.filters, scores, context)
 
         # 4. 排名
-        rankings = self._rank.rank(config.rank, scores, context)
+        rankings = self._rank.rank(effective.rank, scores, context)
 
         # 5. 仓位分配（可选，无 portfolio 则为信号模式）
         positions: dict[str, float] = {}
         total_exposure = 0.0
         cash_ratio = 1.0
-        if config.portfolio:
-            allocator = build_allocator(config.portfolio.method)
-            positions = allocator.allocate(config.portfolio, rankings, timing)
+        if effective.portfolio:
+            allocator = build_allocator(effective.portfolio.method)
+            positions = allocator.allocate(effective.portfolio, rankings, timing)
 
             # 6. 风控裁剪（可选）
-            if config.risk:
-                positions = self._risk.apply_constraints(config.risk, positions)
+            if effective.risk:
+                positions = self._risk.apply_constraints(effective.risk, positions)
 
             total_exposure = round(sum(positions.values()), 4)
             cash_ratio = round(1.0 - total_exposure, 4)
 
         # 7. 构建兼容旧接口的 StrategyResult 列表
         strategy_results = self._build_strategy_results(
-            config, context, timing, scores, rankings, positions, total_exposure, cash_ratio
+            effective, context, timing, scores, rankings, positions, total_exposure, cash_ratio
         )
 
         return EngineResult(
@@ -135,6 +138,52 @@ class StrategyEngine:
             label=label_map.get(regime, "观望"),
             factors=factors,
         )
+
+    def _resolve_regime_config(
+        self, config: StrategyConfig, timing: TimingSignal | None
+    ) -> StrategyConfig:
+        """根据 timing regime 解析条件化策略配置。
+
+        如果 config.regime_rules 非空且 timing 有 regime，
+        从 regime_rules[regime] 中取覆盖值，合并到 config 副本中。
+        未覆盖的字段保持原 config 值。
+
+        Args:
+            config: 原始策略配置。
+            timing: 择时信号，None 表示无择时。
+
+        Returns:
+            合并后的有效策略配置（可能是原 config 或其副本）。
+        """
+        if not config.regime_rules or timing is None:
+            return config
+
+        rule = config.regime_rules.get(timing.regime)
+        if rule is None:
+            return config
+
+        # 构建覆盖字典，只包含非 None 的字段
+        overrides: dict[str, Any] = {}
+        if rule.score is not None:
+            overrides["score"] = rule.score
+        if rule.filters is not None:
+            overrides["filters"] = rule.filters
+        if rule.rank is not None:
+            overrides["rank"] = rule.rank
+        if rule.portfolio is not None:
+            overrides["portfolio"] = rule.portfolio
+
+        if not overrides:
+            return config
+
+        # 创建 config 副本并应用覆盖
+        merged = config.model_copy(update=overrides)
+        logger.debug(
+            "regime 配置覆盖: regime=%s, 覆盖字段=%s",
+            timing.regime,
+            list(overrides.keys()),
+        )
+        return merged
 
     def _build_strategy_results(
         self,

@@ -37,6 +37,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 派生百分位因子配置：(基础因子 ID, 派生因子 ID, 回望天数)
+_PERCENTILE_DERIVATIONS: list[tuple[str, str, int]] = [
+    ("erp", "erp_percentile", 730),
+]
+
 # 默认回望自然日数（当注册表中无因子时使用）
 _DEFAULT_LOOKBACK_DAYS = 90
 
@@ -165,11 +170,7 @@ class FactorService:
         Returns:
             汇总统计字典，包含 index_count / factor_count / upsert_count / errors。
         """
-        indexes = (
-            self._db.query(BenchmarkIndexModel)
-            .order_by(BenchmarkIndexModel.index_code)
-            .all()
-        )
+        indexes = self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
         if not indexes:
             logger.warning("compute_and_store: 无指数，跳过因子计算")
             return {"index_count": 0, "factor_count": 0, "upsert_count": 0, "errors": 0}
@@ -220,10 +221,14 @@ class FactorService:
             upsert_count,
             errors,
         )
+
+        # 派生百分位因子后处理
+        derived_count = self._compute_percentile_derived(trade_date, index_codes)
+
         return {
             "index_count": len(indexes),
-            "factor_count": len(computers),
-            "upsert_count": upsert_count,
+            "factor_count": len(computers) + derived_count,
+            "upsert_count": upsert_count + derived_count,
             "errors": errors,
         }
 
@@ -356,22 +361,24 @@ class FactorService:
 
         # 加载指数估值数据
         valuation_rows = (
-            self._db.query(IndexValuationModel)
-            .filter(
-                and_(
-                    IndexValuationModel.trade_date == trade_date,
-                    IndexValuationModel.index_code.in_(index_codes),
+            (
+                self._db.query(IndexValuationModel)
+                .filter(
+                    and_(
+                        IndexValuationModel.trade_date == trade_date,
+                        IndexValuationModel.index_code.in_(index_codes),
+                    )
                 )
+                .all()
             )
-            .all()
-        ) if index_codes else []
+            if index_codes
+            else []
+        )
 
         # 加载宏观指标数据（LPR 等），取每个指标代码的全部历史记录
         macro_rows = (
             self._db.query(MacroIndicatorModel)
-            .filter(
-                MacroIndicatorModel.indicator_code.in_(["lpr1y", "lpr5y", "cpi", "pmi"])
-            )
+            .filter(MacroIndicatorModel.indicator_code.in_(["lpr1y", "lpr5y", "cpi", "pmi"]))
             .all()
         )
         macro_indicators: dict[str, dict[str, float]] = {}
@@ -386,6 +393,100 @@ class FactorService:
             index_valuation={(r.index_code, r.trade_date): r for r in valuation_rows},
             macro_indicators=macro_indicators,
         )
+
+    def _compute_percentile_derived(self, trade_date: date, index_codes: list[str]) -> int:
+        """计算派生百分位因子（如 erp_percentile）。
+
+        从 index_factor_value 表读取基础因子的历史值，
+        计算当前值在历史分布中的百分位，写入派生因子。
+
+        Args:
+            trade_date: 目标交易日。
+            index_codes: 指数代码列表。
+
+        Returns:
+            写入的派生因子记录数。
+        """
+        total_written = 0
+        for base_factor_id, derived_factor_id, lookback_days in _PERCENTILE_DERIVATIONS:
+            # 检查派生因子是否已启用
+            derived_def = self._repo.find_by_id(derived_factor_id)
+            if derived_def is not None and not derived_def.is_active:
+                continue
+
+            lookback_start = trade_date - timedelta(days=lookback_days)
+            for index_code in index_codes:
+                try:
+                    # 查询历史基础因子值
+                    history_rows = (
+                        self._db.query(
+                            IndexFactorValueModel.trade_date,
+                            IndexFactorValueModel.factor_value_numeric,
+                        )
+                        .filter(
+                            and_(
+                                IndexFactorValueModel.factor_id == base_factor_id,
+                                IndexFactorValueModel.index_code == index_code,
+                                IndexFactorValueModel.trade_date >= lookback_start,
+                                IndexFactorValueModel.trade_date <= trade_date,
+                                IndexFactorValueModel.strategy_id.is_(None),
+                                IndexFactorValueModel.factor_value_numeric.isnot(None),
+                            )
+                        )
+                        .order_by(IndexFactorValueModel.trade_date)
+                        .all()
+                    )
+
+                    if len(history_rows) < 10:
+                        continue
+
+                    # 获取当前值
+                    current_val = None
+                    for row in history_rows:
+                        if row.trade_date == trade_date:
+                            current_val = row.factor_value_numeric
+                            break
+                    if current_val is None:
+                        continue
+
+                    # 计算百分位：有多少比例的值 <= 当前值
+                    all_values = [r.factor_value_numeric for r in history_rows]
+                    count_below = sum(1 for v in all_values if v <= current_val)
+                    percentile = round(count_below / len(all_values) * 100, 2)
+
+                    # upsert 派生因子值
+                    self._bulk_upsert(
+                        [
+                            {
+                                "trade_date": trade_date,
+                                "index_code": index_code,
+                                "factor_id": derived_factor_id,
+                                "factor_value_numeric": percentile,
+                                "factor_value_text": None,
+                                "factor_payload": {
+                                    "base_factor": base_factor_id,
+                                    "current_value": round(current_val, 4),
+                                    "history_count": len(all_values),
+                                    "lookback_days": lookback_days,
+                                },
+                                "strategy_id": None,
+                            }
+                        ]
+                    )
+                    total_written += 1
+
+                except Exception:
+                    logger.warning(
+                        "百分位派生因子计算失败: index=%s base=%s derived=%s",
+                        index_code,
+                        base_factor_id,
+                        derived_factor_id,
+                        exc_info=True,
+                    )
+
+        if total_written:
+            logger.info("百分位派生因子写入: count=%d", total_written)
+        return total_written
 
     def _bulk_upsert(self, rows: list[dict[str, Any]]) -> int:
         """批量 upsert index_factor_value，使用 partial unique index 处理 NULL strategy_id。
