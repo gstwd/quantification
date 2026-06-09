@@ -177,8 +177,6 @@ export interface BacktestCreateRequest {
   universe_mode: 'all' | 'subset'
   index_codes: string[]
   params?: Record<string, unknown> | null
-  weighting: 'equal' | 'signal_weighted'
-  backtest_mode?: 'signal' | 'allocation'
   /** 是否启用基准对比，默认 true */
   enable_benchmark?: boolean
   /** 基准指数代码，默认 000300（沪深300） */
@@ -221,8 +219,6 @@ export interface BacktestSummary {
   start_date: string
   end_date: string
   status: string
-  weighting: string
-  backtest_mode?: string
   metrics: BacktestMetrics | null
   created_at: string
   started_at: string | null

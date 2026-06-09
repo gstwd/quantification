@@ -18,8 +18,6 @@ class BacktestCreateRequest(BaseModel):
         universe_mode: 标的范围，all=全部指数，subset=指定指数代码列表。
         index_codes: 指定指数代码列表（universe_mode=subset 时生效）。
         params: 策略参数透传。
-        weighting: 信号评分模式的加权方式。
-        backtest_mode: 回测模式，signal=信号评分模式（默认），allocation=资产配置模式。
         enable_benchmark: 是否启用基准对比。
         benchmark_index_code: 基准指数代码，默认沪深300。
     """
@@ -30,8 +28,6 @@ class BacktestCreateRequest(BaseModel):
     universe_mode: Literal["all", "subset"] = "all"
     index_codes: list[str] = []
     params: dict[str, Any] | None = None
-    weighting: Literal["equal", "signal_weighted"] = "equal"
-    backtest_mode: Literal["signal", "allocation"] = "signal"
     enable_benchmark: bool = True
     benchmark_index_code: str = "000300"
 
@@ -67,8 +63,6 @@ class BacktestSummary(BaseModel):
     start_date: date
     end_date: date
     status: str
-    weighting: str
-    backtest_mode: str = "signal"
     metrics: BacktestMetrics | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None = None

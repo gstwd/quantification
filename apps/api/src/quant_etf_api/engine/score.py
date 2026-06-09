@@ -291,6 +291,9 @@ class DefaultScoreCalculator:
         return round(max(0.0, min(100.0, score)), 1)
 
 
+_default_scorer = DefaultScoreCalculator()
+
+
 class CrossSectionScorer:
     """横截面评分器：在所有资产间比较因子值进行评分。
 
@@ -370,10 +373,10 @@ class CrossSectionScorer:
                 else:
                     normalized[k] = 50.0
         else:
-            # absolute 模式：直接使用原始加权分（裁剪到 0-100）
-            normalized = {}
-            for k, v in raw_scores.items():
-                normalized[k] = round(max(0.0, min(100.0, v)), 1)
+            raise ValueError(
+                f"CrossSectionScorer 不支持 scoring_mode='{mode}'，"
+                f"absolute 模式应使用 DefaultScoreCalculator"
+            )
 
         return normalized
 
@@ -382,5 +385,5 @@ class CrossSectionScorer:
         config: "TimingConfig",
         context: "EngineContext",
     ) -> tuple[float, str, dict]:
-        """横截面评分器的择时计算（委托给 DefaultScoreCalculator）。"""
-        return DefaultScoreCalculator().calculate_timing(config, context)
+        """横截面评分器的择时计算（委托给 DefaultScoreCalculator 单例）。"""
+        return _default_scorer.calculate_timing(config, context)

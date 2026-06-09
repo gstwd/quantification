@@ -61,10 +61,11 @@ def normalize_rank(values: dict[str, float]) -> dict[str, float | None]:
     # 升序排列，rank 从 1 开始
     valid_items.sort(key=lambda x: x[1])
     n = len(valid_items)
+    valid_keys = {item[0] for item in valid_items}
 
     result: dict[str, float | None] = {}
     for k in values:
-        if k not in {item[0] for item in valid_items}:
+        if k not in valid_keys:
             result[k] = None
             continue
 

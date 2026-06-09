@@ -46,7 +46,7 @@ class TestStrategyEngine:
     """策略引擎测试。"""
 
     def test_signal_mode(self) -> None:
-        """信号模式：无 portfolio 配置，只输出得分和排名。"""
+        """无 portfolio 配置时：只输出得分和排名，无仓位。"""
         engine = StrategyEngine()
         config = StrategyConfig(
             strategy_id="test_signal",
@@ -73,7 +73,7 @@ class TestStrategyEngine:
         assert result.timing is None
         assert len(result.scores) == 3
         assert len(result.rankings) == 3
-        assert result.positions == {}  # 信号模式无仓位
+        assert result.positions == {}  # 无仓位
         assert result.total_exposure == 0.0
         assert result.cash_ratio == 1.0
 

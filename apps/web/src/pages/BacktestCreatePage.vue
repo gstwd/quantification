@@ -71,34 +71,6 @@
       </div>
 
       <div class="form-section">
-        <label class="form-label">回测模式 <HelpTip :text="configHelp('portfolio')" /></label>
-        <div class="radio-group">
-          <label class="radio-label">
-            <input v-model="form.backtest_mode" type="radio" value="signal" />
-            信号评分模式（HIGH/MID/LOW 信号等级）
-          </label>
-          <label class="radio-label">
-            <input v-model="form.backtest_mode" type="radio" value="allocation" />
-            资产配置模式（择时 → 轮动 → 仓位分配）
-          </label>
-        </div>
-      </div>
-
-      <div v-if="form.backtest_mode === 'signal'" class="form-section">
-        <label class="form-label">组合加权方式</label>
-        <div class="radio-group">
-          <label class="radio-label">
-            <input v-model="form.weighting" type="radio" value="equal" />
-            等权（HIGH 信号指数等权持有）
-          </label>
-          <label class="radio-label">
-            <input v-model="form.weighting" type="radio" value="signal_weighted" />
-            信号加权（按信号得分加权）
-          </label>
-        </div>
-      </div>
-
-      <div class="form-section">
         <label class="form-label">基准对比 <HelpTip :text="configHelp('benchmark')" /></label>
         <div class="radio-group">
           <label class="radio-label">
@@ -163,8 +135,6 @@ const form = reactive({
   end_date: '',
   universe_mode: 'all' as 'all' | 'subset',
   index_codes: [] as string[],
-  weighting: 'equal' as 'equal' | 'signal_weighted',
-  backtest_mode: 'signal' as 'signal' | 'allocation',
   enable_benchmark: true,
   benchmark_index_code: '000300',
 })
@@ -230,8 +200,6 @@ async function submit() {
       end_date: form.end_date,
       universe_mode: form.universe_mode,
       index_codes: form.index_codes,
-      weighting: form.weighting,
-      backtest_mode: form.backtest_mode,
       enable_benchmark: form.enable_benchmark,
       benchmark_index_code: form.benchmark_index_code,
     })

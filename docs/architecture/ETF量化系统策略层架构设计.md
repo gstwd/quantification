@@ -57,10 +57,7 @@ StrategyEngine.run(config, context)
     └── EngineResult           → 统一输出
 ```
 
-**两种运行模式：**
-
-- **信号模式**：无 `portfolio` 配置，只输出得分和排名
-- **配置模式**：有 `portfolio` 配置，输出目标仓位权重
+**运行模式：** 策略需配置 `portfolio` 模块，引擎执行完整管线（择时 → 评分 → 过滤 → 排名 → 仓位分配 → 风控），输出目标仓位权重。
 
 ------
 
@@ -359,7 +356,7 @@ score = Σ(transform(factor_value) × weight) / Σ(|weight|)
 }
 ```
 
-## 量能突破策略（信号模式）
+## 量能突破策略
 
 ```json
 {
@@ -382,7 +379,7 @@ score = Σ(transform(factor_value) × weight) / Σ(|weight|)
 }
 ```
 
-无 `portfolio` 配置，为信号模式，只输出得分和排名。
+此策略仅展示评分和排名配置，实际回测需添加 `portfolio` 模块。
 
 ------
 
@@ -411,7 +408,7 @@ class EngineResult:
     timing: TimingSignal | None       # 择时信号
     scores: dict[str, float]          # 每资产得分
     rankings: list[AssetRanking]      # 排名列表
-    positions: dict[str, float]       # 目标仓位（信号模式为空）
+    positions: dict[str, float]       # 目标仓位（无 portfolio 时为空）
     total_exposure: float             # 总仓位比例
     cash_ratio: float                 # 现金比例
     strategy_results: list[StrategyResult]  # 兼容旧接口

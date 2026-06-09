@@ -92,6 +92,9 @@ class BacktestService:
         strategy_config = config_svc.get_parsed_config(req.strategy_id)
         strategy_index_codes = strategy_config.index_codes if strategy_config else []
 
+        if strategy_config is not None and strategy_config.portfolio is None:
+            raise ValueError("策略未配置 portfolio 模块，无法执行回测。请在策略配置中添加 portfolio。")
+
         if strategy_index_codes:
             # 策略有指数范围限定，强制使用策略的 index_codes
             universe_filter = {"mode": "subset", "index_codes": strategy_index_codes}
@@ -119,10 +122,8 @@ class BacktestService:
                 strategy_id=req.strategy_id,
                 start_date=req.start_date,
                 end_date=req.end_date,
-                backtest_mode=req.backtest_mode,
                 universe_filter=universe_filter,
                 params=params,
-                weighting=req.weighting,
                 status="pending",
                 created_at=now,
             )
@@ -138,8 +139,6 @@ class BacktestService:
             start_date=req.start_date,
             end_date=req.end_date,
             status="pending",
-            weighting=req.weighting,
-            backtest_mode=req.backtest_mode,
             created_at=now,
         )
 
@@ -332,10 +331,7 @@ class BacktestService:
                     positions, trade_date, next_date, all_bars
                 )
             else:
-                # 信号模式：使用排名 + top_n
-                portfolio_return, high_cnt, mid_cnt, low_cnt = self._compute_topn_return(
-                    result, row.weighting, config.rank.top_n, next_date, all_bars
-                )
+                portfolio_return = 0.0
 
             # 换手率（仅在调仓日计算）
             turnover = 0.0
@@ -348,13 +344,10 @@ class BacktestService:
             peak = max(peak, cumulative)
             drawdown = (cumulative / peak - 1) * 100
 
-            # 信号统计
-            if positions:
-                high_cnt = len(positions)
-                mid_cnt = 0
-                low_cnt = 0
-            elif not result.rankings:
-                high_cnt, mid_cnt, low_cnt = 0, 0, 0
+            # 持仓统计
+            high_cnt = len(positions) if positions else 0
+            mid_cnt = 0
+            low_cnt = 0
 
             # 基准收益
             benchmark_ret = benchmark_returns[i] if i < len(benchmark_returns) else None
@@ -365,9 +358,9 @@ class BacktestService:
                 portfolio_return=round(portfolio_return, 4),
                 cumulative_return=round(cumulative_return_pct, 4),
                 drawdown=round(drawdown, 4),
-                high_signal_count=high_cnt if not positions else len(positions),
-                mid_signal_count=mid_cnt if not positions else 0,
-                low_signal_count=low_cnt if not positions else 0,
+                high_signal_count=high_cnt,
+                mid_signal_count=mid_cnt,
+                low_signal_count=low_cnt,
                 timing_regime=result.timing.regime if result.timing else None,
                 total_exposure=result.total_exposure if positions else None,
                 cash_ratio=result.cash_ratio if positions else None,
@@ -380,7 +373,8 @@ class BacktestService:
             metric_accumulator.append((portfolio_return, high_cnt))
 
             self._write_index_results(
-                backtest_id, trade_date, next_date, universe, result, all_bars, positions
+                backtest_id, trade_date, next_date, universe, result, all_bars, positions,
+                scoring_mode=config.score.scoring_mode,
             )
 
             prev_positions = positions
@@ -430,6 +424,7 @@ class BacktestService:
         result: Any,
         all_bars: dict,
         positions: dict[str, float],
+        scoring_mode: str = "absolute",
     ) -> None:
         """写入每日每指数的回测结果，使用统一的信号等级判定逻辑。"""
         score_map = result.scores
@@ -438,23 +433,16 @@ class BacktestService:
             code = item["index_code"]
             target_weight = positions.get(code, 0.0)
             score = score_map.get(code, 0.0)
-            original_score = score
+            original_score = round(score, 2)
 
-            if positions:
-                # 配置模式：统一信号等级判定
-                level, _ = determine_signal_level(
-                    score=score,
-                    target_weight=target_weight,
-                    has_positions=True,
-                )
-                in_portfolio = target_weight > 0
-                signal_score = round(target_weight * 100, 2)
-                original_score = round(score, 2)
-            else:
-                # 信号模式：统一信号等级判定
-                level, _ = determine_signal_level(score=score)
-                in_portfolio = level == "HIGH"
-                signal_score = round(score, 2)
+            level, _ = determine_signal_level(
+                score=score,
+                target_weight=target_weight,
+                has_positions=True,
+                scoring_mode=scoring_mode,
+            )
+            in_portfolio = target_weight > 0
+            signal_score = round(target_weight * 100, 2)
 
             idx_ret = None
             if next_date and in_portfolio:
@@ -491,56 +479,6 @@ class BacktestService:
             if ret is not None:
                 total_return += weight * ret
         return round(total_return, 4)
-
-    def _compute_topn_return(
-        self,
-        result: Any,
-        weighting: str,
-        top_n: int | None,
-        next_date: date | None,
-        all_bars: dict,
-    ) -> tuple[float, int, int, int]:
-        """信号模式：按排名取 Top N 资产计算组合收益。
-
-        与旧 _compute_signal_return 的核心区别：
-        尊重 RankConfig.top_n 而非硬编码 HIGH 信号等级为入选条件。
-
-        Args:
-            result: 引擎执行结果。
-            weighting: 加权方式，equal 或 signal_weighted。
-            top_n: 取前 N 名，None 时取全部 HIGH 信号。
-            next_date: T+1 日期。
-            all_bars: 预加载行情数据。
-
-        Returns:
-            (portfolio_return, high_count, mid_count, low_count) 元组。
-        """
-        high = [r for r in result.strategy_results if r.signal_level == "HIGH"]
-        mid = [r for r in result.strategy_results if r.signal_level == "MID"]
-        low = [r for r in result.strategy_results if r.signal_level == "LOW"]
-
-        # 按得分降序排序，取 top_n
-        selected = sorted(high, key=lambda r: r.signal_score, reverse=True)
-        if top_n is not None and len(selected) > top_n:
-            selected = selected[:top_n]
-
-        if not selected or next_date is None:
-            return 0.0, len(high), len(mid), len(low)
-
-        returns = []
-        weights = []
-        for r in selected:
-            ret = self._get_index_return(r.etf_code, r.trade_date, next_date, all_bars)
-            if ret is not None:
-                returns.append(ret)
-                weights.append(r.signal_score if weighting == "signal_weighted" else 1.0)
-
-        if not returns:
-            return 0.0, len(high), len(mid), len(low)
-
-        total_weight = sum(weights)
-        portfolio_return = sum(r * w for r, w in zip(returns, weights)) / total_weight
-        return round(portfolio_return, 4), len(high), len(mid), len(low)
 
     # ── 交易成本 ───────────────────────────────────────────────────────────
 
@@ -807,8 +745,6 @@ class BacktestService:
             start_date=row.start_date,
             end_date=row.end_date,
             status=row.status,
-            weighting=row.weighting,
-            backtest_mode=getattr(row, "backtest_mode", "signal"),
             metrics=metrics,
             created_at=row.created_at,
             started_at=row.started_at,

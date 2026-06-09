@@ -505,19 +505,12 @@ class BacktestRunModel(Base):
     strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="关联策略 ID")
     start_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="回测起始日期")
     end_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="回测结束日期")
-    backtest_mode: Mapped[str] = mapped_column(
-        String(32), default="signal", server_default="signal",
-        comment="回测模式：signal=信号评分，allocation=资产配置",
-    )
     universe_filter: Mapped[dict] = mapped_column(
         JSON,
         nullable=False,
         comment='标的过滤条件，{"mode":"all"} 或 {"mode":"subset","etf_codes":[...]}',
     )
     params: Mapped[dict | None] = mapped_column(JSON, comment="策略参数覆盖，NULL 表示使用默认参数")
-    weighting: Mapped[str] = mapped_column(
-        String(32), default="equal", comment="组合加权方式：equal=等权，signal_weighted=信号加权"
-    )
     status: Mapped[str] = mapped_column(
         String(32),
         default="pending",

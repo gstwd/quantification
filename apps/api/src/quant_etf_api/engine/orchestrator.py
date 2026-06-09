@@ -212,6 +212,7 @@ class StrategyEngine:
                 target_weight=target_weight,
                 has_positions=bool(positions),
                 timing_regime=timing.regime if timing else None,
+                scoring_mode=config.score.scoring_mode,
             )
 
             # 构建因子值列表（仅含 config.score.factors 中定义的真实因子，

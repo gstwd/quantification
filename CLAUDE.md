@@ -141,7 +141,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - **Risk**: 单资产上限、组合上限、最低现金比例
 - **Rebalance**: 调仓频率控制（daily/weekly/monthly），回测中非调仓日沿用上次持仓
 
-无 `portfolio` 配置 → 信号模式（只输出得分/排名）；有 → 配置模式（输出仓位）。
+有 `portfolio` 配置 → 输出仓位（回测要求策略必须配置 portfolio 模块）。
 
 内置 transform 函数（在 `engine/score.py` 的 `_TRANSFORM_REGISTRY` 中注册）：`invert_percentile`、`momentum_score`、`volume_score`、`trend_score`、`clamp_0_100`。
 
@@ -198,7 +198,7 @@ Services fully wired to PostgreSQL. 23 tables across 13 migrations (0001→0013)
 
 **因子系统**: 18 个内置因子（7 基础 + 4 均线 ma_5d/10d/20d/60d + atr_14d + donchian_20d_high/low + rsi_14d），通过 `FactorRegistry` 注册，`FactorService` 编排计算和持久化。所有因子基于指数数据计算（`index_factor_value` 表）。`FactorSpec` 增加 `lookback_days` 字段，`FactorService._load_context()` 动态使用所有因子的最大 lookback。`FactorContext` 增加 `macro_indicators` 字段。`normalization.py` 提供 zscore/rank/minmax/winsorize/MAD 横截面标准化。`evaluation.py` 提供 IC/IR 分析和因子相关性矩阵。
 
-**Backtesting**: `BacktestService` 使用统一 `_run_backtest_loop` 替代旧的 signal/allocation 双分支。集成 `FactorProvider` 预计算因子、`ContextBuilder` 构建上下文、专业绩效指标（`metrics.py`）、基准对比（`benchmark.py`）、交易成本模型（佣金+滑点）。支持调仓频率控制和换手率计算。引擎输出 positions 非空时为配置模式，为空时为信号模式。
+**Backtesting**: `BacktestService` 使用统一 `_run_backtest_loop`。集成 `FactorProvider` 预计算因子、`ContextBuilder` 构建上下文、专业绩效指标（`metrics.py`）、基准对比（`benchmark.py`）、交易成本模型（佣金+滑点）。支持调仓频率控制和换手率计算。回测仅支持配置模式（策略需配置 portfolio 模块）。
 
 **Asset allocation API**: `GET /strategies/{strategy_id}/allocation` runs the full decision pipeline and returns timing signal, asset rankings, and allocation plan.
 
@@ -233,8 +233,8 @@ Services fully wired to PostgreSQL. 23 tables across 13 migrations (0001→0013)
 - **Ruff on Windows**: Installed at `.venv/Scripts/ruff.exe` (inside the project venv, not globally). Use `.venv/Scripts/ruff.exe check .` from `apps/api`.
 - **Engine transform 函数**: 内置变换函数在 `engine/score.py` 的 `_TRANSFORM_REGISTRY` 中注册。新增 transform 只需在该注册表中添加。
 - **EngineContext vs StrategyContextData**: `EngineContext` 使用结构化字段（`asset_factors`、`market_factors`），`StrategyContextData` 保留用于旧接口兼容（`plugins/base.py` re-export）。
-- **Backtest mode detection**: 引擎输出 `result.positions` 非空时为配置模式，为空时为信号模式。不再依赖 `backtest_run.params` 中的 `_backtest_mode` 字段。
 - **FactorProvider 依赖注入**: `FactorProvider` 需要 `db: Session`（实时模式）和 `registry: FactorRegistry`（回测模式）。回测服务在 `__init__` 中构建 `FactorRegistry` 和 `FactorProvider`，通过 `ContextBuilder` 注入。
+- **回测仅支持配置模式**: 策略必须配置 `portfolio` 模块，`create_backtest` 会校验并拒绝无 portfolio 的策略。`backtest_mode` 和 `weighting` 字段已移除。
 - **回测日收益基准（benchmark_return）和换手率（turnover）**: 存储在 `backtest_daily_result` 表中（migration 0011），前端 `BacktestDailyResult` 接口包含这两个可选字段。
 - **index_signal 表** (migration 0010): 与 `etf_signal` 结构对齐，但以 `index_code` 替代 `etf_code`，用于存储基于指数的策略信号。
 - **信号等级判定常量**: 定义在 `domain/common/constants.py`（`SIGNAL_THRESHOLD_HIGH=70`、`SIGNAL_THRESHOLD_MID=50`），引擎和回测服务统一引用，避免硬编码散落。

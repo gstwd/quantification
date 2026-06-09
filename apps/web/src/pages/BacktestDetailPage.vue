@@ -127,20 +127,14 @@
         <div ref="drawdownChartEl" class="chart-container"></div>
       </div>
 
-      <!-- 信号分布（信号模式） -->
-      <div v-if="!isAllocationMode" class="chart-card">
-        <div class="chart-title">每日信号分布</div>
-        <div ref="signalChartEl" class="chart-container chart-short"></div>
-      </div>
-
-      <!-- 仓位变化（配置模式） -->
-      <div v-if="isAllocationMode" class="chart-card">
+      <!-- 仓位变化 -->
+      <div class="chart-card">
         <div class="chart-title">仓位变化</div>
         <div ref="positionsChartEl" class="chart-container"></div>
       </div>
 
-      <!-- 择时状态时间线（配置模式） -->
-      <div v-if="isAllocationMode && regimeTimeline.length > 0" class="table-card">
+      <!-- 择时状态时间线 -->
+      <div v-if="regimeTimeline.length > 0" class="table-card">
         <div class="table-title">择时状态变化</div>
         <div class="regime-timeline">
           <span
@@ -152,31 +146,6 @@
             {{ item.date.slice(5) }}
           </span>
         </div>
-      </div>
-
-      <!-- per-指数 汇总表（信号模式） -->
-      <div v-if="!isAllocationMode && indexSummary.length > 0" class="table-card">
-        <div class="table-title">指数信号汇总</div>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>指数代码</th>
-              <th>HIGH 次数</th>
-              <th>平均得分</th>
-              <th>原始均分</th>
-              <th>信号准确率</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in indexSummary" :key="row.index_code">
-              <td class="mono">{{ row.index_code }}</td>
-              <td>{{ row.high_count }}</td>
-              <td>{{ row.avg_score.toFixed(1) }}</td>
-              <td>{{ row.avg_original_score !== null ? row.avg_original_score.toFixed(1) : '-' }}</td>
-              <td :class="row.accuracy >= 50 ? 'success' : 'danger'">{{ row.accuracy.toFixed(1) }}%</td>
-            </tr>
-          </tbody>
-        </table>
       </div>
 
     </template>
@@ -201,7 +170,6 @@ const store = useBacktestStore()
 
 const equityChartEl = ref<HTMLElement | null>(null)
 const drawdownChartEl = ref<HTMLElement | null>(null)
-const signalChartEl = ref<HTMLElement | null>(null)
 const positionsChartEl = ref<HTMLElement | null>(null)
 const polling = ref(false)
 
@@ -210,12 +178,7 @@ let equityChart: any = null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let drawdownChart: any = null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let signalChart: any = null
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let positionsChart: any = null
-
-/** 是否为配置模式 */
-const isAllocationMode = computed(() => store.current?.backtest_mode === 'allocation')
 
 function statusLabel(status: string): string {
   const map: Record<string, string> = { pending: '待执行', running: '执行中', success: '成功', failed: '失败' }
@@ -237,35 +200,6 @@ const regimeTimeline = computed(() => {
     }))
 })
 
-/** 按指数汇总信号统计 */
-const indexSummary = computed(() => {
-  const map = new Map<string, { high_count: number; scores: number[]; original_scores: number[]; correct: number; total: number }>()
-  for (const r of store.indexResults) {
-    if (!map.has(r.index_code)) map.set(r.index_code, { high_count: 0, scores: [], original_scores: [], correct: 0, total: 0 })
-    const entry = map.get(r.index_code)!
-    entry.scores.push(r.signal_score)
-    if (r.original_score !== null && r.original_score !== undefined) {
-      entry.original_scores.push(r.original_score)
-    }
-    if (r.signal_level === 'HIGH') entry.high_count++
-    if (r.in_portfolio && r.index_return !== null) {
-      entry.total++
-      if (r.index_return > 0) entry.correct++
-    }
-  }
-  return Array.from(map.entries())
-    .map(([index_code, v]) => ({
-      index_code,
-      high_count: v.high_count,
-      avg_score: v.scores.reduce((a, b) => a + b, 0) / (v.scores.length || 1),
-      avg_original_score: v.original_scores.length > 0
-        ? v.original_scores.reduce((a, b) => a + b, 0) / v.original_scores.length
-        : null as number | null,
-      accuracy: v.total > 0 ? (v.correct / v.total) * 100 : 0,
-    }))
-    .sort((a, b) => b.high_count - a.high_count)
-})
-
 async function initCharts() {
   if (store.dailyResults.length === 0) return
   const echarts = await import('echarts')
@@ -273,10 +207,6 @@ async function initCharts() {
   const dates = store.dailyResults.map((r) => r.trade_date)
   const cumReturns = store.dailyResults.map((r) => r.cumulative_return)
   const drawdowns = store.dailyResults.map((r) => r.drawdown)
-  const highCounts = store.dailyResults.map((r) => r.high_signal_count)
-  const midCounts = store.dailyResults.map((r) => r.mid_signal_count)
-  const lowCounts = store.dailyResults.map((r) => r.low_signal_count)
-
   // 计算基准累计收益（从日收益率累加）
   const hasBenchmark = store.dailyResults.some((r) => r.benchmark_return !== null && r.benchmark_return !== undefined)
   const benchmarkCum: number[] = []
@@ -355,27 +285,8 @@ async function initCharts() {
     })
   }
 
-  // 信号分布堆叠柱状图（信号模式）
-  if (!isAllocationMode.value && signalChartEl.value) {
-    signalChart?.dispose()
-    signalChart = echarts.init(signalChartEl.value)
-    signalChart.setOption({
-      backgroundColor: 'transparent',
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      legend: { data: ['HIGH', 'MID', 'LOW'], textStyle: { color: '#94a3b8', fontSize: 11 }, top: 0 },
-      grid: { left: 40, right: 20, top: 30, bottom: 40 },
-      xAxis: { type: 'category', data: dates, axisLabel: { color: '#94a3b8', fontSize: 10, interval: Math.floor(dates.length / 8) }, axisLine: { lineStyle: { color: '#334155' } } },
-      yAxis: { type: 'value', axisLabel: { color: '#94a3b8', fontSize: 11 }, splitLine: { lineStyle: { color: '#1e293b' } } },
-      series: [
-        { name: 'HIGH', type: 'bar', stack: 'signal', data: highCounts, itemStyle: { color: '#22c55e' } },
-        { name: 'MID', type: 'bar', stack: 'signal', data: midCounts, itemStyle: { color: '#f59e0b' } },
-        { name: 'LOW', type: 'bar', stack: 'signal', data: lowCounts, itemStyle: { color: '#475569' } },
-      ],
-    })
-  }
-
-  // 仓位变化堆叠面积图（配置模式）
-  if (isAllocationMode.value && positionsChartEl.value) {
+  // 仓位变化堆叠面积图
+  if (positionsChartEl.value) {
     positionsChart?.dispose()
     positionsChart = echarts.init(positionsChartEl.value)
 
@@ -455,7 +366,6 @@ onMounted(async () => {
 onUnmounted(() => {
   equityChart?.dispose()
   drawdownChart?.dispose()
-  signalChart?.dispose()
   positionsChart?.dispose()
 })
 </script>
