@@ -81,12 +81,19 @@ class ContextBuilder:
     # ==================================================================
 
     def _build_live(self, config: StrategyConfig, trade_date: date) -> EngineContext:
-        """实时模式：从 DB 加载全量指数数据和预计算因子。"""
+        """实时模式：从 DB 加载全量指数数据和预计算因子。
+
+        自动将 trade_date 回退到有数据的最近交易日，
+        避免当天未收盘时查询不到任何数据。
+        """
         from quant_etf_api.infra.db.models.core import (
             BenchmarkIndexModel,
             IndexDailyBarModel,
             IndexValuationModel,
         )
+
+        # 解析有效交易日：取 DB 中不超过 trade_date 的最大交易日
+        effective_date = self._resolve_effective_date(trade_date)
 
         # 获取全量活跃指数（排除已退市/停发的指数，避免幸存者偏差）
         indexes = (
@@ -110,23 +117,26 @@ class ContextBuilder:
             if idx.index_code in index_codes
         }
 
-        # 加载日线（90 天回望）
-        lookback = trade_date - timedelta(days=90)
+        # 加载日线（90 天回望，基于有效交易日）
+        lookback = effective_date - timedelta(days=90)
         bars = (
             self._db.query(IndexDailyBarModel)
             .filter(
                 IndexDailyBarModel.trade_date >= lookback,
-                IndexDailyBarModel.trade_date <= trade_date,
+                IndexDailyBarModel.trade_date <= effective_date,
                 IndexDailyBarModel.index_code.in_(index_codes),
             )
             .all()
         )
         local_bars: dict[tuple[str, date], Any] = {(r.index_code, r.trade_date): r for r in bars}
 
-        # 加载估值
+        # 加载估值（基于有效交易日范围）
         val_rows = (
             self._db.query(IndexValuationModel)
-            .filter(IndexValuationModel.trade_date >= lookback)
+            .filter(
+                IndexValuationModel.trade_date >= lookback,
+                IndexValuationModel.trade_date <= effective_date,
+            )
             .all()
         )
         index_valuation: dict[str, dict[str, Any]] = {}
@@ -136,12 +146,12 @@ class ContextBuilder:
                 "pb_percentile": r.pb_percentile,
             }
 
-        # 通过 FactorProvider 加载因子值
-        asset_factors = self._factor_provider.load_asset_factors(config, trade_date, index_codes)
+        # 通过 FactorProvider 加载因子值（基于有效交易日）
+        asset_factors = self._factor_provider.load_asset_factors(config, effective_date, index_codes)
 
         # 补充原始行情数据（change_pct、close_price 不是因子，是原始字段）
         for code in index_codes:
-            bar = local_bars.get((code, trade_date))
+            bar = local_bars.get((code, effective_date))
             if bar is None:
                 continue
             if (code, "change_pct") not in asset_factors:
@@ -156,8 +166,8 @@ class ContextBuilder:
             if (code, "pb_percentile") not in asset_factors:
                 asset_factors[(code, "pb_percentile")] = val.get("pb_percentile")
 
-        # 市场级择时因子
-        market_factors = self._factor_provider.load_market_factors(config, trade_date)
+        # 市场级择时因子（基于有效交易日）
+        market_factors = self._factor_provider.load_market_factors(config, effective_date)
 
         # 补充市场因子：如果 FactorProvider 未返回估值因子，从估值表获取
         if config.timing:
@@ -167,14 +177,14 @@ class ContextBuilder:
                     market_factors["pe_percentile"] = val["pe_percentile"]
                     market_factors["pb_percentile"] = val.get("pb_percentile")
                 if "change_pct" not in market_factors:
-                    bar = local_bars.get((rep_code, trade_date))
+                    bar = local_bars.get((rep_code, effective_date))
                     if bar and bar.change_pct is not None:
                         market_factors["change_pct"] = bar.change_pct
                 if market_factors:
                     break
 
         return EngineContext(
-            trade_date=trade_date,
+            trade_date=effective_date,
             universe=universe,
             asset_factors=asset_factors,
             market_factors=market_factors,
@@ -260,6 +270,34 @@ class ContextBuilder:
     # ==================================================================
     # 内部方法
     # ==================================================================
+
+    def _resolve_effective_date(self, trade_date: date) -> date:
+        """将有数据的最新交易日作为有效交易日。
+
+        查询 index_daily_bar 表中不超过 trade_date 的最大交易日，
+        确保后续因子查询能命中数据。
+
+        Args:
+            trade_date: 请求的交易日（可能是当天，但数据尚未就绪）。
+
+        Returns:
+            有数据的最新交易日。如果 DB 为空则原样返回 trade_date。
+        """
+        from quant_etf_api.infra.db.models.core import IndexDailyBarModel
+
+        result = (
+            self._db.query(IndexDailyBarModel.trade_date)
+            .filter(IndexDailyBarModel.trade_date <= trade_date)
+            .order_by(IndexDailyBarModel.trade_date.desc())
+            .limit(1)
+            .first()
+        )
+        if result is not None and result[0] < trade_date:
+            logger.info(
+                "trade_date=%s 无数据，回退到最近交易日=%s", trade_date, result[0]
+            )
+            return result[0]
+        return trade_date
 
     @staticmethod
     def _filter_by_scope(indexes: list[Any], index_codes: list[str] | None = None) -> list[str]:

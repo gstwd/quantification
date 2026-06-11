@@ -25,19 +25,18 @@ class IndexDailyBarRepository(BaseRepository):
         return list(reversed(rows))
 
     def find_all_date_range(
-        self, start: date, end: date
+        self, start: date, end: date, index_codes: list[str] | None = None
     ) -> dict[tuple[str, date], IndexDailyBarModel]:
-        """按日期范围查询所有指数日线，返回 (code, date) → 行 的映射。"""
-        rows = (
-            self._db.query(IndexDailyBarModel)
-            .filter(
-                and_(
-                    IndexDailyBarModel.trade_date >= start,
-                    IndexDailyBarModel.trade_date <= end,
-                )
+        """按日期范围查询指数日线，返回 (code, date) → 行 的映射。"""
+        query = self._db.query(IndexDailyBarModel).filter(
+            and_(
+                IndexDailyBarModel.trade_date >= start,
+                IndexDailyBarModel.trade_date <= end,
             )
-            .all()
         )
+        if index_codes:
+            query = query.filter(IndexDailyBarModel.index_code.in_(index_codes))
+        rows = query.all()
         return {(r.index_code, r.trade_date): r for r in rows}
 
     def get_date_range(self, code: str) -> tuple[date | None, date | None]:

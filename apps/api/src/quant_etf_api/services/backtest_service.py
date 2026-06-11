@@ -634,12 +634,12 @@ class BacktestService:
             if codes:
                 rows = base_query.filter(BenchmarkIndexModel.index_code.in_(codes)).all()
                 return [
-                    {"etf_code": r.index_code, "index_code": r.index_code, "name_cn": r.name_cn}
+                    {"index_code": r.index_code, "name_cn": r.name_cn}
                     for r in rows
                 ]
         rows = base_query.all()
         return [
-            {"etf_code": r.index_code, "index_code": r.index_code, "name_cn": r.name_cn}
+            {"index_code": r.index_code, "name_cn": r.name_cn}
             for r in rows
         ]
 
@@ -669,7 +669,9 @@ class BacktestService:
         if not trading_dates:
             return {}
         lookback_start = trading_dates[0] - timedelta(days=_BACKTEST_LOOKBACK_DAYS)
-        return self._index_bar_repo.find_all_date_range(lookback_start, trading_dates[-1])
+        return self._index_bar_repo.find_all_date_range(
+            lookback_start, trading_dates[-1], index_codes=index_codes
+        )
 
     def _load_all_valuation(
         self, trading_dates: list[date], index_codes: list[str]
@@ -696,13 +698,7 @@ class BacktestService:
         Returns:
             key=indicator_code, value={period: value} 的字典。
         """
-        rows = (
-            self._db.query(MacroIndicatorModel)
-            .filter(
-                MacroIndicatorModel.indicator_code.in_(["lpr1y", "lpr5y", "cpi", "pmi"])
-            )
-            .all()
-        )
+        rows = self._db.query(MacroIndicatorModel).all()
         result: dict[str, dict[str, float]] = {}
         for row in rows:
             code = row.indicator_code
