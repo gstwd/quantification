@@ -38,7 +38,10 @@ class StrategyExecutionService:
         self._db = db
         self._run_repo = run_repo or ResearchRunRepository(db)
         self._engine = StrategyEngine()
-        self._context_builder = ContextBuilder(db)
+
+        from quant_etf_api.factors.registry import get_default_factor_registry
+
+        self._context_builder = ContextBuilder(db, registry=get_default_factor_registry())
 
     def execute(
         self,

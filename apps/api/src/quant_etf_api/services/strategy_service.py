@@ -81,7 +81,9 @@ class StrategyService:
             return None
 
         # 构建上下文（使用统一 build 方法，由策略配置驱动因子选择）
-        builder = ContextBuilder(self._db)
+        from quant_etf_api.factors.registry import get_default_factor_registry
+
+        builder = ContextBuilder(self._db, registry=get_default_factor_registry())
         context = builder.build(config, date.today())
 
         # 执行引擎

@@ -33,14 +33,17 @@ class ContextBuilder:
         self,
         db: Session,
         factor_provider: FactorProvider | None = None,
+        registry: Any | None = None,
     ) -> None:
         """初始化上下文构建器。
 
         Args:
             db: SQLAlchemy 同步 Session。
             factor_provider: 因子供应器，未提供时自动创建。
+            registry: 因子注册表。提供时支持实时模式的因子按需补算。
         """
         self._db = db
+        self._registry = registry
         self._factor_provider = factor_provider or FactorProvider(db=db)
 
     def build(
@@ -148,6 +151,34 @@ class ContextBuilder:
 
         # 通过 FactorProvider 加载因子值（基于有效交易日）
         asset_factors = self._factor_provider.load_asset_factors(config, effective_date, index_codes)
+
+        # 按需补算：策略依赖的因子值缺失时自动触发 FactorService 计算
+        if self._registry is not None:
+            factor_ids = self._factor_provider.collect_required_factor_ids(config)
+            loaded_ids = {fid for (_, fid) in asset_factors}
+            missing = [fid for fid in factor_ids if fid not in loaded_ids]
+            if missing:
+                logger.info(
+                    "因子数据缺失，触发按需计算: trade_date=%s missing=%s",
+                    effective_date, missing[:5],
+                )
+                from quant_etf_api.factors.service import FactorService
+
+                try:
+                    fs = FactorService(self._db, self._registry)
+                    fs.sync_factor_definitions()  # 确保 factor_definition 表已同步
+                    fs.compute_and_store(effective_date)
+                    self._db.commit()
+                    asset_factors = self._factor_provider.load_asset_factors(
+                        config, effective_date, index_codes
+                    )
+                    logger.info(
+                        "按需因子计算完成: trade_date=%s factor_count=%d",
+                        effective_date, len(asset_factors),
+                    )
+                except Exception:
+                    logger.warning("按需因子计算失败", exc_info=True)
+                    self._db.rollback()
 
         # 补充原始行情数据（change_pct、close_price 不是因子，是原始字段）
         for code in index_codes:

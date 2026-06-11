@@ -292,7 +292,31 @@
           <span v-if="allocation.data_date" class="data-date-tag">数据日期：{{ allocation.data_date }}</span>
         </div>
 
-        <!-- 择时信号 -->
+        <!-- 概览条 -->
+        <div class="alloc-summary-bar">
+          <span v-if="allocation.timing?.regime" class="summary-item">
+            <span class="summary-label">择时</span>
+            <span :class="['regime-tag-sm', `regime-${allocation.timing.regime}`]">
+              {{ allocation.timing.regime === 'offensive' ? '进攻' : allocation.timing.regime === 'defensive' ? '防守' : '观望' }}
+            </span>
+          </span>
+          <span class="summary-item">
+            <span class="summary-label">标的</span>
+            <span v-if="allocation.rankings?.length" class="summary-val-accent">{{ allocation.rankings.length }} 个</span>
+            <span v-else class="summary-val-muted">无标的通过筛选</span>
+          </span>
+          <span class="summary-item">
+            <span class="summary-label">仓位</span>
+            <span v-if="allocation.plan?.total_exposure > 0" class="summary-val-accent">{{ (allocation.plan.total_exposure * 100).toFixed(0) }}%</span>
+            <span v-else class="summary-val-muted">空仓</span>
+          </span>
+          <span v-if="allocation.plan?.method" class="summary-item">
+            <span class="summary-label">方法</span>
+            <span class="summary-val">{{ allocation.plan.method === 'equal_weight' ? '等权' : allocation.plan.method === 'score_weight' ? '得分加权' : allocation.plan.method }}</span>
+          </span>
+        </div>
+
+        <!-- 择时信号明细 -->
         <div v-if="allocation.timing && allocation.timing.regime" class="alloc-card">
           <div class="alloc-header">择时信号</div>
           <div class="alloc-body">
@@ -340,22 +364,17 @@
           </div>
         </div>
 
+        <!-- 排名为空：展示原因 -->
+        <div v-else class="alloc-empty-hint">
+          <span class="empty-icon">📋</span>
+          <p>当前无资产通过策略筛选条件</p>
+          <p class="hint-sub">所有标的被过滤规则剔除，或因子数据尚未就绪</p>
+        </div>
+
         <!-- 仓位分配 -->
         <div v-if="allocation.plan && Object.keys(allocation.plan.positions ?? {}).length > 0" class="alloc-card">
           <div class="alloc-header">仓位分配</div>
           <div class="alloc-body">
-            <div class="alloc-row">
-              <span class="alloc-key">方法</span>
-              <span class="alloc-val">{{ allocation.plan.method }}</span>
-            </div>
-            <div class="alloc-row">
-              <span class="alloc-key">总仓位</span>
-              <span class="alloc-val">{{ (allocation.plan.total_exposure * 100).toFixed(1) }}%</span>
-            </div>
-            <div class="alloc-row">
-              <span class="alloc-key">现金</span>
-              <span class="alloc-val">{{ (allocation.plan.cash_ratio * 100).toFixed(1) }}%</span>
-            </div>
             <div class="position-tags">
               <span v-for="(w, code) in allocation.plan.positions" :key="code" class="position-tag">
                 <span class="pos-code">{{ code }}</span>
@@ -363,6 +382,13 @@
               </span>
             </div>
           </div>
+        </div>
+
+        <!-- 仓位为空：展示空仓说明 -->
+        <div v-else class="alloc-empty-hint">
+          <span class="empty-icon">💤</span>
+          <p>当前建议空仓</p>
+          <p class="hint-sub">策略未产生有效持仓信号，保持现金观望</p>
         </div>
       </div>
 
@@ -797,6 +823,35 @@ onMounted(() => store.loadOne(props.strategyId))
 .section-title { font-size: 16px; font-weight: 600; }
 .section-header-row { display: flex; align-items: center; gap: 10px; }
 .data-date-tag { font-size: 11px; color: var(--text-muted); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; }
+
+/* 概览条 */
+.alloc-summary-bar {
+  display: flex; gap: 16px; flex-wrap: wrap;
+  padding: 12px 16px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.summary-item { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.summary-label { color: var(--text-muted); }
+.summary-val { color: var(--text); }
+.summary-val-accent { color: #4ade80; font-weight: 600; }
+.summary-val-muted { color: var(--text-muted); font-style: italic; }
+.regime-tag-sm {
+  font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 10px;
+}
+.regime-tag-sm.regime-offensive { background: rgba(239,68,68,0.15); color: #f87171; }
+.regime-tag-sm.regime-defensive { background: rgba(34,197,94,0.15); color: #4ade80; }
+.regime-tag-sm.regime-neutral { background: rgba(148,163,184,0.15); color: #94a3b8; }
+
+/* 空状态提示 */
+.alloc-empty-hint {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 24px 16px;
+  background: var(--surface); border: 1px dashed var(--border); border-radius: var(--radius);
+  text-align: center;
+}
+.alloc-empty-hint p { margin: 0; font-size: 14px; color: var(--text-muted); }
+.alloc-empty-hint .hint-sub { font-size: 12px; color: var(--text-muted); opacity: 0.7; }
+.empty-icon { font-size: 24px; margin-bottom: 4px; }
 
 .alloc-card {
   background: var(--surface);
