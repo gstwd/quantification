@@ -68,6 +68,7 @@ class BacktestSummary(BaseModel):
     started_at: UtcDatetime | None = None
     finished_at: UtcDatetime | None = None
     error_message: str | None = None
+    progress: int = 0
 
 
 class BacktestDetail(BacktestSummary):

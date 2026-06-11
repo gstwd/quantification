@@ -93,11 +93,11 @@ class ERPComputer:
 
 
 class ERPPercentileComputer:
-    """ERP 历史百分位因子计算器（派生因子）。
+    """ERP 历史百分位因子计算器。
 
-    计算当前 ERP 值在近 2 年历史分布中的百分位排名。
-    实际计算在 FactorService._compute_percentile_derived() 中完成后处理，
-    此类仅提供 FactorSpec 元数据用于注册和同步。
+    计算当前 ERP 值在近 2 年历史分布中的百分位排名（0-100）。
+    需要 FactorContext.index_valuation 包含多日历史数据（lookback_days=730）。
+    ERP 百分位 > 80 表示股票相对债券极具吸引力，常用于熊市超跌判断。
     """
 
     @property
@@ -107,29 +107,74 @@ class ERPPercentileComputer:
             factor_id="erp_percentile",
             name="ERP 历史百分位",
             category="valuation",
-            version="1.0.0",
+            version="2.0.0",
             description=(
                 "当前 ERP 在近 2 年历史分布中的百分位排名（0-100）。"
                 "ERP 百分位 > 80 表示股票相对债券极具吸引力，用于熊市超跌判断。"
-                "由 FactorService 后处理计算，依赖 erp 基础因子。"
+                "依赖 FactorContext.index_valuation 包含多日历史数据。"
             ),
             required_data=["index_valuation", "macro_indicators"],
             lookback_days=730,
         )
 
-    def compute(self, index_code: str, trade_date: date, ctx: "FactorContext") -> "FactorValue":
-        """ERP 百分位由 FactorService 后处理计算，此处返回 None。
+    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
+        """计算 ERP 在历史分布中的百分位排名。
 
         Args:
             index_code: 指数代码。
             trade_date: 目标交易日。
-            ctx: 因子上下文。
+            ctx: FactorContext，index_valuation 需包含 730 天历史数据。
 
         Returns:
-            FactorValue，numeric 始终为 None（实际值由 service 层写入）。
+            FactorValue，数据不足（< 10 个历史数据点）时 numeric 为 None。
         """
+        # 获取 LPR（与 ERPComputer 保持一致，取最大值）
+        lpr_data = ctx.macro_indicators.get("lpr1y", {})
+        latest_lpr = max(lpr_data.values()) if lpr_data else None
+        if latest_lpr is None:
+            return FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=None,
+                payload={"index_code": index_code, "reason": "无 LPR 数据"},
+            )
+
+        # 获取当日 PE（用于计算当日 ERP）
+        current_row = ctx.index_valuation.get((index_code, trade_date))
+        if current_row is None or current_row.pe is None or current_row.pe <= 0:
+            return FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=None,
+                payload={"index_code": index_code, "reason": "无当日有效 PE 数据"},
+            )
+        current_erp = 1.0 / current_row.pe * 100.0 - latest_lpr
+
+        # 遍历历史估值数据，计算各历史日期的 ERP
+        erp_history: list[float] = []
+        for (code, _dt), val_row in ctx.index_valuation.items():
+            if code != index_code:
+                continue
+            if val_row.pe is None or val_row.pe <= 0:
+                continue
+            erp_history.append(1.0 / val_row.pe * 100.0 - latest_lpr)
+
+        if len(erp_history) < 10:
+            return FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=None,
+                payload={"index_code": index_code, "reason": f"历史数据不足（{len(erp_history)} 点）"},
+            )
+
+        # 计算百分位：历史中有多少比例的 ERP <= 当前 ERP
+        count_below = sum(1 for v in erp_history if v <= current_erp)
+        percentile = round(count_below / len(erp_history) * 100, 2)
+
         return FactorValue(
             factor_id=self.spec.factor_id,
-            numeric=None,
-            payload={"note": "由 FactorService._compute_percentile_derived() 后处理计算"},
+            numeric=percentile,
+            payload={
+                "index_code": index_code,
+                "current_erp": round(current_erp, 4),
+                "history_count": len(erp_history),
+                "lpr_1y": latest_lpr,
+            },
         )

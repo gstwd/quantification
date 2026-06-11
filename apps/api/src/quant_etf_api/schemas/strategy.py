@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -18,6 +18,7 @@ class StrategySummary(BaseModel):
         frequency: 运行频率。
         description: 策略描述。
         status: 状态。
+        index_codes: 策略绑定的指数代码列表，空列表表示全指数通用。
     """
 
     strategy_id: str
@@ -26,6 +27,7 @@ class StrategySummary(BaseModel):
     frequency: str
     description: str
     status: str = "active"
+    index_codes: list[str] = Field(default_factory=list)
 
 
 class StrategyDetail(StrategySummary):
@@ -89,11 +91,13 @@ class AllocationResponse(BaseModel):
         timing: 择时信号，含 regime、confidence、label、factors。
         rankings: 资产轮动排名列表。
         plan: 仓位分配方案，含 positions、total_exposure、cash_ratio、reasoning。
+        data_date: 本次决策所用因子数据的交易日，用于展示数据新鲜度。
     """
 
     timing: dict[str, Any]
     rankings: list[dict[str, Any]]
     plan: dict[str, Any]
+    data_date: date | None = None
 
 
 class StrategyValidationResult(BaseModel):

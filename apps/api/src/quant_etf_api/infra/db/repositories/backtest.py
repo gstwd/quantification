@@ -7,6 +7,7 @@ from typing import Any
 
 from quant_etf_api.infra.db.models.core import (
     BacktestDailyResultModel,
+    BacktestIndexResultModel,
     BacktestRunModel,
 )
 from quant_etf_api.infra.db.repositories.base import BaseRepository
@@ -51,6 +52,44 @@ class BacktestRepository(BaseRepository):
             .order_by(BacktestDailyResultModel.trade_date.asc())
             .all()
         )
+
+    def find_index_results(
+        self, backtest_id: str, index_code: str | None = None
+    ) -> list[BacktestIndexResultModel]:
+        """查询回测的每日指数信号与收益（按日期和指数代码升序）。
+
+        Args:
+            backtest_id: 回测标识。
+            index_code: 可选的指数代码过滤，None 时返回所有指数。
+
+        Returns:
+            BacktestIndexResultModel 列表。
+        """
+        q = self._db.query(BacktestIndexResultModel).filter(
+            BacktestIndexResultModel.backtest_id == backtest_id
+        )
+        if index_code is not None:
+            q = q.filter(BacktestIndexResultModel.index_code == index_code)
+        return q.order_by(
+            BacktestIndexResultModel.trade_date.asc(),
+            BacktestIndexResultModel.index_code.asc(),
+        ).all()
+
+    def update_progress(self, backtest_id: str, progress: int) -> None:
+        """更新回测执行进度（0-100）。
+
+        Args:
+            backtest_id: 回测标识。
+            progress: 进度百分比（0-100）。
+        """
+        run = self.find_by_id(backtest_id)
+        if run is None:
+            return
+        run.progress = max(0, min(100, progress))
+        try:
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
 
     def mark_success(self, backtest_id: str, metrics: dict[str, Any] | None = None) -> None:
         """将回测标记为成功。"""

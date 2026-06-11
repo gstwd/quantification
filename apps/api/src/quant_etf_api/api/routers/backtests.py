@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import threading
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
+from quant_etf_api.api.executor import get_bg_executor
 from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.schemas.backtest import (
     BacktestCreateRequest,
@@ -35,8 +34,7 @@ def _run_backtest_bg(backtest_id: str) -> None:
 def create_backtest(req: BacktestCreateRequest, db: Session = Depends(get_db)) -> BacktestSummary:
     """创建回测任务并在后台线程中异步执行，立即返回 pending 状态。"""
     summary = BacktestService(db).create_backtest(req)
-    thread = threading.Thread(target=_run_backtest_bg, args=(summary.backtest_id,), daemon=True)
-    thread.start()
+    get_bg_executor().submit(_run_backtest_bg, summary.backtest_id)
     return summary
 
 

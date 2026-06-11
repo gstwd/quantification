@@ -89,9 +89,51 @@ class FactorComputer(Protocol):
         Args:
             index_code: 指数代码，如 000300。
             trade_date: 目标交易日。
-            ctx: 包含 90 天回望数据的上下文。
+            ctx: 包含回望数据的上下文。
 
         Returns:
             FactorValue，numeric 为 None 表示数据不足无法计算。
+        """
+        ...
+
+
+@runtime_checkable
+class BatchFactorComputer(Protocol):
+    """支持批量计算的扩展因子协议（可选实现，用于回测性能优化）。
+
+    实现此协议的因子在回测预计算阶段会被优先使用，
+    一次调用覆盖所有交易日，避免对每个日期重复遍历全量 bar 数据。
+    不实现此协议的因子退回逐点调用（向后兼容）。
+    """
+
+    @property
+    def spec(self) -> FactorSpec:
+        """返回该因子的元数据描述符。"""
+        ...
+
+    def compute(
+        self,
+        index_code: str,
+        trade_date: date,
+        ctx: FactorContext,
+    ) -> FactorValue:
+        """逐点计算（保持向后兼容）。"""
+        ...
+
+    def compute_batch(
+        self,
+        index_code: str,
+        dates: list[date],
+        ctx: FactorContext,
+    ) -> dict[date, FactorValue]:
+        """批量计算多个交易日的因子值。
+
+        Args:
+            index_code: 指数代码，如 000300。
+            dates: 需要计算的交易日列表（升序）。
+            ctx: 包含全量回望数据的上下文（通常覆盖整个回测区间）。
+
+        Returns:
+            key=交易日, value=FactorValue 的字典，不包含无数据的日期。
         """
         ...

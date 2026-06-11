@@ -16,8 +16,16 @@
     <div v-if="store.loading" class="loading">加载中...</div>
 
     <template v-else-if="store.current">
-      <!-- 轮询提示 -->
-      <div v-if="polling" class="polling-banner">回测执行中，自动刷新结果...</div>
+      <!-- 轮询提示（含执行进度） -->
+      <div v-if="polling" class="polling-banner">
+        <span>回测执行中，自动刷新结果...</span>
+        <span v-if="(store.current?.progress ?? 0) > 0" class="polling-progress">
+          <span class="polling-bar-bg">
+            <span class="polling-bar-fill" :style="{ width: (store.current?.progress ?? 0) + '%' }"></span>
+          </span>
+          <span class="polling-pct">{{ store.current?.progress ?? 0 }}%</span>
+        </span>
+      </div>
 
       <!-- 汇总指标卡片 -->
       <div v-if="store.current.metrics" class="metrics-section">
@@ -382,6 +390,9 @@ onUnmounted(() => {
 .loading { padding: 60px; text-align: center; color: var(--text-muted); }
 
 .polling-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   padding: 10px 16px;
   background: rgba(59,130,246,0.1);
   border: 1px solid rgba(59,130,246,0.3);
@@ -389,6 +400,10 @@ onUnmounted(() => {
   color: #60a5fa;
   font-size: 13px;
 }
+.polling-progress { display: inline-flex; align-items: center; gap: 6px; }
+.polling-bar-bg { display: inline-block; width: 100px; height: 5px; background: rgba(59,130,246,0.15); border-radius: 3px; overflow: hidden; }
+.polling-bar-fill { display: block; height: 100%; background: #60a5fa; border-radius: 3px; transition: width 0.4s; }
+.polling-pct { font-size: 12px; }
 
 .section-label {
   font-size: 12px;

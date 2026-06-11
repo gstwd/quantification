@@ -22,7 +22,6 @@ from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.orchestrator import StrategyEngine
 from quant_etf_api.infra.db.models.core import (
     BacktestDailyResultModel,
-    BacktestIndexResultModel,
     BacktestRunModel,
     BenchmarkIndexModel,
     IndexDailyBarModel,
@@ -71,10 +70,10 @@ class BacktestService:
         self._index_bar_repo = index_bar_repo or IndexDailyBarRepository(db)
         self._rebalance_scheduler = DefaultRebalanceScheduler()
 
-        # 构建 FactorRegistry 供回测因子预计算使用
-        from quant_etf_api.factors.registry import build_default_factor_registry
+        # 使用进程级单例注册表，避免每次请求重建
+        from quant_etf_api.factors.registry import get_default_factor_registry
 
-        self._registry = build_default_factor_registry()
+        self._registry = get_default_factor_registry()
         self._factor_provider = FactorProvider(db=db, registry=self._registry)
         self._context_builder = ContextBuilder(db, factor_provider=self._factor_provider)
 
@@ -194,15 +193,7 @@ class BacktestService:
     ) -> list[BacktestIndexResult]:
         """返回回测每日每指数信号与收益。"""
         try:
-            rows = self._db.query(BacktestIndexResultModel).filter(
-                BacktestIndexResultModel.backtest_id == backtest_id
-            )
-            if index_code:
-                rows = rows.filter(BacktestIndexResultModel.index_code == index_code)
-            rows = rows.order_by(
-                BacktestIndexResultModel.trade_date.asc(),
-                BacktestIndexResultModel.index_code.asc(),
-            ).all()
+            rows = self._backtest_repo.find_index_results(backtest_id, index_code)
             return [
                 BacktestIndexResult(
                     trade_date=r.trade_date,
@@ -295,6 +286,9 @@ class BacktestService:
         peak = 1.0
         prev_positions: dict[str, float] = {}
         last_rebalance_date: date | None = None
+        # 进度跟踪：每完成约 10% 交易日写一次进度
+        last_progress = 0
+        total_dates = len(trading_dates)
 
         for i, trade_date in enumerate(trading_dates):
             day_factors = precomputed.get(trade_date, {})
@@ -378,6 +372,13 @@ class BacktestService:
             )
 
             prev_positions = positions
+
+            # 每 10% 交易日更新一次进度（最少 1 天触发）
+            if total_dates > 0:
+                new_progress = int((i + 1) / total_dates * 100)
+                if new_progress - last_progress >= 10:
+                    self._backtest_repo.update_progress(backtest_id, new_progress)
+                    last_progress = new_progress
 
             # 每 100 天 flush 一次，释放内存中的 ORM 对象
             if (i + 1) % 100 == 0:
@@ -750,6 +751,7 @@ class BacktestService:
             started_at=row.started_at,
             finished_at=row.finished_at,
             error_message=row.error_message,
+            progress=getattr(row, "progress", 0) or 0,
         )
 
     def _row_to_detail(self, row: BacktestRunModel) -> BacktestDetail:

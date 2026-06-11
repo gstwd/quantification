@@ -287,7 +287,10 @@
 
       <!-- 决策管线结果 -->
       <div v-if="allocation" class="allocation-section">
-        <h2 class="section-title">决策管线结果</h2>
+        <div class="section-header-row">
+          <h2 class="section-title">决策管线结果</h2>
+          <span v-if="allocation.data_date" class="data-date-tag">数据日期：{{ allocation.data_date }}</span>
+        </div>
 
         <!-- 择时信号 -->
         <div v-if="allocation.timing && allocation.timing.regime" class="alloc-card">
@@ -459,7 +462,7 @@ const editConfigText = ref('')
 
 /** 从 config_json 中提取各模块配置 */
 const configJson = computed(() => store.current?.config_json ?? {})
-const indexCodesList = computed(() => (configJson.value.index_codes as string[]) || [])
+const indexCodesList = computed(() => store.current?.index_codes ?? [])
 const scoreConfig = computed(() => configJson.value.score as { factors?: Record<string, number>; transforms?: Record<string, string>; missing_factor_strategy?: string; scoring_mode?: string } | undefined)
 const timingConfig = computed(() => configJson.value.timing as { factors?: Record<string, number>; transforms?: Record<string, string>; thresholds?: { offensive?: number; defensive?: number }; proxy_index_codes?: string[] } | undefined)
 const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string }> } | undefined)
@@ -792,6 +795,8 @@ onMounted(() => store.loadOne(props.strategyId))
 /* 决策结果区域 */
 .allocation-section { display: flex; flex-direction: column; gap: 12px; }
 .section-title { font-size: 16px; font-weight: 600; }
+.section-header-row { display: flex; align-items: center; gap: 10px; }
+.data-date-tag { font-size: 11px; color: var(--text-muted); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; }
 
 .alloc-card {
   background: var(--surface);

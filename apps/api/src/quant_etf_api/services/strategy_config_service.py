@@ -44,6 +44,7 @@ class StrategyConfigService:
                 frequency=r.frequency,
                 description=r.description or "",
                 status=r.status,
+                index_codes=(r.config_json or {}).get("index_codes", []),
             )
             for r in rows
         ]
@@ -149,8 +150,9 @@ class StrategyConfigService:
             self._db.commit()
         return result
 
-    def validate_config(self, config_json: dict[str, Any]) -> StrategyValidationResult:
-        """校验策略配置 JSON 是否合法。
+    @staticmethod
+    def validate_config(config_json: dict[str, Any]) -> StrategyValidationResult:
+        """校验策略配置 JSON 是否合法（不依赖数据库，可静态调用）。
 
         Args:
             config_json: 策略配置 JSON（仅含引擎配置，不含 strategy_id/display_name 等元数据字段）。

@@ -41,6 +41,20 @@ class FactorRegistry:
         return [c.spec for c in self._computers.values()]
 
 
+_default_registry: FactorRegistry | None = None
+
+
+def get_default_factor_registry() -> FactorRegistry:
+    """返回进程级单例注册表，首次调用时构建，后续复用。
+
+    避免 BacktestService 等每次请求重建注册表的开销。
+    """
+    global _default_registry
+    if _default_registry is None:
+        _default_registry = build_default_factor_registry()
+    return _default_registry
+
+
 def build_default_factor_registry() -> FactorRegistry:
     """构建包含所有内置因子计算器的默认注册表，进程启动时调用一次。
 

@@ -29,7 +29,15 @@
           >
             <td class="mono">{{ item.strategy_id }}</td>
             <td class="text-muted">{{ item.start_date }} ~ {{ item.end_date }}</td>
-            <td><span class="status-badge" :class="'status-' + item.status">{{ statusLabel(item.status) }}</span></td>
+            <td>
+              <span class="status-badge" :class="'status-' + item.status">{{ statusLabel(item.status) }}</span>
+              <span v-if="item.status === 'running' && item.progress > 0" class="progress-inline">
+                <span class="progress-bar-bg">
+                  <span class="progress-bar-fill" :style="{ width: item.progress + '%' }"></span>
+                </span>
+                <span class="progress-pct">{{ item.progress }}%</span>
+              </span>
+            </td>
             <td :class="returnClass(item.metrics?.cumulative_return_pct)">
               {{ item.metrics ? formatPct(item.metrics.cumulative_return_pct) : '—' }}
             </td>
@@ -162,6 +170,12 @@ onMounted(async () => {
 .status-running { background: rgba(59,130,246,0.15); color: #60a5fa; }
 .status-success { background: rgba(34,197,94,0.15); color: var(--success); }
 .status-failed { background: rgba(239,68,68,0.15); color: var(--danger); }
+
+/* 进度条 */
+.progress-inline { display: inline-flex; align-items: center; gap: 5px; margin-left: 6px; vertical-align: middle; }
+.progress-bar-bg { display: inline-block; width: 60px; height: 4px; background: rgba(59,130,246,0.15); border-radius: 2px; overflow: hidden; }
+.progress-bar-fill { display: block; height: 100%; background: #60a5fa; border-radius: 2px; transition: width 0.3s; }
+.progress-pct { font-size: 11px; color: #60a5fa; }
 
 .pagination { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px 0; }
 .page-btn {

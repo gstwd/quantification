@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Any
 
@@ -11,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
+from quant_etf_api.api.executor import get_bg_executor
 from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.schemas.pagination import PaginatedResponse
 from quant_etf_api.schemas.run import ResearchRunDetail, ResearchRunItemSchema, ResearchRunSummary
@@ -20,9 +20,6 @@ from quant_etf_api.services.run_service import RunService
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["runs"])
-
-# 后台任务线程池，最大并发 3 个任务
-_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="bg-task")
 
 
 def _run_ingest_bg(run_id: str) -> None:
@@ -177,7 +174,7 @@ def get_run_items(run_id: str, db: Session = Depends(get_db)) -> list[ResearchRu
 def refresh_universe(db: Session = Depends(get_db)) -> dict[str, str]:
     """触发 ETF 池元数据刷新，后台线程执行。"""
     summary = RunService(db).create_run("universe_refresh", None, date.today())
-    _executor.submit(_run_universe_refresh_bg, summary.run_id)
+    get_bg_executor().submit(_run_universe_refresh_bg, summary.run_id)
     return {"status": "accepted", "run_type": "universe_refresh", "run_id": summary.run_id}
 
 
@@ -185,7 +182,7 @@ def refresh_universe(db: Session = Depends(get_db)) -> dict[str, str]:
 def daily_ingest(db: Session = Depends(get_db)) -> dict[str, str]:
     """触发全量日频数据摄取（ETF + 指数 + 宏观），后台线程执行。"""
     summary = RunService(db).create_run("daily_ingest", None, date.today())
-    _executor.submit(_run_ingest_bg, summary.run_id)
+    get_bg_executor().submit(_run_ingest_bg, summary.run_id)
     return {"status": "accepted", "run_type": "daily_ingest", "run_id": summary.run_id}
 
 
@@ -193,7 +190,7 @@ def daily_ingest(db: Session = Depends(get_db)) -> dict[str, str]:
 def etf_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
     """触发 ETF 日线和份额数据刷新，后台线程执行。"""
     summary = RunService(db).create_run("etf_refresh", None, date.today())
-    _executor.submit(_run_etf_refresh_bg, summary.run_id)
+    get_bg_executor().submit(_run_etf_refresh_bg, summary.run_id)
     return {"status": "accepted", "run_type": "etf_refresh", "run_id": summary.run_id}
 
 
@@ -201,7 +198,7 @@ def etf_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
 def index_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
     """触发指数日线和估值数据刷新，后台线程执行。"""
     summary = RunService(db).create_run("index_refresh", None, date.today())
-    _executor.submit(_run_index_refresh_bg, summary.run_id)
+    get_bg_executor().submit(_run_index_refresh_bg, summary.run_id)
     return {"status": "accepted", "run_type": "index_refresh", "run_id": summary.run_id}
 
 
@@ -209,7 +206,7 @@ def index_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
 def macro_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
     """触发宏观指标数据刷新，后台线程执行。"""
     summary = RunService(db).create_run("macro_refresh", None, date.today())
-    _executor.submit(_run_macro_refresh_bg, summary.run_id)
+    get_bg_executor().submit(_run_macro_refresh_bg, summary.run_id)
     return {"status": "accepted", "run_type": "macro_refresh", "run_id": summary.run_id}
 
 
@@ -217,7 +214,7 @@ def macro_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
 def cold_start(db: Session = Depends(get_db)) -> dict[str, str]:
     """触发冷启动：拉取全部 ETF 和指数从成立至今的全量历史日线数据。"""
     summary = RunService(db).create_run("cold_start", None, date.today())
-    _executor.submit(_run_cold_start_bg, summary.run_id)
+    get_bg_executor().submit(_run_cold_start_bg, summary.run_id)
     return {"status": "accepted", "run_type": "cold_start", "run_id": summary.run_id}
 
 
@@ -225,7 +222,7 @@ def cold_start(db: Session = Depends(get_db)) -> dict[str, str]:
 def run_strategy(strategy_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     """触发指定策略的信号计算任务，后台线程执行并写入 index_signal 表。"""
     summary = RunService(db).create_run("strategy_run", strategy_id, date.today())
-    _executor.submit(_run_strategy_bg, strategy_id, summary.run_id, None)
+    get_bg_executor().submit(_run_strategy_bg, strategy_id, summary.run_id, None)
     return {"status": "accepted", "strategy_id": strategy_id, "run_id": summary.run_id}
 
 
@@ -247,21 +244,21 @@ def retry_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     )
 
     if detail.run_type == "daily_ingest":
-        _executor.submit(_run_ingest_bg, new_summary.run_id)
+        get_bg_executor().submit(_run_ingest_bg, new_summary.run_id)
     elif detail.run_type == "strategy_run":
         if detail.strategy_id is None:
             raise HTTPException(status_code=400, detail="策略运行记录缺少 strategy_id")
-        _executor.submit(_run_strategy_bg, detail.strategy_id, new_summary.run_id, detail.params)
+        get_bg_executor().submit(_run_strategy_bg, detail.strategy_id, new_summary.run_id, detail.params)
     elif detail.run_type == "cold_start":
-        _executor.submit(_run_cold_start_bg, new_summary.run_id)
+        get_bg_executor().submit(_run_cold_start_bg, new_summary.run_id)
     elif detail.run_type == "universe_refresh":
-        _executor.submit(_run_universe_refresh_bg, new_summary.run_id)
+        get_bg_executor().submit(_run_universe_refresh_bg, new_summary.run_id)
     elif detail.run_type == "etf_refresh":
-        _executor.submit(_run_etf_refresh_bg, new_summary.run_id)
+        get_bg_executor().submit(_run_etf_refresh_bg, new_summary.run_id)
     elif detail.run_type == "index_refresh":
-        _executor.submit(_run_index_refresh_bg, new_summary.run_id)
+        get_bg_executor().submit(_run_index_refresh_bg, new_summary.run_id)
     elif detail.run_type == "macro_refresh":
-        _executor.submit(_run_macro_refresh_bg, new_summary.run_id)
+        get_bg_executor().submit(_run_macro_refresh_bg, new_summary.run_id)
     else:
         raise HTTPException(status_code=400, detail=f"不支持重试的运行类型: {detail.run_type}")
 

@@ -96,6 +96,7 @@ class StrategyService:
                 "cash_ratio": result.cash_ratio,
                 "method": config.portfolio.method if config.portfolio else "signal_only",
             },
+            data_date=context.trade_date,
         )
 
     # ── 配置管理委托 ──────────────────────────────────────────────────────
@@ -125,5 +126,4 @@ class StrategyService:
 
     def validate_config(self, config_json: dict[str, Any]) -> StrategyValidationResult:
         """校验策略配置。"""
-        svc = StrategyConfigService(self._db) if self._db else StrategyConfigService.__new__(StrategyConfigService)
-        return svc.validate_config(config_json)
+        return StrategyConfigService.validate_config(config_json)

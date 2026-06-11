@@ -527,6 +527,12 @@ class BacktestRunModel(Base):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime, comment="回测完成时间（UTC），NULL 表示未完成"
     )
+    progress: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=sa.text("0"),
+        comment="回测执行进度（0-100），每完成约 10% 交易日更新一次",
+    )
 
 
 class BacktestDailyResultModel(Base):

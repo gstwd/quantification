@@ -15,7 +15,7 @@ from typing import Any, TYPE_CHECKING
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
-from quant_etf_api.factors.base import FactorContext
+from quant_etf_api.factors.base import BatchFactorComputer, FactorContext
 
 if TYPE_CHECKING:
     from quant_etf_api.engine.config import StrategyConfig
@@ -192,38 +192,70 @@ class FactorProvider:
             logger.warning("回测因子预计算：无匹配的因子计算器，factor_ids=%s", factor_ids)
             return {}
 
-        result: dict[date, dict[tuple[str, str], float | None]] = {}
+        # 将 computers 分为批量和逐点两组
+        batch_computers = [c for c in computers if isinstance(c, BatchFactorComputer)]
+        point_computers = [c for c in computers if not isinstance(c, BatchFactorComputer)]
 
-        for trade_date in dates:
-            ctx = FactorContext(
+        # 初始化结果字典（按日期）
+        result: dict[date, dict[tuple[str, str], float | None]] = {d: {} for d in dates}
+
+        # 批量因子：每个 (指数, 因子) 组合只构建一次收盘价序列，计算所有日期
+        # 使用全量 bar 数据的上下文（无需按日期切片，批量接口自行处理历史范围）
+        if batch_computers:
+            batch_ctx = FactorContext(
                 index_bars=all_bars,
-                index_valuation={
-                    (code, dt): val for (code, dt), val in all_valuation.items() if dt == trade_date
-                },
+                index_valuation=all_valuation or {},
                 macro_indicators=all_macro or {},
             )
-            day_factors: dict[tuple[str, str], float | None] = {}
             for code in index_codes:
-                for computer in computers:
+                for computer in batch_computers:
                     try:
-                        fv = computer.compute(code, trade_date, ctx)
-                        day_factors[(code, fv.factor_id)] = fv.numeric
+                        batch_results = computer.compute_batch(code, dates, batch_ctx)
+                        for trade_date, fv in batch_results.items():
+                            result[trade_date][(code, fv.factor_id)] = fv.numeric
                     except Exception:
                         logger.warning(
-                            "回测因子计算失败: date=%s code=%s factor=%s",
-                            trade_date,
+                            "回测批量因子计算失败: code=%s factor=%s",
                             code,
                             computer.spec.factor_id,
                             exc_info=True,
                         )
-                        day_factors[(code, computer.spec.factor_id)] = None
-            result[trade_date] = day_factors
+                        for trade_date in dates:
+                            result[trade_date][(code, computer.spec.factor_id)] = None
+
+        # 逐点因子（不支持批量接口的计算器）：保留原有逐日循环
+        if point_computers:
+            for trade_date in dates:
+                ctx = FactorContext(
+                    index_bars=all_bars,
+                    index_valuation={
+                        (code, dt): val
+                        for (code, dt), val in (all_valuation or {}).items()
+                        if dt <= trade_date
+                    },
+                    macro_indicators=all_macro or {},
+                )
+                for code in index_codes:
+                    for computer in point_computers:
+                        try:
+                            fv = computer.compute(code, trade_date, ctx)
+                            result[trade_date][(code, fv.factor_id)] = fv.numeric
+                        except Exception:
+                            logger.warning(
+                                "回测因子计算失败: date=%s code=%s factor=%s",
+                                trade_date,
+                                code,
+                                computer.spec.factor_id,
+                                exc_info=True,
+                            )
+                            result[trade_date][(code, computer.spec.factor_id)] = None
 
         logger.info(
-            "回测因子预计算完成: dates=%d index=%d factors=%d",
+            "回测因子预计算完成: dates=%d index=%d batch_factors=%d point_factors=%d",
             len(dates),
             len(index_codes),
-            len(computers),
+            len(batch_computers),
+            len(point_computers),
         )
         return result
 

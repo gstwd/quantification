@@ -39,9 +39,7 @@
           <span class="scope-codes">{{ strategyIndexCodes.join(', ') }}</span>
         </div>
 
-        <div v-if="loadingStrategy" class="scope-loading">加载策略配置中...</div>
-
-        <div class="radio-group">
+<div class="radio-group">
           <label class="radio-label" :class="{ disabled: isUniverseLocked }">
             <input v-model="form.universe_mode" type="radio" value="all" :disabled="isUniverseLocked" />
             全部指数
@@ -111,7 +109,6 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 
 import { fetchBenchmarkIndexes } from '../api/market_data'
-import { fetchStrategyDetail } from '../api/strategies'
 import { useBacktestStore } from '../stores/backtests'
 import { useStrategyStore } from '../stores/strategies'
 import type { BenchmarkIndex } from '../types/api'
@@ -142,10 +139,8 @@ const form = reactive({
 const submitting = ref(false)
 const error = ref('')
 
-/** 当前选中策略的 index_codes 限定（来自 config_json）。非空时表示策略有标的范围限定。 */
+/** 当前选中策略的 index_codes 限定。非空时表示策略有标的范围限定。 */
 const strategyIndexCodes = ref<string[]>([])
-/** 正在加载策略详情 */
-const loadingStrategy = ref(false)
 /** 策略是否限定了标的范围 */
 const isUniverseLocked = computed(() => strategyIndexCodes.value.length > 0)
 
@@ -164,27 +159,20 @@ function toggleIndex(code: string) {
   else form.index_codes.splice(idx, 1)
 }
 
-/** 监听策略选择，获取策略的 index_codes 限定 */
+/** 监听策略选择，从已加载的策略列表中直接读取 index_codes 限定（无需额外网络请求） */
 watch(
   () => form.strategy_id,
-  async (strategyId) => {
+  (strategyId) => {
     strategyIndexCodes.value = []
     if (!strategyId) return
 
-    loadingStrategy.value = true
-    try {
-      const detail = await fetchStrategyDetail(strategyId)
-      const codes = (detail.config_json as Record<string, unknown>)?.index_codes as string[] | undefined
-      if (codes && codes.length > 0) {
-        strategyIndexCodes.value = codes
-        // 强制设为子集模式，使用策略限定的指数
-        form.universe_mode = 'subset'
-        form.index_codes = [...codes]
-      }
-    } catch {
-      strategyIndexCodes.value = []
-    } finally {
-      loadingStrategy.value = false
+    const strategy = strategyStore.items.find((s) => s.strategy_id === strategyId)
+    const codes = strategy?.index_codes ?? []
+    if (codes.length > 0) {
+      strategyIndexCodes.value = codes
+      // 强制设为子集模式，使用策略限定的指数
+      form.universe_mode = 'subset'
+      form.index_codes = [...codes]
     }
   },
   { immediate: true },

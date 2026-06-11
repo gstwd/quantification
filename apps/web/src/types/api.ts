@@ -21,6 +21,8 @@ export interface StrategySummary {
   frequency: string
   description: string
   status: string
+  /** 策略绑定的指数代码列表，空数组表示全指数通用 */
+  index_codes: string[]
 }
 
 export interface StrategyDetail extends StrategySummary {
@@ -224,6 +226,8 @@ export interface BacktestSummary {
   started_at: string | null
   finished_at: string | null
   error_message: string | null
+  /** 执行进度（0-100），running 状态时有效 */
+  progress: number
 }
 
 export interface BacktestDetail extends BacktestSummary {
@@ -397,6 +401,8 @@ export interface AllocationResponse {
   timing: AllocationTiming
   rankings: AllocationRanking[]
   plan: AllocationPlan
+  /** 本次决策所用因子数据的交易日（YYYY-MM-DD），用于展示数据新鲜度 */
+  data_date?: string | null
 }
 
 /** 统一分页响应格式 */
