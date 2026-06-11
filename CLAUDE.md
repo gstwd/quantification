@@ -115,7 +115,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
   - `retry.py` — `@with_retry()` 装饰器，指数退避重试，参数可通过环境变量 `AKSHARE_RETRY_MAX_ATTEMPTS` / `AKSHARE_RETRY_BASE_DELAY` 配置
 - **`infra/trading_calendar.py`** — `TradingCalendar` 类，通过 `akshare.tool_trade_date_hist_sina()` 获取 A 股交易日历，内存缓存 TTL=1 天，API 不可用时降级为周末判断
 - **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends. 调度器同步执行，不走线程池
-- **`api/routers/runs.py`** — 后台任务使用 `ThreadPoolExecutor(max_workers=3)`（模块级 `_executor`），进程退出时在 `main.py` lifespan 中 `shutdown(wait=False, cancel_futures=True)`。所有 bg 函数统一 `mark_running` → `mark_success/failed` 状态流转，外层 try/except 兜底。启动时 `recover_stuck_runs_on_startup()` 将卡在 pending/running 的记录标记为 failed
+- **`api/executor.py`** — 共享后台任务线程池。所有 bg 路由（runs、backtests）通过 `get_bg_executor()` 获取统一 executor，`main.py` lifespan 统一 shutdown。所有 bg 函数统一 `mark_running` → `mark_success/failed` 状态流转，外层 try/except 兜底。
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
   - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, AllocationPlan dataclasses)
@@ -164,7 +164,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - 通过 `FactorProvider` 加载因子值，消除硬编码因子计算
 - `services/context_builder.py` 是向后兼容 shim，re-export 自 engine 版本
 
-### Database schema (23 tables, migrations 0001–0013)
+### Database schema (24 tables, migrations 0001–0016)
 
 | Group | Tables |
 |---|---|
@@ -172,7 +172,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 | Market data | `etf_daily_bar`, `index_daily_bar`, `etf_daily_share`, `index_valuation`, `macro_indicator`, `source_payload_log` |
 | Analytics | `factor_definition`, `etf_factor_value`, `index_factor_value`, `signal_definition`, `etf_signal`, `index_signal` |
 | Runtime | `strategy_plugin`, `research_run`, `research_run_item` |
-| Backtest | `backtest_run`, `backtest_daily_result`, `backtest_etf_result`, `backtest_index_result` |
+| Backtest | `backtest_run`（含 progress 列）, `backtest_daily_result`, `backtest_etf_result`, `backtest_index_result` |
 | Strategy | `strategy_config` |
 
 Key migrations:
@@ -181,6 +181,7 @@ Key migrations:
 - 0007–0008: 指数因子回测、策略配置表
 - 0009–0012: 回测模式字段、`index_signal` 表、回测日基准收益和换手率、回测指数原始得分
 - 0013: `trading_calendar` 表、`benchmark_index` 增加 `is_active`/`delisting_date`、`macro_indicator` 增加 `period_date`
+- 0016: `backtest_run` 增加 `progress` 列（回测执行进度 0-100）
 
 ### Frontend
 
@@ -264,5 +265,8 @@ Key rules (details in the doc):
 - **StrategyConfig.index_codes**: 存储在 `config_json` 内部（非独立 DB 列），通过 `**row.config_json` 展开到 engine 的 `StrategyConfig` 模型。前端 API 请求中 `index_codes` 应在 `config_json` 内传递，非顶层字段。非空时 `_filter_by_scope()` 仅保留指定指数（实时和回测模式均生效）。
 - **index_codes 回测强制应用**: `BacktestService.create_backtest()` 检查策略的 `config.index_codes`，非空时强制覆盖 `universe_filter` 为 subset 模式；`ContextBuilder._build_backtest()` 对传入的 index_codes 做交集过滤（双重保护）。
 - **StrategyConfigForm 与 engine/config.py 的 StrategyConfig 同步**: 引擎新增配置模块时，需同步更新 `StrategyConfigForm.vue`（表单）、`StrategyDetailPage.vue`（详情展示）。目前已覆盖全部 7 个模块（score/timing/filters/rank/portfolio/risk/rebalance）+ 资产范围 index_codes。
-- **前端获取策略 index_codes 需 `fetchStrategyDetail()`**: 列表 API 的 `StrategySummary` 不含 `config_json`。需要 `index_codes` 时（如回测创建页锁定标的范围），必须额外调用 `GET /strategies/{id}` 获取详情。
+- **`StrategySummary` 已有 `index_codes` 顶层字段**: 列表 API 直接返回 `index_codes`，前端无需额外调用 `fetchStrategyDetail()`。`StrategyConfigForm.vue` 读取 `modelValue.index_codes`（config_json 内），`StrategyDetailPage.vue` 和 `BacktestCreatePage.vue` 读取顶层 `store.current?.index_codes`。
 - **index_daily_bar OHLC 字段**: `IndexDailyBarModel` 有 `open_price`、`high_price`、`low_price`、`close_price` 字段，技术指标因子（ATR/Donchian）通过 `ctx.index_bars` 直接访问。
+- **`get_default_factor_registry()` vs `build_default_factor_registry()`**: 进程级单例通过 `get_default_factor_registry()` 获取（首次构建后缓存），避免 `BacktestService` 每请求重建。只有 `cli.py` 和 `registry.py` 内部使用 `build_default_factor_registry()`。
+- **`BatchFactorComputer` Protocol**: 定义在 `factors/base.py`，回测因子预计算时优先调用 `compute_batch()`（一次遍历 bar 数据覆盖所有日期）。已在 momentum.py（return_5d/20d/60d/120d）实现。新增回测频繁使用的因子时建议实现此协议。
+- **`validate_config` 是 `@staticmethod`**: `StrategyConfigService.validate_config()` 不依赖 DB 会话，直接静态调用无需实例化服务。

@@ -67,12 +67,12 @@ export const useBacktestStore = defineStore('backtests', {
           const timer = setInterval(async () => {
             try {
               const detail = await fetchBacktest(backtestId)
+              // 每次轮询都更新 current，确保进度条等 UI 实时刷新
+              this.current = detail
+              const idx = this.items.findIndex((i) => i.backtest_id === backtestId)
+              if (idx !== -1) this.items[idx] = detail
               if (detail.status !== 'pending' && detail.status !== 'running') {
                 clearInterval(timer)
-                this.current = detail
-                // 同步更新列表中的状态
-                const idx = this.items.findIndex((i) => i.backtest_id === backtestId)
-                if (idx !== -1) this.items[idx] = detail
                 resolve()
               }
             } catch {

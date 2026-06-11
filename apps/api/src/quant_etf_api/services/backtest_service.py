@@ -22,6 +22,7 @@ from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.orchestrator import StrategyEngine
 from quant_etf_api.infra.db.models.core import (
     BacktestDailyResultModel,
+    BacktestIndexResultModel,
     BacktestRunModel,
     BenchmarkIndexModel,
     IndexDailyBarModel,
