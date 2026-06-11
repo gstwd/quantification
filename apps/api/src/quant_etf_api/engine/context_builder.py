@@ -54,6 +54,8 @@ class ContextBuilder:
         all_bars: dict[tuple[str, date], Any] | None = None,
         all_valuation: dict[tuple[str, date], Any] | None = None,
         precomputed_factors: dict[tuple[str, str], float | None] | None = None,
+        cached_universe: list[dict[str, Any]] | None = None,
+        cached_metadata: dict[str, dict[str, Any]] | None = None,
     ) -> EngineContext:
         """构建引擎上下文（实时和回测统一入口）。
 
@@ -67,6 +69,8 @@ class ContextBuilder:
             all_bars: 预加载的指数日线数据（回测模式）。
             all_valuation: 预加载的估值数据（回测模式）。
             precomputed_factors: 预计算的因子值字典（回测模式）。
+            cached_universe: 预构建的 universe 列表（回测模式复用，避免每日重构）。
+            cached_metadata: 预构建的 asset_metadata 字典（回测模式复用）。
 
         Returns:
             填充完成的 EngineContext。
@@ -75,7 +79,8 @@ class ContextBuilder:
 
         if is_backtest:
             return self._build_backtest(
-                config, trade_date, index_codes, all_bars, all_valuation, precomputed_factors
+                config, trade_date, index_codes, all_bars, all_valuation,
+                precomputed_factors, cached_universe, cached_metadata,
             )
         return self._build_live(config, trade_date)
 
@@ -235,6 +240,8 @@ class ContextBuilder:
         all_bars: dict[tuple[str, date], Any],
         all_valuation: dict[tuple[str, date], Any] | None,
         precomputed_factors: dict[tuple[str, str], float | None] | None,
+        cached_universe: list[dict[str, Any]] | None = None,
+        cached_metadata: dict[str, dict[str, Any]] | None = None,
     ) -> EngineContext:
         """回测模式：使用预加载数据构建上下文。
 
@@ -248,10 +255,17 @@ class ContextBuilder:
             strategy_codes = set(config.index_codes)
             codes = [c for c in codes if c in strategy_codes]
 
-        universe = [
-            {"etf_code": code, "name_cn": code, "category": "broad_index"} for code in codes
-        ]
-        asset_metadata = {code: {"name_cn": code, "category": "broad_index"} for code in codes}
+        # 使用缓存或现场构建 universe 和 metadata
+        if cached_universe is not None:
+            universe = cached_universe
+        else:
+            universe = [
+                {"etf_code": code, "name_cn": code, "category": "broad_index"} for code in codes
+            ]
+        if cached_metadata is not None:
+            asset_metadata = cached_metadata
+        else:
+            asset_metadata = {code: {"name_cn": code, "category": "broad_index"} for code in codes}
 
         # 使用预计算的因子值
         asset_factors: dict[tuple[str, str], float | None] = (

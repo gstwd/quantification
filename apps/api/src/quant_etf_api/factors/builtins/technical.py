@@ -1,10 +1,14 @@
 """技术指标类因子：均线、ATR、Donchian 通道、RSI（基于指数数据）。
 
 补充趋势类和通道类因子的缺失，支持双均线、海龟交易、RSI 超买超卖等经典策略。
+
+均线、ATR、Donchian 通道、RSI 均实现 BatchFactorComputer 协议，
+回测预计算时一次遍历全量 bar 数据覆盖所有交易日，避免逐日重复构建收盘价序列。
 """
 
 from __future__ import annotations
 
+import bisect
 from datetime import date
 
 from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
@@ -77,6 +81,51 @@ def _get_historical_bars(
 # ══════════════════════════════════════════════════════════════════════
 
 
+def _build_sorted_closes_for_code(
+    index_code: str, ctx: FactorContext,
+) -> tuple[list[date], list[float]]:
+    """提取指定指数的有序收盘价序列，供批量计算复用。
+
+    Args:
+        index_code: 指数代码。
+        ctx: FactorContext，包含全量回望数据。
+
+    Returns:
+        (close_dates, close_prices) 元组，均按日期升序排列。
+    """
+    closes = sorted(
+        [
+            (dt, v.close_price)
+            for (code, dt), v in ctx.index_bars.items()
+            if code == index_code and v.close_price is not None
+        ],
+        key=lambda x: x[0],
+    )
+    if not closes:
+        return [], []
+    return [d for d, _ in closes], [p for _, p in closes]
+
+
+def _build_sorted_bars_for_code(
+    index_code: str, ctx: FactorContext,
+) -> list[tuple[date, float, float, float, float]]:
+    """提取指定指数的有序 OHLC 序列，供批量计算复用。
+
+    Returns:
+        [(date, open, high, low, close), ...] 列表，按日期升序排列。
+    """
+    return sorted(
+        [
+            (dt, v.open_price, v.high_price, v.low_price, v.close_price)
+            for (code, dt), v in ctx.index_bars.items()
+            if code == index_code
+            and v.close_price is not None
+            and v.high_price is not None
+            and v.low_price is not None
+        ],
+        key=lambda x: x[0],
+    )
+
 class MAComputer:
     """移动均线因子计算器。
 
@@ -129,6 +178,44 @@ class MAComputer:
             numeric=ma,
             payload={"period": self._period, "sample_count": len(closes)},
         )
+
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext,
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的移动均线。
+
+        一次遍历构建有序收盘价序列，使用 bisect 快速定位每个日期的数据窗口，
+        避免逐日重复扫描全量 bar。
+
+        Args:
+            index_code: 指数代码。
+            dates: 需要计算的交易日列表（升序）。
+            ctx: FactorContext，包含全量回望数据。
+
+        Returns:
+            key=交易日, value=FactorValue 的字典。
+        """
+        result: dict[date, FactorValue] = {}
+        close_dates, close_prices = _build_sorted_closes_for_code(index_code, ctx)
+        if not close_dates:
+            return {d: FactorValue(factor_id=self.spec.factor_id, numeric=None) for d in dates}
+
+        for trade_date in dates:
+            idx = bisect.bisect_right(close_dates, trade_date) - 1
+            if idx < 0 or close_dates[idx] != trade_date or idx < self._period - 1:
+                result[trade_date] = FactorValue(
+                    factor_id=self.spec.factor_id, numeric=None,
+                    payload={"reason": f"收盘价数据不足 {self._period} 条"},
+                )
+                continue
+            window = close_prices[idx - self._period + 1 : idx + 1]
+            ma = round(sum(window) / len(window), 4)
+            result[trade_date] = FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=ma,
+                payload={"period": self._period, "sample_count": len(window)},
+            )
+        return result
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -204,6 +291,49 @@ class ATRComputer:
             payload={"period": self._period, "tr_count": len(tr_list)},
         )
 
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext,
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的 ATR。
+
+        Args:
+            index_code: 指数代码。
+            dates: 需要计算的交易日列表（升序）。
+            ctx: FactorContext，包含全量回望数据。
+
+        Returns:
+            key=交易日, value=FactorValue 的字典。
+        """
+        result: dict[date, FactorValue] = {}
+        bars = _build_sorted_bars_for_code(index_code, ctx)
+        if len(bars) < self._period + 1:
+            return {d: FactorValue(factor_id=self.spec.factor_id, numeric=None) for d in dates}
+
+        bar_dates = [b[0] for b in bars]
+
+        for trade_date in dates:
+            idx = bisect.bisect_right(bar_dates, trade_date) - 1
+            if idx < 0 or bar_dates[idx] != trade_date or idx < self._period:
+                result[trade_date] = FactorValue(
+                    factor_id=self.spec.factor_id, numeric=None,
+                    payload={"reason": f"日线数据不足 {self._period + 1} 条"},
+                )
+                continue
+            window = bars[idx - self._period : idx + 1]
+            tr_list: list[float] = []
+            for i in range(1, len(window)):
+                _, _o, high, low, _c = window[i]
+                _, _po, _ph, _pl, prev_c = window[i - 1]
+                tr = max(high - low, abs(high - prev_c), abs(low - prev_c))
+                tr_list.append(tr)
+            atr = round(sum(tr_list) / len(tr_list), 4)
+            result[trade_date] = FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=atr,
+                payload={"period": self._period, "tr_count": len(tr_list)},
+            )
+        return result
+
 
 # ══════════════════════════════════════════════════════════════════════
 # Donchian 通道因子
@@ -256,6 +386,44 @@ class DonchianHighComputer:
             payload={"period": self._period},
         )
 
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext,
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的 Donchian 通道上轨。
+
+        Args:
+            index_code: 指数代码。
+            dates: 需要计算的交易日列表（升序）。
+            ctx: FactorContext，包含全量回望数据。
+
+        Returns:
+            key=交易日, value=FactorValue 的字典。
+        """
+        result: dict[date, FactorValue] = {}
+        bars = _build_sorted_bars_for_code(index_code, ctx)
+        if not bars:
+            return {d: FactorValue(factor_id=self.spec.factor_id, numeric=None) for d in dates}
+
+        bar_dates = [b[0] for b in bars]
+        high_prices = [b[2] for b in bars]  # high price 在索引 2
+
+        for trade_date in dates:
+            idx = bisect.bisect_right(bar_dates, trade_date) - 1
+            if idx < 0 or bar_dates[idx] != trade_date or idx < self._period - 1:
+                result[trade_date] = FactorValue(
+                    factor_id=self.spec.factor_id, numeric=None,
+                    payload={"reason": f"日线数据不足 {self._period} 条"},
+                )
+                continue
+            window = high_prices[idx - self._period + 1 : idx + 1]
+            highest = max(w for w in window if w is not None)
+            result[trade_date] = FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=highest,
+                payload={"period": self._period},
+            )
+        return result
+
 
 class DonchianLowComputer:
     """Donchian 通道下轨因子计算器。
@@ -302,6 +470,44 @@ class DonchianLowComputer:
             numeric=lowest,
             payload={"period": self._period},
         )
+
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext,
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的 Donchian 通道下轨。
+
+        Args:
+            index_code: 指数代码。
+            dates: 需要计算的交易日列表（升序）。
+            ctx: FactorContext，包含全量回望数据。
+
+        Returns:
+            key=交易日, value=FactorValue 的字典。
+        """
+        result: dict[date, FactorValue] = {}
+        bars = _build_sorted_bars_for_code(index_code, ctx)
+        if not bars:
+            return {d: FactorValue(factor_id=self.spec.factor_id, numeric=None) for d in dates}
+
+        bar_dates = [b[0] for b in bars]
+        low_prices = [b[3] for b in bars]  # low price 在索引 3
+
+        for trade_date in dates:
+            idx = bisect.bisect_right(bar_dates, trade_date) - 1
+            if idx < 0 or bar_dates[idx] != trade_date or idx < self._period - 1:
+                result[trade_date] = FactorValue(
+                    factor_id=self.spec.factor_id, numeric=None,
+                    payload={"reason": f"日线数据不足 {self._period} 条"},
+                )
+                continue
+            window = low_prices[idx - self._period + 1 : idx + 1]
+            lowest = min(w for w in window if w is not None)
+            result[trade_date] = FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=lowest,
+                payload={"period": self._period},
+            )
+        return result
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -380,6 +586,57 @@ class RSIComputer:
             numeric=rsi,
             payload={"period": self._period, "avg_gain": round(avg_gain, 4), "avg_loss": round(avg_loss, 4)},
         )
+
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext,
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的 RSI。
+
+        Args:
+            index_code: 指数代码。
+            dates: 需要计算的交易日列表（升序）。
+            ctx: FactorContext，包含全量回望数据。
+
+        Returns:
+            key=交易日, value=FactorValue 的字典。
+        """
+        result: dict[date, FactorValue] = {}
+        close_dates, close_prices = _build_sorted_closes_for_code(index_code, ctx)
+        if not close_dates:
+            return {d: FactorValue(factor_id=self.spec.factor_id, numeric=None) for d in dates}
+
+        for trade_date in dates:
+            idx = bisect.bisect_right(close_dates, trade_date) - 1
+            if idx < 0 or close_dates[idx] != trade_date or idx < self._period:
+                result[trade_date] = FactorValue(
+                    factor_id=self.spec.factor_id, numeric=None,
+                    payload={"reason": f"收盘价数据不足 {self._period + 1} 条"},
+                )
+                continue
+            window = close_prices[idx - self._period : idx + 1]
+            gains: list[float] = []
+            losses: list[float] = []
+            for i in range(1, len(window)):
+                diff = window[i] - window[i - 1]
+                if diff > 0:
+                    gains.append(diff)
+                    losses.append(0.0)
+                else:
+                    gains.append(0.0)
+                    losses.append(abs(diff))
+            avg_gain = sum(gains) / len(gains)
+            avg_loss = sum(losses) / len(losses)
+            if avg_loss == 0:
+                rsi = 100.0
+            else:
+                rs = avg_gain / avg_loss
+                rsi = round(100.0 - 100.0 / (1.0 + rs), 2)
+            result[trade_date] = FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=rsi,
+                payload={"period": self._period, "avg_gain": round(avg_gain, 4), "avg_loss": round(avg_loss, 4)},
+            )
+        return result
 
 
 # ══════════════════════════════════════════════════════════════════════

@@ -291,6 +291,20 @@ class BacktestService:
         last_progress = 0
         total_dates = len(trading_dates)
 
+        # 信号准确率累积器（替代 DB 查询）
+        total_in_pos_count = 0
+        total_in_pos_positive = 0
+
+        # 预构建 universe 和 metadata（回测区间内不变，避免每日重复构造）
+        codes = index_codes
+        if config.index_codes:
+            strategy_codes = set(config.index_codes)
+            codes = [c for c in codes if c in strategy_codes]
+        cached_universe = [
+            {"etf_code": code, "name_cn": code, "category": "broad_index"} for code in codes
+        ]
+        cached_metadata = {code: {"name_cn": code, "category": "broad_index"} for code in codes}
+
         for i, trade_date in enumerate(trading_dates):
             day_factors = precomputed.get(trade_date, {})
 
@@ -302,13 +316,15 @@ class BacktestService:
                 all_bars=all_bars,
                 all_valuation=all_valuation,
                 precomputed_factors=day_factors,
+                cached_universe=cached_universe,
+                cached_metadata=cached_metadata,
             )
 
             # 检查调仓日
             should_rebalance = self._check_rebalance(config, trade_date, last_rebalance_date)
 
-            # 执行引擎
-            result = self._engine.run(config, context)
+            # 执行引擎（回测模式跳过详细的 StrategyResult 构建以提升性能）
+            result = self._engine.run(config, context, include_details=False)
 
             next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
 
@@ -340,9 +356,8 @@ class BacktestService:
             drawdown = (cumulative / peak - 1) * 100
 
             # 持仓统计
-            high_cnt = len(positions) if positions else 0
-            mid_cnt = 0
-            low_cnt = 0
+            high_cnt = mid_cnt = low_cnt = 0
+            has_positions = bool(positions)
 
             # 基准收益
             benchmark_ret = benchmark_returns[i] if i < len(benchmark_returns) else None
@@ -353,24 +368,33 @@ class BacktestService:
                 portfolio_return=round(portfolio_return, 4),
                 cumulative_return=round(cumulative_return_pct, 4),
                 drawdown=round(drawdown, 4),
-                high_signal_count=high_cnt,
-                mid_signal_count=mid_cnt,
-                low_signal_count=low_cnt,
+                high_signal_count=0,  # 占位，下面从 _write_index_results 获取实际值
+                mid_signal_count=0,
+                low_signal_count=0,
                 timing_regime=result.timing.regime if result.timing else None,
-                total_exposure=result.total_exposure if positions else None,
-                cash_ratio=result.cash_ratio if positions else None,
+                total_exposure=result.total_exposure,
+                cash_ratio=result.cash_ratio,
                 positions=positions if positions else None,
                 benchmark_return=round(benchmark_ret, 4) if benchmark_ret is not None else None,
                 turnover=round(turnover, 4) if turnover > 0 else None,
             )
             self._db.add(daily_row)
             daily_results.append(daily_row)
-            metric_accumulator.append((portfolio_return, high_cnt))
+            metric_accumulator.append((portfolio_return, 1 if has_positions else 0))
 
-            self._write_index_results(
-                backtest_id, trade_date, next_date, universe, result, all_bars, positions,
-                scoring_mode=config.score.scoring_mode,
+            # 写入指数结果并获取信号计数
+            high_cnt, mid_cnt, low_cnt, day_pos_count, day_pos_positive = (
+                self._write_index_results(
+                    backtest_id, trade_date, next_date, universe, result, all_bars, positions,
+                    scoring_mode=config.score.scoring_mode,
+                )
             )
+            # 更新每日行的信号计数
+            daily_row.high_signal_count = high_cnt
+            daily_row.mid_signal_count = mid_cnt
+            daily_row.low_signal_count = low_cnt
+            total_in_pos_count += day_pos_count
+            total_in_pos_positive += day_pos_positive
 
             prev_positions = positions
 
@@ -388,8 +412,12 @@ class BacktestService:
 
         self._db.flush()
 
-        # 计算汇总指标（使用轻量累积器，避免依赖已 flush 的 ORM 对象）
-        metrics = self._compute_summary_metrics(metric_accumulator, benchmark_returns, backtest_id)
+        # 计算汇总指标（使用轻量累积器和内存中的信号准确率，避免依赖已 flush 的 ORM 对象）
+        metrics = self._compute_summary_metrics(
+            metric_accumulator, benchmark_returns,
+            total_in_pos_count=total_in_pos_count,
+            total_in_pos_positive=total_in_pos_positive,
+        )
         self._backtest_repo.mark_success(backtest_id, metrics)
 
     # ── 数据准备 ───────────────────────────────────────────────────────────
@@ -427,9 +455,16 @@ class BacktestService:
         all_bars: dict,
         positions: dict[str, float],
         scoring_mode: str = "absolute",
-    ) -> None:
-        """写入每日每指数的回测结果，使用统一的信号等级判定逻辑。"""
+    ) -> tuple[int, int, int, int, int]:
+        """写入每日每指数的回测结果，使用统一的信号等级判定逻辑。
+
+        Returns:
+            (high_cnt, mid_cnt, low_cnt, in_portfolio_count, in_portfolio_positive_count) 元组。
+        """
         score_map = result.scores
+        high = mid = low = 0
+        in_pos_count = 0
+        in_pos_positive = 0
 
         for item in universe:
             code = item["index_code"]
@@ -443,12 +478,22 @@ class BacktestService:
                 has_positions=True,
                 scoring_mode=scoring_mode,
             )
+            if level == "HIGH":
+                high += 1
+            elif level == "MID":
+                mid += 1
+            else:
+                low += 1
+
             in_portfolio = target_weight > 0
             signal_score = round(target_weight * 100, 2)
 
             idx_ret = None
             if next_date and in_portfolio:
                 idx_ret = self._get_index_return(code, trade_date, next_date, all_bars)
+                in_pos_count += 1
+                if idx_ret is not None and idx_ret > 0:
+                    in_pos_positive += 1
 
             self._db.add(
                 BacktestIndexResultModel(
@@ -462,6 +507,8 @@ class BacktestService:
                     original_score=original_score,
                 )
             )
+
+        return high, mid, low, in_pos_count, in_pos_positive
 
     # ── 收益计算 ───────────────────────────────────────────────────────────
 
@@ -539,14 +586,16 @@ class BacktestService:
         self,
         metric_accumulator: list[tuple[float, int]],
         benchmark_returns: list[float],
-        backtest_id: str,
+        total_in_pos_count: int = 0,
+        total_in_pos_positive: int = 0,
     ) -> dict[str, Any]:
         """计算回测汇总绩效指标，集成专业指标和基准对比。
 
         Args:
-            metric_accumulator: 轻量累积器，每项为 (portfolio_return, high_signal_count)。
+            metric_accumulator: 轻量累积器，每项为 (portfolio_return, has_positions)。
             benchmark_returns: 基准日收益率序列。
-            backtest_id: 回测 ID，用于查询 DB 中的指数结果。
+            total_in_pos_count: 持仓指数总次数（主循环累积）。
+            total_in_pos_positive: 持仓指数正收益总次数（主循环累积）。
         """
         if not metric_accumulator:
             return BacktestMetrics(
@@ -568,25 +617,10 @@ class BacktestService:
             benchmark_returns=benchmark_returns if benchmark_returns else None,
         )
 
-        # 信号准确率
+        # 信号准确率（从主循环累积的内存计数器获取，无需 DB 查询）
         signal_accuracy_pct = 0.0
-        try:
-            idx_rows = (
-                self._db.query(BacktestIndexResultModel)
-                .filter(
-                    BacktestIndexResultModel.backtest_id == backtest_id,
-                    BacktestIndexResultModel.in_portfolio.is_(True),
-                    BacktestIndexResultModel.index_return.isnot(None),
-                )
-                .all()
-            )
-            if idx_rows:
-                positive = sum(
-                    1 for r in idx_rows if r.index_return is not None and r.index_return > 0
-                )
-                signal_accuracy_pct = round(positive / len(idx_rows) * 100, 2)
-        except Exception:
-            logger.warning("compute signal_accuracy_pct failed", exc_info=True)
+        if total_in_pos_count > 0:
+            signal_accuracy_pct = round(total_in_pos_positive / total_in_pos_count * 100, 2)
 
         # 基准对比
         benchmark_return_pct = None

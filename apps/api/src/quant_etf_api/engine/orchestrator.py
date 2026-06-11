@@ -54,12 +54,18 @@ class StrategyEngine:
         self._rank = rank_engine or DefaultRankEngine()
         self._risk = risk_manager or DefaultRiskManager()
 
-    def run(self, config: StrategyConfig, context: EngineContext) -> EngineResult:
+    def run(
+        self, config: StrategyConfig, context: EngineContext,
+        include_details: bool = True,
+    ) -> EngineResult:
         """执行策略管线。
 
         Args:
             config: 策略配置。
             context: 引擎上下文。
+            include_details: 是否构建详细的 StrategyResult 列表。
+                回测模式传 False 以跳过 _build_strategy_results()，
+                避免逐日构造无用对象，提升回测性能。
 
         Returns:
             统一的引擎执行结果。
@@ -85,7 +91,7 @@ class StrategyEngine:
         # 4. 排名
         rankings = self._rank.rank(effective.rank, scores, context)
 
-        # 5. 仓位分配（可选，无 portfolio 则为信号模式）
+        # 5. 仓位分配（必选）
         positions: dict[str, float] = {}
         total_exposure = 0.0
         cash_ratio = 1.0
@@ -100,10 +106,12 @@ class StrategyEngine:
             total_exposure = round(sum(positions.values()), 4)
             cash_ratio = round(1.0 - total_exposure, 4)
 
-        # 7. 构建兼容旧接口的 StrategyResult 列表
-        strategy_results = self._build_strategy_results(
-            effective, context, timing, scores, rankings, positions, total_exposure, cash_ratio
-        )
+        # 7. 构建兼容旧接口的 StrategyResult 列表（回测模式下跳过以提升性能）
+        strategy_results: list[StrategyResult] = []
+        if include_details:
+            strategy_results = self._build_strategy_results(
+                effective, context, timing, scores, rankings, positions, total_exposure, cash_ratio
+            )
 
         return EngineResult(
             trade_date=context.trade_date,

@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import text
+
 from quant_etf_api.infra.db.models.core import (
     BacktestDailyResultModel,
     BacktestIndexResultModel,
@@ -78,18 +80,22 @@ class BacktestRepository(BaseRepository):
     def update_progress(self, backtest_id: str, progress: int) -> None:
         """更新回测执行进度（0-100）。
 
+        使用裸 SQL 直接写入，不触发 ORM flush/commit，
+        避免打断主事务中的 daily/index result 写入。
+
         Args:
             backtest_id: 回测标识。
             progress: 进度百分比（0-100）。
         """
-        run = self.find_by_id(backtest_id)
-        if run is None:
-            return
-        run.progress = max(0, min(100, progress))
+        p = max(0, min(100, progress))
         try:
-            self._db.commit()
+            self._db.connection().execute(
+                text("UPDATE backtest_run SET progress = :p WHERE backtest_id = :bid"),
+                {"p": p, "bid": backtest_id},
+            )
         except Exception:
-            self._db.rollback()
+            # 静默失败：进度写入不是关键路径，不应打断回测主循环
+            pass
 
     def mark_success(self, backtest_id: str, metrics: dict[str, Any] | None = None) -> None:
         """将回测标记为成功。"""
@@ -101,6 +107,7 @@ class BacktestRepository(BaseRepository):
             return
         run.status = "success"
         run.finished_at = datetime.now(timezone.utc)
+        run.progress = 100
         if metrics:
             run.metrics = metrics
         self._db.commit()
