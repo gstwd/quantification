@@ -13,7 +13,7 @@
       </div>
       <div class="header-actions">
         <button class="btn btn-secondary" :disabled="triggeringColdStart" @click="triggerColdStartFn">
-          {{ triggeringColdStart ? '执行中...' : '历史回补' }}
+          {{ triggeringColdStart ? '执行中...' : '历史回补（冷启动）' }}
         </button>
         <button class="btn btn-primary" :disabled="triggering" @click="triggerIngest">
           {{ triggering ? '触发中...' : '触发数据摄取' }}

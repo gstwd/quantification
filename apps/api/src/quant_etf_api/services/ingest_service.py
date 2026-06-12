@@ -1337,7 +1337,7 @@ class IngestService:
         """冷启动：拉取全部 ETF 和指数的全量历史数据（后台线程入口）。
 
         与 run_daily_ingest 的区别：
-        - ETF 日线拉取全量历史（~320 条），而非仅最近 5 条
+        - ETF，指数日线拉取全量历史
         - 不拉取份额快照（份额为点状数据，无历史含义）
         - 跳过周末检查（冷启动可随时执行）
         - 指数日线/估值/宏观复用现有全量方法
@@ -1390,7 +1390,7 @@ class IngestService:
 
             for idx in indexes:
                 try:
-                    index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code)
+                    index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code, incremental=False)
                 except Exception as e:
                     logger.warning("指数 %s 日线拉取失败: %s", idx.index_code, e)
 
