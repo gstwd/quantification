@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 _fetch_locks: dict[str, threading.Lock] = {}
 _fetch_locks_meta = threading.Lock()
 
+# 防止 run_daily_ingest 被调度器、手动按钮、重试同时触发
+_daily_ingest_lock = threading.Lock()
+
 
 def _get_lock(key: str) -> threading.Lock:
     with _fetch_locks_meta:
@@ -958,6 +961,76 @@ class IngestService:
         return result
 
     # ==================================================================
+    # 共享私有方法
+    # ==================================================================
+
+    def _process_etf_ingest_batch(
+        self, run_id: str, etfs: list, today: date
+    ) -> tuple[int, int, int]:
+        """遍历所有活跃 ETF，逐个拉取日线和份额数据并写入运行子项记录。
+
+        两个调用方（run_daily_ingest、refresh_etf_data）共享此方法，
+        避免 ETF 遍历逻辑重复。
+
+        Args:
+            run_id: 运行记录 ID。
+            etfs: 活跃 ETF 列表（EtfUniverseModel 实例）。
+            today: 当前日期。
+
+        Returns:
+            (success_count, failed_count, skipped_count)
+        """
+        etf_success = 0
+        etf_failed = 0
+        etf_skipped = 0
+
+        if not etfs:
+            return etf_success, etf_failed, etf_skipped
+
+        for etf in etfs:
+            etf_code = etf.etf_code
+            item_status = "success"
+            item_message = ""
+
+            try:
+                latest_bar_date = self._fetch_and_upsert_bars_incremental(etf_code)
+                if not latest_bar_date:
+                    item_status = "skipped"
+                    item_message = "未获取到 K 线数据"
+                    etf_skipped += 1
+                elif latest_bar_date == str(today):
+                    try:
+                        self._fetch_and_upsert_shares(etf_code, today)
+                    except Exception:
+                        item_message = "份额数据拉取失败"
+                    etf_success += 1
+                else:
+                    item_status = "skipped"
+                    item_message = f"非交易日，最新行情日期为 {latest_bar_date}"
+                    etf_skipped += 1
+            except Exception as e:
+                item_status = "failed"
+                item_message = str(e)[:500]
+                etf_failed += 1
+                self._db.rollback()
+                logger.warning("ETF %s 数据摄取失败: %s", etf_code, e)
+
+            try:
+                item = ResearchRunItemModel(
+                    run_id=run_id,
+                    etf_code=etf_code,
+                    status=item_status,
+                    message=item_message or None,
+                )
+                self._db.add(item)
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                logger.warning("写入 ResearchRunItem 失败: %s", etf_code, exc_info=True)
+
+        return etf_success, etf_failed, etf_skipped
+
+    # ==================================================================
     # 全量日频摄取（后台线程入口）
     # ==================================================================
 
@@ -971,8 +1044,17 @@ class IngestService:
 
         完成后更新 research_run 状态为 success/failed。
         """
-        start_time = datetime.now(timezone.utc)
+        # 非阻塞并发控制：如果已有 ingest 正在运行，跳过本次执行
+        if not _daily_ingest_lock.acquire(blocking=False):
+            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
+            if run is not None:
+                run.status = "success"
+                run.finished_at = datetime.now(timezone.utc)
+                run.metrics = {"reason": "concurrent_skip", "message": "另一个摄任务正在运行，跳过本次执行"}
+                self._db.commit()
+            return
         try:
+            start_time = datetime.now(timezone.utc)
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is None:
                 logger.error("run_daily_ingest: run_id %s 不存在", run_id)
@@ -994,52 +1076,9 @@ class IngestService:
 
             # ------------------------------ 1. ETF 行情 + 份额 ------------------------------
             etfs = self._universe_repo.find_all_active()
-
-            etf_success = 0
-            etf_failed = 0
-            etf_skipped = 0
-
-            if etfs:
-                for etf in etfs:
-                    etf_code = etf.etf_code
-                    item_status = "success"
-                    item_message = ""
-
-                    try:
-                        latest_bar_date = self._fetch_and_upsert_bars_incremental(etf_code)
-                        if not latest_bar_date:
-                            item_status = "skipped"
-                            item_message = "未获取到 K 线数据"
-                            etf_skipped += 1
-                        elif latest_bar_date == str(today):
-                            try:
-                                self._fetch_and_upsert_shares(etf_code, today)
-                            except Exception:
-                                item_message = "份额数据拉取失败"
-                            etf_success += 1
-                        else:
-                            item_status = "skipped"
-                            item_message = f"非交易日，最新行情日期为 {latest_bar_date}"
-                            etf_skipped += 1
-                    except Exception as e:
-                        item_status = "failed"
-                        item_message = str(e)[:500]
-                        etf_failed += 1
-                        self._db.rollback()
-                        logger.warning("ETF %s 数据摄取失败: %s", etf_code, e)
-
-                    try:
-                        item = ResearchRunItemModel(
-                            run_id=run_id,
-                            etf_code=etf_code,
-                            status=item_status,
-                            message=item_message or None,
-                        )
-                        self._db.add(item)
-                        self._db.commit()
-                    except Exception:
-                        self._db.rollback()
-                        logger.warning("写入 ResearchRunItem 失败: %s", etf_code, exc_info=True)
+            etf_success, etf_failed, etf_skipped = self._process_etf_ingest_batch(
+                run_id, etfs, today
+            )
 
             # ------------------------------ 2. 指数日线 + 估值 ------------------------------
             indexes = (
@@ -1108,6 +1147,8 @@ class IngestService:
             except Exception:
                 logger.warning("更新失败状态时出错", exc_info=True)
                 self._db.rollback()
+        finally:
+            _daily_ingest_lock.release()
 
     # ==================================================================
     # 按类型拆分的数据刷新（后台线程入口）
@@ -1132,53 +1173,19 @@ class IngestService:
             run.started_at = start_time
             self._db.commit()
 
-            etfs = self._universe_repo.find_all_active()
-            etf_success = 0
-            etf_failed = 0
-            etf_skipped = 0
             today = date.today()
+            cal = TradingCalendar()
+            if not cal.is_trading_day(today):
+                run.status = "success"
+                run.finished_at = datetime.now(timezone.utc)
+                run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
+                self._db.commit()
+                return
 
-            if etfs:
-                for etf in etfs:
-                    etf_code = etf.etf_code
-                    item_status = "success"
-                    item_message = ""
-
-                    try:
-                        latest_bar_date = self._fetch_and_upsert_bars_incremental(etf_code)
-                        if not latest_bar_date:
-                            item_status = "skipped"
-                            item_message = "未获取到 K 线数据"
-                            etf_skipped += 1
-                        elif latest_bar_date == str(today):
-                            try:
-                                self._fetch_and_upsert_shares(etf_code, today)
-                            except Exception:
-                                item_message = "份额数据拉取失败"
-                            etf_success += 1
-                        else:
-                            item_status = "skipped"
-                            item_message = f"非交易日，最新行情日期为 {latest_bar_date}"
-                            etf_skipped += 1
-                    except Exception as e:
-                        item_status = "failed"
-                        item_message = str(e)[:500]
-                        etf_failed += 1
-                        self._db.rollback()
-                        logger.warning("ETF %s 数据摄取失败: %s", etf_code, e)
-
-                    try:
-                        item = ResearchRunItemModel(
-                            run_id=run_id,
-                            etf_code=etf_code,
-                            status=item_status,
-                            message=item_message or None,
-                        )
-                        self._db.add(item)
-                        self._db.commit()
-                    except Exception:
-                        self._db.rollback()
-                        logger.warning("写入 ResearchRunItem 失败: %s", etf_code, exc_info=True)
+            etfs = self._universe_repo.find_all_active()
+            etf_success, etf_failed, etf_skipped = self._process_etf_ingest_batch(
+                run_id, etfs, today
+            )
 
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is None:
@@ -1186,10 +1193,12 @@ class IngestService:
             run.status = "success"
             run.finished_at = datetime.now(timezone.utc)
             run.metrics = {
-                "total": len(etfs),
-                "success": etf_success,
-                "failed": etf_failed,
-                "skipped": etf_skipped,
+                "etf": {
+                    "total": len(etfs),
+                    "success": etf_success,
+                    "failed": etf_failed,
+                    "skipped": etf_skipped,
+                },
                 "duration_seconds": round(
                     (datetime.now(timezone.utc) - start_time).total_seconds(), 1
                 ),
@@ -1231,6 +1240,15 @@ class IngestService:
             run.started_at = start_time
             self._db.commit()
 
+            today = date.today()
+            cal = TradingCalendar()
+            if not cal.is_trading_day(today):
+                run.status = "success"
+                run.finished_at = datetime.now(timezone.utc)
+                run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
+                self._db.commit()
+                return
+
             indexes = (
                 self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
             )
@@ -1254,9 +1272,11 @@ class IngestService:
             run.status = "success"
             run.finished_at = datetime.now(timezone.utc)
             run.metrics = {
-                "index_total": len(indexes),
-                "bar_records": index_bar_count,
-                "valuation_records": index_valuation_count,
+                "index": {
+                    "total": len(indexes),
+                    "bar_records": index_bar_count,
+                    "valuation_records": index_valuation_count,
+                },
                 "duration_seconds": round(
                     (datetime.now(timezone.utc) - start_time).total_seconds(), 1
                 ),
@@ -1300,6 +1320,15 @@ class IngestService:
             run.started_at = start_time
             self._db.commit()
 
+            today = date.today()
+            cal = TradingCalendar()
+            if not cal.is_trading_day(today):
+                run.status = "success"
+                run.finished_at = datetime.now(timezone.utc)
+                run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
+                self._db.commit()
+                return
+
             macro_count = self._fetch_and_upsert_macro()
 
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
@@ -1308,7 +1337,7 @@ class IngestService:
             run.status = "success"
             run.finished_at = datetime.now(timezone.utc)
             run.metrics = {
-                "records": macro_count,
+                "macro": {"records": macro_count},
                 "duration_seconds": round(
                     (datetime.now(timezone.utc) - start_time).total_seconds(), 1
                 ),

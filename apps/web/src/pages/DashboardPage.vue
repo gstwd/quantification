@@ -16,7 +16,7 @@
           {{ triggeringColdStart ? '执行中...' : '历史回补（冷启动）' }}
         </button>
         <button class="btn btn-primary" :disabled="triggering" @click="triggerIngest">
-          {{ triggering ? '触发中...' : '触发数据摄取' }}
+          {{ triggering ? '触发中...' : '触发数据摄取（增量）' }}
         </button>
       </div>
     </div>
@@ -208,6 +208,10 @@ function formatRunType(runType: string): string {
     universe_refresh: '标的刷新',
     cold_start: '历史回补',
     startup_fill: '启动补全',
+    etf_refresh: 'ETF 行情刷新',
+    index_refresh: '指数数据刷新',
+    macro_refresh: '宏观数据刷新',
+    factor_computation: '因子计算',
   }
   return map[runType] ?? runType
 }

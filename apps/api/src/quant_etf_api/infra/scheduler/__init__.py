@@ -6,6 +6,7 @@ from datetime import date, datetime, time
 
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.infra.db.base import SessionLocal
+from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.services.ingest_service import IngestService
 from quant_etf_api.services.run_service import RunService
 
@@ -68,8 +69,8 @@ class DailyIngestScheduler:
         db = SessionLocal()
         try:
             today = date.today()
-            if today.weekday() >= 5:
-                logger.info("调度器: 周末跳过 %s", today)
+            if not TradingCalendar().is_trading_day(today):
+                logger.info("调度器: 非交易日跳过 %s", today)
                 return
             summary = RunService(db).create_run("daily_ingest", None, today)
             IngestService(db).run_daily_ingest(summary.run_id)

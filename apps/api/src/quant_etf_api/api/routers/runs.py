@@ -69,6 +69,19 @@ def _run_cold_start_bg(run_id: str) -> None:
         db.close()
 
 
+def _run_startup_fill_bg(run_id: str) -> None:
+    """在独立 Session 中执行启动补全，仅补全有数据缺口的 ETF 和指数。"""
+    db = SessionLocal()
+    try:
+        RunService(db).mark_running(run_id)
+        IngestService(db).run_startup_fill(run_id)
+    except Exception as e:
+        logger.exception("启动补全任务异常: run_id=%s", run_id)
+        RunService(db).mark_failed(run_id, f"启动补全异常: {type(e).__name__}: {e!s}")
+    finally:
+        db.close()
+
+
 def _run_universe_refresh_bg(run_id: str) -> None:
     """在独立 Session 中执行 ETF 池元数据刷新，避免与请求 Session 冲突。"""
     db = SessionLocal()
@@ -180,7 +193,7 @@ def refresh_universe(db: Session = Depends(get_db)) -> dict[str, str]:
 
 @router.post("/runs/daily-ingest")
 def daily_ingest(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发全量日频数据摄取（ETF + 指数 + 宏观），后台线程执行。"""
+    """触发增量日频数据摄取（ETF + 指数 + 宏观），后台线程执行。"""
     summary = RunService(db).create_run("daily_ingest", None, date.today())
     get_bg_executor().submit(_run_ingest_bg, summary.run_id)
     return {"status": "accepted", "run_type": "daily_ingest", "run_id": summary.run_id}
@@ -259,6 +272,8 @@ def retry_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
         get_bg_executor().submit(_run_index_refresh_bg, new_summary.run_id)
     elif detail.run_type == "macro_refresh":
         get_bg_executor().submit(_run_macro_refresh_bg, new_summary.run_id)
+    elif detail.run_type == "startup_fill":
+        get_bg_executor().submit(_run_startup_fill_bg, new_summary.run_id)
     else:
         raise HTTPException(status_code=400, detail=f"不支持重试的运行类型: {detail.run_type}")
 

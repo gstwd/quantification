@@ -133,7 +133,8 @@ async function handleRefreshData() {
   refreshMsg.value = ''
   try {
     const res = await triggerIndexRefresh()
-    refreshMsg.value = `指数数据刷新已触发，可在运行记录中查看进度 (${res.run_id.slice(0, 8)}…)`
+    await loadIndexes()
+    refreshMsg.value = `指数数据刷新完成 (${res.run_id.slice(0, 8)}…)`
     refreshOk.value = true
   } catch {
     refreshMsg.value = '触发失败，请重试'

@@ -11,7 +11,12 @@
         <input v-model="query" class="search-input" placeholder="搜索代码或名称..." />
       </div>
       <div class="toolbar-actions">
-        <button class="btn-secondary" :disabled="refreshing" @click="handleRefreshData">{{ refreshing ? '刷新中...' : '刷新数据' }}</button>
+        <button class="btn-secondary" :disabled="universeRefreshing" @click="handleRefreshUniverse">
+          {{ universeRefreshing ? '同步中...' : '同步 ETF 池' }}
+        </button>
+        <button class="btn-secondary" :disabled="refreshing" @click="handleRefreshData">
+          {{ refreshing ? '刷新中...' : '刷新行情数据' }}
+        </button>
         <button class="btn-add" @click="openAddModal">+ 添加 ETF</button>
       </div>
     </div>
@@ -98,12 +103,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
-import { triggerEtfRefresh } from '../api/runs'
+import { triggerEtfRefresh, triggerUniverseRefresh } from '../api/runs'
 import { useEtfStore } from '../stores/etfs'
 
 const store = useEtfStore()
 const query = ref('')
 const refreshing = ref(false)
+const universeRefreshing = ref(false)
 const refreshMsg = ref('')
 const refreshOk = ref(true)
 const offset = ref(0)
@@ -115,13 +121,32 @@ const filtered = computed(() => {
   return store.items.filter(e => e.etf_code.includes(q) || e.name_cn.toLowerCase().includes(q))
 })
 
-/** 触发 ETF 数据刷新 */
+/** 触发 ETF 池元数据同步 */
+async function handleRefreshUniverse() {
+  universeRefreshing.value = true
+  refreshMsg.value = ''
+  try {
+    const res = await triggerUniverseRefresh()
+    await store.loadAll(offset.value, pageSize)
+    refreshMsg.value = `ETF 池同步完成 (${res.run_id.slice(0, 8)}…)`
+    refreshOk.value = true
+  } catch {
+    refreshMsg.value = 'ETF 池同步失败，请重试'
+    refreshOk.value = false
+  } finally {
+    universeRefreshing.value = false
+    setTimeout(() => { refreshMsg.value = '' }, 5000)
+  }
+}
+
+/** 触发 ETF 行情数据刷新 */
 async function handleRefreshData() {
   refreshing.value = true
   refreshMsg.value = ''
   try {
     const res = await triggerEtfRefresh()
-    refreshMsg.value = `ETF 数据刷新已触发，可在运行记录中查看进度 (${res.run_id.slice(0, 8)}…)`
+    await store.loadAll(offset.value, pageSize)
+    refreshMsg.value = `ETF 行情数据刷新完成 (${res.run_id.slice(0, 8)}…)`
     refreshOk.value = true
   } catch {
     refreshMsg.value = '触发失败，请重试'

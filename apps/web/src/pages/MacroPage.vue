@@ -85,7 +85,8 @@ async function handleRefreshData() {
   refreshMsg.value = ''
   try {
     const res = await triggerMacroRefresh()
-    refreshMsg.value = `宏观数据刷新已触发，可在运行记录中查看进度 (${res.run_id.slice(0, 8)}…)`
+    await loadData()
+    refreshMsg.value = `宏观数据刷新完成 (${res.run_id.slice(0, 8)}…)`
     refreshOk.value = true
   } catch {
     refreshMsg.value = '触发失败，请重试'
