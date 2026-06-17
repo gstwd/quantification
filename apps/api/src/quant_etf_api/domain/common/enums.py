@@ -50,3 +50,43 @@ class BacktestStatus(StrEnum):
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
+
+
+class MarketPhase(StrEnum):
+    """市场阶段枚举。"""
+
+    TRENDING_UP = "trending_up"       # 趋势上涨
+    TRENDING_DOWN = "trending_down"   # 趋势下跌
+    RANGING = "ranging"               # 震荡
+    ROTATION = "rotation"             # 风格/板块轮动
+    EUPHORIA = "euphoria"             # 情绪高潮
+    PANIC = "panic"                   # 恐慌
+    REPAIR = "repair"                 # 修复
+
+
+class SizeStyle(StrEnum):
+    """大小盘风格枚举。"""
+
+    LARGE_CAP = "large_cap"
+    SMALL_CAP = "small_cap"
+    BALANCED = "balanced"
+
+
+class GrowthStyle(StrEnum):
+    """成长/价值风格枚举。"""
+
+    GROWTH = "growth"
+    VALUE = "value"
+    BALANCED = "balanced"
+
+
+class SectorLeading(StrEnum):
+    """行业主导方向枚举。"""
+
+    TECH = "tech"
+    DIVIDEND = "dividend"
+    CYCLICAL = "cyclical"
+    FINANCIAL = "financial"
+    CONSUMPTION = "consumption"
+    HEALTHCARE = "healthcare"
+    BALANCED = "balanced"

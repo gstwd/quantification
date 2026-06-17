@@ -412,3 +412,179 @@ export interface PaginatedResponse<T> {
   offset: number
   limit: number
 }
+
+// =============================================================================
+// 市场日志模块
+// =============================================================================
+
+export interface TagSummary {
+  id: string
+  name: string
+  color: string
+  description: string | null
+  is_system: boolean
+  usage_count: number
+}
+
+export interface TagCreate {
+  name: string
+  color?: string
+  description?: string | null
+}
+
+export interface TagUpdate {
+  name?: string
+  color?: string
+  description?: string | null
+}
+
+export interface SetTagsRequest {
+  tag_ids: string[]
+}
+
+export interface IndexSnapshotRow {
+  id: string
+  index_code: string
+  index_name: string
+  index_category: string | null
+  sort_order: number
+  close_price: number | null
+  change_pct: number | null
+  volume_ratio_20d: number | null
+  return_5d: number | null
+  return_20d: number | null
+  return_60d: number | null
+  return_120d: number | null
+  ma_20d_deviation: number | null
+  ma_60d_deviation: number | null
+  ma_120d_deviation: number | null
+  volatility_20d: number | null
+  max_drawdown_60d: number | null
+}
+
+export interface JournalMarketData {
+  market_up_stocks: number | null
+  market_down_stocks: number | null
+  market_flat_stocks: number | null
+  limit_up_stocks: number | null
+  limit_down_stocks: number | null
+  total_turnover_yi: number | null
+  turnover_vs_prev_pct: number | null
+  north_bound_net_yi: number | null
+  margin_balance_change_yi: number | null
+  size_style: string | null
+  growth_style: string | null
+  sector_leading: string | null
+  top_sectors: string | null
+  bottom_sectors: string | null
+  data_source: string | null
+  notes: string | null
+}
+
+export interface JournalMarketDataUpsert {
+  market_up_stocks?: number | null
+  market_down_stocks?: number | null
+  market_flat_stocks?: number | null
+  limit_up_stocks?: number | null
+  limit_down_stocks?: number | null
+  total_turnover_yi?: number | null
+  turnover_vs_prev_pct?: number | null
+  north_bound_net_yi?: number | null
+  margin_balance_change_yi?: number | null
+  size_style?: string | null
+  growth_style?: string | null
+  sector_leading?: string | null
+  top_sectors?: string | null
+  bottom_sectors?: string | null
+  data_source?: string | null
+  notes?: string | null
+}
+
+export interface ObservationRow {
+  id: string
+  section_key: string
+  section_label: string
+  content: string | null
+  sort_order: number
+}
+
+export interface ObservationUpsert {
+  section_key: string
+  content: string | null
+}
+
+export interface ObservationsBatchUpdate {
+  observations: ObservationUpsert[]
+}
+
+export interface AIAnalysisResponse {
+  id: string
+  model: string
+  status: string
+  market_summary: string | null
+  phase_judgment: string | null
+  style_judgment: string | null
+  core_narrative: string | null
+  risk_alert: string | null
+  focus_direction: string | null
+  error_message: string | null
+  tokens_used: number | null
+  created_at: string
+}
+
+export interface JournalEntrySummary {
+  id: string
+  trade_date: string
+  market_temperature: number | null
+  profit_effect: number | null
+  risk_preference: number | null
+  trading_difficulty: number | null
+  market_consistency: number | null
+  market_phase: string | null
+  one_line_summary: string | null
+  is_complete: boolean
+  word_count: number
+  tags: TagSummary[]
+  created_at: string
+  updated_at: string
+}
+
+export interface JournalEntryCreate {
+  trade_date: string
+}
+
+export interface JournalEntryUpdate {
+  market_temperature?: number | null
+  profit_effect?: number | null
+  risk_preference?: number | null
+  trading_difficulty?: number | null
+  market_consistency?: number | null
+  market_phase?: string | null
+  one_line_summary?: string | null
+  is_complete?: boolean
+  market_data?: JournalMarketDataUpsert | null
+}
+
+export interface JournalEntryDetail extends JournalEntrySummary {
+  index_snapshots: IndexSnapshotRow[]
+  market_data: JournalMarketData | null
+  observations: ObservationRow[]
+  ai_analysis: AIAnalysisResponse | null
+}
+
+export interface CalendarDay {
+  date: string
+  is_trading_day: boolean
+  has_entry: boolean
+  entry_id: string | null
+  market_phase: string | null
+  market_temperature: number | null
+  tags: TagSummary[]
+  one_line_summary: string | null
+}
+
+export interface CalendarResponse {
+  year: number
+  month: number | null
+  days: CalendarDay[]
+}

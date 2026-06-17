@@ -16,6 +16,7 @@ from quant_etf_api.api.routers import (
     factors,
     health,
     indexes,
+    journal,
     market_data,
     runs,
     signals,
@@ -89,6 +90,7 @@ app.include_router(signals.router, prefix=settings.api_prefix)
 app.include_router(factors.router, prefix=settings.api_prefix)
 app.include_router(runs.router, prefix=settings.api_prefix)
 app.include_router(backtests.router, prefix=settings.api_prefix)
+app.include_router(journal.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

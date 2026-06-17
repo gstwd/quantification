@@ -8,6 +8,8 @@ import EtfDetailPage from '../pages/EtfDetailPage.vue'
 import EtfUniversePage from '../pages/EtfUniversePage.vue'
 import FactorDetailPage from '../pages/FactorDetailPage.vue'
 import FactorsPage from '../pages/FactorsPage.vue'
+import JournalCalendarPage from '../pages/JournalCalendarPage.vue'
+import JournalEntryPage from '../pages/JournalEntryPage.vue'
 import RunsPage from '../pages/RunsPage.vue'
 import IndexDetailPage from '../pages/IndexDetailPage.vue'
 import IndexListPage from '../pages/IndexListPage.vue'
@@ -26,6 +28,9 @@ const router = createRouter({
     { path: '/macro', component: MacroPage },
     { path: '/strategies', component: StrategiesPage },
     { path: '/strategies/:strategyId', component: StrategyDetailPage, props: true },
+    { path: '/journal/calendar', component: JournalCalendarPage },
+    { path: '/journal/:entryId', component: JournalEntryPage, props: true },
+    { path: '/journal/date/:date', component: JournalEntryPage, props: true },
     { path: '/factors', component: FactorsPage },
     { path: '/factors/:factorId', component: FactorDetailPage, props: true },
     { path: '/runs', component: RunsPage },
