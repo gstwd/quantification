@@ -30,7 +30,7 @@ def delete_index(
     index_code: str,
     db: Session = Depends(get_db),
 ) -> None:
-    """删除基准指数。"""
+    """停用基准指数（软删除，保留历史数据）。"""
     try:
         IndexService(db).remove_index(index_code)
     except ValueError as e:

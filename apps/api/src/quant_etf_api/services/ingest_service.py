@@ -485,8 +485,13 @@ class IngestService:
         return len(bars)
 
     def get_benchmark_indexes(self) -> list[BenchmarkIndex]:
-        """返回所有基准指数（从种子表读取）。"""
-        rows = self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
+        """返回所有活跃的基准指数（从种子表读取，已停用的不返回）。"""
+        rows = (
+            self._db.query(BenchmarkIndexModel)
+            .filter(BenchmarkIndexModel.is_active.is_(True))
+            .order_by(BenchmarkIndexModel.index_code)
+            .all()
+        )
         return [BenchmarkIndex(index_code=r.index_code, index_name=r.name_cn) for r in rows]
 
     def _query_index_bars(

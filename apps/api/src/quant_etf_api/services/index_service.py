@@ -18,12 +18,17 @@ class IndexService:
         self._db = db
 
     def list_indexes(self) -> list[BenchmarkIndex]:
-        """列出所有基准指数。
+        """列出所有活跃的基准指数。
 
         Returns:
-            按代码升序排列的基准指数列表
+            按代码升序排列的活跃基准指数列表（已停用的不会返回）
         """
-        rows = self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
+        rows = (
+            self._db.query(BenchmarkIndexModel)
+            .filter(BenchmarkIndexModel.is_active.is_(True))
+            .order_by(BenchmarkIndexModel.index_code)
+            .all()
+        )
         return [BenchmarkIndex(index_code=r.index_code, index_name=r.name_cn) for r in rows]
 
     def add_index(self, index_code: str, name_cn: str | None = None) -> BenchmarkIndex:
@@ -32,21 +37,23 @@ class IndexService:
         先尝试从 AkShare 自动获取名称，失败时使用 name_cn 参数作为手动兜底，
         两者都没有则拒绝添加。
 
+        如果指数已存在但已停用（is_active=False），则重新激活并更新名称。
+
         Args:
             index_code: 指数代码，如 '000300'
             name_cn: 中文名称（可选，自动获取失败时的兜底值）
 
         Returns:
-            新增的基准指数信息
+            新增或重新激活的基准指数信息
 
         Raises:
-            ValueError: 指数已存在、代码无效或无法获取名称
+            ValueError: 指数已处于活跃状态、代码无效或无法获取名称
         """
         existing = self._db.get(BenchmarkIndexModel, index_code)
-        if existing:
+        if existing and existing.is_active:
             raise ValueError(f"指数 {index_code} 已存在")
 
-        # 尝试自动获取名称
+        # 尝试自动获取名称（仅在有网络或 reactivate 需要更新名称时）
         auto_name: str | None = None
         try:
             auto_name = AkShareIndexClient().fetch_index_name(index_code)
@@ -54,6 +61,22 @@ class IndexService:
             logger.warning("自动获取指数 %s 名称失败", index_code)
 
         final_name = auto_name or name_cn
+        # reactivate 场景：不强制要求名称
+        if existing and not existing.is_active:
+            if final_name:
+                existing.name_cn = final_name
+            existing.is_active = True
+            try:
+                self._db.commit()
+                self._db.refresh(existing)
+                logger.info("指数 %s 已重新激活", index_code)
+                return BenchmarkIndex(index_code=existing.index_code, index_name=existing.name_cn)
+            except Exception:
+                self._db.rollback()
+                logger.error("重新激活指数 %s 失败", index_code, exc_info=True)
+                raise
+
+        # 全新添加场景：必须有名称
         if not final_name:
             raise ValueError(f"无法获取指数 {index_code} 的名称，请手动输入")
 
@@ -73,27 +96,33 @@ class IndexService:
             raise
 
     def remove_index(self, index_code: str) -> None:
-        """删除基准指数。
+        """停用基准指数（软删除）。
+
+        将 is_active 设为 False，保留历史数据关联。
+        策略引擎和回测服务已通过 is_active=True 过滤，停用后自动不再参与计算。
 
         Args:
             index_code: 指数代码
 
         Raises:
-            ValueError: 指数不存在
+            ValueError: 指数不存在或已停用
         """
         row = self._db.get(BenchmarkIndexModel, index_code)
         if not row:
             raise ValueError(f"指数 {index_code} 不存在")
+        if not row.is_active:
+            raise ValueError(f"指数 {index_code} 已停用")
         try:
-            self._db.delete(row)
+            row.is_active = False
             self._db.commit()
+            logger.info("指数 %s 已停用（软删除）", index_code)
         except Exception:
             self._db.rollback()
-            logger.error("删除指数 %s 失败", index_code, exc_info=True)
+            logger.error("停用指数 %s 失败", index_code, exc_info=True)
             raise
 
     def ensure_index_exists(self, index_code: str, name_cn: str | None = None) -> None:
-        """确保指数存在，不存在则自动创建。
+        """确保活跃指数存在，不存在则自动创建，已停用则重新激活。
 
         幂等操作，用于 ETF 添加时自动关联跟踪指数。
 
@@ -102,7 +131,19 @@ class IndexService:
             name_cn: 中文名称兜底值
         """
         existing = self._db.get(BenchmarkIndexModel, index_code)
-        if existing:
+        if existing and existing.is_active:
+            return
+        if existing and not existing.is_active:
+            # 已停用则重新激活
+            existing.is_active = True
+            if name_cn:
+                existing.name_cn = name_cn
+            try:
+                self._db.commit()
+                logger.info("指数 %s 已重新激活（通过 ETF 关联）", index_code)
+            except Exception:
+                self._db.rollback()
+                logger.warning("重新激活指数 %s 失败", index_code, exc_info=True)
             return
 
         auto_name: str | None = None

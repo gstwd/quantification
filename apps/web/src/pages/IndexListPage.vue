@@ -49,7 +49,7 @@
             <td class="num-cell">{{ getPB(item.index_code) }}</td>
             <td class="num-cell">{{ getPBPercentile(item.index_code) }}</td>
             <td>
-              <button class="btn-delete" @click.stop="handleDelete(item.index_code, item.index_name)">删除</button>
+              <button class="btn-delete" @click.stop="handleDelete(item.index_code, item.index_name)">停用</button>
             </td>
           </tr>
         </tbody>
@@ -270,10 +270,10 @@ async function submitAdd() {
   }
 }
 
-// --- 删除指数 ---
-/** 删除指定指数 */
+// --- 停用指数 ---
+/** 停用指定指数（软删除，保留历史数据） */
 async function handleDelete(indexCode: string, indexName: string) {
-  if (!window.confirm(`确认删除指数 ${indexCode}（${indexName}）？`)) return
+  if (!window.confirm(`确认停用指数 ${indexCode}（${indexName}）？停用后历史数据保留，可重新添加恢复。`)) return
   try {
     await deleteIndex(indexCode)
     indexes.value = indexes.value.filter(i => i.index_code !== indexCode)

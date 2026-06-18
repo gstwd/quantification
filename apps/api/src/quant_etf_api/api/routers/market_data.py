@@ -22,7 +22,7 @@ router = APIRouter(tags=["market-data"])
 def list_benchmark_indexes(
     db: Session = Depends(get_db),
 ) -> list[BenchmarkIndex]:
-    """列出所有基准指数。"""
+    """列出所有活跃的基准指数。"""
     return IngestService(db).get_benchmark_indexes()
 
 
