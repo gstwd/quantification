@@ -9,6 +9,7 @@ import logging
 from datetime import date
 from typing import Any
 
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from quant_etf_api.engine.config import StrategyConfig
@@ -72,53 +73,52 @@ class StrategyExecutionService:
             self._mark_run_failed(run_id, f"策略 {config.strategy_id} 执行异常")
             return
 
-        # 写入指数信号和因子值
-        signal_count = 0
-        factor_count = 0
+        # 收集待写入的信号和因子值
+        signal_rows: list[dict[str, Any]] = []
+        factor_rows: list[dict[str, Any]] = []
         for r in result.strategy_results:
-            try:
-                self._db.add(
-                    IndexSignalModel(
-                        trade_date=r.trade_date,
-                        index_code=r.etf_code,
-                        strategy_id=r.strategy_id,
-                        signal_score=r.signal_score,
-                        signal_level=r.signal_level,
-                        signal_label=r.signal_label,
-                        signal_payload=r.payload,
-                        run_id=run_id,
-                    )
-                )
-                signal_count += 1
-            except Exception:
-                self._db.rollback()
-                logger.warning("写入指数信号失败: %s %s", r.etf_code, r.strategy_id)
-
+            signal_rows.append({
+                "trade_date": r.trade_date,
+                "index_code": r.etf_code,
+                "strategy_id": r.strategy_id,
+                "signal_score": r.signal_score,
+                "signal_level": r.signal_level,
+                "signal_label": r.signal_label,
+                "signal_payload": r.payload,
+                "run_id": run_id,
+            })
             for fv in r.factor_values:
-                try:
-                    raw = fv.get("value")
-                    num_val: float | None = None
-                    txt_val: str | None = None
-                    if isinstance(raw, (int, float)):
-                        num_val = float(raw)
-                    elif raw is not None:
-                        txt_val = str(raw)
+                raw = fv.get("value")
+                num_val: float | None = None
+                txt_val: str | None = None
+                if isinstance(raw, (int, float)):
+                    num_val = float(raw)
+                elif raw is not None:
+                    txt_val = str(raw)
+                factor_rows.append({
+                    "trade_date": r.trade_date,
+                    "index_code": r.etf_code,
+                    "factor_id": fv["factor_id"],
+                    "factor_value_numeric": num_val,
+                    "factor_value_text": txt_val,
+                    "factor_payload": fv.get("payload"),
+                    "strategy_id": r.strategy_id,
+                })
 
-                    self._db.add(
-                        IndexFactorValueModel(
-                            trade_date=r.trade_date,
-                            index_code=r.etf_code,
-                            factor_id=fv["factor_id"],
-                            factor_value_numeric=num_val,
-                            factor_value_text=txt_val,
-                            factor_payload=fv.get("payload"),
-                            strategy_id=r.strategy_id,
-                        )
-                    )
-                    factor_count += 1
-                except Exception:
-                    self._db.rollback()
-                    logger.warning("写入指数因子值失败: %s %s %s", r.etf_code, fv["factor_id"])
+        # 批量写入信号（重复则跳过，ON CONFLICT DO NOTHING）
+        if signal_rows:
+            stmt = pg_insert(IndexSignalModel).values(signal_rows)
+            stmt = stmt.on_conflict_do_nothing(constraint="uq_index_signal")
+            self._db.execute(stmt)
+
+        # 批量写入因子值（重复则跳过，ON CONFLICT DO NOTHING）
+        if factor_rows:
+            stmt = pg_insert(IndexFactorValueModel).values(factor_rows)
+            stmt = stmt.on_conflict_do_nothing(constraint="uq_index_factor_value")
+            self._db.execute(stmt)
+
+        signal_count = len(signal_rows)
+        factor_count = len(factor_rows)
 
         self._db.commit()
 
