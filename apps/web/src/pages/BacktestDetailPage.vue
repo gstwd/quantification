@@ -141,10 +141,12 @@
         <div ref="positionsChartEl" class="chart-container"></div>
       </div>
 
-      <!-- 择时状态时间线 -->
-      <div v-if="regimeTimeline.length > 0" class="table-card">
-        <div class="table-title">择时状态变化</div>
-        <div class="regime-timeline">
+      <!-- 择时状态 + 代理指数趋势（合并图表） -->
+      <div v-if="regimeTimeline.length > 0" class="chart-card">
+        <div class="chart-title">择时状态 &amp; 代理指数趋势</div>
+        <div v-if="hasBenchmark" ref="timingChartEl" class="chart-container"></div>
+        <!-- 无基准数据时降级为原始 regime 时间线 -->
+        <div v-else class="regime-timeline">
           <span
             v-for="(item, i) in regimeTimeline"
             :key="i"
@@ -164,6 +166,8 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
+import type { BenchmarkIndex } from '../types/api'
+import { fetchBenchmarkIndexes } from '../api/market_data'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
 import { useBacktestStore } from '../stores/backtests'
@@ -179,7 +183,10 @@ const store = useBacktestStore()
 const equityChartEl = ref<HTMLElement | null>(null)
 const drawdownChartEl = ref<HTMLElement | null>(null)
 const positionsChartEl = ref<HTMLElement | null>(null)
+const timingChartEl = ref<HTMLElement | null>(null)
 const polling = ref(false)
+/** 指数代码 → 指数名称 映射表 */
+const indexNameMap = ref<Record<string, string>>({})
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let equityChart: any = null
@@ -187,6 +194,8 @@ let equityChart: any = null
 let drawdownChart: any = null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let positionsChart: any = null
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let timingChart: any = null
 
 function statusLabel(status: string): string {
   const map: Record<string, string> = { pending: '待执行', running: '执行中', success: '成功', failed: '失败' }
@@ -196,6 +205,38 @@ function statusLabel(status: string): string {
 function formatPct(v: number): string {
   return (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
 }
+
+/** 是否有基准收益数据 */
+const hasBenchmark = computed(() => {
+  return store.dailyResults.some((r) => r.benchmark_return !== null && r.benchmark_return !== undefined)
+})
+
+/** 基准累计收益率序列（从日收益率累加，用于权益曲线对比） */
+const benchmarkCumReturns = computed(() => {
+  const result: number[] = []
+  let cum = 0
+  for (const r of store.dailyResults) {
+    if (r.benchmark_return !== null && r.benchmark_return !== undefined) {
+      cum = (1 + cum / 100) * (1 + r.benchmark_return / 100) - 1
+      cum = cum * 100
+    }
+    result.push(Number(cum.toFixed(4)))
+  }
+  return result
+})
+
+/** 代理指数归一化收盘价序列（从日收益率重建，基准=100） */
+const benchmarkPrices = computed(() => {
+  const result: number[] = []
+  let price = 100
+  for (const r of store.dailyResults) {
+    if (r.benchmark_return !== null && r.benchmark_return !== undefined) {
+      price = price * (1 + r.benchmark_return / 100)
+    }
+    result.push(Number(price.toFixed(2)))
+  }
+  return result
+})
 
 /** 择时状态时间线数据 */
 const regimeTimeline = computed(() => {
@@ -208,6 +249,13 @@ const regimeTimeline = computed(() => {
     }))
 })
 
+/** 根据指数代码获取展示名称（名称优先，降级为代码） */
+function getDisplayName(code: string): string {
+  const name = indexNameMap.value[code]
+  if (name) return name
+  return code
+}
+
 async function initCharts() {
   if (store.dailyResults.length === 0) return
   const echarts = await import('echarts')
@@ -215,19 +263,9 @@ async function initCharts() {
   const dates = store.dailyResults.map((r) => r.trade_date)
   const cumReturns = store.dailyResults.map((r) => r.cumulative_return)
   const drawdowns = store.dailyResults.map((r) => r.drawdown)
-  // 计算基准累计收益（从日收益率累加）
-  const hasBenchmark = store.dailyResults.some((r) => r.benchmark_return !== null && r.benchmark_return !== undefined)
-  const benchmarkCum: number[] = []
-  if (hasBenchmark) {
-    let benchCum = 0
-    for (const r of store.dailyResults) {
-      if (r.benchmark_return !== null && r.benchmark_return !== undefined) {
-        benchCum = (1 + benchCum / 100) * (1 + r.benchmark_return / 100) - 1
-        benchCum = benchCum * 100
-      }
-      benchmarkCum.push(Number(benchCum.toFixed(4)))
-    }
-  }
+  const benchmarkCum = benchmarkCumReturns.value
+  const benchmarkPricesData = benchmarkPrices.value
+  const showBench = hasBenchmark.value
 
   // 权益曲线（含基准对比叠加）
   if (equityChartEl.value) {
@@ -242,7 +280,7 @@ async function initCharts() {
       lineStyle: { color: '#3b82f6', width: 2 },
       areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(59,130,246,0.2)' }, { offset: 1, color: 'rgba(59,130,246,0.02)' }] } },
     }]
-    if (hasBenchmark) {
+    if (showBench) {
       series.push({
         name: '基准',
         type: 'line',
@@ -264,8 +302,8 @@ async function initCharts() {
           return tip
         },
       },
-      legend: hasBenchmark ? { data: ['策略', '基准'], textStyle: { color: '#94a3b8', fontSize: 11 }, top: 0 } : undefined,
-      grid: { left: 60, right: 20, top: hasBenchmark ? 30 : 20, bottom: 40 },
+      legend: showBench ? { data: ['策略', '基准'], textStyle: { color: '#94a3b8', fontSize: 11 }, top: 0 } : undefined,
+      grid: { left: 60, right: 20, top: showBench ? 30 : 20, bottom: 40 },
       xAxis: { type: 'category', data: dates, axisLabel: { color: '#94a3b8', fontSize: 11 }, axisLine: { lineStyle: { color: '#334155' } } },
       yAxis: { type: 'value', axisLabel: { color: '#94a3b8', fontSize: 11, formatter: (v: number) => v.toFixed(1) + '%' }, splitLine: { lineStyle: { color: '#1e293b' } } },
       series,
@@ -293,7 +331,7 @@ async function initCharts() {
     })
   }
 
-  // 仓位变化堆叠面积图
+  // 仓位变化堆叠面积图（使用指数名称展示）
   if (positionsChartEl.value) {
     positionsChart?.dispose()
     positionsChart = echarts.init(positionsChartEl.value)
@@ -307,10 +345,14 @@ async function initCharts() {
     }
     const codeList = Array.from(allCodes).sort()
 
+    // 构建 code → displayName 映射用于图例和 tooltip
+    const codeDisplayNames = codeList.map((code) => getDisplayName(code))
+    const legendData = [...codeDisplayNames, '现金']
+
     // 构建每个指数的权重时间序列
     const colorPalette = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#a855f7', '#06b6d4', '#f97316', '#ec4899']
     const series = codeList.map((code, idx) => ({
-      name: code,
+      name: codeDisplayNames[idx],
       type: 'line',
       stack: 'positions',
       areaStyle: {},
@@ -344,19 +386,140 @@ async function initCharts() {
           return tip
         },
       },
-      legend: { data: [...codeList, '现金'], textStyle: { color: '#94a3b8', fontSize: 11 }, top: 0, type: 'scroll' },
+      legend: { data: legendData, textStyle: { color: '#94a3b8', fontSize: 11 }, top: 0, type: 'scroll' },
       grid: { left: 60, right: 20, top: 40, bottom: 40 },
       xAxis: { type: 'category', data: dates, axisLabel: { color: '#94a3b8', fontSize: 10, interval: Math.floor(dates.length / 8) }, axisLine: { lineStyle: { color: '#334155' } } },
       yAxis: { type: 'value', max: 100, axisLabel: { color: '#94a3b8', fontSize: 11, formatter: (v: number) => v + '%' }, splitLine: { lineStyle: { color: '#1e293b' } } },
       series,
     })
   }
+
+  // 择时状态 + 代理指数趋势（合并图表）
+  initTimingChart(echarts, dates, benchmarkPricesData, showBench)
+}
+
+/** 构建择时状态 + 代理指数趋势合并图表（每日归一化收盘价 + regime 背景着色） */
+function initTimingChart(
+  echarts: any, // eslint-disable-line @typescript-eslint/no-explicit-any
+  dates: string[],
+  prices: number[],
+  showBench: boolean,
+) {
+  if (!timingChartEl.value || regimeTimeline.value.length === 0) return
+  if (!showBench) return // 无基准数据时使用降级方案（regime 时间线块）
+
+  timingChart?.dispose()
+  timingChart = echarts.init(timingChartEl.value)
+
+  // 构建 regime → 颜色映射
+  const REGIME_COLORS: Record<string, string> = {
+    offensive: 'rgba(34,197,94,0.12)',
+    neutral: 'rgba(245,158,11,0.12)',
+    defensive: 'rgba(239,68,68,0.12)',
+  }
+
+  // 将连续的同一 regime 日期合并为区间，用于 markArea 背景着色
+  // ECharts markArea data 格式：[[{name, itemStyle, xAxis, yAxis}, {xAxis, yAxis}], ...]
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const markAreas: any[] = []
+  const timeline = regimeTimeline.value
+  if (timeline.length > 0) {
+    let blockStart = 0
+    let currentRegime = timeline[0].regime
+    for (let i = 1; i < timeline.length; i++) {
+      if (timeline[i].regime !== currentRegime) {
+        markAreas.push([
+          { name: currentRegime, itemStyle: { color: REGIME_COLORS[currentRegime] ?? 'rgba(100,116,139,0.1)' }, xAxis: timeline[blockStart].date, yAxis: 'min' },
+          { xAxis: timeline[i - 1].date, yAxis: 'max' },
+        ])
+        currentRegime = timeline[i].regime
+        blockStart = i
+      }
+    }
+    // 最后一个区间
+    markAreas.push([
+      { name: currentRegime, itemStyle: { color: REGIME_COLORS[currentRegime] ?? 'rgba(100,116,139,0.1)' }, xAxis: timeline[blockStart].date, yAxis: 'min' },
+      { xAxis: timeline[timeline.length - 1].date, yAxis: 'max' },
+    ])
+  }
+
+  timingChart.setOption({
+    backgroundColor: 'transparent',
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: { name: string; seriesName: string; value: number; axisValue: string }[]) => {
+        const date = params[0]?.axisValue ?? ''
+        let tip = `<b>${date}</b><br/>`
+        // 代理指数收盘价
+        const benchP = params.find((p) => p.seriesName === '代理指数')
+        if (benchP) tip += `代理指数: ${benchP.value.toFixed(2)}<br/>`
+        // 择时状态
+        const regimeItem = regimeTimeline.value.find((r) => r.date === date)
+        if (regimeItem) {
+          const regimeLabels: Record<string, string> = { offensive: '进攻', neutral: '中性', defensive: '防守' }
+          tip += `择时状态: ${regimeLabels[regimeItem.regime] ?? regimeItem.regime}<br/>`
+          tip += `目标仓位: ${(regimeItem.exposure * 100).toFixed(0)}%`
+        }
+        return tip
+      },
+    },
+    grid: { left: 80, right: 20, top: 20, bottom: 40 },
+    xAxis: {
+      type: 'category',
+      data: dates,
+      axisLabel: { color: '#94a3b8', fontSize: 11 },
+      axisLine: { lineStyle: { color: '#334155' } },
+    },
+    yAxis: {
+      type: 'value',
+      name: '归一化价格',
+      nameLocation: 'end',
+      nameRotate: 0,
+      nameGap: 24,
+      nameTextStyle: { color: '#94a3b8', fontSize: 10, align: 'left' },
+      axisLabel: { color: '#94a3b8', fontSize: 11, formatter: (v: number) => v.toFixed(1) },
+      splitLine: { lineStyle: { color: '#1e293b' } },
+      scale: true,
+    },
+    series: [
+      {
+        name: '代理指数',
+        type: 'line',
+        data: prices,
+        smooth: true,
+        symbol: 'none',
+        lineStyle: { color: '#f59e0b', width: 2 },
+        markArea: {
+          silent: true,
+          data: markAreas,
+          label: { show: false },
+        },
+      },
+    ],
+  })
+}
+
+/** 加载基准指数列表，构建 index_code → index_name 映射 */
+async function loadIndexNames() {
+  try {
+    const indexes: BenchmarkIndex[] = await fetchBenchmarkIndexes()
+    const map: Record<string, string> = {}
+    for (const idx of indexes) {
+      map[idx.index_code] = idx.index_name
+    }
+    indexNameMap.value = map
+  } catch {
+    // 获取指数名称失败时降级显示代码
+  }
 }
 
 watch(() => store.dailyResults, () => { if (store.dailyResults.length > 0) initCharts() })
 
 onMounted(async () => {
-  await store.loadOne(props.backtestId)
+  await Promise.all([
+    store.loadOne(props.backtestId),
+    loadIndexNames(),
+  ])
   if (store.current?.status === 'pending' || store.current?.status === 'running') {
     polling.value = true
     await store.pollUntilDone(props.backtestId)
@@ -375,6 +538,7 @@ onUnmounted(() => {
   equityChart?.dispose()
   drawdownChart?.dispose()
   positionsChart?.dispose()
+  timingChart?.dispose()
 })
 </script>
 
