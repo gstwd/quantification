@@ -291,17 +291,17 @@ class ContextBuilder:
                     if (code, "pb_percentile") not in asset_factors:
                         asset_factors[(code, "pb_percentile")] = val_row.pb_percentile
 
-        # 市场级择时因子
+        # 市场级择时因子：从预计算因子中提取择时代理指数的因子值
         market_factors: dict[str, float | None] = {}
-        if config.timing and all_valuation:
-            for rep_code in config.timing.proxy_index_codes:
-                if rep_code not in codes:
-                    continue
-                val_row = all_valuation.get((rep_code, trade_date))
-                if val_row and val_row.pe_percentile is not None:
-                    market_factors["pe_percentile"] = val_row.pe_percentile
-                    market_factors["pb_percentile"] = val_row.pb_percentile
-                    break
+        if config.timing and precomputed_factors:
+            for factor_id in config.timing.factors:
+                for rep_code in config.timing.proxy_index_codes:
+                    val = precomputed_factors.get((rep_code, factor_id))
+                    if val is not None:
+                        market_factors[factor_id] = val
+                        break
+                else:
+                    market_factors[factor_id] = None
 
         return EngineContext(
             trade_date=trade_date,

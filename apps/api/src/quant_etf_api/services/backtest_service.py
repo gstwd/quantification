@@ -263,9 +263,22 @@ class BacktestService:
             row
         )
 
-        # 预计算所有因子值
+        # 确保择时代理指数的行情数据和因子也被加载（代理指数可能不在策略标的池中）
+        factor_index_codes = list(index_codes)
+        if config.timing:
+            for proxy_code in config.timing.proxy_index_codes:
+                if proxy_code not in factor_index_codes:
+                    factor_index_codes.append(proxy_code)
+                    # 加载代理指数的日线数据
+                    proxy_bars = self._load_all_index_bars(trading_dates, [proxy_code])
+                    all_bars.update(proxy_bars)
+                    # 加载代理指数的估值数据
+                    proxy_val = self._load_all_valuation(trading_dates, [proxy_code])
+                    all_valuation.update(proxy_val)
+
+        # 预计算所有因子值（含择时代理指数）
         precomputed = self._factor_provider.precompute_backtest_factors(
-            config, trading_dates, index_codes, all_bars, all_valuation, all_macro
+            config, trading_dates, factor_index_codes, all_bars, all_valuation, all_macro
         )
 
         # 基准配置
