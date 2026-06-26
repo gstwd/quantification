@@ -48,8 +48,18 @@ export async function validateStrategyConfig(
   return data
 }
 
-/** 运行资产配置决策管线 */
-export async function runAllocation(strategyId: string): Promise<AllocationResponse> {
-  const { data } = await apiClient.get<AllocationResponse>(`/strategies/${strategyId}/allocation`)
+/**
+ * 运行资产配置决策管线
+ * @param strategyId - 策略标识
+ * @param tradeDate - 可选，指定交易日（YYYY-MM-DD），不传则使用最新数据
+ */
+export async function runAllocation(
+  strategyId: string,
+  tradeDate?: string,
+): Promise<AllocationResponse> {
+  const { data } = await apiClient.get<AllocationResponse>(
+    `/strategies/${strategyId}/allocation`,
+    { params: tradeDate ? { trade_date: tradeDate } : {} },
+  )
   return data
 }

@@ -58,6 +58,7 @@ class StrategyService:
         self,
         strategy_id: str,
         params: dict[str, Any] | None = None,
+        trade_date: date | None = None,
     ) -> AllocationResponse | None:
         """运行资产配置决策管线。
 
@@ -66,6 +67,7 @@ class StrategyService:
         Args:
             strategy_id: 策略标识。
             params: 策略参数覆盖（暂未使用，预留扩展）。
+            trade_date: 指定交易日，不传则使用今天。
 
         Returns:
             AllocationResponse，策略不存在时返回 None。
@@ -84,7 +86,8 @@ class StrategyService:
         from quant_etf_api.factors.registry import get_default_factor_registry
 
         builder = ContextBuilder(self._db, registry=get_default_factor_registry())
-        context = builder.build(config, date.today())
+        effective_date = trade_date if trade_date is not None else date.today()
+        context = builder.build(config, effective_date)
 
         # 执行引擎
         result = self._engine.run(config, context)

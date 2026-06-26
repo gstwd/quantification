@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import date
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
@@ -75,10 +77,14 @@ def validate_strategy_config(
 @router.get("/strategies/{strategy_id}/allocation", response_model=AllocationResponse)
 def run_allocation(
     strategy_id: str,
+    trade_date: date | None = Query(None, description="指定交易日（YYYY-MM-DD），不传则使用最新数据"),
     db: Session = Depends(get_db),
 ) -> AllocationResponse:
-    """运行资产配置决策管线，返回择时、排名、仓位分配结果。"""
-    result = StrategyService(db).run_allocation(strategy_id)
+    """运行资产配置决策管线，返回择时、排名、仓位分配结果。
+
+    支持通过 trade_date 参数查看历史某一天的决策结果。
+    """
+    result = StrategyService(db).run_allocation(strategy_id, trade_date=trade_date)
     if result is None:
         raise HTTPException(
             status_code=404,

@@ -21,14 +21,18 @@
           </div>
         </div>
         <div class="header-actions">
-          <button class="btn-accent" @click="handleRunSignal" :disabled="running">
-            {{ running ? '执行中...' : '运行信号' }}
+          <input
+            type="date"
+            class="date-input"
+            v-model="selectedDate"
+            :max="todayStr"
+            title="选择交易日查看历史决策"
+          />
+          <button class="btn-accent" @click="handleRunAllocation" :disabled="allocating">
+            {{ allocating ? '计算中...' : '执行决策' }}
           </button>
           <button class="btn-secondary" @click="handleLoadSignals" :disabled="loadingSignals">
             {{ loadingSignals ? '加载中...' : '查看信号' }}
-          </button>
-          <button class="btn-accent" @click="handleRunAllocation" :disabled="allocating">
-            {{ allocating ? '计算中...' : '查看决策' }}
           </button>
           <button class="btn-secondary" @click="showEdit = true">编辑</button>
           <button class="btn-danger" @click="handleDelete">删除</button>
@@ -235,11 +239,6 @@
 
       </div>
 
-      <!-- 执行结果提示 -->
-      <div v-if="runMessage" :class="['run-tip', runSuccess ? 'run-success' : 'run-error']">
-        {{ runMessage }}
-      </div>
-
       <!-- 最新信号表格 -->
       <div v-if="signals.length > 0" class="signals-section">
         <div class="signals-header">
@@ -285,6 +284,8 @@
         </div>
       </div>
 
+      <!-- 执行错误提示 -->
+      <div v-if="runError" class="run-error">{{ runError }}</div>
       <!-- 决策管线结果 -->
       <div v-if="allocation" class="allocation-section">
         <div class="section-header-row">
@@ -328,7 +329,7 @@
             </div>
             <div class="alloc-row">
               <span class="alloc-key">置信度</span>
-              <span class="alloc-val">{{ ((allocation.timing.confidence ?? 0) * 100).toFixed(0) }}%</span>
+              <span class="alloc-val">{{ (allocation.timing.confidence ?? 0).toFixed(0) }}%</span>
             </div>
             <div v-if="allocation.timing.label" class="alloc-row">
               <span class="alloc-key">标签</span>
@@ -392,6 +393,26 @@
         </div>
       </div>
 
+      <!-- 标的K线（决策日期前后：前60后20个交易日） -->
+      <div v-if="allocation && allocation.rankings && allocation.rankings.length > 0" class="kline-section">
+        <h2 class="section-title">标的K线（决策日 {{ decisionDate }} 前后）</h2>
+        <div v-if="chartsLoading" class="chart-placeholder">加载K线数据中...</div>
+        <template v-else>
+          <div v-for="(item, i) in allocation.rankings" :key="item.etf_code" class="kline-card">
+            <div class="kline-header-bar">
+              <span class="kline-rank">#{{ i + 1 }}</span>
+              <span class="kline-code mono">{{ item.etf_code }}</span>
+              <span class="kline-name">{{ item.name_cn }}</span>
+              <span class="kline-score">得分 {{ (item.score ?? 0).toFixed(1) }}</span>
+            </div>
+            <div v-if="!chartsData[item.etf_code] || chartsData[item.etf_code].length === 0" class="chart-placeholder chart-placeholder-sm">
+              暂无K线数据
+            </div>
+            <div v-else :ref="(el: unknown) => { if (el) setChartRef(item.etf_code, el as HTMLElement) }" class="kline-chart"></div>
+          </div>
+        </template>
+      </div>
+
       <!-- 原始配置 JSON -->
       <details class="json-section">
         <summary class="json-toggle">原始配置 JSON</summary>
@@ -453,24 +474,26 @@
  * 展示策略配置的各模块详情，支持编辑和删除操作。
  */
 
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { runAllocation } from '../api/strategies'
+import { fetchIndexDailyBars } from '../api/market_data'
 import { fetchLatestSignals } from '../api/signals'
-import { triggerStrategyRun } from '../api/runs'
+import { runAllocation } from '../api/strategies'
 import StrategyConfigForm from '../components/StrategyConfigForm.vue'
 import { useStrategyStore } from '../stores/strategies'
-import type { AllocationResponse, SignalRow } from '../types/api'
+import type { AllocationResponse, DailyBar, SignalRow } from '../types/api'
 
 const props = defineProps<{ strategyId: string }>()
 const store = useStrategyStore()
 const router = useRouter()
 
-const running = ref(false)
+/** 今天日期字符串，用于日期选择器上限 */
+const todayStr = new Date().toISOString().slice(0, 10)
+/** 用户选择的交易日，默认今天 */
+const selectedDate = ref(todayStr)
 const allocating = ref(false)
-const runMessage = ref('')
-const runSuccess = ref(true)
+const runError = ref('')
 const allocation = ref<AllocationResponse | null>(null)
 
 /** 信号查看 */
@@ -478,6 +501,31 @@ const signals = ref<SignalRow[]>([])
 const signalTradeDate = ref('')
 const loadingSignals = ref(false)
 const expandedSignal = ref<string | null>(null)
+
+/** 决策日期（优先用后端返回的 data_date，其次用用户选择的日期） */
+const decisionDate = computed(() => allocation.value?.data_date || selectedDate.value)
+
+/** K线图表 */
+const chartsLoading = ref(false)
+const chartsData = ref<Record<string, DailyBar[]>>({})
+const chartInstances = new Map<string, unknown>()
+const chartRefs: Record<string, HTMLElement> = {}
+
+/** 设置图表容器引用 */
+function setChartRef(code: string, el: HTMLElement): void {
+  chartRefs[code] = el
+}
+
+/** 根据决策日期计算起止日期（前60后20个交易日 ≈ 前90后30个自然日） */
+function calcDateRange(centerDate: string): { startDate: string; endDate: string } {
+  const d = new Date(centerDate)
+  const start = new Date(d.getTime() - 90 * 86400000)
+  const end = new Date(d.getTime() + 30 * 86400000)
+  return {
+    startDate: start.toISOString().slice(0, 10),
+    endDate: end.toISOString().slice(0, 10),
+  }
+}
 
 const showEdit = ref(false)
 const editJsonError = ref('')
@@ -555,18 +603,17 @@ const expandedSignalPayload = computed(() => {
 /** 加载最新信号 */
 async function handleLoadSignals(): Promise<void> {
   loadingSignals.value = true
+  runError.value = ''
   try {
     const res = await fetchLatestSignals(props.strategyId, 0, 100)
     signals.value = res.items
     signalTradeDate.value = res.items.length > 0 ? String(res.items[0].trade_date) : ''
     expandedSignal.value = null
     if (res.items.length === 0) {
-      runMessage.value = '暂无信号数据，请先运行信号计算'
-      runSuccess.value = true
+      runError.value = '暂无信号数据，请先运行信号计算'
     }
   } catch (e) {
-    runMessage.value = e instanceof Error ? e.message : '加载信号失败'
-    runSuccess.value = false
+    runError.value = e instanceof Error ? e.message : '加载信号失败'
   } finally {
     loadingSignals.value = false
   }
@@ -577,37 +624,148 @@ function toggleSignalDetail(indexCode: string): void {
   expandedSignal.value = expandedSignal.value === indexCode ? null : indexCode
 }
 
-/** 运行信号计算 */
-async function handleRunSignal(): Promise<void> {
-  running.value = true
-  runMessage.value = ''
-  try {
-    await triggerStrategyRun(props.strategyId)
-    runMessage.value = '信号计算任务已提交，后台执行中。可前往"运行记录"页面查看进度。'
-    runSuccess.value = true
-  } catch (e) {
-    runMessage.value = e instanceof Error ? e.message : '信号计算触发失败'
-    runSuccess.value = false
-  } finally {
-    running.value = false
-  }
-}
-
-/** 运行决策管线 */
+/** 运行决策管线（支持指定交易日） */
 async function handleRunAllocation(): Promise<void> {
   allocating.value = true
-  runMessage.value = ''
+  runError.value = ''
   try {
-    allocation.value = await runAllocation(props.strategyId)
-    runMessage.value = '决策管线执行完成'
-    runSuccess.value = true
+    const dateParam = selectedDate.value || undefined
+    allocation.value = await runAllocation(props.strategyId, dateParam)
+    // 决策完成后加载标的K线数据
+    await loadKlineData()
   } catch (e) {
-    runMessage.value = e instanceof Error ? e.message : '决策管线执行失败'
-    runSuccess.value = false
+    runError.value = e instanceof Error ? e.message : '决策管线执行失败'
     allocation.value = null
   } finally {
     allocating.value = false
   }
+}
+
+/** 加载排名标的决策日前后K线数据并初始化图表 */
+async function loadKlineData(): Promise<void> {
+  if (!allocation.value?.rankings?.length) return
+  chartsLoading.value = true
+  chartsData.value = {}
+
+  // 销毁旧图表实例
+  disposeCharts()
+
+  const range = calcDateRange(decisionDate.value)
+  const codes = allocation.value.rankings.map(r => r.etf_code)
+  const results = await Promise.allSettled(
+    codes.map(code =>
+      fetchIndexDailyBars(code, { startDate: range.startDate, endDate: range.endDate }),
+    ),
+  )
+  const data: Record<string, DailyBar[]> = {}
+  codes.forEach((code, i) => {
+    const r = results[i]
+    data[code] = r.status === 'fulfilled' ? r.value : []
+  })
+  chartsData.value = data
+  chartsLoading.value = false
+
+  await nextTick()
+  initCharts()
+}
+
+/** 初始化所有标的K线图表 */
+async function initCharts(): Promise<void> {
+  const echarts = await import('echarts')
+
+  for (const code of Object.keys(chartsData.value)) {
+    const el = chartRefs[code]
+    if (!el) continue
+    const bars = chartsData.value[code]
+    if (!bars || bars.length === 0) continue
+
+    const chart = echarts.init(el, null, { renderer: 'canvas' })
+    chartInstances.set(code, chart)
+
+    const dates = bars.map(b => b.trade_date)
+    const candleData = bars.map(b => [b.open_price, b.close_price, b.low_price, b.high_price])
+    const volumes = bars.map(b => b.volume ?? 0)
+    // 找到决策日对应的索引，用于标记线
+    const decisionIdx = dates.indexOf(decisionDate.value)
+
+    chart.setOption({
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross' },
+        backgroundColor: '#1e293b',
+        borderColor: '#334155',
+        textStyle: { color: '#f1f5f9', fontSize: 11 },
+      },
+      grid: [
+        { left: 50, right: 12, top: 16, bottom: 60 },
+        { left: 50, right: 12, top: '68%', bottom: 20 },
+      ],
+      xAxis: [
+        {
+          type: 'category', data: dates, gridIndex: 0,
+          axisLine: { lineStyle: { color: '#334155' } },
+          axisLabel: { color: '#94a3b8', fontSize: 10 },
+        },
+        {
+          type: 'category', data: dates, gridIndex: 1,
+          axisLine: { lineStyle: { color: '#334155' } },
+          axisLabel: { show: false },
+        },
+      ],
+      yAxis: [
+        {
+          scale: true, gridIndex: 0,
+          splitLine: { lineStyle: { color: '#334155', type: 'dashed' } },
+          axisLabel: { color: '#94a3b8', fontSize: 10 },
+        },
+        {
+          scale: true, splitNumber: 2, gridIndex: 1,
+          splitLine: { show: false },
+          axisLabel: { show: false },
+        },
+      ],
+      dataZoom: [
+        { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
+        {
+          type: 'slider', xAxisIndex: [0, 1],
+          bottom: 4, height: 16,
+          borderColor: '#334155',
+          fillerColor: 'rgba(59,130,246,0.1)',
+          handleStyle: { color: '#3b82f6' },
+          textStyle: { color: '#94a3b8', fontSize: 10 },
+        },
+      ],
+      series: [
+        {
+          name: 'K线', type: 'candlestick',
+          xAxisIndex: 0, yAxisIndex: 0, data: candleData,
+          itemStyle: { color: '#22c55e', color0: '#ef4444', borderColor: '#22c55e', borderColor0: '#ef4444' },
+          markLine: decisionIdx >= 0 ? {
+            silent: true,
+            symbol: 'none',
+            label: { show: true, formatter: '决策日', position: 'start', color: '#f59e0b', fontSize: 10 },
+            lineStyle: { color: '#f59e0b', type: 'dashed', width: 1.5 },
+            data: [{ xAxis: decisionIdx }],
+          } : undefined,
+        },
+        {
+          name: '量', type: 'bar',
+          xAxisIndex: 1, yAxisIndex: 1, data: volumes,
+          itemStyle: { color: 'rgba(59,130,246,0.5)' },
+        },
+      ],
+    })
+  }
+}
+
+/** 销毁所有图表实例 */
+function disposeCharts(): void {
+  chartInstances.forEach((c) => {
+    try { (c as { dispose(): void }).dispose() } catch { /* ignore */ }
+  })
+  chartInstances.clear()
+  chartRefs && Object.keys(chartRefs).forEach(k => delete chartRefs[k])
 }
 
 /** 删除策略 */
@@ -620,6 +778,7 @@ async function handleDelete(): Promise<void> {
 }
 
 onMounted(() => store.loadOne(props.strategyId))
+onUnmounted(() => disposeCharts())
 </script>
 
 <style scoped>
@@ -809,14 +968,30 @@ onMounted(() => store.loadOne(props.strategyId))
 .btn-accent:hover:not(:disabled) { opacity: 0.85; }
 .btn-accent:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* 日期选择器 */
+.date-input {
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.date-input:focus { outline: none; border-color: var(--accent); }
+.date-input::-webkit-calendar-picker-indicator { filter: invert(0.7); cursor: pointer; }
+
 /* 执行结果提示 */
-.run-tip {
+.run-error {
   padding: 10px 16px;
   border-radius: var(--radius);
   font-size: 13px;
+  background: rgba(239,68,68,0.1);
+  border: 1px solid rgba(239,68,68,0.25);
+  color: #f87171;
 }
-.run-success { background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.25); color: #4ade80; }
-.run-error { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.25); color: #f87171; }
 
 /* 决策结果区域 */
 .allocation-section { display: flex; flex-direction: column; gap: 12px; }
@@ -978,5 +1153,48 @@ onMounted(() => store.loadOne(props.strategyId))
   max-height: 300px;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* K线图表区域 */
+.kline-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.kline-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.kline-header-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.kline-rank { font-size: 12px; font-weight: 700; color: var(--accent); min-width: 24px; }
+.kline-code { font-size: 12px; font-weight: 600; }
+.kline-name { font-size: 12px; color: var(--text-muted); flex: 1; }
+.kline-score { font-size: 11px; color: var(--text-muted); }
+.kline-chart { width: 100%; height: 280px; }
+
+.chart-placeholder {
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.chart-placeholder-sm {
+  padding: 24px 16px;
+  font-size: 12px;
+  border: none;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
 }
 </style>
