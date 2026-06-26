@@ -276,6 +276,12 @@ class BacktestService:
         # 基准日收益率序列
         benchmark_returns: list[float] = []
         if enable_benchmark:
+            # 确保基准指数的日线数据已加载（基准指数可能不在策略 universe 中）
+            if benchmark_index_code not in index_codes:
+                benchmark_bars = self._load_all_index_bars(
+                    trading_dates, [benchmark_index_code]
+                )
+                all_bars.update(benchmark_bars)
             benchmark_returns = compute_buy_hold_benchmark(
                 all_bars, benchmark_index_code, trading_dates
             )

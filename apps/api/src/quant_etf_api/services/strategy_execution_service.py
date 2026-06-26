@@ -9,6 +9,7 @@ import logging
 from datetime import date
 from typing import Any
 
+from sqlalchemy import delete as pg_delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -73,6 +74,26 @@ class StrategyExecutionService:
             self._mark_run_failed(run_id, f"策略 {config.strategy_id} 执行异常")
             return
 
+        strategy_id = config.strategy_id
+
+        # 先删除该策略在有效交易日（context.trade_date）的所有旧记录，
+        # 确保配置修改后不残留旧数据。
+        # 注意：context.trade_date 可能不同于输入 trade_date，_build_live
+        # 会自动回退到有数据的最近交易日（如当天尚未收盘）。
+        effective_date = context.trade_date
+        self._db.execute(
+            pg_delete(IndexSignalModel).where(
+                IndexSignalModel.strategy_id == strategy_id,
+                IndexSignalModel.trade_date == effective_date,
+            )
+        )
+        self._db.execute(
+            pg_delete(IndexFactorValueModel).where(
+                IndexFactorValueModel.strategy_id == strategy_id,
+                IndexFactorValueModel.trade_date == effective_date,
+            )
+        )
+
         # 收集待写入的信号和因子值
         signal_rows: list[dict[str, Any]] = []
         factor_rows: list[dict[str, Any]] = []
@@ -105,17 +126,13 @@ class StrategyExecutionService:
                     "strategy_id": r.strategy_id,
                 })
 
-        # 批量写入信号（重复则跳过，ON CONFLICT DO NOTHING）
+        # 批量写入信号（旧记录已删除，直接插入）
         if signal_rows:
-            stmt = pg_insert(IndexSignalModel).values(signal_rows)
-            stmt = stmt.on_conflict_do_nothing(constraint="uq_index_signal")
-            self._db.execute(stmt)
+            self._db.execute(pg_insert(IndexSignalModel).values(signal_rows))
 
-        # 批量写入因子值（重复则跳过，ON CONFLICT DO NOTHING）
+        # 批量写入因子值
         if factor_rows:
-            stmt = pg_insert(IndexFactorValueModel).values(factor_rows)
-            stmt = stmt.on_conflict_do_nothing(constraint="uq_index_factor_value")
-            self._db.execute(stmt)
+            self._db.execute(pg_insert(IndexFactorValueModel).values(factor_rows))
 
         signal_count = len(signal_rows)
         factor_count = len(factor_rows)
