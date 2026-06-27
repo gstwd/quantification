@@ -358,10 +358,14 @@ class BacktestService:
             # 确定持仓
             if should_rebalance:
                 positions = dict(result.positions) if result.positions else {}
+                day_total_exposure = result.total_exposure
+                day_cash_ratio = result.cash_ratio
                 last_rebalance_date = trade_date
             else:
-                # 非调仓日沿用上次持仓
+                # 非调仓日沿用上次持仓，total_exposure/cash_ratio 由实际持仓推导
                 positions = dict(prev_positions)
+                day_total_exposure = round(sum(positions.values()), 4)
+                day_cash_ratio = round(1.0 - day_total_exposure, 4)
 
             # 计算组合收益
             if positions:
@@ -399,8 +403,8 @@ class BacktestService:
                 mid_signal_count=0,
                 low_signal_count=0,
                 timing_regime=result.timing.regime if result.timing else None,
-                total_exposure=result.total_exposure,
-                cash_ratio=result.cash_ratio,
+                total_exposure=day_total_exposure,
+                cash_ratio=day_cash_ratio,
                 positions=positions if positions else None,
                 benchmark_return=round(benchmark_ret, 4) if benchmark_ret is not None else None,
                 turnover=round(turnover, 4) if turnover > 0 else None,
