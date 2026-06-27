@@ -235,13 +235,28 @@ class BacktestComparisonDetail(BacktestComparisonSummary):
     params: dict[str, Any] | None = None
 
 
+class ComparisonDailyPoint(BaseModel):
+    """对比回测单日绩效摘要（仅含图表渲染所需字段，减少网络传输）。
+
+    相比 BacktestDailyResult：
+    - 保留：trade_date, portfolio_return, cumulative_return, drawdown
+    - 移除：signal counts (high/mid/low), timing_regime, total_exposure,
+      cash_ratio, positions (JSON dict 通常较大), benchmark_return, turnover
+    """
+
+    trade_date: date
+    portfolio_return: float
+    cumulative_return: float
+    drawdown: float
+
+
 class ComparisonDailyResponse(BaseModel):
     """对比回测每日收益响应，用于前端叠加图表渲染。
 
     Attributes:
-        a_daily: 策略 A 的每日组合绩效列表。
-        b_daily: 策略 B 的每日组合绩效列表。
+        a_daily: 策略 A 的每日组合绩效摘要。
+        b_daily: 策略 B 的每日组合绩效摘要。
     """
 
-    a_daily: list[BacktestDailyResult]
-    b_daily: list[BacktestDailyResult]
+    a_daily: list[ComparisonDailyPoint]
+    b_daily: list[ComparisonDailyPoint]

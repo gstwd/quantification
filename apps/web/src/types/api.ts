@@ -356,10 +356,18 @@ export interface ComparisonDetail extends ComparisonSummary {
   params: Record<string, unknown> | null
 }
 
+/** 对比回测单日绩效摘要（仅图表渲染所需字段，减少网络传输） */
+export interface ComparisonDailyPoint {
+  trade_date: string
+  portfolio_return: number
+  cumulative_return: number
+  drawdown: number
+}
+
 /** 对比回测每日收益响应（两个策略的叠加数据） */
 export interface ComparisonDailyResponse {
-  a_daily: BacktestDailyResult[]
-  b_daily: BacktestDailyResult[]
+  a_daily: ComparisonDailyPoint[]
+  b_daily: ComparisonDailyPoint[]
 }
 
 export interface IndexValuation {

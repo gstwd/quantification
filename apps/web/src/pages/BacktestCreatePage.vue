@@ -18,14 +18,27 @@
         </select>
       </div>
 
-      <div class="form-row">
-        <div class="form-section">
-          <label class="form-label">起始日期</label>
-          <input v-model="form.start_date" type="date" class="form-input" />
+      <div class="form-section">
+        <label class="form-label">回测区间</label>
+        <div class="date-presets">
+          <button
+            v-for="p in presets"
+            :key="p.label"
+            class="preset-btn"
+            :class="{ active: form.start_date === p.start && form.end_date === p.end }"
+            type="button"
+            @click="applyPreset(p)"
+          >{{ p.label }}</button>
         </div>
-        <div class="form-section">
-          <label class="form-label">结束日期</label>
-          <input v-model="form.end_date" type="date" class="form-input" />
+        <div class="form-row">
+          <div class="form-section">
+            <label class="form-label-sub">起始日期</label>
+            <input v-model="form.start_date" type="date" class="form-input" />
+          </div>
+          <div class="form-section">
+            <label class="form-label-sub">结束日期</label>
+            <input v-model="form.end_date" type="date" class="form-input" />
+          </div>
         </div>
       </div>
 
@@ -114,6 +127,8 @@ import { useStrategyStore } from '../stores/strategies'
 import type { BenchmarkIndex } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
+import { getDatePresets } from '../utils/datePresets'
+import type { DatePreset } from '../utils/datePresets'
 
 /** 获取配置描述的快捷方法 */
 function configHelp(key: string): string {
@@ -138,6 +153,15 @@ const form = reactive({
 
 const submitting = ref(false)
 const error = ref('')
+
+/** 日期快捷预设 */
+const presets = getDatePresets()
+
+/** 应用日期预设 */
+function applyPreset(p: DatePreset) {
+  form.start_date = p.start
+  form.end_date = p.end
+}
 
 /** 当前选中策略的 index_codes 限定。非空时表示策略有标的范围限定。 */
 const strategyIndexCodes = ref<string[]>([])
@@ -232,6 +256,24 @@ onMounted(async () => {
 
 .form-section { display: flex; flex-direction: column; gap: 8px; }
 .form-label { font-size: 13px; font-weight: 600; color: var(--text); }
+.form-label-sub { font-size: 12px; font-weight: 500; color: var(--text-muted); }
+.form-label-sub { font-size: 12px; font-weight: 500; color: var(--text-muted); margin-top: 2px; }
+
+/* 日期快捷选择按钮 */
+.date-presets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.preset-btn {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.preset-btn:hover { background: var(--surface); color: var(--text); }
+.preset-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 
 .form-select, .form-input {
   background: var(--bg);

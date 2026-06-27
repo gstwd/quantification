@@ -197,9 +197,19 @@ function compStatusLabel(status: string): string {
 
 // ── 综合评价 ──
 
-type Winner = 'a' | 'b' | 'draw'
+type Winner = 'a' | 'b' | 'draw' | 'neutral'
 
-const totalCompared = ref(9)
+/** 可对比指标总数（排除中性指标如交易天数等） */
+const totalCompared = computed(() => {
+  let count = 0
+  for (const row of allCoreRows.value) {
+    if (row.winner !== 'neutral') count++
+  }
+  for (const row of riskRows.value) {
+    if (row.winner !== 'neutral') count++
+  }
+  return count
+})
 
 const verdictText = computed(() => {
   const m = store.currentComparison?.comparison_metrics
@@ -317,6 +327,29 @@ function buildRow(
   }
 }
 
+/** 构建无优劣判定的中性指标行（如交易天数、持仓天数等非绩效指标） */
+function buildNeutralRow(
+  label: string,
+  a: number,
+  b: number,
+  fmt: (v: number) => string,
+  diffFmt: (v: number) => string = daysFmt,
+): MetricRow {
+  const diff = a - b
+  return {
+    label,
+    a,
+    b,
+    diff,
+    format: fmt,
+    formatDiff: diffFmt,
+    aClass: () => '',
+    bClass: () => '',
+    diffClass: () => '',
+    winner: 'neutral',
+  }
+}
+
 const allCoreRows = computed<MetricRow[]>(() => {
   const m = store.currentComparison?.comparison_metrics
   if (!m) return []
@@ -337,8 +370,9 @@ const riskRows = computed<MetricRow[]>(() => {
     buildRow('索提诺比率', m.a_sortino_ratio, m.b_sortino_ratio, ratioFmt, ratioFmt),
     buildRow('胜率 (%)', m.a_win_rate_pct, m.b_win_rate_pct, pctFmt),
     buildRow('信号准确率 (%)', m.a_signal_accuracy_pct, m.b_signal_accuracy_pct, pctFmt),
-    buildRow('交易天数', m.a_total_trading_days, m.b_total_trading_days, daysFmt, daysFmt),
-    buildRow('持仓天数', m.a_active_days, m.b_active_days, daysFmt, daysFmt),
+    // 以下为中性指标，不做优劣比较
+    buildNeutralRow('交易天数', m.a_total_trading_days, m.b_total_trading_days, daysFmt, daysFmt),
+    buildNeutralRow('持仓天数', m.a_active_days, m.b_active_days, daysFmt, daysFmt),
   ]
 })
 
@@ -402,45 +436,51 @@ const benchmarkMetrics = computed<BenchRow[]>(() => {
 
 const equityData = computed(() => {
   if (!store.comparisonDaily) return { dates: [], aCum: [], bCum: [] }
-  const aDates = store.comparisonDaily.a_daily.map((r) => r.trade_date)
-  const aCum = store.comparisonDaily.a_daily.map((r) => r.cumulative_return)
-  const bDates = store.comparisonDaily.b_daily.map((r) => r.trade_date)
-  const bCum = store.comparisonDaily.b_daily.map((r) => r.cumulative_return)
+  const aMap = new Map(store.comparisonDaily.a_daily.map((r) => [r.trade_date, r.cumulative_return]))
+  const bMap = new Map(store.comparisonDaily.b_daily.map((r) => [r.trade_date, r.cumulative_return]))
 
-  // 取日期交集或分别展示
-  const dates = aDates.length >= bDates.length ? aDates : bDates
-  return { dates, aCum, bCum, aDates, bDates }
+  // 取日期并集作为 X 轴，缺失日期补 null（ECharts 自动断开处理）
+  const allDates = Array.from(new Set([...aMap.keys(), ...bMap.keys()])).sort()
+  const aCum = allDates.map((d) => aMap.get(d) ?? null)
+  const bCum = allDates.map((d) => bMap.get(d) ?? null)
+  return { dates: allDates, aCum, bCum }
 })
 
 const ddData = computed(() => {
   if (!store.comparisonDaily) return { dates: [], aDD: [], bDD: [] }
-  const aDates = store.comparisonDaily.a_daily.map((r) => r.trade_date)
-  const aDD = store.comparisonDaily.a_daily.map((r) => r.drawdown)
-  const bDates = store.comparisonDaily.b_daily.map((r) => r.trade_date)
-  const bDD = store.comparisonDaily.b_daily.map((r) => r.drawdown)
-  const dates = aDates.length >= bDates.length ? aDates : bDates
-  return { dates, aDD, bDD, aDates, bDates }
+  const aMap = new Map(store.comparisonDaily.a_daily.map((r) => [r.trade_date, r.drawdown]))
+  const bMap = new Map(store.comparisonDaily.b_daily.map((r) => [r.trade_date, r.drawdown]))
+
+  // 取日期并集，缺失补 null
+  const allDates = Array.from(new Set([...aMap.keys(), ...bMap.keys()])).sort()
+  const aDD = allDates.map((d) => aMap.get(d) ?? null)
+  const bDD = allDates.map((d) => bMap.get(d) ?? null)
+  return { dates: allDates, aDD, bDD }
 })
 
 const excessData = computed(() => {
   if (!store.comparisonDaily) return { dates: [], excessCum: [] }
   const aDaily = store.comparisonDaily.a_daily
   const bDaily = store.comparisonDaily.b_daily
-  // 按日期对齐
+  // 构建日期 → 日收益率的映射
   const dateMap = new Map<string, number>()
   for (const r of aDaily) dateMap.set(r.trade_date, r.portfolio_return)
   const dates: string[] = []
-  const excess: number[] = []
-  let cum = 0
+  const excessCum: number[] = []
+  // 分别复利累计，超额 = A 累计 / B 累计 - 1（%）
+  let cumA = 1.0
+  let cumB = 1.0
   for (const r of bDaily) {
     const aRet = dateMap.get(r.trade_date)
     if (aRet !== undefined) {
-      cum += aRet - r.portfolio_return
+      cumA *= 1 + aRet / 100
+      cumB *= 1 + r.portfolio_return / 100
+      const excess = (cumA / cumB - 1) * 100
       dates.push(r.trade_date)
-      excess.push(cum)
+      excessCum.push(Number(excess.toFixed(4)))
     }
   }
-  return { dates, excessCum: excess }
+  return { dates, excessCum }
 })
 
 // ── ECharts 初始化 ──
@@ -455,7 +495,7 @@ async function initCharts() {
       tooltip: { trigger: 'axis' },
       legend: { data: ['策略 A', '策略 B'], bottom: 0 },
       grid: { left: 50, right: 20, top: 20, bottom: 40 },
-      xAxis: { type: 'category', data: equityData.value.aDates, axisLabel: { rotate: 45, fontSize: 10 } },
+      xAxis: { type: 'category', data: equityData.value.dates, axisLabel: { rotate: 45, fontSize: 10 } },
       yAxis: { type: 'value', axisLabel: { formatter: (v: number) => v.toFixed(0) + '%' } },
       series: [
         {
@@ -517,7 +557,6 @@ async function initCharts() {
   // 超额收益图
   if (excessChartEl.value) {
     excessChartInst = echarts.init(excessChartEl.value)
-    const excData = excessData.value.excessCum
     excessChartInst.setOption({
       tooltip: { trigger: 'axis' },
       grid: { left: 50, right: 20, top: 20, bottom: 40 },
@@ -531,7 +570,7 @@ async function initCharts() {
         {
           name: '超额收益',
           type: 'line',
-          data: excData,
+          data: excessData.value.excessCum,
           smooth: true,
           lineStyle: { color: '#8B5CF6', width: 2 },
           itemStyle: { color: '#8B5CF6' },
@@ -541,7 +580,7 @@ async function initCharts() {
               type: 'linear',
               x: 0, y: 0, x2: 0, y2: 1,
               colorStops: [
-                { offset: 0, color: excData.length > 0 && excData[excData.length - 1] >= 0 ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)' },
+                { offset: 0, color: excessData.value.excessCum.length > 0 && excessData.value.excessCum[excessData.value.excessCum.length - 1] >= 0 ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)' },
                 { offset: 1, color: 'rgba(148,163,184,0.02)' },
               ],
             },
@@ -554,9 +593,17 @@ async function initCharts() {
       ],
     })
   }
+
+  // 联动缩放：权益曲线、回撤曲线、超额收益图共享 X 轴交互
+  const connected = [equityChartInst, ddChartInst, excessChartInst].filter(Boolean)
+  if (connected.length > 1) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    echarts.connect(connected as any)
+  }
 }
 
 function disposeCharts() {
+  // dispose 会自动解除图表联动
   equityChartInst?.dispose()
   ddChartInst?.dispose()
   excessChartInst?.dispose()

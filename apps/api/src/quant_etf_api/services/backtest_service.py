@@ -43,6 +43,7 @@ from quant_etf_api.schemas.backtest import (
     BacktestIndexResult,
     BacktestMetrics,
     BacktestSummary,
+    ComparisonDailyPoint,
     ComparisonDailyResponse,
     ComparisonMetrics,
 )
@@ -943,15 +944,23 @@ class BacktestService:
             return None
 
     def get_comparison_daily(self, comparison_id: str) -> ComparisonDailyResponse:
-        """返回两个策略的每日组合绩效，用于叠加图表渲染。"""
+        """返回两个策略的每日组合绩效摘要（仅图表渲染所需字段），用于叠加图表渲染。"""
         try:
             comp = self._backtest_repo.find_comparison_by_id(comparison_id)
             if comp is None:
                 return ComparisonDailyResponse(a_daily=[], b_daily=[])
 
+            def _to_point(daily: BacktestDailyResult) -> ComparisonDailyPoint:
+                return ComparisonDailyPoint(
+                    trade_date=daily.trade_date,
+                    portfolio_return=daily.portfolio_return,
+                    cumulative_return=daily.cumulative_return,
+                    drawdown=daily.drawdown,
+                )
+
             return ComparisonDailyResponse(
-                a_daily=self.get_daily_results(comp.backtest_a_id),
-                b_daily=self.get_daily_results(comp.backtest_b_id),
+                a_daily=[_to_point(d) for d in self.get_daily_results(comp.backtest_a_id)],
+                b_daily=[_to_point(d) for d in self.get_daily_results(comp.backtest_b_id)],
             )
         except Exception:
             logger.warning("get_comparison_daily DB query failed", exc_info=True)
