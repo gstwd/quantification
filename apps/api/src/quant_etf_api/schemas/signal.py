@@ -6,16 +6,6 @@ from typing import Any
 from pydantic import BaseModel
 
 
-class SignalRow(BaseModel):
-    trade_date: date
-    index_code: str
-    strategy_id: str
-    signal_score: float
-    signal_level: str
-    signal_label: str
-    signal_payload: dict[str, Any] = {}
-
-
 class FactorRow(BaseModel):
     """因子值行，用于时间序列和横截面查询响应。"""
 

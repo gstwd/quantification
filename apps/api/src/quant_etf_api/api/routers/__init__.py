@@ -9,7 +9,6 @@ __all__ = [
     "journal",
     "market_data",
     "runs",
-    "signals",
     "strategies",
     "system",
 ]

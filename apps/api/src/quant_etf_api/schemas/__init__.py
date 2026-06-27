@@ -22,7 +22,7 @@ from .journal import (
 )
 from .market_data import DailyBar, IndexValuation, MacroIndicatorSchema, ShareSnapshot
 from .run import ResearchRunSummary
-from .signal import FactorRow, SignalRow
+from .signal import FactorRow
 from .strategy import StrategyDetail, StrategySummary
 from .system import DataSourceSnapshot, SystemStatusResponse
 
@@ -51,7 +51,6 @@ __all__ = [
     "ResearchRunSummary",
     "SetTagsRequest",
     "ShareSnapshot",
-    "SignalRow",
     "StrategyDetail",
     "StrategySummary",
     "SystemStatusResponse",

@@ -19,7 +19,6 @@ from quant_etf_api.api.routers import (
     journal,
     market_data,
     runs,
-    signals,
     strategies,
     system,
 )
@@ -86,7 +85,7 @@ app.include_router(etfs.router, prefix=settings.api_prefix)
 app.include_router(indexes.router, prefix=settings.api_prefix)
 app.include_router(market_data.router, prefix=settings.api_prefix)
 app.include_router(strategies.router, prefix=settings.api_prefix)
-app.include_router(signals.router, prefix=settings.api_prefix)
+
 app.include_router(factors.router, prefix=settings.api_prefix)
 app.include_router(runs.router, prefix=settings.api_prefix)
 app.include_router(backtests.router, prefix=settings.api_prefix)

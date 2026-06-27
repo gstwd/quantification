@@ -55,16 +55,6 @@ export interface StrategyValidationResult {
   warnings: string[]
 }
 
-export interface SignalRow {
-  trade_date: string
-  index_code: string
-  strategy_id: string
-  signal_score: number
-  signal_level: string
-  signal_label: string
-  signal_payload: Record<string, unknown>
-}
-
 export interface ResearchRunSummary {
   run_id: string
   run_type: string

@@ -8,7 +8,6 @@ from quant_etf_api.infra.db.repositories.etf_universe import EtfUniverseReposito
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.infra.db.repositories.journal_repository import JournalRepository
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
-from quant_etf_api.infra.db.repositories.signal import SignalRepository
 
 __all__ = [
     "BacktestRepository",
@@ -19,5 +18,4 @@ __all__ = [
     "IndexDailyBarRepository",
     "JournalRepository",
     "ResearchRunRepository",
-    "SignalRepository",
 ]

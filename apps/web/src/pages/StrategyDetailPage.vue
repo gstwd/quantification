@@ -31,9 +31,6 @@
           <button class="btn-accent" @click="handleRunAllocation" :disabled="allocating">
             {{ allocating ? '计算中...' : '执行决策' }}
           </button>
-          <button class="btn-secondary" @click="handleLoadSignals" :disabled="loadingSignals">
-            {{ loadingSignals ? '加载中...' : '查看信号' }}
-          </button>
           <button class="btn-secondary" @click="showEdit = true">编辑</button>
           <button class="btn-danger" @click="handleDelete">删除</button>
         </div>
@@ -239,51 +236,6 @@
 
       </div>
 
-      <!-- 最新信号表格 -->
-      <div v-if="signals.length > 0" class="signals-section">
-        <div class="signals-header">
-          <h2 class="section-title">最新信号（{{ signalTradeDate }}）</h2>
-          <span class="signals-count">共 {{ signals.length }} 条</span>
-        </div>
-        <div class="signals-table-wrap">
-          <table class="signals-table">
-            <thead>
-              <tr>
-                <th>排名</th>
-                <th>指数代码</th>
-                <th>得分</th>
-                <th>信号等级</th>
-                <th>信号标签</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(sig, i) in signals" :key="sig.index_code">
-                <td class="text-muted">{{ i + 1 }}</td>
-                <td class="mono">{{ sig.index_code }}</td>
-                <td class="mono">{{ sig.signal_score.toFixed(1) }}</td>
-                <td>
-                  <span :class="['level-tag', `level-${sig.signal_level.toLowerCase()}`]">
-                    {{ sig.signal_level }}
-                  </span>
-                </td>
-                <td>{{ sig.signal_label }}</td>
-                <td>
-                  <button class="toggle-detail-btn" @click="toggleSignalDetail(sig.index_code)">
-                    {{ expandedSignal === sig.index_code ? '收起' : '详情' }}
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <!-- 展开的信号详情 -->
-        <div v-if="expandedSignal && expandedSignalPayload" class="signal-detail">
-          <div class="signal-detail-header">信号详情：{{ expandedSignal }}</div>
-          <pre class="signal-detail-json mono">{{ JSON.stringify(expandedSignalPayload, null, 2) }}</pre>
-        </div>
-      </div>
-
       <!-- 执行错误提示 -->
       <div v-if="runError" class="run-error">{{ runError }}</div>
       <!-- 决策管线结果 -->
@@ -478,11 +430,10 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { fetchIndexDailyBars } from '../api/market_data'
-import { fetchLatestSignals } from '../api/signals'
 import { runAllocation } from '../api/strategies'
 import StrategyConfigForm from '../components/StrategyConfigForm.vue'
 import { useStrategyStore } from '../stores/strategies'
-import type { AllocationResponse, DailyBar, SignalRow } from '../types/api'
+import type { AllocationResponse, DailyBar } from '../types/api'
 
 const props = defineProps<{ strategyId: string }>()
 const store = useStrategyStore()
@@ -495,12 +446,6 @@ const selectedDate = ref(todayStr)
 const allocating = ref(false)
 const runError = ref('')
 const allocation = ref<AllocationResponse | null>(null)
-
-/** 信号查看 */
-const signals = ref<SignalRow[]>([])
-const signalTradeDate = ref('')
-const loadingSignals = ref(false)
-const expandedSignal = ref<string | null>(null)
 
 /** 决策日期（优先用后端返回的 data_date，其次用用户选择的日期） */
 const decisionDate = computed(() => allocation.value?.data_date || selectedDate.value)
@@ -591,37 +536,6 @@ async function handleUpdate(): Promise<void> {
   if (success) {
     showEdit.value = false
   }
-}
-
-/** 展开的信号详情 payload */
-const expandedSignalPayload = computed(() => {
-  if (!expandedSignal.value) return null
-  const sig = signals.value.find((s) => s.index_code === expandedSignal.value)
-  return sig?.signal_payload ?? null
-})
-
-/** 加载最新信号 */
-async function handleLoadSignals(): Promise<void> {
-  loadingSignals.value = true
-  runError.value = ''
-  try {
-    const res = await fetchLatestSignals(props.strategyId, 0, 100)
-    signals.value = res.items
-    signalTradeDate.value = res.items.length > 0 ? String(res.items[0].trade_date) : ''
-    expandedSignal.value = null
-    if (res.items.length === 0) {
-      runError.value = '暂无信号数据，请先运行信号计算'
-    }
-  } catch (e) {
-    runError.value = e instanceof Error ? e.message : '加载信号失败'
-  } finally {
-    loadingSignals.value = false
-  }
-}
-
-/** 切换信号详情展开 */
-function toggleSignalDetail(indexCode: string): void {
-  expandedSignal.value = expandedSignal.value === indexCode ? null : indexCode
 }
 
 /** 运行决策管线（支持指定交易日） */
@@ -1083,77 +997,6 @@ onUnmounted(() => disposeCharts())
 }
 .pos-code { color: var(--text-muted); }
 .pos-weight { color: var(--accent); font-weight: 600; }
-
-/* 信号表格 */
-.signals-section {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-}
-.signals-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
-}
-.signals-header .section-title { margin: 0; }
-.signals-count { font-size: 12px; color: var(--text-muted); }
-.signals-table-wrap { overflow-x: auto; }
-.signals-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.signals-table th {
-  text-align: left;
-  padding: 8px 14px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-muted);
-  border-bottom: 1px solid var(--border);
-}
-.signals-table td { padding: 10px 14px; border-bottom: 1px solid rgba(51,65,85,0.3); }
-.signals-table tr:last-child td { border-bottom: none; }
-
-.level-tag {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 12px;
-  font-weight: 600;
-}
-.level-high { background: rgba(34,197,94,0.15); color: #4ade80; }
-.level-mid { background: rgba(245,158,11,0.15); color: #f59e0b; }
-.level-low { background: rgba(239,68,68,0.12); color: #f87171; }
-
-.toggle-detail-btn {
-  padding: 2px 8px;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text-muted);
-  font-size: 11px;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.toggle-detail-btn:hover { border-color: var(--accent); color: var(--accent); }
-
-.signal-detail {
-  padding: 12px 16px;
-  border-top: 1px solid var(--border);
-  background: var(--surface-2);
-}
-.signal-detail-header { font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 8px; }
-.signal-detail-json {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 12px;
-  font-size: 11px;
-  overflow-x: auto;
-  max-height: 300px;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
 
 /* K线图表区域 */
 .kline-section {
