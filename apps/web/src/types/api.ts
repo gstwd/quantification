@@ -264,6 +264,104 @@ export interface BacktestIndexResult {
   original_score?: number | null
 }
 
+// =============================================================================
+// 策略对比回测模块
+// =============================================================================
+
+/** 策略对比回测创建请求 */
+export interface ComparisonCreateRequest {
+  strategy_a_id: string
+  strategy_b_id: string
+  start_date: string
+  end_date: string
+  /** 策略 A 的指数代码列表（空数组=全部指数）。若策略 A 已配置标的范围则忽略 */
+  a_index_codes: string[]
+  /** 策略 B 的指数代码列表（空数组=全部指数）。若策略 B 已配置标的范围则忽略 */
+  b_index_codes: string[]
+  enable_benchmark?: boolean
+  benchmark_index_code?: string
+  name?: string | null
+}
+
+/** 双策略对比指标 */
+export interface ComparisonMetrics {
+  // ── 策略 A/B 各自指标 ──
+  a_cumulative_return_pct: number
+  b_cumulative_return_pct: number
+  a_annualized_return_pct: number
+  b_annualized_return_pct: number
+  a_max_drawdown_pct: number
+  b_max_drawdown_pct: number
+  a_sharpe_ratio: number
+  b_sharpe_ratio: number
+  a_sortino_ratio: number
+  b_sortino_ratio: number
+  a_calmar_ratio: number
+  b_calmar_ratio: number
+  a_win_rate_pct: number
+  b_win_rate_pct: number
+  a_signal_accuracy_pct: number
+  b_signal_accuracy_pct: number
+  a_total_trading_days: number
+  b_total_trading_days: number
+  a_active_days: number
+  b_active_days: number
+
+  // ── 差值（A - B） ──
+  cumulative_return_diff_pct: number
+  annualized_return_diff_pct: number
+  max_drawdown_diff_pct: number
+  sharpe_diff: number
+  sortino_diff: number
+  calmar_diff: number
+  win_rate_diff_pct: number
+  signal_accuracy_diff_pct: number
+
+  // ── 基准对比（若启用） ──
+  a_benchmark_return_pct: number | null
+  b_benchmark_return_pct: number | null
+  a_excess_return_pct: number | null
+  b_excess_return_pct: number | null
+  a_alpha: number | null
+  b_alpha: number | null
+  a_beta: number | null
+  b_beta: number | null
+  a_information_ratio: number | null
+  b_information_ratio: number | null
+}
+
+/** 对比回测列表摘要 */
+export interface ComparisonSummary {
+  comparison_id: string
+  name: string | null
+  strategy_a_id: string
+  strategy_b_id: string
+  backtest_a_id: string
+  backtest_b_id: string
+  start_date: string
+  end_date: string
+  status: string
+  comparison_metrics: ComparisonMetrics | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  error_message: string | null
+  progress: number
+}
+
+/** 对比回测详情 */
+export interface ComparisonDetail extends ComparisonSummary {
+  backtest_a: BacktestDetail | null
+  backtest_b: BacktestDetail | null
+  params: Record<string, unknown> | null
+}
+
+/** 对比回测每日收益响应（两个策略的叠加数据） */
+export interface ComparisonDailyResponse {
+  a_daily: BacktestDailyResult[]
+  b_daily: BacktestDailyResult[]
+}
+
 export interface IndexValuation {
   trade_date: string
   index_code: string

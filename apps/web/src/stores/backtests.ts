@@ -2,10 +2,14 @@ import { defineStore } from 'pinia'
 
 import {
   createBacktest,
+  createComparison,
   fetchBacktest,
   fetchBacktestDaily,
   fetchBacktestIndexResults,
   fetchBacktests,
+  fetchComparison,
+  fetchComparisons,
+  fetchComparisonDaily,
 } from '../api/backtests'
 import type {
   BacktestCreateRequest,
@@ -13,6 +17,10 @@ import type {
   BacktestDailyResult,
   BacktestIndexResult,
   BacktestSummary,
+  ComparisonCreateRequest,
+  ComparisonDetail,
+  ComparisonDailyResponse,
+  ComparisonSummary,
 } from '../types/api'
 
 export const useBacktestStore = defineStore('backtests', {
@@ -24,6 +32,11 @@ export const useBacktestStore = defineStore('backtests', {
     indexResults: [] as BacktestIndexResult[],
     loading: false,
     submitting: false,
+    // ── 策略对比回测 ──
+    comparisons: [] as ComparisonSummary[],
+    comparisonsTotal: 0,
+    currentComparison: null as ComparisonDetail | null,
+    comparisonDaily: null as ComparisonDailyResponse | null,
   }),
   actions: {
     async loadAll(offset = 0, limit = 50) {
@@ -71,6 +84,70 @@ export const useBacktestStore = defineStore('backtests', {
               this.current = detail
               const idx = this.items.findIndex((i) => i.backtest_id === backtestId)
               if (idx !== -1) this.items[idx] = detail
+              if (detail.status !== 'pending' && detail.status !== 'running') {
+                clearInterval(timer)
+                resolve()
+              }
+            } catch {
+              clearInterval(timer)
+              resolve()
+            }
+          }, 2000)
+        })
+      await poll()
+    },
+
+    // ── 策略对比回测 ──
+
+    async loadAllComparisons(offset = 0, limit = 50) {
+      this.loading = true
+      try {
+        const res = await fetchComparisons(offset, limit)
+        this.comparisons = res.items
+        this.comparisonsTotal = res.total
+      } finally {
+        this.loading = false
+      }
+    },
+
+    async loadOneComparison(comparisonId: string) {
+      this.loading = true
+      try {
+        this.currentComparison = await fetchComparison(comparisonId)
+      } finally {
+        this.loading = false
+      }
+    },
+
+    async loadComparisonDaily(comparisonId: string) {
+      this.comparisonDaily = await fetchComparisonDaily(comparisonId)
+    },
+
+    async submitComparison(
+      req: ComparisonCreateRequest,
+    ): Promise<ComparisonSummary> {
+      this.submitting = true
+      try {
+        const summary = await createComparison(req)
+        this.comparisons.unshift(summary)
+        return summary
+      } finally {
+        this.submitting = false
+      }
+    },
+
+    /** 每 2 秒轮询一次，直到对比回测状态不再是 pending 或 running */
+    async pollComparisonUntilDone(comparisonId: string): Promise<void> {
+      const poll = (): Promise<void> =>
+        new Promise((resolve) => {
+          const timer = setInterval(async () => {
+            try {
+              const detail = await fetchComparison(comparisonId)
+              this.currentComparison = detail
+              const idx = this.comparisons.findIndex(
+                (c) => c.comparison_id === comparisonId,
+              )
+              if (idx !== -1) this.comparisons[idx] = detail
               if (detail.status !== 'pending' && detail.status !== 'running') {
                 clearInterval(timer)
                 resolve()

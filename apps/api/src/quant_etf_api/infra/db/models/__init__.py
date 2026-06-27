@@ -1,5 +1,6 @@
 from __future__ import annotations
 from .core import (
+    BacktestComparisonModel,
     BacktestDailyResultModel,
     BacktestEtfResultModel,
     BacktestIndexResultModel,
@@ -33,6 +34,7 @@ from .core import (
 )
 
 __all__ = [
+    "BacktestComparisonModel",
     "BacktestDailyResultModel",
     "BacktestEtfResultModel",
     "BacktestIndexResultModel",

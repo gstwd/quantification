@@ -9,11 +9,15 @@ from quant_etf_api.api.deps import get_db
 from quant_etf_api.api.executor import get_bg_executor
 from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.schemas.backtest import (
+    BacktestComparisonCreateRequest,
+    BacktestComparisonDetail,
+    BacktestComparisonSummary,
     BacktestCreateRequest,
     BacktestDailyResult,
     BacktestDetail,
     BacktestIndexResult,
     BacktestSummary,
+    ComparisonDailyResponse,
 )
 from quant_etf_api.schemas.pagination import PaginatedResponse
 from quant_etf_api.services.backtest_service import BacktestService
@@ -74,3 +78,71 @@ def get_backtest_index_results(
 ) -> list[BacktestIndexResult]:
     """返回回测每日每指数信号与实际收益，可按指数代码过滤。"""
     return BacktestService(db).get_index_results(backtest_id, index_code=index_code)
+
+
+# ── 策略对比回测端点 ───────────────────────────────────────────────
+
+
+def _run_comparison_bg(comparison_id: str) -> None:
+    """在独立 Session 中执行对比回测，避免与请求 Session 冲突。"""
+    db = SessionLocal()
+    try:
+        BacktestService(db).run_comparison(comparison_id)
+    finally:
+        db.close()
+
+
+@router.post(
+    "/backtests/comparisons",
+    response_model=BacktestComparisonSummary,
+    status_code=202,
+)
+def create_comparison(
+    req: BacktestComparisonCreateRequest,
+    db: Session = Depends(get_db),
+) -> BacktestComparisonSummary:
+    """创建策略对比回测，生成两个子回测并在后台并行执行。"""
+    summary = BacktestService(db).create_comparison(req)
+    get_bg_executor().submit(_run_comparison_bg, summary.comparison_id)
+    return summary
+
+
+@router.get(
+    "/backtests/comparisons",
+    response_model=PaginatedResponse[BacktestComparisonSummary],
+)
+def list_comparisons(
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> PaginatedResponse[BacktestComparisonSummary]:
+    """分页返回对比回测列表，按创建时间倒序。"""
+    items, total = BacktestService(db).list_comparisons(offset=offset, limit=limit)
+    return PaginatedResponse(items=items, total=total, offset=offset, limit=limit)
+
+
+@router.get(
+    "/backtests/comparisons/{comparison_id}",
+    response_model=BacktestComparisonDetail,
+)
+def get_comparison(
+    comparison_id: str,
+    db: Session = Depends(get_db),
+) -> BacktestComparisonDetail:
+    """返回对比回测详情，含两个子回测的完整信息和对比指标。"""
+    detail = BacktestService(db).get_comparison(comparison_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="对比记录不存在")
+    return detail
+
+
+@router.get(
+    "/backtests/comparisons/{comparison_id}/daily",
+    response_model=ComparisonDailyResponse,
+)
+def get_comparison_daily(
+    comparison_id: str,
+    db: Session = Depends(get_db),
+) -> ComparisonDailyResponse:
+    """返回两个策略的每日组合绩效，用于叠加图表渲染。"""
+    return BacktestService(db).get_comparison_daily(comparison_id)

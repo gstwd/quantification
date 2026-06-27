@@ -1,6 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 import BacktestCreatePage from '../pages/BacktestCreatePage.vue'
+import BacktestComparisonCreatePage from '../pages/BacktestComparisonCreatePage.vue'
+import BacktestComparisonDetailPage from '../pages/BacktestComparisonDetailPage.vue'
 import BacktestDetailPage from '../pages/BacktestDetailPage.vue'
 import BacktestListPage from '../pages/BacktestListPage.vue'
 import DashboardPage from '../pages/DashboardPage.vue'
@@ -36,6 +38,8 @@ const router = createRouter({
     { path: '/runs', component: RunsPage },
     { path: '/backtests', component: BacktestListPage },
     { path: '/backtests/new', component: BacktestCreatePage },
+    { path: '/backtests/comparison/new', component: BacktestComparisonCreatePage },
+    { path: '/backtests/comparison/:comparisonId', component: BacktestComparisonDetailPage, props: true },
     { path: '/backtests/:backtestId', component: BacktestDetailPage, props: true },
   ],
 })

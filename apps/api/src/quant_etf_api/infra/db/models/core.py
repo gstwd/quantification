@@ -662,6 +662,78 @@ class BacktestIndexResultModel(Base):
     )
 
 
+class BacktestComparisonModel(Base):
+    """策略对比回测主表，记录一次双策略对比回测的配置和结果。
+
+    一次对比包含两个子回测（backtest_a / backtest_b），
+    它们在同一时间区间、同一标的范围内独立执行。
+    对比完成后，comparison_metrics 存储两策略各项指标的并排对比数据。
+    """
+
+    __tablename__ = "backtest_comparison"
+
+    comparison_id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, comment="对比唯一 ID，UUID 格式"
+    )
+    name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="对比名称，用户可选标签"
+    )
+    strategy_a_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="策略 A 的 ID"
+    )
+    strategy_b_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="策略 B 的 ID"
+    )
+    backtest_a_id: Mapped[str] = mapped_column(
+        ForeignKey("backtest_run.backtest_id"),
+        nullable=False,
+        comment="策略 A 的子回测 ID",
+    )
+    backtest_b_id: Mapped[str] = mapped_column(
+        ForeignKey("backtest_run.backtest_id"),
+        nullable=False,
+        comment="策略 B 的子回测 ID",
+    )
+    start_date: Mapped[Date] = mapped_column(
+        Date, nullable=False, comment="回测起始日期（两个策略共享）"
+    )
+    end_date: Mapped[Date] = mapped_column(
+        Date, nullable=False, comment="回测结束日期（两个策略共享）"
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default="pending",
+        server_default=sa.text("'pending'"),
+        comment="对比状态：pending/running/success/failed/partial",
+    )
+    params: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True, comment="共享参数（基准配置、标的范围等）"
+    )
+    comparison_metrics: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True, comment="对比级别汇总指标，完成后写入"
+    )
+    error_message: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="失败/部分失败时的错误信息"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        comment="记录创建时间（UTC）",
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="开始执行时间（UTC）"
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="完成时间（UTC）"
+    )
+    progress: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=sa.text("0"),
+        comment="对比整体进度 0-100",
+    )
+
+
 class IndexValuationModel(Base):
     """指数估值数据（PE/PB 及历史分位），按指数代码 + 日期唯一。
 

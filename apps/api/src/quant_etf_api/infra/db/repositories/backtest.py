@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import text
 
 from quant_etf_api.infra.db.models.core import (
+    BacktestComparisonModel,
     BacktestDailyResultModel,
     BacktestIndexResultModel,
     BacktestRunModel,
@@ -123,4 +124,86 @@ class BacktestRepository(BaseRepository):
         run.status = "failed"
         run.finished_at = datetime.now(timezone.utc)
         run.error_message = error_message[:1000]
+        self._db.commit()
+
+    # ── 对比回测查询与状态更新 ────────────────────────────────────────────
+
+    def find_all_comparisons(
+        self, offset: int = 0, limit: int = 50
+    ) -> tuple[list[BacktestComparisonModel], int]:
+        """分页查询对比回测记录，按创建时间倒序。
+
+        Args:
+            offset: 偏移量。
+            limit: 每页最大条数。
+
+        Returns:
+            (items, total) 元组。
+        """
+        base_q = self._db.query(BacktestComparisonModel)
+        total = base_q.count()
+        rows = (
+            base_q.order_by(BacktestComparisonModel.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return rows, total
+
+    def find_comparison_by_id(self, comparison_id: str) -> BacktestComparisonModel | None:
+        """按主键查询对比回测记录。"""
+        return self._db.get(BacktestComparisonModel, comparison_id)
+
+    def update_comparison_progress(self, comparison_id: str, progress: int) -> None:
+        """更新对比回测执行进度（0-100）。
+
+        使用裸 SQL 直接写入，避免与 ORM 状态冲突。
+        """
+        p = max(0, min(100, progress))
+        try:
+            self._db.connection().execute(
+                text("UPDATE backtest_comparison SET progress = :p WHERE comparison_id = :cid"),
+                {"p": p, "cid": comparison_id},
+            )
+        except Exception:
+            pass
+
+    def mark_comparison_success(
+        self, comparison_id: str, metrics: dict[str, Any] | None = None
+    ) -> None:
+        """将对比回测标记为成功。"""
+        if self._db.is_active is False:
+            self._db.rollback()
+        comp = self.find_comparison_by_id(comparison_id)
+        if comp is None:
+            return
+        comp.status = "success"
+        comp.finished_at = datetime.now(timezone.utc)
+        comp.progress = 100
+        if metrics:
+            comp.comparison_metrics = metrics
+        self._db.commit()
+
+    def mark_comparison_failed(self, comparison_id: str, error_message: str) -> None:
+        """将对比回测标记为失败（两个子回测均失败）。"""
+        if self._db.is_active is False:
+            self._db.rollback()
+        comp = self.find_comparison_by_id(comparison_id)
+        if comp is None:
+            return
+        comp.status = "failed"
+        comp.finished_at = datetime.now(timezone.utc)
+        comp.error_message = error_message[:1000]
+        self._db.commit()
+
+    def mark_comparison_partial(self, comparison_id: str, error_message: str) -> None:
+        """将对比回测标记为部分成功（一个子回测成功，一个失败）。"""
+        if self._db.is_active is False:
+            self._db.rollback()
+        comp = self.find_comparison_by_id(comparison_id)
+        if comp is None:
+            return
+        comp.status = "partial"
+        comp.finished_at = datetime.now(timezone.utc)
+        comp.error_message = error_message[:1000]
         self._db.commit()
