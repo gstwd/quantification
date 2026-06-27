@@ -16,6 +16,7 @@
     <div v-else-if="store.items.length === 0" class="empty">暂无策略配置，请点击"新建策略"创建</div>
     <div v-else class="grid">
       <div v-for="item in store.items" :key="item.strategy_id" class="strategy-card">
+        <button class="copy-btn" title="复制策略" @click="handleCopyClick(item)">📋</button>
         <div class="card-top">
           <h3 class="strategy-name">{{ item.display_name }}</h3>
           <div class="chips">
@@ -87,6 +88,29 @@
         </div>
       </div>
     </div>
+
+    <!-- 复制策略弹窗 -->
+    <div v-if="showCopy" class="modal-overlay" @click.self="showCopy = false">
+      <div class="modal">
+        <h2 class="modal-title">复制策略</h2>
+        <p class="copy-hint">将复制源策略的全部配置，请为副本指定新的 ID 和名称。</p>
+        <div class="form-group">
+          <label class="form-label">策略 ID（不可与已有策略重复）</label>
+          <input v-model="copyForm.strategy_id" class="form-input" placeholder="如 momentum_rotation_v2" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">策略名称</label>
+          <input v-model="copyForm.display_name" class="form-input" placeholder="如 动量轮动 V2" />
+        </div>
+        <div v-if="copyError" class="form-error">{{ copyError }}</div>
+        <div class="modal-actions">
+          <button class="btn-secondary" @click="showCopy = false">取消</button>
+          <button class="btn-primary" @click="handleCopyConfirm" :disabled="copyLoading">
+            {{ copyLoading ? '复制中...' : '确认复制' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -106,6 +130,9 @@ import { useStrategyStore } from '../stores/strategies'
 
 const store = useStrategyStore()
 const showCreate = ref(false)
+const showCopy = ref(false)
+const copyLoading = ref(false)
+const copyError = ref('')
 const jsonError = ref('')
 const advancedMode = ref(false)
 
@@ -116,13 +143,19 @@ const form = ref({
   frequency: 'daily',
 })
 
+/** 复制表单 */
+const copyForm = ref({
+  strategy_id: '',
+  display_name: '',
+})
+
 /** 表单模式下的 config_json 对象 */
 const configJson = ref<Record<string, unknown>>({ score: { factors: {} } })
 
 /** 高级模式下的 JSON 文本 */
 const configJsonText = ref('{\n  "score": {\n    "factors": {}\n  }\n}')
 
-/** 监听弹窗关闭，重置表单 */
+/** 监听新建弹窗关闭，重置表单 */
 watch(showCreate, (val) => {
   if (!val) {
     form.value = { strategy_id: '', display_name: '', description: '', frequency: 'daily' }
@@ -131,6 +164,14 @@ watch(showCreate, (val) => {
     jsonError.value = ''
     advancedMode.value = false
     store.validationResult = null
+  }
+})
+
+/** 监听复制弹窗关闭，重置表单 */
+watch(showCopy, (val) => {
+  if (!val) {
+    copyForm.value = { strategy_id: '', display_name: '' }
+    copyError.value = ''
   }
 })
 
@@ -158,6 +199,58 @@ async function handleCreate(): Promise<void> {
   }
 }
 
+/** 点击复制按钮，获取源策略详情并打开复制弹窗 */
+async function handleCopyClick(item: { strategy_id: string; display_name: string }): Promise<void> {
+  copyError.value = ''
+  copyLoading.value = true
+  try {
+    await store.loadOne(item.strategy_id)
+    copyForm.value = {
+      strategy_id: item.strategy_id,
+      display_name: item.display_name,
+    }
+    showCopy.value = true
+  } catch (e) {
+    copyError.value = e instanceof Error ? e.message : '获取策略详情失败'
+  } finally {
+    copyLoading.value = false
+  }
+}
+
+/** 确认复制策略 */
+async function handleCopyConfirm(): Promise<void> {
+  copyError.value = ''
+  if (!copyForm.value.strategy_id.trim() || !copyForm.value.display_name.trim()) {
+    copyError.value = '策略 ID 和名称不能为空'
+    return
+  }
+  if (!store.current?.config_json) {
+    copyError.value = '未获取到源策略配置，请重新打开弹窗'
+    return
+  }
+
+  copyLoading.value = true
+  try {
+    const success = await store.create({
+      strategy_id: copyForm.value.strategy_id.trim(),
+      display_name: copyForm.value.display_name.trim(),
+      version: store.current.version,
+      description: store.current.description || '',
+      frequency: store.current.frequency,
+      config_json: store.current.config_json,
+    })
+    if (success) {
+      showCopy.value = false
+    } else {
+      copyError.value = store.error || '复制失败'
+    }
+  } catch {
+    copyError.value = '复制策略失败'
+  } finally {
+    copyLoading.value = false
+  }
+}
+
 onMounted(() => store.loadAll())
 </script>
 
@@ -180,8 +273,30 @@ onMounted(() => store.loadAll())
   flex-direction: column;
   gap: 12px;
   transition: border-color 0.15s;
+  position: relative;
 }
 .strategy-card:hover { border-color: var(--accent); }
+.strategy-card:hover .copy-btn { opacity: 1; }
+
+.copy-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, border-color 0.15s, color 0.15s;
+  line-height: 1;
+}
+.copy-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 
 .card-top { display: flex; flex-direction: column; gap: 8px; }
 .strategy-name { font-size: 16px; font-weight: 600; }
@@ -257,6 +372,8 @@ onMounted(() => store.loadAll())
   gap: 16px;
 }
 .modal-title { font-size: 18px; font-weight: 600; }
+
+.copy-hint { font-size: 13px; color: var(--text-muted); line-height: 1.6; }
 
 .form-group { display: flex; flex-direction: column; gap: 6px; }
 .form-label { font-size: 12px; color: var(--text-muted); font-weight: 500; }
