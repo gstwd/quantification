@@ -220,7 +220,7 @@ const verdictText = computed(() => {
   if (m.cumulative_return_diff_pct > 0.01) aWins.push('累计收益')
   else if (m.cumulative_return_diff_pct < -0.01) bWins.push('累计收益')
 
-  // 回撤：负差值 = A 回撤更小 = A 更优
+  // 回撤为负值（-10 > -20），正差值 = A 回撤更优
   if (m.max_drawdown_diff_pct > 0.5) aWins.push('最大回撤控制')
   else if (m.max_drawdown_diff_pct < -0.5) bWins.push('最大回撤控制')
 
@@ -294,8 +294,7 @@ function pctColor(v: number): string {
   return v >= 0 ? 'success' : 'danger'
 }
 
-// 回撤差值：A 回撤更小=更好，但 diff=A-B，所以 A 更优时 diff 为负
-// 对于一般指标，diff>0 意味着 A 更好；对于回撤，diff<0 意味着 A 更好
+// 对于一般指标，diff>0 意味着 A 更好；回撤为负值（-10 > -20），diff>0 同样意味着 A 更好
 function buildRow(
   label: string,
   a: number,
@@ -308,7 +307,7 @@ function buildRow(
   let winner: Winner = 'draw'
   const threshold = fmt === ratioFmt ? 0.001 : 0.01
   if (invertDiff) {
-    // 回撤类：更小=更好
+    // 更小=更好的指标（如费用、波动率等正数指标）
     winner = diff > threshold ? 'b' : diff < -threshold ? 'a' : 'draw'
   } else {
     winner = diff > threshold ? 'a' : diff < -threshold ? 'b' : 'draw'
@@ -355,7 +354,7 @@ const allCoreRows = computed<MetricRow[]>(() => {
   if (!m) return []
   return [
     buildRow('累计收益 (%)', m.a_cumulative_return_pct, m.b_cumulative_return_pct, pctFmt),
-    buildRow('最大回撤 (%)', m.a_max_drawdown_pct, m.b_max_drawdown_pct, pctFmt, pctFmt, true),
+    buildRow('最大回撤 (%)', m.a_max_drawdown_pct, m.b_max_drawdown_pct, pctFmt, pctFmt),
     buildRow('夏普比率', m.a_sharpe_ratio, m.b_sharpe_ratio, ratioFmt, ratioFmt),
     buildRow('卡玛比率', m.a_calmar_ratio, m.b_calmar_ratio, ratioFmt, ratioFmt),
   ]
