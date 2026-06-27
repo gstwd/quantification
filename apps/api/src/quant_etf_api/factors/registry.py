@@ -71,6 +71,7 @@ def build_default_factor_registry() -> FactorRegistry:
     )
     from quant_etf_api.factors.builtins.momentum import (
         Return120dComputer,
+        Return17dComputer,
         Return20dComputer,
         Return5dComputer,
         Return60dComputer,
@@ -88,32 +89,37 @@ def build_default_factor_registry() -> FactorRegistry:
         PBPercentileComputer,
         PEPercentileComputer,
     )
-    from quant_etf_api.factors.builtins.volatility import Volatility20dComputer
-    from quant_etf_api.factors.builtins.volume import VolumeRatio20dComputer
+    from quant_etf_api.factors.builtins.volatility import Volatility17dComputer, Volatility20dComputer
+    from quant_etf_api.factors.builtins.volume import VolumeRatio17dComputer, VolumeRatio20dComputer
 
     registry = FactorRegistry()
     # 价格（原始字段，无需计算）
     registry.register(ClosePriceComputer())
     registry.register(ChangePctComputer())
     # 量能
+    registry.register(VolumeRatio17dComputer())
     registry.register(VolumeRatio20dComputer())
     # 动量
     registry.register(Return5dComputer())
+    registry.register(Return17dComputer())
     registry.register(Return20dComputer())
     registry.register(Return60dComputer())
     registry.register(Return120dComputer())
     # 波动
+    registry.register(Volatility17dComputer())
     registry.register(Volatility20dComputer())
     # 估值
     registry.register(PEPercentileComputer())
     registry.register(PBPercentileComputer())
     # 技术指标 — 均线
-    for period in (5, 10, 20, 60):
+    for period in (5, 10, 17, 20, 60):
         registry.register(MAComputer(period=period))
     # 技术指标 — ATR
     registry.register(ATRComputer(period=14))
     # 技术指标 — Donchian 通道
+    registry.register(DonchianHighComputer(period=17))
     registry.register(DonchianHighComputer(period=20))
+    registry.register(DonchianLowComputer(period=17))
     registry.register(DonchianLowComputer(period=20))
     # 技术指标 — RSI
     registry.register(RSIComputer(period=14))

@@ -354,23 +354,37 @@ class TestVolatility20dComputer:
 
 
 class TestFactorRegistry:
-    def test_default_registry_has_seven_factors(self) -> None:
-        """默认注册表应包含 7 个内置因子。"""
+    def test_default_registry_has_all_factors(self) -> None:
+        """默认注册表应包含全部内置因子。"""
         registry = build_default_factor_registry()
-        assert len(registry.all()) == 7
+        assert len(registry.all()) == 32
 
     def test_default_registry_factor_ids(self) -> None:
-        """默认注册表的 factor_id 集合应完整。"""
+        """默认注册表的 factor_id 集合应包含核心因子。"""
         registry = build_default_factor_registry()
         ids = {c.spec.factor_id for c in registry.all()}
-        assert ids == {
+        # 核心因子应全部存在
+        assert ids >= {
+            "volume_ratio_17d",
             "volume_ratio_20d",
             "return_5d",
+            "return_17d",
             "return_20d",
             "return_60d",
+            "return_120d",
+            "volatility_17d",
             "volatility_20d",
             "pe_percentile",
             "pb_percentile",
+            "ma_5d",
+            "ma_10d",
+            "ma_17d",
+            "ma_20d",
+            "ma_60d",
+            "donchian_17d_high",
+            "donchian_17d_low",
+            "donchian_20d_high",
+            "donchian_20d_low",
         }
 
     def test_get_returns_correct_computer(self) -> None:

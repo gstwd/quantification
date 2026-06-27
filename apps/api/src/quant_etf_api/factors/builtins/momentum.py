@@ -1,4 +1,4 @@
-"""动量类因子：5 日、20 日、60 日、120 日收益率（基于指数数据）。
+"""动量类因子：5 日、17 日、20 日、60 日、120 日收益率（基于指数数据）。
 
 不复用 domain.common.bar_metrics.calc_5d_return（数据不足时返回 0.0，语义模糊），
 改用内部 _calc_nd_return：数据不足时明确返回 None，区分"零涨跌"与"无数据"。
@@ -229,6 +229,61 @@ class Return20dComputer:
         """
         close_dates, close_prices = _build_sorted_closes(index_code, ctx)
         return _calc_batch_returns(close_dates, close_prices, dates, n=20, factor_id=self.spec.factor_id)
+
+
+class Return17dComputer:
+    """17 日动量因子计算器。
+
+    计算近 17 个交易日的指数价格涨跌幅（%），衡量中短期动量。
+    实现 BatchFactorComputer 协议，支持回测批量预计算。
+    """
+
+    @property
+    def spec(self) -> FactorSpec:
+        """返回 17 日收益率的因子元数据。"""
+        return FactorSpec(
+            factor_id="return_17d",
+            name="17日收益率",
+            category="momentum",
+            version="1.0.0",
+            description="指数近 17 个交易日的价格涨跌幅（%），衡量中短期动量。",
+            required_data=["index_bars"],
+            lookback_days=35,
+        )
+
+    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
+        """计算 17 日收益率。
+
+        Args:
+            index_code: 指数代码。
+            trade_date: 目标交易日。
+            ctx: FactorContext。
+
+        Returns:
+            FactorValue，历史数据不足 17 条时 numeric 为 None。
+        """
+        value = _calc_nd_return(index_code, trade_date, ctx, n=17)
+        return FactorValue(
+            factor_id=self.spec.factor_id,
+            numeric=value,
+            payload={"lookback_days": 17},
+        )
+
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的 17 日收益率。
+
+        Args:
+            index_code: 指数代码。
+            dates: 需要计算的交易日列表（升序）。
+            ctx: FactorContext，包含全量回望数据。
+
+        Returns:
+            key=交易日, value=FactorValue 的字典。
+        """
+        close_dates, close_prices = _build_sorted_closes(index_code, ctx)
+        return _calc_batch_returns(close_dates, close_prices, dates, n=17, factor_id=self.spec.factor_id)
 
 
 class Return60dComputer:
