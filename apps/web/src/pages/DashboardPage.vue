@@ -75,6 +75,9 @@
             <span v-if="!item.is_rebalance_day" class="rebalance-detail">
               {{ formatRebalanceLabel(item) }}
             </span>
+            <span v-if="item.data_date" class="exec-date">
+              执行日 {{ formatExecDate(item.data_date) }}
+            </span>
           </div>
 
           <!-- 择时信号 -->
@@ -309,6 +312,14 @@ function formatStatus(status: string): string {
     failed: '失败',
   }
   return map[status] ?? status
+}
+
+/** 格式化执行日期（YYYY-MM-DD → MM-DD） */
+function formatExecDate(dateStr: string): string {
+  const d = new Date(dateStr)
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${mm}-${dd}`
 }
 
 /** 格式化调仓频率标签 */
@@ -689,6 +700,11 @@ onMounted(() =>
 .rebalance-detail {
   font-size: 11px;
   color: var(--text-muted);
+}
+.exec-date {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: auto;
 }
 
 /* 择时 regime 标签 */

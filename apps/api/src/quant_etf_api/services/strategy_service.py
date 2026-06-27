@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from quant_etf_api.engine.orchestrator import StrategyEngine
+from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.schemas.strategy import (
     AllocationResponse,
     StarredStrategyItem,
@@ -28,6 +29,27 @@ from quant_etf_api.services.context_builder import ContextBuilder
 from quant_etf_api.services.strategy_config_service import StrategyConfigService
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_effective_date(trade_date: date | None = None) -> date:
+    """将指定日期对齐到最近的交易日。
+
+    当 trade_date 为 None 时，使用今天；若今天为非交易日（周末/节假日），
+    则回退至最近一个交易日。确保调仓日判断和分配管线基于真实交易日执行。
+
+    Args:
+        trade_date: 指定日期，为 None 时自动对齐。
+
+    Returns:
+        对齐后的有效交易日。
+    """
+    if trade_date is not None:
+        return trade_date
+    cal = TradingCalendar()
+    today = date.today()
+    if cal.is_trading_day(today):
+        return today
+    return cal.latest_trading_day(today)
 
 
 class StrategyService:
@@ -88,7 +110,7 @@ class StrategyService:
         from quant_etf_api.factors.registry import get_default_factor_registry
 
         builder = ContextBuilder(self._db, registry=get_default_factor_registry())
-        effective_date = trade_date if trade_date is not None else date.today()
+        effective_date = _resolve_effective_date(trade_date)
         context = builder.build(config, effective_date)
 
         # 执行引擎
@@ -145,7 +167,7 @@ class StrategyService:
 
         from quant_etf_api.engine.rebalance import DefaultRebalanceScheduler
 
-        effective_date = trade_date if trade_date is not None else date.today()
+        effective_date = _resolve_effective_date(trade_date)
         config_svc = StrategyConfigService(self._db)
         starred_rows = config_svc._repo.find_starred()
 
@@ -158,7 +180,7 @@ class StrategyService:
                 if config is None:
                     continue
 
-                # 判断调仓日
+                # 判断调仓日（基于交易日对齐后的有效日期）
                 if config.rebalance is not None:
                     is_rebalance_day = scheduler.should_rebalance(
                         config.rebalance, effective_date, None
