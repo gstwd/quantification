@@ -35,6 +35,34 @@ class StrategyConfigRepository(BaseRepository):
         else:
             self._db.add(model)
 
+    def find_starred(self) -> list[StrategyConfigModel]:
+        """查询所有星标关注的启用策略。"""
+        return (
+            self._db.query(StrategyConfigModel)
+            .filter(
+                StrategyConfigModel.status == "active",
+                StrategyConfigModel.is_starred == True,  # noqa: E712
+            )
+            .order_by(StrategyConfigModel.strategy_id.asc())
+            .all()
+        )
+
+    def set_starred(self, strategy_id: str, is_starred: bool) -> bool:
+        """设置策略的星标状态。
+
+        Args:
+            strategy_id: 策略标识。
+            is_starred: 是否星标。
+
+        Returns:
+            是否成功更新。
+        """
+        model = self._db.get(StrategyConfigModel, strategy_id)
+        if model is None:
+            return False
+        model.is_starred = is_starred
+        return True
+
     def delete_by_id(self, strategy_id: str) -> bool:
         """删除策略配置。
 

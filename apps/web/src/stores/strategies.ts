@@ -6,6 +6,8 @@ import {
   deleteStrategy,
   fetchStrategies,
   fetchStrategyDetail,
+  starStrategy,
+  unstarStrategy,
   updateStrategy,
   validateStrategyConfig,
 } from '../api/strategies'
@@ -103,6 +105,40 @@ export const useStrategyStore = defineStore('strategies', () => {
     }
   }
 
+  /** 星标关注策略 */
+  async function star(strategyId: string): Promise<boolean> {
+    try {
+      await starStrategy(strategyId)
+      // 乐观更新本地状态
+      const item = items.value.find(i => i.strategy_id === strategyId)
+      if (item) item.is_starred = true
+      if (current.value && current.value.strategy_id === strategyId) {
+        current.value.is_starred = true
+      }
+      return true
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '星标策略失败'
+      return false
+    }
+  }
+
+  /** 取消星标关注 */
+  async function unstar(strategyId: string): Promise<boolean> {
+    try {
+      await unstarStrategy(strategyId)
+      // 乐观更新本地状态
+      const item = items.value.find(i => i.strategy_id === strategyId)
+      if (item) item.is_starred = false
+      if (current.value && current.value.strategy_id === strategyId) {
+        current.value.is_starred = false
+      }
+      return true
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '取消星标失败'
+      return false
+    }
+  }
+
   /** 校验策略配置 */
   async function validate(configJson: Record<string, unknown>): Promise<void> {
     try {
@@ -123,6 +159,8 @@ export const useStrategyStore = defineStore('strategies', () => {
     create,
     update,
     remove,
+    star,
+    unstar,
     validate,
   }
 })

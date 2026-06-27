@@ -11,7 +11,17 @@
     <template v-else-if="store.current">
       <div class="page-header">
         <div class="header-left">
-          <h1 class="page-title">{{ store.current.display_name }}</h1>
+          <h1 class="page-title">
+            {{ store.current.display_name }}
+            <button
+              class="star-btn"
+              :class="{ starred: store.current.is_starred }"
+              :title="store.current.is_starred ? '取消星标' : '星标关注'"
+              @click="handleToggleStar"
+            >
+              {{ store.current.is_starred ? '★' : '☆' }}
+            </button>
+          </h1>
           <div class="chips">
             <span class="chip chip-version">v{{ store.current.version }}</span>
             <span class="chip chip-freq">{{ store.current.frequency }}</span>
@@ -682,6 +692,16 @@ function disposeCharts(): void {
   chartRefs && Object.keys(chartRefs).forEach(k => delete chartRefs[k])
 }
 
+/** 切换星标状态 */
+async function handleToggleStar(): Promise<void> {
+  if (!store.current) return
+  if (store.current.is_starred) {
+    await store.unstar(store.current.strategy_id)
+  } else {
+    await store.star(store.current.strategy_id)
+  }
+}
+
 /** 删除策略 */
 async function handleDelete(): Promise<void> {
   if (!confirm('确定删除此策略？此操作不可撤销。')) return
@@ -703,6 +723,27 @@ onUnmounted(() => disposeCharts())
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .header-left { display: flex; flex-direction: column; gap: 8px; }
 .page-title { font-size: 22px; font-weight: 700; }
+.page-title .star-btn {
+  vertical-align: middle;
+  margin-left: 8px;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+  line-height: 1;
+}
+.page-title .star-btn.starred {
+  color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.3);
+}
+.page-title .star-btn:hover {
+  border-color: #f59e0b;
+  color: #f59e0b;
+}
 .header-actions { display: flex; gap: 8px; }
 
 .chips { display: flex; gap: 6px; }

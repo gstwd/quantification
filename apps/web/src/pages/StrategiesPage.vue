@@ -16,6 +16,14 @@
     <div v-else-if="store.items.length === 0" class="empty">暂无策略配置，请点击"新建策略"创建</div>
     <div v-else class="grid">
       <div v-for="item in store.items" :key="item.strategy_id" class="strategy-card">
+        <button
+          class="star-btn"
+          :class="{ starred: item.is_starred }"
+          :title="item.is_starred ? '取消星标' : '星标关注'"
+          @click.stop="handleToggleStar(item)"
+        >
+          {{ item.is_starred ? '★' : '☆' }}
+        </button>
         <button class="copy-btn" title="复制策略" @click="handleCopyClick(item)">📋</button>
         <div class="card-top">
           <h3 class="strategy-name">{{ item.display_name }}</h3>
@@ -175,6 +183,15 @@ watch(showCopy, (val) => {
   }
 })
 
+/** 切换星标状态 */
+async function handleToggleStar(item: { strategy_id: string; is_starred: boolean }): Promise<void> {
+  if (item.is_starred) {
+    await store.unstar(item.strategy_id)
+  } else {
+    await store.star(item.strategy_id)
+  }
+}
+
 /** 创建策略 */
 async function handleCreate(): Promise<void> {
   jsonError.value = ''
@@ -277,6 +294,32 @@ onMounted(() => store.loadAll())
 }
 .strategy-card:hover { border-color: var(--accent); }
 .strategy-card:hover .copy-btn { opacity: 1; }
+.strategy-card:hover .star-btn:not(.starred) { opacity: 1; }
+
+.star-btn {
+  position: absolute;
+  top: 12px;
+  right: 44px;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, border-color 0.15s, color 0.15s;
+  line-height: 1;
+}
+.star-btn.starred {
+  opacity: 1;
+  color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.3);
+}
+.star-btn:hover {
+  border-color: #f59e0b;
+  color: #f59e0b;
+}
 
 .copy-btn {
   position: absolute;

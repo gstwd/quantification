@@ -1,6 +1,7 @@
 import { apiClient } from './client'
 import type {
   AllocationResponse,
+  StarredSummaryResponse,
   StrategyConfigCreate,
   StrategyConfigUpdate,
   StrategyDetail,
@@ -59,6 +60,30 @@ export async function runAllocation(
 ): Promise<AllocationResponse> {
   const { data } = await apiClient.get<AllocationResponse>(
     `/strategies/${strategyId}/allocation`,
+    { params: tradeDate ? { trade_date: tradeDate } : {} },
+  )
+  return data
+}
+
+/** 星标关注策略 */
+export async function starStrategy(strategyId: string): Promise<void> {
+  await apiClient.post(`/strategies/${strategyId}/star`)
+}
+
+/** 取消星标关注 */
+export async function unstarStrategy(strategyId: string): Promise<void> {
+  await apiClient.post(`/strategies/${strategyId}/unstar`)
+}
+
+/**
+ * 获取所有星标策略的当日执行摘要
+ * @param tradeDate - 可选，指定交易日（YYYY-MM-DD），不传则使用今天
+ */
+export async function fetchStarredSummary(
+  tradeDate?: string,
+): Promise<StarredSummaryResponse> {
+  const { data } = await apiClient.get<StarredSummaryResponse>(
+    '/strategies/starred/summary',
     { params: tradeDate ? { trade_date: tradeDate } : {} },
   )
   return data

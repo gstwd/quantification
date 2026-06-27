@@ -21,6 +21,8 @@ export interface StrategySummary {
   frequency: string
   description: string
   status: string
+  /** 是否星标关注 */
+  is_starred: boolean
   /** 策略绑定的指数代码列表，空数组表示全指数通用 */
   index_codes: string[]
 }
@@ -499,6 +501,31 @@ export interface AllocationResponse {
   plan: AllocationPlan
   /** 本次决策所用因子数据的交易日（YYYY-MM-DD），用于展示数据新鲜度 */
   data_date?: string | null
+}
+
+/** 星标策略执行摘要中的单个策略项 */
+export interface StarredStrategyItem {
+  strategy_id: string
+  display_name: string
+  frequency: string
+  /** 是否为调仓日 */
+  is_rebalance_day: boolean
+  /** 调仓频率（daily/weekly/monthly） */
+  rebalance_frequency: string | null
+  /** 周度调仓的星期几（0=周一） */
+  rebalance_day_of_week: number | null
+  /** 月度调仓的日期（1-31） */
+  rebalance_day_of_month: number | null
+  timing: AllocationTiming | null
+  rankings: AllocationRanking[]
+  plan: AllocationPlan
+  data_date: string | null
+}
+
+/** 星标策略执行摘要响应 */
+export interface StarredSummaryResponse {
+  trade_date: string
+  items: StarredStrategyItem[]
 }
 
 /** 统一分页响应格式 */

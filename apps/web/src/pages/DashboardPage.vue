@@ -45,6 +45,85 @@
       </div>
     </div>
 
+    <!-- 关注策略：星标策略当日执行摘要 -->
+    <div class="section">
+      <div class="section-header">
+        <h2 class="section-title">关注策略</h2>
+        <span v-if="starredLoading" class="section-badge">加载中...</span>
+        <span v-else-if="starredSummary" class="section-badge">{{ starredSummary.items.length }} 个星标</span>
+      </div>
+      <div v-if="starredLoading" class="loading">加载中...</div>
+      <div v-else-if="starredSummary?.items.length" class="starred-grid">
+        <div v-for="item in starredSummary.items" :key="item.strategy_id" class="starred-card">
+          <!-- 卡片头部：策略名称 + 星标按钮 -->
+          <div class="starred-card-header">
+            <RouterLink :to="`/strategies/${item.strategy_id}`" class="starred-name">
+              {{ item.display_name }}
+            </RouterLink>
+            <button
+              class="star-btn-small starred"
+              title="取消星标"
+              @click.stop="handleUnstar(item.strategy_id)"
+            >★</button>
+          </div>
+
+          <!-- 调仓状态 -->
+          <div class="starred-row">
+            <span :class="['rebalance-badge', item.is_rebalance_day ? 'rebalance-yes' : 'rebalance-no']">
+              {{ item.is_rebalance_day ? '今日调仓' : '非调仓日' }}
+            </span>
+            <span v-if="!item.is_rebalance_day" class="rebalance-detail">
+              {{ formatRebalanceLabel(item) }}
+            </span>
+          </div>
+
+          <!-- 择时信号 -->
+          <div v-if="item.timing?.regime" class="starred-row">
+            <span class="starred-label">择时</span>
+            <span :class="['regime-badge', `regime-${item.timing.regime}`]">
+              {{ formatRegime(item.timing.regime) }}
+            </span>
+            <span class="regime-confidence">{{ item.timing.confidence?.toFixed(0) }}%</span>
+          </div>
+
+          <!-- 仓位概览 -->
+          <div v-if="Object.keys(item.plan?.positions || {}).length > 0" class="starred-row">
+            <span class="starred-label">持仓</span>
+            <div class="position-tags">
+              <span
+                v-for="[code, weight] in topPositions(item.plan.positions)"
+                :key="code"
+                class="position-tag"
+              >
+                {{ code }} <strong>{{ (weight * 100).toFixed(0) }}%</strong>
+              </span>
+              <span
+                v-if="Object.keys(item.plan.positions).length > 5"
+                class="position-more"
+              >+{{ Object.keys(item.plan.positions).length - 5 }}</span>
+            </div>
+          </div>
+
+          <!-- 总仓位进度条 -->
+          <div v-if="item.plan?.total_exposure != null" class="starred-row">
+            <span class="starred-label">总仓位</span>
+            <div class="exposure-bar-bg">
+              <div
+                class="exposure-bar"
+                :style="{ width: (item.plan.total_exposure * 100).toFixed(0) + '%' }"
+              ></div>
+            </div>
+            <span class="exposure-pct">{{ (item.plan.total_exposure * 100).toFixed(0) }}%</span>
+          </div>
+        </div>
+      </div>
+      <div v-else class="empty">
+        暂无关注策略，前往
+        <RouterLink to="/strategies" class="link-accent">策略中心</RouterLink>
+        添加关注
+      </div>
+    </div>
+
     <!-- 数据源状态 -->
     <div v-if="systemStatus" class="section">
       <div class="section-header">
@@ -154,9 +233,11 @@
  */
 
 import { computed, onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 
-import type { DataQualityResponse, SystemStatusResponse } from '../types/api'
+import type { DataQualityResponse, StarredSummaryResponse, SystemStatusResponse } from '../types/api'
 import { fetchDataQuality, fetchSystemStatus, triggerColdStart, triggerDailyIngest } from '../api/runs'
+import { fetchStarredSummary } from '../api/strategies'
 import { useStrategyStore } from '../stores/strategies'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
@@ -175,6 +256,9 @@ const triggering = ref(false)
 const triggeringColdStart = ref(false)
 
 const strategyStore = useStrategyStore()
+
+const starredSummary = ref<StarredSummaryResponse | null>(null)
+const starredLoading = ref(false)
 
 /** 数据质量分组配置 */
 const qualityGroups = computed(() => {
@@ -225,6 +309,50 @@ function formatStatus(status: string): string {
     failed: '失败',
   }
   return map[status] ?? status
+}
+
+/** 格式化调仓频率标签 */
+function formatRebalanceLabel(item: { rebalance_frequency: string | null; rebalance_day_of_week: number | null; rebalance_day_of_month: number | null }): string {
+  const weekNames = ['周一', '周二', '周三', '周四', '周五']
+  if (item.rebalance_frequency === 'weekly' && item.rebalance_day_of_week != null) {
+    return `每${weekNames[item.rebalance_day_of_week] || '五'}调仓`
+  }
+  if (item.rebalance_frequency === 'monthly' && item.rebalance_day_of_month != null) {
+    return `每月${item.rebalance_day_of_month}日调仓`
+  }
+  return '每日调仓'
+}
+
+/** 格式化择时 regime */
+function formatRegime(regime: string): string {
+  const map: Record<string, string> = { offensive: '进攻', defensive: '防守', neutral: '中性' }
+  return map[regime] ?? regime
+}
+
+/** 取持仓前5项 */
+function topPositions(positions: Record<string, number>): Array<[string, number]> {
+  return Object.entries(positions)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 5)
+}
+
+/** 加载星标策略摘要 */
+async function loadStarredSummary() {
+  starredLoading.value = true
+  try {
+    starredSummary.value = await fetchStarredSummary()
+  } catch {
+    // 星标摘要加载失败不影响主页面
+  } finally {
+    starredLoading.value = false
+  }
+}
+
+/** 取消星标 */
+async function handleUnstar(strategyId: string) {
+  await strategyStore.unstar(strategyId)
+  // 重新加载星标摘要以刷新列表
+  await loadStarredSummary()
 }
 
 /** 加载系统状态 */
@@ -283,6 +411,7 @@ onMounted(() =>
     loadStatus(),
     loadQuality(),
     strategyStore.loadAll(),
+    loadStarredSummary(),
   ]),
 )
 </script>
@@ -486,6 +615,136 @@ onMounted(() =>
 /* === 通用工具类 === */
 .text-muted { color: var(--text-muted); }
 .mono { font-family: monospace; font-size: 12px; }
+
+/* === 关注策略卡片 === */
+.starred-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 12px;
+  padding: 16px 20px;
+}
+.starred-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.starred-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.starred-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+  transition: color 0.15s;
+}
+.starred-name:hover { color: var(--accent-hover); }
+
+.star-btn-small {
+  padding: 2px 6px;
+  background: transparent;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--radius-sm);
+  color: #f59e0b;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+  line-height: 1;
+}
+.star-btn-small:hover { background: rgba(245, 158, 11, 0.1); }
+
+.starred-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.starred-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 36px;
+  flex-shrink: 0;
+}
+
+/* 调仓状态标签 */
+.rebalance-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 20px;
+}
+.rebalance-yes {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--success);
+}
+.rebalance-no {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-muted);
+}
+.rebalance-detail {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* 择时 regime 标签 */
+.regime-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 20px;
+}
+.regime-offensive { background: rgba(34, 197, 94, 0.15); color: var(--success); }
+.regime-defensive { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
+.regime-neutral   { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+.regime-confidence { font-size: 12px; color: var(--text-muted); }
+
+/* 持仓标签 */
+.position-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.position-tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  background: rgba(59, 130, 246, 0.08);
+  border-radius: 12px;
+  color: var(--text-muted);
+}
+.position-tag strong { color: var(--text); }
+.position-more {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 2px 4px;
+}
+
+/* 仓位进度条 */
+.exposure-bar-bg {
+  flex: 1;
+  height: 6px;
+  background: var(--surface);
+  border-radius: 3px;
+  overflow: hidden;
+  max-width: 140px;
+}
+.exposure-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #34d399);
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+.exposure-pct {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.link-accent { color: var(--accent); }
 
 /* === 响应式 === */
 @media (max-width: 640px) {

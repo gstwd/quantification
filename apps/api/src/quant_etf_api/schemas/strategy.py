@@ -18,6 +18,7 @@ class StrategySummary(BaseModel):
         frequency: 运行频率。
         description: 策略描述。
         status: 状态。
+        is_starred: 是否星标关注。
         index_codes: 策略绑定的指数代码列表，空列表表示全指数通用。
     """
 
@@ -27,6 +28,7 @@ class StrategySummary(BaseModel):
     frequency: str
     description: str
     status: str = "active"
+    is_starred: bool = False
     index_codes: list[str] = Field(default_factory=list)
 
 
@@ -98,6 +100,48 @@ class AllocationResponse(BaseModel):
     rankings: list[dict[str, Any]]
     plan: dict[str, Any]
     data_date: date | None = None
+
+
+class StarredStrategyItem(BaseModel):
+    """星标策略执行摘要，用于总览页展示。
+
+    Attributes:
+        strategy_id: 策略唯一标识。
+        display_name: 策略中文名称。
+        frequency: 运行频率。
+        is_rebalance_day: 是否为调仓日。
+        rebalance_frequency: 调仓频率。
+        rebalance_day_of_week: 周度调仓的星期几（0=周一）。
+        rebalance_day_of_month: 月度调仓的日期（1-31）。
+        timing: 择时信号，含 regime、confidence、label。
+        rankings: 资产排名列表。
+        plan: 仓位分配方案。
+        data_date: 所用数据的最新交易日。
+    """
+
+    strategy_id: str
+    display_name: str
+    frequency: str
+    is_rebalance_day: bool
+    rebalance_frequency: str | None = None
+    rebalance_day_of_week: int | None = None
+    rebalance_day_of_month: int | None = None
+    timing: dict[str, Any] | None = None
+    rankings: list[dict[str, Any]] = Field(default_factory=list)
+    plan: dict[str, Any] = Field(default_factory=dict)
+    data_date: date | None = None
+
+
+class StarredSummaryResponse(BaseModel):
+    """星标策略执行摘要响应。
+
+    Attributes:
+        trade_date: 执行日期。
+        items: 各星标策略的执行摘要列表。
+    """
+
+    trade_date: date
+    items: list[StarredStrategyItem] = Field(default_factory=list)
 
 
 class StrategyValidationResult(BaseModel):

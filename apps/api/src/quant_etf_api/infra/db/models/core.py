@@ -798,6 +798,9 @@ class StrategyConfigModel(Base):
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="active", comment="状态：active=启用, disabled=禁用"
     )
+    is_starred: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, comment="是否星标关注"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc), comment="记录创建时间（UTC）"
     )

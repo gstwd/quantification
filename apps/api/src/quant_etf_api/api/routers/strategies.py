@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from quant_etf_api.api.deps import get_db
 from quant_etf_api.schemas.strategy import (
     AllocationResponse,
+    StarredSummaryResponse,
     StrategyConfigCreate,
     StrategyConfigUpdate,
     StrategyDetail,
@@ -25,6 +26,18 @@ router = APIRouter(tags=["strategies"])
 def list_strategies(db: Session = Depends(get_db)) -> list[StrategySummary]:
     """返回所有已启用策略的摘要列表。"""
     return StrategyService(db).list_strategies()
+
+
+@router.get("/strategies/starred/summary", response_model=StarredSummaryResponse)
+def get_starred_summary(
+    trade_date: date | None = Query(None, description="指定交易日（YYYY-MM-DD），不传则使用今天"),
+    db: Session = Depends(get_db),
+) -> StarredSummaryResponse:
+    """获取所有星标策略的当日执行摘要。
+
+    返回各星标策略的择时信号、资产排名、仓位分配及调仓日判断结果。
+    """
+    return StrategyService(db).get_starred_summary(trade_date=trade_date)
 
 
 @router.get("/strategies/{strategy_id}", response_model=StrategyDetail)
@@ -91,3 +104,17 @@ def run_allocation(
             detail=f"策略 {strategy_id} 不存在或不支持资产配置决策管线",
         )
     return result
+
+
+@router.post("/strategies/{strategy_id}/star", status_code=204)
+def star_strategy(strategy_id: str, db: Session = Depends(get_db)) -> None:
+    """星标关注策略。"""
+    if not StrategyService(db).star_strategy(strategy_id, True):
+        raise HTTPException(status_code=404, detail="策略不存在")
+
+
+@router.post("/strategies/{strategy_id}/unstar", status_code=204)
+def unstar_strategy(strategy_id: str, db: Session = Depends(get_db)) -> None:
+    """取消星标关注。"""
+    if not StrategyService(db).star_strategy(strategy_id, False):
+        raise HTTPException(status_code=404, detail="策略不存在")

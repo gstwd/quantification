@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session
 from quant_etf_api.engine.orchestrator import StrategyEngine
 from quant_etf_api.schemas.strategy import (
     AllocationResponse,
+    StarredStrategyItem,
+    StarredSummaryResponse,
     StrategyConfigCreate,
     StrategyConfigUpdate,
     StrategyDetail,
@@ -103,6 +105,98 @@ class StrategyService:
             },
             data_date=context.trade_date,
         )
+
+    # ── 星标管理 ──────────────────────────────────────────────────────────
+
+    def star_strategy(self, strategy_id: str, is_starred: bool) -> bool:
+        """设置策略的星标状态。
+
+        Args:
+            strategy_id: 策略标识。
+            is_starred: 是否星标。
+
+        Returns:
+            是否成功更新，策略不存在时返回 False。
+        """
+        if self._db is None:
+            return False
+        svc = StrategyConfigService(self._db)
+        result = svc._repo.set_starred(strategy_id, is_starred)
+        if result:
+            self._db.commit()
+        return result
+
+    def get_starred_summary(
+        self, trade_date: date | None = None
+    ) -> StarredSummaryResponse:
+        """获取所有星标策略的当日执行摘要。
+
+        对每个星标策略运行分配管线，判断是否为调仓日，
+        返回择时、排名、仓位等摘要信息。
+
+        Args:
+            trade_date: 指定交易日，不传则使用今天。
+
+        Returns:
+            StarredSummaryResponse，含各策略的执行摘要列表。
+        """
+        if self._db is None:
+            return StarredSummaryResponse(trade_date=trade_date or date.today(), items=[])
+
+        from quant_etf_api.engine.rebalance import DefaultRebalanceScheduler
+
+        effective_date = trade_date if trade_date is not None else date.today()
+        config_svc = StrategyConfigService(self._db)
+        starred_rows = config_svc._repo.find_starred()
+
+        items: list[StarredStrategyItem] = []
+        scheduler = DefaultRebalanceScheduler()
+
+        for row in starred_rows:
+            try:
+                config = config_svc.get_parsed_config(row.strategy_id)
+                if config is None:
+                    continue
+
+                # 判断调仓日
+                if config.rebalance is not None:
+                    is_rebalance_day = scheduler.should_rebalance(
+                        config.rebalance, effective_date, None
+                    )
+                else:
+                    # 无调仓配置默认视为每日调仓
+                    is_rebalance_day = True
+
+                # 运行分配管线
+                allocation = self.run_allocation(
+                    row.strategy_id, trade_date=effective_date
+                )
+                if allocation is None:
+                    continue
+
+                rebalance_cfg = config.rebalance
+                items.append(
+                    StarredStrategyItem(
+                        strategy_id=row.strategy_id,
+                        display_name=row.display_name,
+                        frequency=row.frequency,
+                        is_rebalance_day=is_rebalance_day,
+                        rebalance_frequency=rebalance_cfg.frequency if rebalance_cfg else "daily",
+                        rebalance_day_of_week=rebalance_cfg.day_of_week if rebalance_cfg else None,
+                        rebalance_day_of_month=rebalance_cfg.day_of_month if rebalance_cfg else None,
+                        timing=allocation.timing,
+                        rankings=allocation.rankings,
+                        plan=allocation.plan,
+                        data_date=allocation.data_date,
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "获取星标策略 %s 执行摘要失败，跳过", row.strategy_id
+                )
+                continue
+
+        return StarredSummaryResponse(trade_date=effective_date, items=items)
 
     # ── 配置管理委托 ──────────────────────────────────────────────────────
 

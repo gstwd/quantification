@@ -44,6 +44,7 @@ class StrategyConfigService:
                 frequency=r.frequency,
                 description=r.description or "",
                 status=r.status,
+                is_starred=r.is_starred,
                 index_codes=(r.config_json or {}).get("index_codes", []),
             )
             for r in rows
@@ -61,6 +62,7 @@ class StrategyConfigService:
             frequency=row.frequency,
             description=row.description or "",
             status=row.status,
+            is_starred=row.is_starred,
             config_json=row.config_json,
             created_at=row.created_at,
             updated_at=row.updated_at,
