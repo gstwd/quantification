@@ -53,34 +53,9 @@ def list_backtests(
     return PaginatedResponse(items=items, total=total, offset=offset, limit=limit)
 
 
-@router.get("/backtests/{backtest_id}", response_model=BacktestDetail)
-def get_backtest(backtest_id: str, db: Session = Depends(get_db)) -> BacktestDetail:
-    """返回回测详情，含配置信息和汇总指标。"""
-    detail = BacktestService(db).get_backtest(backtest_id)
-    if detail is None:
-        raise HTTPException(status_code=404, detail="回测记录不存在")
-    return detail
-
-
-@router.get("/backtests/{backtest_id}/daily", response_model=list[BacktestDailyResult])
-def get_backtest_daily(
-    backtest_id: str, db: Session = Depends(get_db)
-) -> list[BacktestDailyResult]:
-    """返回回测每日组合绩效，用于权益曲线和回撤图渲染。"""
-    return BacktestService(db).get_daily_results(backtest_id)
-
-
-@router.get("/backtests/{backtest_id}/index-results", response_model=list[BacktestIndexResult])
-def get_backtest_index_results(
-    backtest_id: str,
-    index_code: str | None = None,
-    db: Session = Depends(get_db),
-) -> list[BacktestIndexResult]:
-    """返回回测每日每指数信号与实际收益，可按指数代码过滤。"""
-    return BacktestService(db).get_index_results(backtest_id, index_code=index_code)
-
-
 # ── 策略对比回测端点 ───────────────────────────────────────────────
+# 注意：对比路由必须定义在 /backtests/{backtest_id} 之前，
+# 否则 /backtests/comparisons 会被 {backtest_id} 捕获并返回 404。
 
 
 def _run_comparison_bg(comparison_id: str) -> None:
@@ -146,3 +121,30 @@ def get_comparison_daily(
 ) -> ComparisonDailyResponse:
     """返回两个策略的每日组合绩效，用于叠加图表渲染。"""
     return BacktestService(db).get_comparison_daily(comparison_id)
+
+
+@router.get("/backtests/{backtest_id}", response_model=BacktestDetail)
+def get_backtest(backtest_id: str, db: Session = Depends(get_db)) -> BacktestDetail:
+    """返回回测详情，含配置信息和汇总指标。"""
+    detail = BacktestService(db).get_backtest(backtest_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="回测记录不存在")
+    return detail
+
+
+@router.get("/backtests/{backtest_id}/daily", response_model=list[BacktestDailyResult])
+def get_backtest_daily(
+    backtest_id: str, db: Session = Depends(get_db)
+) -> list[BacktestDailyResult]:
+    """返回回测每日组合绩效，用于权益曲线和回撤图渲染。"""
+    return BacktestService(db).get_daily_results(backtest_id)
+
+
+@router.get("/backtests/{backtest_id}/index-results", response_model=list[BacktestIndexResult])
+def get_backtest_index_results(
+    backtest_id: str,
+    index_code: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[BacktestIndexResult]:
+    """返回回测每日每指数信号与实际收益，可按指数代码过滤。"""
+    return BacktestService(db).get_index_results(backtest_id, index_code=index_code)

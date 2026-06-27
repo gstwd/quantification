@@ -198,8 +198,19 @@ async function goCompPage(newOffset: number) {
   try { await store.loadAllComparisons(newOffset, compPageSize) } finally { compLoading.value = false }
 }
 
-function switchTab(tab: 'single' | 'comparison') {
+const comparisonsLoaded = ref(false)
+
+async function switchTab(tab: 'single' | 'comparison') {
   activeTab.value = tab
+  if (tab === 'comparison' && !comparisonsLoaded.value) {
+    compLoading.value = true
+    try {
+      await store.loadAllComparisons(0, compPageSize)
+      comparisonsLoaded.value = true
+    } finally {
+      compLoading.value = false
+    }
+  }
 }
 
 onMounted(async () => {
