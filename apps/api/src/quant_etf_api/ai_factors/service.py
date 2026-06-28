@@ -137,7 +137,6 @@ class AIFactorService:
         rows = []
         for item in items:
             rows.append({
-                "id": None,  # 让 DB 自动生成 UUID
                 "source_id": item.source_id,
                 "source_name": item.source_name,
                 "title": item.title,
@@ -166,7 +165,6 @@ class AIFactorService:
             if not news_id:
                 continue
             rows.append({
-                "id": None,
                 "news_id": news_id,
                 "trade_date": trade_date,
                 "asset_tags": item.asset_tags,

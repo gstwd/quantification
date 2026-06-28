@@ -17,8 +17,6 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
-from urllib.parse import urljoin
 
 import httpx
 
@@ -50,6 +48,15 @@ DEFAULT_RSS_FEEDS: list[str] = [
 
 # NewsNow API 默认地址
 DEFAULT_NEWSNOW_API = "https://newsnow.busiyi.world/api/s"
+
+# Cloudflare 需要浏览器 User-Agent，否则返回验证页面而非 JSON
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+}
 
 
 class NewsCollector:
@@ -102,7 +109,6 @@ class NewsCollector:
         id_to_name = {p["id"]: p["name"] for p in DEFAULT_PLATFORMS}
 
         items: list[RawNewsItem] = []
-        fetch_time = datetime.now(timezone.utc)
 
         for platform_id in platform_ids:
             try:
@@ -134,17 +140,26 @@ class NewsCollector:
 
         for attempt in range(self._max_retries):
             try:
-                with httpx.Client(timeout=self._timeout, proxy=self._proxy) as client:
+                with httpx.Client(
+                    timeout=self._timeout,
+                    proxy=self._proxy,
+                    headers=_BROWSER_HEADERS,
+                ) as client:
                     resp = client.get(url)
                     resp.raise_for_status()
                     data = resp.json()
                     return data
-            except Exception:
+            except Exception as e:
                 if attempt < self._max_retries - 1:
                     logger.debug("重试 %d/%d: %s", attempt + 1, self._max_retries, platform_id)
                     time.sleep(self._retry_delay)
                 else:
-                    logger.warning("采集失败(已重试%d次): %s", self._max_retries, platform_id)
+                    logger.warning(
+                        "采集失败(已重试%d次): %s, 错误: %s",
+                        self._max_retries,
+                        platform_id,
+                        e,
+                    )
 
         return None
 
@@ -248,15 +263,20 @@ class NewsCollector:
 
         for attempt in range(self._max_retries):
             try:
-                with httpx.Client(timeout=self._timeout, proxy=self._proxy) as client:
+                with httpx.Client(
+                    timeout=self._timeout,
+                    proxy=self._proxy,
+                    headers=_BROWSER_HEADERS,
+                ) as client:
                     resp = client.get(feed_url)
                     resp.raise_for_status()
                     content = resp.text
                     break
-            except Exception:
+            except Exception as e:
                 if attempt < self._max_retries - 1:
                     time.sleep(self._retry_delay)
                 else:
+                    logger.warning("RSS 获取失败: %s, 错误: %s", feed_url, e)
                     return []
 
         feed = feedparser.parse(content)

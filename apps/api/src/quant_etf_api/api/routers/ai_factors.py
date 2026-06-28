@@ -13,7 +13,7 @@ import logging
 from datetime import date
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
@@ -26,7 +26,6 @@ from quant_etf_api.infra.db.repositories.news_item import (
 from quant_etf_api.schemas.ai_factor import (
     AIAnalysisRunResponse,
     DailySentimentResponse,
-    NewsItemResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -158,7 +157,6 @@ def _raw_to_news_rows(items: list, crawl_date: date) -> list[dict[str, Any]]:
     rows = []
     for item in items:
         rows.append({
-            "id": None,
             "source_id": item.source_id,
             "source_name": item.source_name,
             "title": item.title,
