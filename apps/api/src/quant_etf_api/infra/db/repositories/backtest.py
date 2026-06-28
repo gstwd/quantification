@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
 
+from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import (
     BacktestComparisonModel,
     BacktestDailyResultModel,
@@ -107,7 +107,7 @@ class BacktestRepository(BaseRepository):
         if run is None:
             return
         run.status = "success"
-        run.finished_at = datetime.now(timezone.utc)
+        run.finished_at = utcnow()
         run.progress = 100
         if metrics:
             run.metrics = metrics
@@ -122,7 +122,7 @@ class BacktestRepository(BaseRepository):
         if run is None:
             return
         run.status = "failed"
-        run.finished_at = datetime.now(timezone.utc)
+        run.finished_at = utcnow()
         run.error_message = error_message[:1000]
         self._db.commit()
 
@@ -178,7 +178,7 @@ class BacktestRepository(BaseRepository):
         if comp is None:
             return
         comp.status = "success"
-        comp.finished_at = datetime.now(timezone.utc)
+        comp.finished_at = utcnow()
         comp.progress = 100
         if metrics:
             comp.comparison_metrics = metrics
@@ -192,7 +192,7 @@ class BacktestRepository(BaseRepository):
         if comp is None:
             return
         comp.status = "failed"
-        comp.finished_at = datetime.now(timezone.utc)
+        comp.finished_at = utcnow()
         comp.error_message = error_message[:1000]
         self._db.commit()
 
@@ -204,6 +204,6 @@ class BacktestRepository(BaseRepository):
         if comp is None:
             return
         comp.status = "partial"
-        comp.finished_at = datetime.now(timezone.utc)
+        comp.finished_at = utcnow()
         comp.error_message = error_message[:1000]
         self._db.commit()

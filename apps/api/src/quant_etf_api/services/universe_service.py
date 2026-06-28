@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
@@ -11,7 +11,7 @@ from quant_etf_api.infra.clients.akshare_fund import (
     map_fund_type_to_category,
 )
 from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
-from quant_etf_api.infra.db.base import SessionLocal
+from quant_etf_api.infra.db.base import SessionLocal, utcnow
 from quant_etf_api.infra.db.models.core import (
     EtfUniverseModel,
     ResearchRunItemModel,
@@ -227,7 +227,7 @@ class UniverseService:
         每只 ETF 的处理结果写入 ResearchRunItem，
         全部完成后更新 research_run 状态与指标。
         """
-        start_time = datetime.now(timezone.utc)
+        start_time = utcnow()
         try:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is None:
@@ -247,7 +247,7 @@ class UniverseService:
 
             if not etfs:
                 run.status = "success"
-                run.finished_at = datetime.now(timezone.utc)
+                run.finished_at = utcnow()
                 run.metrics = {"total": 0, "message": "无活跃 ETF"}
                 self._db.commit()
                 return
@@ -306,7 +306,7 @@ class UniverseService:
                             changed = True
 
                         if changed:
-                            etf.updated_at = datetime.now(timezone.utc)
+                            etf.updated_at = utcnow()
                             item_message = "; ".join(changes)
                             updated_count += 1
                         else:
@@ -338,14 +338,14 @@ class UniverseService:
             if run is None:
                 return
             run.status = "success"
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = utcnow()
             run.metrics = {
                 "total": len(etfs),
                 "updated": updated_count,
                 "unchanged": unchanged_count,
                 "failed": failed_count,
                 "duration_seconds": round(
-                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                    (utcnow() - start_time).total_seconds(), 1
                 ),
             }
             self._db.commit()
@@ -361,7 +361,7 @@ class UniverseService:
                 )
                 if run is not None:
                     run.status = "failed"
-                    run.finished_at = datetime.now(timezone.utc)
+                    run.finished_at = utcnow()
                     run.error_message = str(e)[:1000]
                     self._db.commit()
             except Exception:

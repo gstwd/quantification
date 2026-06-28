@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -30,7 +30,7 @@ from quant_etf_api.infra.db.models.core import (
     IndexValuationModel,
     MacroIndicatorModel,
 )
-from quant_etf_api.infra.db.base import SessionLocal
+from quant_etf_api.infra.db.base import SessionLocal, utcnow
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.schemas.backtest import (
@@ -93,7 +93,7 @@ class BacktestService:
         忽略请求中的 universe_mode 和 index_codes。空 index_codes 表示全指数通用策略。
         """
         backtest_id = str(uuid4())
-        now = datetime.now(timezone.utc)
+        now = utcnow()
 
         # 加载策略配置，检查是否有 index_codes 限定
         config_svc = StrategyConfigService(self._db)
@@ -228,7 +228,7 @@ class BacktestService:
                 return
 
             row.status = "running"
-            row.started_at = datetime.now(timezone.utc)
+            row.started_at = utcnow()
             self._db.commit()
 
             # 加载策略配置
@@ -846,7 +846,7 @@ class BacktestService:
             ValueError: 策略不存在、未配置 portfolio 或两策略相同。
         """
         comparison_id = str(uuid4())
-        now = datetime.now(timezone.utc)
+        now = utcnow()
 
         # 校验两个策略不同
         if req.strategy_a_id == req.strategy_b_id:
@@ -988,7 +988,7 @@ class BacktestService:
 
         # 标记为运行中
         comp.status = "running"
-        comp.started_at = datetime.now(timezone.utc)
+        comp.started_at = utcnow()
         self._db.commit()
 
         errors: dict[str, str] = {}

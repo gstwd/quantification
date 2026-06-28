@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
+from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import ResearchRunItemModel, ResearchRunModel
 from quant_etf_api.infra.db.repositories.base import BaseRepository
 
@@ -80,7 +80,7 @@ class ResearchRunRepository(BaseRepository):
         if run is None:
             return
         run.status = "success"
-        run.finished_at = datetime.now(timezone.utc)
+        run.finished_at = utcnow()
         if metrics:
             run.metrics = metrics
         self._db.commit()
@@ -94,6 +94,6 @@ class ResearchRunRepository(BaseRepository):
         if run is None:
             return
         run.status = "failed"
-        run.finished_at = datetime.now(timezone.utc)
+        run.finished_at = utcnow()
         run.error_message = error_message[:1000]
         self._db.commit()

@@ -222,7 +222,7 @@ function getGuideHint(key: string): string {
 }
 
 function formatTime(ts: string): string {
-  return new Date(ts).toLocaleString('zh-CN', { hour12: false })
+  return new Date(ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
 // ===== Event handlers =====

@@ -68,7 +68,7 @@ def _get_cached_trading_days() -> set[date] | None:
     Returns:
         交易日集合，加载失败时返回 None。
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     cached = _cache["trading_days"]
     loaded_at = _cache["loaded_at"]
 

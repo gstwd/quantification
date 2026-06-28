@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import ResearchRunModel
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.schemas.run import ResearchRunDetail, ResearchRunItemSchema, ResearchRunSummary
@@ -73,7 +74,7 @@ class RunService:
             RuntimeError: 数据库写入失败时抛出。
         """
         run_id = str(uuid4())
-        now = datetime.now(timezone.utc)
+        now = utcnow()
         try:
             run = ResearchRunModel(
                 run_id=run_id,
@@ -200,7 +201,7 @@ class RunService:
         for run in stuck:
             try:
                 run.status = "failed"
-                run.finished_at = datetime.now(timezone.utc)
+                run.finished_at = utcnow()
                 run.error_message = "进程重启，任务中断"
                 count += 1
             except Exception:

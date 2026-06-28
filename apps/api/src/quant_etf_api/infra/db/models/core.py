@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from uuid import uuid4 as _uuid4
 
 import sqlalchemy as sa
@@ -20,7 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from quant_etf_api.infra.db.base import Base
+from quant_etf_api.infra.db.base import Base, utcnow
 
 
 class EtfUniverseModel(Base):
@@ -54,12 +54,12 @@ class EtfUniverseModel(Base):
         String(32), default="seed", comment="数据来源，seed=内置种子数据"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="记录创建时间（UTC）"
+        DateTime, default=utcnow, comment="记录创建时间（UTC）"
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=utcnow,
+        onupdate=utcnow,
         comment="记录最后更新时间（UTC）",
     )
 
@@ -83,12 +83,12 @@ class BenchmarkIndexModel(Base):
         Date, nullable=True, comment="退市/停发日期"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="记录创建时间（UTC）"
+        DateTime, default=utcnow, comment="记录创建时间（UTC）"
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=utcnow,
+        onupdate=utcnow,
         comment="记录最后更新时间（UTC）",
     )
 
@@ -121,7 +121,7 @@ class EtfDailyBarModel(Base):
         String(32), default="stub", comment="数据来源，akshare=AkShare，stub=占位数据"
     )
     ingested_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="数据入库时间（UTC）"
+        DateTime, default=utcnow, comment="数据入库时间（UTC）"
     )
 
 
@@ -150,7 +150,7 @@ class IndexDailyBarModel(Base):
         String(32), default="stub", comment="数据来源，stub=占位数据"
     )
     ingested_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="数据入库时间（UTC）"
+        DateTime, default=utcnow, comment="数据入库时间（UTC）"
     )
 
 
@@ -178,7 +178,7 @@ class EtfDailyShareModel(Base):
         String(32), default="stub", comment="数据来源，akshare=AkShare，stub=占位数据"
     )
     ingested_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="数据入库时间（UTC）"
+        DateTime, default=utcnow, comment="数据入库时间（UTC）"
     )
 
 
@@ -205,7 +205,7 @@ class SourcePayloadLogModel(Base):
         JSON, comment="原始响应数据，用于调试和审计"
     )
     fetched_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="数据拉取时间（UTC）"
+        DateTime, default=utcnow, comment="数据拉取时间（UTC）"
     )
 
 
@@ -426,12 +426,12 @@ class StrategyPluginModel(Base):
         JSON, comment="策略输出结果的 JSON Schema 定义"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="记录创建时间（UTC）"
+        DateTime, default=utcnow, comment="记录创建时间（UTC）"
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=utcnow,
+        onupdate=utcnow,
         comment="记录最后更新时间（UTC）",
     )
 
@@ -462,7 +462,7 @@ class ResearchRunModel(Base):
     )
     error_message: Mapped[str | None] = mapped_column(Text, comment="失败时的错误信息")
     started_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="运行开始时间（UTC）"
+        DateTime, default=utcnow, comment="运行开始时间（UTC）"
     )
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime, comment="运行结束时间（UTC），NULL 表示未完成"
@@ -523,7 +523,7 @@ class BacktestRunModel(Base):
         JSON, comment="汇总绩效指标，完成后写入，包含累计收益、最大回撤、夏普比率等"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="回测创建时间（UTC）"
+        DateTime, default=utcnow, comment="回测创建时间（UTC）"
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime, comment="回测开始执行时间（UTC）")
     finished_at: Mapped[datetime | None] = mapped_column(
@@ -717,7 +717,7 @@ class BacktestComparisonModel(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=lambda: datetime.now(timezone.utc),
+        default=utcnow,
         comment="记录创建时间（UTC）",
     )
     started_at: Mapped[datetime | None] = mapped_column(
@@ -766,7 +766,7 @@ class IndexValuationModel(Base):
         String(32), default="akshare", comment="数据来源，akshare=AkShare 客户端"
     )
     ingested_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="数据入库时间（UTC）"
+        DateTime, default=utcnow, comment="数据入库时间（UTC）"
     )
 
 
@@ -802,12 +802,12 @@ class StrategyConfigModel(Base):
         Boolean, nullable=False, default=False, comment="是否星标关注"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="记录创建时间（UTC）"
+        DateTime, default=utcnow, comment="记录创建时间（UTC）"
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=utcnow,
+        onupdate=utcnow,
         comment="记录最后更新时间（UTC）",
     )
 
@@ -845,7 +845,7 @@ class MacroIndicatorModel(Base):
         Date, nullable=True, comment="标准化周期日期，CPI/PMI 取当月首日，LPR 取报价日"
     )
     ingested_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="数据入库时间（UTC）"
+        DateTime, default=utcnow, comment="数据入库时间（UTC）"
     )
 
 
@@ -865,7 +865,7 @@ class TradingCalendarModel(Base):
         Boolean, nullable=False, default=True, comment="是否为交易日"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="记录创建时间（UTC）"
+        DateTime, default=utcnow, comment="记录创建时间（UTC）"
     )
 
 
@@ -908,11 +908,11 @@ class JournalEntryModel(Base):
         Integer, default=0, comment="非结构化内容总字数"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="记录创建时间（UTC）"
+        DateTime, default=utcnow, comment="记录创建时间（UTC）"
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc), comment="记录最后更新时间（UTC）"
+        DateTime, default=utcnow,
+        onupdate=utcnow, comment="记录最后更新时间（UTC）"
     )
 
 
@@ -1098,7 +1098,7 @@ class JournalTagModel(Base):
         Integer, default=0, comment="使用次数（冗余计数，方便排序）"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="记录创建时间（UTC）"
+        DateTime, default=utcnow, comment="记录创建时间（UTC）"
     )
 
 
@@ -1116,7 +1116,7 @@ class JournalEntryTagModel(Base):
         primary_key=True, comment="标签 ID"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="关联创建时间（UTC）"
+        DateTime, default=utcnow, comment="关联创建时间（UTC）"
     )
 
 
@@ -1171,5 +1171,5 @@ class JournalAIAnalysisModel(Base):
         Integer, nullable=True, comment="消耗的 token 数"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), comment="记录创建时间（UTC）"
+        DateTime, default=utcnow, comment="记录创建时间（UTC）"
     )

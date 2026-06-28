@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func
@@ -13,6 +13,7 @@ from quant_etf_api.infra.clients.akshare_fund import AkShareFundClient
 from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
 from quant_etf_api.infra.clients.akshare_macro import AkShareMacroClient
 from quant_etf_api.infra.trading_calendar import TradingCalendar
+from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import (
     BenchmarkIndexModel,
     EtfDailyBarModel,
@@ -185,7 +186,7 @@ class IngestService:
                 "change_pct": b.change_pct,
                 "amplitude": b.amplitude,
                 "source": "akshare",
-                "ingested_at": datetime.now(timezone.utc),
+                "ingested_at": utcnow(),
             }
             for b in bars
         ]
@@ -254,7 +255,7 @@ class IngestService:
                         "change_pct": b.change_pct,
                         "amplitude": b.amplitude,
                         "source": "akshare",
-                        "ingested_at": datetime.now(timezone.utc),
+                        "ingested_at": utcnow(),
                     }
                     for b in bars
                 ]
@@ -339,7 +340,7 @@ class IngestService:
                         "aum": snapshot.aum,
                         "nav": round(snapshot.price, 3),
                         "source": "akshare",
-                        "ingested_at": datetime.now(timezone.utc),
+                        "ingested_at": utcnow(),
                     }
                 ]
             )
@@ -469,7 +470,7 @@ class IngestService:
                 "volume": b.volume,
                 "turnover": b.turnover,
                 "source": "akshare",
-                "ingested_at": datetime.now(timezone.utc),
+                "ingested_at": utcnow(),
             }
             for b in bars
         ]
@@ -573,7 +574,7 @@ class IngestService:
                 "pb_percentile": v.pb_percentile,
                 "dividend_yield": v.dividend_yield,
                 "source": "akshare",
-                "ingested_at": datetime.now(timezone.utc),
+                "ingested_at": utcnow(),
             }
             for v in valuations
         ]
@@ -695,7 +696,7 @@ class IngestService:
                         "unit": i.unit,
                         "source": "akshare",
                         "period_date": i.period_date,
-                        "ingested_at": datetime.now(timezone.utc),
+                        "ingested_at": utcnow(),
                     }
                     for i in indicators
                 ]
@@ -962,7 +963,7 @@ class IngestService:
             },
         }
 
-        result["checked_at"] = datetime.now(timezone.utc).isoformat()
+        result["checked_at"] = utcnow().isoformat()
         return result
 
     # ==================================================================
@@ -1054,12 +1055,12 @@ class IngestService:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is not None:
                 run.status = "success"
-                run.finished_at = datetime.now(timezone.utc)
+                run.finished_at = utcnow()
                 run.metrics = {"reason": "concurrent_skip", "message": "另一个摄任务正在运行，跳过本次执行"}
                 self._db.commit()
             return
         try:
-            start_time = datetime.now(timezone.utc)
+            start_time = utcnow()
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is None:
                 logger.error("run_daily_ingest: run_id %s 不存在", run_id)
@@ -1074,7 +1075,7 @@ class IngestService:
 
             if not cal.is_trading_day(today):
                 run.status = "success"
-                run.finished_at = datetime.now(timezone.utc)
+                run.finished_at = utcnow()
                 run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
                 self._db.commit()
                 return
@@ -1115,7 +1116,7 @@ class IngestService:
             if run is None:
                 return
             run.status = "success"
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = utcnow()
             run.metrics = {
                 "etf": {
                     "total": len(etfs),
@@ -1130,7 +1131,7 @@ class IngestService:
                 },
                 "macro": {"records": macro_count},
                 "duration_seconds": round(
-                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                    (utcnow() - start_time).total_seconds(), 1
                 ),
             }
             self._db.commit()
@@ -1146,7 +1147,7 @@ class IngestService:
                 )
                 if run is not None:
                     run.status = "failed"
-                    run.finished_at = datetime.now(timezone.utc)
+                    run.finished_at = utcnow()
                     run.error_message = str(e)[:1000]
                     self._db.commit()
             except Exception:
@@ -1167,7 +1168,7 @@ class IngestService:
         Args:
             run_id: 运行记录 ID。
         """
-        start_time = datetime.now(timezone.utc)
+        start_time = utcnow()
         try:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is None:
@@ -1182,7 +1183,7 @@ class IngestService:
             cal = TradingCalendar()
             if not cal.is_trading_day(today):
                 run.status = "success"
-                run.finished_at = datetime.now(timezone.utc)
+                run.finished_at = utcnow()
                 run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
                 self._db.commit()
                 return
@@ -1196,7 +1197,7 @@ class IngestService:
             if run is None:
                 return
             run.status = "success"
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = utcnow()
             run.metrics = {
                 "etf": {
                     "total": len(etfs),
@@ -1205,7 +1206,7 @@ class IngestService:
                     "skipped": etf_skipped,
                 },
                 "duration_seconds": round(
-                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                    (utcnow() - start_time).total_seconds(), 1
                 ),
             }
             self._db.commit()
@@ -1221,7 +1222,7 @@ class IngestService:
                 )
                 if run is not None:
                     run.status = "failed"
-                    run.finished_at = datetime.now(timezone.utc)
+                    run.finished_at = utcnow()
                     run.error_message = str(e)[:1000]
                     self._db.commit()
             except Exception:
@@ -1234,7 +1235,7 @@ class IngestService:
         Args:
             run_id: 运行记录 ID。
         """
-        start_time = datetime.now(timezone.utc)
+        start_time = utcnow()
         try:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is None:
@@ -1249,7 +1250,7 @@ class IngestService:
             cal = TradingCalendar()
             if not cal.is_trading_day(today):
                 run.status = "success"
-                run.finished_at = datetime.now(timezone.utc)
+                run.finished_at = utcnow()
                 run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
                 self._db.commit()
                 return
@@ -1275,7 +1276,7 @@ class IngestService:
             if run is None:
                 return
             run.status = "success"
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = utcnow()
             run.metrics = {
                 "index": {
                     "total": len(indexes),
@@ -1283,7 +1284,7 @@ class IngestService:
                     "valuation_records": index_valuation_count,
                 },
                 "duration_seconds": round(
-                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                    (utcnow() - start_time).total_seconds(), 1
                 ),
             }
             self._db.commit()
@@ -1299,7 +1300,7 @@ class IngestService:
                 )
                 if run is not None:
                     run.status = "failed"
-                    run.finished_at = datetime.now(timezone.utc)
+                    run.finished_at = utcnow()
                     run.error_message = str(e)[:1000]
                     self._db.commit()
             except Exception:
@@ -1314,7 +1315,7 @@ class IngestService:
         Args:
             run_id: 运行记录 ID。
         """
-        start_time = datetime.now(timezone.utc)
+        start_time = utcnow()
         try:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is None:
@@ -1329,7 +1330,7 @@ class IngestService:
             cal = TradingCalendar()
             if not cal.is_trading_day(today):
                 run.status = "success"
-                run.finished_at = datetime.now(timezone.utc)
+                run.finished_at = utcnow()
                 run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
                 self._db.commit()
                 return
@@ -1340,11 +1341,11 @@ class IngestService:
             if run is None:
                 return
             run.status = "success"
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = utcnow()
             run.metrics = {
                 "macro": {"records": macro_count},
                 "duration_seconds": round(
-                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                    (utcnow() - start_time).total_seconds(), 1
                 ),
             }
             self._db.commit()
@@ -1360,7 +1361,7 @@ class IngestService:
                 )
                 if run is not None:
                     run.status = "failed"
-                    run.finished_at = datetime.now(timezone.utc)
+                    run.finished_at = utcnow()
                     run.error_message = str(e)[:1000]
                     self._db.commit()
             except Exception:
@@ -1376,7 +1377,7 @@ class IngestService:
         - 跳过周末检查（冷启动可随时执行）
         - 指数日线/估值/宏观复用现有全量方法
         """
-        start_time = datetime.now(timezone.utc)
+        start_time = utcnow()
         try:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
             if run is None:
@@ -1445,7 +1446,7 @@ class IngestService:
             if run is None:
                 return
             run.status = "success"
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = utcnow()
             run.metrics = {
                 "etf": {
                     "total": len(etfs),
@@ -1459,7 +1460,7 @@ class IngestService:
                 },
                 "macro": {"records": macro_count},
                 "duration_seconds": round(
-                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                    (utcnow() - start_time).total_seconds(), 1
                 ),
             }
             self._db.commit()
@@ -1475,7 +1476,7 @@ class IngestService:
                 )
                 if run is not None:
                     run.status = "failed"
-                    run.finished_at = datetime.now(timezone.utc)
+                    run.finished_at = utcnow()
                     run.error_message = str(e)[:1000]
                     self._db.commit()
             except Exception:
@@ -1489,7 +1490,7 @@ class IngestService:
         - ETF 日线使用增量方法，已有当日数据的 ETF 直接跳过，避免重复 API 调用
         - 指数/宏观数据仅在超过 5 天未更新时才重新拉取
         """
-        start_time = datetime.now(timezone.utc)
+        start_time = utcnow()
         stale_threshold = date.today() - timedelta(days=5)
 
         try:
@@ -1550,7 +1551,7 @@ class IngestService:
                 func.max(MacroIndicatorModel.ingested_at)
             ).scalar()
             # DateTime 列返回 naive datetime，去掉 tzinfo 后再比较
-            macro_stale_threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            macro_stale_threshold = utcnow() - timedelta(
                 days=5
             )
             macro_count = 0
@@ -1564,7 +1565,7 @@ class IngestService:
             if run is None:
                 return
             run.status = "success"
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = utcnow()
             run.metrics = {
                 "etf": {
                     "total": len(etfs),
@@ -1578,7 +1579,7 @@ class IngestService:
                 },
                 "macro": {"records": macro_count},
                 "duration_seconds": round(
-                    (datetime.now(timezone.utc) - start_time).total_seconds(), 1
+                    (utcnow() - start_time).total_seconds(), 1
                 ),
             }
             self._db.commit()
@@ -1594,7 +1595,7 @@ class IngestService:
                 )
                 if run is not None:
                     run.status = "failed"
-                    run.finished_at = datetime.now(timezone.utc)
+                    run.finished_at = utcnow()
                     run.error_message = str(e)[:1000]
                     self._db.commit()
             except Exception:
