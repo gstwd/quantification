@@ -547,7 +547,6 @@ apps/api/src/quant_etf_api/
 | Analytics | `signal_definition` | 信号定义 |
 | Analytics | `etf_signal` | ETF 策略信号 |
 | Analytics | `index_signal` | 指数策略信号 |
-| Runtime | `strategy_plugin` | 旧策略插件（已弃用，始终为空） |
 | Runtime | `research_run` | 研究运行记录 |
 | Runtime | `research_run_item` | 运行明细 |
 | Backtest | `backtest_run` | 回测任务 |
@@ -636,4 +635,3 @@ _TRANSFORM_REGISTRY["my_transform"] = _my_transform
 - `EtfSignalModel` 和 `EtfFactorValueModel` 持久化逻辑不变
 - `services/context_builder.py` 是向后兼容 shim，re-export 自 `engine/context_builder.py`
 - 现有 API 端点结构不变
-- `strategy_plugin` 表保留但始终为空，不允许新增 FK 引用

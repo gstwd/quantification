@@ -1,4 +1,4 @@
-"""FactorRegistry：因子计算器注册表，与 StrategyRegistry 同构。"""
+"""FactorRegistry：因子计算器注册表，进程启动时构建一次，全局共享。"""
 
 from __future__ import annotations
 
@@ -6,11 +6,7 @@ from quant_etf_api.factors.base import FactorComputer, FactorSpec
 
 
 class FactorRegistry:
-    """因子计算器注册表，进程启动时构建一次，全局共享。
-
-    与 plugins.registry.StrategyRegistry 结构完全对齐：
-    以 factor_id 为 key 存储所有已注册的因子计算器。
-    """
+    """因子计算器注册表，以 factor_id 为 key 存储所有已注册的因子计算器。"""
 
     def __init__(self) -> None:
         # 以 factor_id 为 key 存储所有已注册的因子计算器

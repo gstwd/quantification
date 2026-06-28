@@ -1,7 +1,6 @@
 """策略服务，提供策略列表、详情和决策管线调用。
 
-重构后使用 StrategyEngine + StrategyConfig 驱动策略执行，
-替代旧的 StrategyPlugin + StrategyRegistry 模式。
+使用 StrategyEngine + StrategyConfig 驱动策略执行。
 """
 
 from __future__ import annotations

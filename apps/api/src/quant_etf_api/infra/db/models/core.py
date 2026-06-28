@@ -223,7 +223,7 @@ class FactorDefinitionModel(Base):
         String(32), default="1.0.0", comment="因子版本号，遵循语义化版本"
     )
     owner_plugin: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, comment="定义该因子的策略插件 ID，NULL 表示独立因子"
+        String(64), nullable=True, comment="历史遗留字段，所有内置因子均为 NULL"
     )
     category: Mapped[str | None] = mapped_column(
         String(32),
@@ -402,37 +402,6 @@ class IndexSignalModel(Base):
     )
     run_id: Mapped[str | None] = mapped_column(
         String(64), comment="产生该信号的研究运行 ID"
-    )
-
-
-class StrategyPluginModel(Base):
-    __tablename__ = "strategy_plugin"
-
-    strategy_id: Mapped[str] = mapped_column(
-        String(64), primary_key=True, comment="策略唯一标识，如 volume_breakout_daily"
-    )
-    display_name: Mapped[str] = mapped_column(
-        String(128), nullable=False, comment="策略中文显示名称"
-    )
-    plugin_module: Mapped[str] = mapped_column(
-        String(256), nullable=False, comment="插件 Python 模块路径"
-    )
-    plugin_version: Mapped[str] = mapped_column(String(32), nullable=False, comment="插件版本号")
-    status: Mapped[str] = mapped_column(
-        String(32), default="active", comment="插件状态：active=启用，disabled=禁用"
-    )
-    default_params: Mapped[dict | None] = mapped_column(JSON, comment="策略默认参数，JSON 格式")
-    result_schema: Mapped[dict | None] = mapped_column(
-        JSON, comment="策略输出结果的 JSON Schema 定义"
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, comment="记录创建时间（UTC）"
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=utcnow,
-        onupdate=utcnow,
-        comment="记录最后更新时间（UTC）",
     )
 
 

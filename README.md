@@ -1,6 +1,6 @@
 # A股 ETF 日频量化研究平台
 
-A-share ETF daily-frequency quantitative research platform — 后端 FastAPI + PostgreSQL，前端 Vue 3，策略以插件形式接入。
+A-share ETF daily-frequency quantitative research platform — 后端 FastAPI + PostgreSQL，前端 Vue 3，策略以配置驱动方式接入。
 
 ---
 
@@ -12,7 +12,6 @@ A-share ETF daily-frequency quantitative research platform — 后端 FastAPI + 
   - [技术栈](#后端技术栈)
   - [分层说明](#分层说明)
   - [数据库模型](#数据库模型)
-  - [插件系统](#插件系统)
   - [三因子模型](#三因子模型)
   - [API 路由](#api-路由)
 - [前端架构](#前端架构)
@@ -33,7 +32,7 @@ A-share ETF daily-frequency quantitative research platform — 后端 FastAPI + 
 | 频率 | 日频，不做日内或实时 |
 | 用途 | 研究平台，不做交易执行、账户管理、实盘风控 |
 | 数据 | 通过公开 API 抓取，统一存入 PostgreSQL |
-| 策略 | 多策略插件化，每个策略独立注册、独立运行 |
+| 策略 | 多策略配置化，每个策略独立配置、独立运行 |
 | 前端 | Vue 3 研究工作台，展示信号、因子、运行记录 |
 
 `etf-three-factor-org/` 目录保留原始脚本作为领域逻辑参考，不再直接运行。
@@ -56,7 +55,6 @@ quantification/
 │   │   │   ├── api/routers/    # HTTP 路由层
 │   │   │   ├── schemas/        # Pydantic 请求/响应模型
 │   │   │   ├── services/       # 业务逻辑层
-│   │   │   ├── plugins/        # 策略插件系统
 │   │   │   ├── infra/
 │   │   │   │   ├── db/         # SQLAlchemy ORM 模型与数据库连接
 │   │   │   │   └── clients/    # 外部 API 客户端（腾讯、东方财富）
@@ -128,7 +126,7 @@ services/           ← 业务逻辑层：编排数据获取、策略运行、�
     │
     ├── factors/        ← 因子层：单因子计算（依赖 domain）
     │
-    └── plugins/        ← 插件层：策略编排（依赖 domain），通过 registry 统一管理
+    └── engine/         ← 引擎层：策略执行管线（依赖 domain + factors）
 ```
 
 **路由层（`api/routers/`）** 只做参数解析和响应格式化，不包含业务逻辑。
@@ -145,11 +143,11 @@ services/           ← 业务逻辑层：编排数据获取、策略运行、�
 
 **因子层（`factors/`）** 实现单因子计算（FactorComputer Protocol），依赖 domain 层的计算函数。
 
-**插件层（`plugins/`）** 实现策略编排（StrategyPlugin Protocol），依赖 domain 层的评分规则，组合多个因子产出信号。三个内置插件之间无依赖关系。
+**引擎层（`engine/`）** 实现组件化、配置驱动的策略执行管线（StrategyEngine），组合多个因子产出信号和仓位分配。
 
 ### 数据库模型
 
-数据库按 4 组组织，共 13 张表：
+数据库按 5 组组织：
 
 #### 参考数据（Reference Data）
 
@@ -171,7 +169,7 @@ services/           ← 业务逻辑层：编排数据获取、策略运行、�
 
 | 表名 | 唯一约束 | 说明 |
 |------|---------|------|
-| `factor_definition` | `factor_id` | 因子元数据：名称、描述、归属插件 |
+| `factor_definition` | `factor_id` | 因子元数据：名称、描述、类别、版本 |
 | `etf_factor_value` | `(trade_date, etf_code, factor_id, strategy_id)` | 每只 ETF 每日的因子计算结果 |
 | `signal_definition` | `signal_id` | 信号元数据 |
 | `etf_signal` | `(trade_date, etf_code, strategy_id)` | 每只 ETF 每日的综合信号：分数、等级、标签 |
@@ -180,58 +178,15 @@ services/           ← 业务逻辑层：编排数据获取、策略运行、�
 
 | 表名 | 主键 | 说明 |
 |------|------|------|
-| `strategy_plugin` | `strategy_id` | 已注册策略的元数据持久化 |
+| `strategy_config` | `strategy_id` | 策略配置（JSON），驱动策略引擎执行 |
 | `research_run` | `run_id` | 每次数据采集或策略运行的记录：状态、参数、耗时、错误 |
 | `research_run_item` | `id` | 运行记录的明细，每只 ETF 一行 |
 
 **设计原则：** 因子和信号不按策略单独建表，而是共用 `etf_factor_value` / `etf_signal`，通过 `strategy_id` 字段区分。这样新增策略不需要改表结构。
 
-### 插件系统
-
-插件系统的核心是 `plugins/base.py` 中定义的 `StrategyPlugin` Protocol（协议）。
-
-**什么是 Protocol？**
-Python 的 `Protocol` 是结构化子类型（鸭子类型）的正式化。只要一个类实现了 Protocol 要求的所有属性和方法，它就被认为是该 Protocol 的实现，不需要显式继承。
-
-```python
-# plugins/base.py — 插件必须实现的接口
-class StrategyPlugin(Protocol):
-    strategy_id: str        # 唯一标识，如 "three_factor_guard"
-    display_name: str       # 展示名称
-    version: str            # 版本号
-    frequency: str          # 频率，固定为 "daily"
-    description: str        # 策略描述
-
-    def parameter_schema(self) -> dict: ...         # 参数 JSON Schema
-    def required_inputs(self) -> list[str]: ...     # 需要哪些输入数据
-    def factor_definitions(self) -> list[dict]: ... # 输出哪些因子
-    def signal_definition(self) -> dict: ...        # 输出信号的定义
-    def prepare_context(...) -> StrategyContextData: ...  # 准备运行上下文
-    def run_for_universe(...) -> list[StrategyResult]: ... # 对全 ETF 池运行
-    def explain_result(...) -> dict: ...            # 解释单只 ETF 的结果
-```
-
-**注册机制（`plugins/registry.py`）：**
-```python
-registry = StrategyRegistry()
-registry.register(ThreeFactorGuardPlugin())
-registry.register(ShareFlowMonitorPlugin())
-registry.register(VolumeBreakoutDailyPlugin())
-```
-
-应用启动时（`main.py`）调用 `build_default_registry()` 完成注册。
-
-**内置策略：**
-
-| 策略 ID | 文件 | 说明 |
-|---------|------|------|
-| `three_factor_guard` | `builtins/three_factor/` | 三因子模型：量比 + 方向 + 份额 |
-| `share_flow_monitor` | `builtins/share_flow_monitor/` | 单因子份额监控，用于数据验证 |
-| `volume_breakout_daily` | `builtins/volume_breakout/` | 简单量能突破，作为基线对比 |
-
 ### 三因子模型
 
-三因子模型的评分规则在 `domain/strategies/scoring.py`（纯领域逻辑），`plugins/builtins/three_factor/factors.py` 为其 re-export 兼容层。
+三因子模型的评分规则在 `domain/strategies/scoring.py`（纯领域逻辑）。
 
 #### 因子 1：量比概率（`volume_probability`）
 
@@ -420,44 +375,28 @@ pytest
 
 ## 开发指南
 
-### 新增策略插件
+### 新增策略
 
-1. 在 `apps/api/src/quant_etf_api/plugins/builtins/` 下新建目录，如 `my_strategy/`
-2. 创建 `__init__.py` 和 `plugin.py`
-3. 在 `plugin.py` 中实现 `StrategyPlugin` Protocol 的所有方法
-4. 在 `plugins/registry.py` 的 `build_default_registry()` 中注册
+策略通过 JSON 配置驱动引擎执行，无需编写代码：
 
-```python
-# plugin.py 最小骨架
-class MyStrategyPlugin:
-    strategy_id = "my_strategy"
-    display_name = "我的策略"
-    version = "1.0.0"
-    frequency = "daily"
-    description = "策略描述"
+1. 编写策略 JSON 配置（含 score、timing、filters、rank、portfolio、risk、rebalance 模块）
+2. 通过 `POST /api/strategies` 创建策略配置
+3. 通过 `POST /api/strategies/{id}/run` 执行策略
+4. 通过 `POST /api/backtests` 对策略进行历史回测
 
-    def parameter_schema(self) -> dict:
-        return {}
-
-    def required_inputs(self) -> list[str]:
-        return ["etf_daily_bar"]
-
-    def factor_definitions(self) -> list[dict]:
-        return [{"factor_id": "my_factor", "name": "我的因子"}]
-
-    def signal_definition(self) -> dict:
-        return {"signal_id": "my_signal", "name": "我的信号"}
-
-    def prepare_context(self, trade_date, params=None):
-        from quant_etf_api.plugins.base import StrategyContextData
-        return StrategyContextData()
-
-    def run_for_universe(self, trade_date, universe, context, params=None):
-        # 对每只 ETF 计算信号，返回 StrategyResult 列表
-        ...
-
-    def explain_result(self, result):
-        return {"summary": "..."}
+```json
+{
+  "strategy_id": "my_strategy",
+  "display_name": "我的策略",
+  "config_json": {
+    "index_codes": ["000300"],
+    "score": {
+      "factors": [{"factor_id": "return_20d", "weight": 0.6}, {"factor_id": "volatility_20d", "weight": -0.4}]
+    },
+    "rank": {"top_n": 5},
+    "portfolio": {"method": "equal_weight"}
+  }
+}
 ```
 
 ### 替换 stub 数据为真实数据
@@ -500,7 +439,6 @@ alembic downgrade -1
 - `etf-three-factor-org/references/config.md` — 数据源 API 来源与限制
 - `docs/architecture/overview.md` — 系统架构总览
 - `docs/architecture/data-model.md` — 数据库模型详细说明
-- `docs/architecture/plugin-system.md` — 插件系统设计说明
 - [FastAPI 官方文档](https://fastapi.tiangolo.com/)
 - [SQLAlchemy 2 文档](https://docs.sqlalchemy.org/en/20/)
 - [Alembic 文档](https://alembic.sqlalchemy.org/)

@@ -16,11 +16,11 @@ from typing import Any
 
 @dataclass
 class StrategyContextData:
-    """策略执行上下文，由服务层构建后传入插件。
+    """策略执行上下文，由服务层构建后传入策略引擎。
 
     Attributes:
         benchmark_changes: 基准指数当日涨跌幅，key=指数代码，value=涨跌幅（%）。
-        extra: 扩展字段，各插件可自定义存放额外上下文数据。
+        extra: 扩展字段，可自定义存放额外上下文数据。
     """
 
     benchmark_changes: dict[str, float] = field(default_factory=dict)
@@ -56,7 +56,7 @@ class StrategyResult:
 
 @dataclass
 class TimingSignal:
-    """市场择时信号，由策略插件的 assess_market_timing() 方法输出。
+    """市场择时信号，由策略引擎的择时模块输出。
 
     综合估值、趋势、量能等指标判断当前市场环境，
     输出三种 regime：offensive（进攻）、defensive（防守）、neutral（观望）。
@@ -76,7 +76,7 @@ class TimingSignal:
 
 @dataclass
 class AssetRanking:
-    """资产轮动排名项，由策略插件的 rank_assets() 方法输出。
+    """资产轮动排名项，由策略引擎的排名模块输出。
 
     每只 ETF 的综合排名信息，包含动量排名和估值排名。
 

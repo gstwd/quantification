@@ -70,7 +70,7 @@ class FactorValue:
 class FactorComputer(Protocol):
     """因子计算器协议，所有内置/扩展因子只需实现此接口，无需继承任何基类。
 
-    使用结构化子类型（Protocol）而非继承，与 StrategyPlugin 保持风格一致。
+    使用结构化子类型（Protocol）而非继承。
     """
 
     @property

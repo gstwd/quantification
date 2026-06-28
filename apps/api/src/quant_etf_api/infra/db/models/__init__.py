@@ -29,7 +29,6 @@ from .core import (
     SignalDefinitionModel,
     SourcePayloadLogModel,
     StrategyConfigModel,
-    StrategyPluginModel,
     TradingCalendarModel,
 )
 
@@ -63,6 +62,5 @@ __all__ = [
     "SignalDefinitionModel",
     "SourcePayloadLogModel",
     "StrategyConfigModel",
-    "StrategyPluginModel",
     "TradingCalendarModel",
 ]
