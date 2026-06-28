@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     llm_model: str = Field(
         default="deepseek/deepseek-chat", description="默认模型标识（LiteLLM 格式：provider/model）"
     )
-    llm_max_tokens: int = Field(default=2000, description="AI 分析最大输出 token 数")
+    llm_max_tokens: int = Field(default=4096, description="AI 分析最大输出 token 数")
     llm_temperature: float = Field(default=0.3, description="AI 分析温度参数")
     llm_timeout_seconds: int = Field(default=60, description="LLM 请求超时时间")
 

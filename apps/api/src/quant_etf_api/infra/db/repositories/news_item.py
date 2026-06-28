@@ -136,22 +136,31 @@ class AISentimentResultRepository(BaseRepository):
             raise
 
     def find_existing_news_ids(self, news_ids: list[str]) -> set[str]:
-        """查询已有 AI 分析记录的 news_id 集合。
+        """查询已有有效 AI 分析记录的 news_id 集合。
 
-        用于跳过已分析新闻，避免重复调用 LLM。
+        仅返回"有意义"的分析结果（sentiment_score 非零 或 relevance_score > 0
+        或 asset_tags 非空），跳过 AI 生成的全零默认值，确保空结果能被重新分析。
 
         Args:
             news_ids: 待检查的 news_id 列表。
 
         Returns:
-            已有分析记录的 news_id 集合。
+            已有有效分析记录的 news_id 集合。
         """
         if not news_ids:
             return set()
 
+        from sqlalchemy import or_
+
         rows = (
             self._db.query(AISentimentResultModel.news_id)
-            .filter(AISentimentResultModel.news_id.in_(news_ids))
+            .filter(
+                AISentimentResultModel.news_id.in_(news_ids),
+                or_(
+                    AISentimentResultModel.sentiment_score != 0,
+                    AISentimentResultModel.relevance_score > 0,
+                ),
+            )
             .all()
         )
         return {r[0] for r in rows}

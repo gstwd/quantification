@@ -32,10 +32,26 @@ logger = logging.getLogger(__name__)
 PROMPT_NAME = "sentiment_analysis"
 
 # 批量分析时每次发送给 AI 的最大新闻条数
-DEFAULT_BATCH_SIZE = 50
+# 每条分析约需 100-150 tokens 输出，默认 max_tokens=2000，保守设为 10 条/批
+DEFAULT_BATCH_SIZE = 10
 
 # 默认市场背景（无特殊背景时）
 DEFAULT_MARKET_CONTEXT = "正常交易时段，无特殊宏观事件"
+
+# 已知财经来源 ID（这些来源的新闻直接视为金融相关，跳过关键词过滤）
+_FINANCE_SOURCE_IDS: frozenset[str] = frozenset(
+    [
+        "wallstreetcn-hot",  # 华尔街见闻
+        "cls-hot",  # 财联社热门
+        "thepaper",  # 澎湃新闻（含财经频道）
+    ]
+)
+# 已知财经 RSS 源域名前缀
+_FINANCE_RSS_DOMAINS: tuple[str, ...] = (
+    "https://finance.yahoo.com",
+    "https://feeds.content.dowjones.io",
+    "https://www.economist.com",
+)
 
 
 class SentimentAnalyzer:
@@ -89,10 +105,19 @@ class SentimentAnalyzer:
             available_tags = ALL_AVAILABLE_TAGS
 
         # 过滤：仅保留可能与金融相关的新闻
+        # 判定逻辑：来源为财经平台 OR 标题含金融关键词
         from quant_etf_api.ai_factors.data.cleaner import TextCleaner
 
-        finance_items = [it for it in items if TextCleaner.is_finance_related(it.title)]
-        non_finance = [it for it in items if not TextCleaner.is_finance_related(it.title)]
+        finance_items: list[RawNewsItem] = []
+        non_finance: list[RawNewsItem] = []
+        for it in items:
+            is_finance_source = it.source_id in _FINANCE_SOURCE_IDS or it.source_id.startswith(
+                _FINANCE_RSS_DOMAINS
+            )
+            if is_finance_source or TextCleaner.is_finance_related(it.title):
+                finance_items.append(it)
+            else:
+                non_finance.append(it)
 
         logger.info(
             "新闻过滤: %d 条中 %d 条金融相关, %d 条跳过",
