@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 
 from quant_etf_api.ai_factors.base import NewsSentimentItem, RawNewsItem
@@ -137,7 +138,11 @@ class SentimentAnalyzer:
         market_context: str,
         available_tags: list[str],
     ) -> list[NewsSentimentItem]:
-        """调用 LLM 分析一批新闻。"""
+        """调用 LLM 分析一批新闻。
+
+        使用 chat_json_with_repair：LiteLLM 自动处理 DeepSeek 的 reasoning_content，
+        JSON 解析失败时自动请求 AI 修复，两次尝试都失败才回退。
+        """
         if not self._client.api_key:
             logger.warning("未配置 LLM API Key，跳过 AI 情绪分析")
             return self._fallback_results(items)
@@ -159,14 +164,29 @@ class SentimentAnalyzer:
         ]
 
         try:
-            raw_response = self._client.chat(messages, max_tokens=self._client.max_tokens)
-            parsed = self._parse_response(raw_response, items)
-            if parsed:
-                return parsed
+            # 先尝试 chat_json_with_repair（LiteLLM + json_repair + AI修复）
+            data = self._client.chat_json_with_repair(
+                messages,
+                max_tokens=self._client.max_tokens,
+            )
+            if data is not None:
+                result = self._build_from_json(data, items)
+                if result:
+                    return result
         except Exception:
             logger.exception("AI 情绪分析调用失败")
 
-        # AI 失败时返回降级结果
+        # JSON 解析失败 → 尝试直接 chat + reasoning 文本解析
+        try:
+            raw = self._client.chat(messages, max_tokens=self._client.max_tokens)
+            if raw and raw.strip():
+                parsed = self._parse_reasoning_text(raw, items)
+                if parsed:
+                    return parsed
+        except Exception:
+            pass
+
+        # 所有方式都失败时返回降级结果
         return self._fallback_results(items)
 
     def _format_news(self, items: list[RawNewsItem]) -> str:
@@ -187,33 +207,226 @@ class SentimentAnalyzer:
             )
         return "\n".join(lines)
 
-    def _parse_response(
+    # DeepSeek 推理文本中条目分隔符的模式（支持多种变体）
+    _ENTRY_DELIMITER: re.Pattern = re.compile(
+        r"\n(?="
+        r"\[\d+\]"           # [0]
+        r"|"
+        r"\d+\.\s"           # 1.
+        r"|"
+        r"\d+\.""            # 1."
+        r")"
+    )
+    # 条目开头的索引提取（支持 [0]、0.、0." 三种格式）
+    _ENTRY_INDEX: re.Pattern = re.compile(r"^\[(\d+)\]|^(\d+)[\.．]")
+
+    def _parse_reasoning_text(
         self,
         raw: str,
         items: list[RawNewsItem],
     ) -> list[NewsSentimentItem] | None:
-        """解析 LLM JSON 响应为 NewsSentimentItem 列表。
+        """解析 DeepSeek reasoning_content 中的结构化自然语言文本。
+
+        DeepSeek 的输出格式不固定，常见变体：
+            [0] 标题：xxx ...
+              sentiment_score: 0.3, relevance_score: 0.5
+              asset_tags: 科技, AI
+              topics: ["芯片", "算力"]
+              summary: 摘要文本
+
+            1. "新闻标题" - 分析...
+              sentiment_score: 0.3, relevance_score: 0.5
+              ...
 
         Args:
-            raw: LLM 原始响应。
-            items: 原始新闻列表（用于回填标题等字段）。
+            raw: reasoning_content 原始文本。
+            items: 原始新闻列表。
 
         Returns:
-            解析后的列表，失败返回 None。
+            解析后的 NewsSentimentItem 列表，格式不匹配返回 None。
         """
-        from quant_etf_api.infra.ai.client import _extract_json
+        # 按条目分隔符切割
+        parts = self._ENTRY_DELIMITER.split(raw)
+        if not parts:
+            return None
 
-        data = _extract_json(raw)
+        # 第一部分可能是前言（非条目文本），跳过
+        entries = [p for p in parts if self._ENTRY_INDEX.search(p)]
+        if not entries:
+            return None
 
-        # 处理两种情况：数组格式 或 {"results": [...]} 格式
+        now = datetime.now(timezone.utc)
+        results: list[NewsSentimentItem] = []
+
+        for entry_text in entries:
+            entry_text = entry_text.strip()
+
+            # 提取索引
+            idx_match = self._ENTRY_INDEX.search(entry_text)
+            if not idx_match:
+                continue
+            idx = int(idx_match.group(1) or idx_match.group(2))
+            if not (0 <= idx < len(items)):
+                continue
+
+            item = items[idx]
+
+            # 提取各字段（中英文冒号均支持）
+            sentiment = self._extract_float(entry_text, r"sentiment_score[：:]\s*(-?[\d.]+)")
+            relevance = self._extract_float(entry_text, r"relevance_score[：:]\s*(-?[\d.]+)")
+
+            # 提取 asset_tags（支持纯文本和 JSON 数组两种格式）
+            tags = self._extract_tags_field(entry_text, "asset_tags")
+
+            # 提取 topics（支持纯文本和 JSON 数组两种格式）
+            topics = self._extract_tags_field(entry_text, "topics")
+
+            # 提取 summary
+            summary = ""
+            sm = re.search(r'summary[：:]\s*[\""]?(.+?)[\""]?(?:\n|\n\[|\n\d+[\.．]|$)', entry_text, re.DOTALL)
+            if sm:
+                summary = sm.group(1).strip()[:100]
+
+            # 计算关注度
+            attention = self._scorer.calculate_attention_score(
+                rank=item.ranks[0] if item.ranks else 99,
+                count=item.appear_count,
+            )
+
+            results.append(
+                NewsSentimentItem(
+                    timestamp=now,
+                    source=item.source_id,
+                    source_name=item.source_name,
+                    title=item.title,
+                    url=item.url,
+                    asset_tags=tags[:5],
+                    sentiment_score=round(sentiment, 4),
+                    attention_score=round(attention, 2),
+                    relevance_score=round(relevance, 4),
+                    topics=topics[:5],
+                    summary=summary,
+                    raw_text=item.title,
+                )
+            )
+
+        # 补齐未匹配的 items
+        while len(results) < len(items):
+            missing = items[len(results)]
+            results.append(
+                NewsSentimentItem(
+                    timestamp=now,
+                    source=missing.source_id,
+                    source_name=missing.source_name,
+                    title=missing.title,
+                    url=missing.url,
+                    attention_score=self._scorer.calculate_attention_score(
+                        rank=missing.ranks[0] if missing.ranks else 99,
+                        count=missing.appear_count,
+                    ),
+                    raw_text=missing.title,
+                )
+            )
+
+        nonzero = sum(1 for r in results if r.sentiment_score != 0)
+        logger.info("从 reasoning 文本解析出 %d/%d 条有效分析结果", nonzero, len(results))
+        return results
+
+    @staticmethod
+    def _extract_tags_field(text: str, field_name: str) -> list[str]:
+        """从文本中提取标签字段（支持纯文本和 JSON 数组两种格式）。
+
+        格式变体：
+            asset_tags: 科技, AI
+            asset_tags: ["科技", "AI"]
+            asset_tags: [] 或者宏观
+            asset_tags: 无特别标签
+
+        Args:
+            text: 条目文本。
+            field_name: 字段名（如 "asset_tags"、"topics"）。
+
+        Returns:
+            清洗后的标签列表。
+        """
+        # 匹配字段值：从 key: 开始到行尾（或遇到换行+下一字段/新条目）
+        pattern = (
+            rf"{field_name}[：:]"  # key:
+            r"\s*"                  # 可选空格
+            r"(.+?)"               # 值（非贪婪）
+            r"(?:\n(?:sentiment_|relevance_|topics|asset_tags|summary)|\n\s*\n|\Z)"  # 到下一字段或结束
+        )
+        m = re.search(pattern, text, re.DOTALL)
+        if not m:
+            return []
+
+        raw_val = m.group(1).strip()
+
+        # JSON 数组格式：["tag1", "tag2"]
+        if raw_val.startswith("["):
+            import json
+
+            try:
+                bracket_end = raw_val.find("]")
+                if bracket_end != -1:
+                    arr = json.loads(raw_val[:bracket_end + 1])
+                    if isinstance(arr, list):
+                        return [str(t) for t in arr if t][:5]
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # 纯文本格式：tag1, tag2 或 tag1；tag2 等
+        # 先清理无意义的描述
+        cleaned = re.sub(r"[无没]有?特[别殊]标签[。，]*", "", raw_val)
+        cleaned = re.sub(r"可以不加[。，]*", "", cleaned)
+        cleaned = re.sub(r"或者\S+", "", cleaned)
+        tags = [t.strip() for t in re.split(r"[，,、；;]", cleaned) if t.strip()]
+        return [t for t in tags if t and "可能" not in t and "?" not in t][:5]
+
+    @staticmethod
+    def _extract_float(text: str, pattern: str) -> float:
+        """从文本中提取浮点数，失败返回 0.0。"""
+        m = re.search(pattern, text)
+        if m:
+            try:
+                val = float(m.group(1))
+                return max(-1.0, min(1.0, val))
+            except (TypeError, ValueError):
+                pass
+        return 0.0
+
+    def _build_from_json(
+        self,
+        data: dict | list,
+        items: list[RawNewsItem],
+    ) -> list[NewsSentimentItem] | None:
+        """从解析后的 JSON dict/list 构建 NewsSentimentItem 列表。
+
+        LiteLLM 已处理好 reasoning_content → 此处只需从标准 JSON 中提取字段。
+
+        Args:
+            data: chat_json_with_repair 返回的已解析 JSON（dict 或 list）。
+            items: 原始新闻列表。
+
+        Returns:
+            NewsSentimentItem 列表，无法提取 entries 时返回 None。
+        """
         entries: list[dict] = []
         if isinstance(data, list):
             entries = data
         elif isinstance(data, dict):
-            entries = data.get("results", []) or data.get("data", []) or []
+            entries = (
+                data.get("results", [])
+                or data.get("data", [])
+                or data.get("items", [])
+                or data.get("analyses", [])
+                or []
+            )
+            if not entries and ("sentiment_score" in data or "index" in data):
+                entries = [data]
 
         if not entries:
-            logger.warning("LLM 返回空结果")
+            logger.warning("JSON 已解析但无有效 entries，data keys=%s", list(data.keys())[:5] if isinstance(data, dict) else "list")
             return None
 
         now = datetime.now(timezone.utc)

@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     # LLM 配置（可选，不配置则 AI 分析功能不可用）
     llm_api_key: str | None = Field(default=None, description="LLM API Key")
     llm_base_url: str | None = Field(default=None, description="LLM API Base URL（OpenAI 兼容接口）")
-    llm_model: str = Field(default="gpt-4o-mini", description="默认模型标识")
+    llm_model: str = Field(default="deepseek/deepseek-chat", description="默认模型标识（LiteLLM 格式：provider/model）")
     llm_max_tokens: int = Field(default=2000, description="AI 分析最大输出 token 数")
     llm_temperature: float = Field(default=0.3, description="AI 分析温度参数")
     llm_timeout_seconds: int = Field(default=60, description="LLM 请求超时时间")
