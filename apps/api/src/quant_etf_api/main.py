@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from quant_etf_api.api.middleware import RequestIdMiddleware
 from quant_etf_api.api.routers import (
+    ai_factors,
     backtests,
     etfs,
     factors,
@@ -89,6 +90,7 @@ app.include_router(strategies.router, prefix=settings.api_prefix)
 app.include_router(factors.router, prefix=settings.api_prefix)
 app.include_router(runs.router, prefix=settings.api_prefix)
 app.include_router(backtests.router, prefix=settings.api_prefix)
+app.include_router(ai_factors.router, prefix=settings.api_prefix)
 app.include_router(journal.router, prefix=settings.api_prefix)
 
 

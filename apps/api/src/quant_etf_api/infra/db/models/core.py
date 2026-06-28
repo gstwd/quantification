@@ -1142,3 +1142,160 @@ class JournalAIAnalysisModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, comment="记录创建时间（UTC）"
     )
+
+
+# ============================================================================
+# AI 因子相关表（ai_factors 层的数据持久化）
+# ============================================================================
+
+
+class NewsItemModel(Base):
+    """原始新闻存储表。
+
+    存储从 NewsNow API / RSS 采集的原始新闻条目，
+    每日去重后供 AI 分析使用。
+    """
+
+    __tablename__ = "news_item"
+    __table_args__ = (
+        UniqueConstraint("source_id", "title", "crawl_date", name="uq_news_source_title_date"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(_uuid4()),
+        comment="新闻唯一标识（UUID）"
+    )
+    source_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="来源平台 ID，如 toutiao/baidu"
+    )
+    source_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="来源平台中文名"
+    )
+    title: Mapped[str] = mapped_column(
+        Text, nullable=False, comment="新闻标题（已清洗）"
+    )
+    url: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="新闻链接（已规范化）"
+    )
+    rank: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="热榜排名（1=榜首）"
+    )
+    crawl_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="采集日期"
+    )
+    first_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="首次上榜时间"
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="最后上榜时间"
+    )
+    appear_count: Mapped[int] = mapped_column(
+        Integer, default=1, comment="出现次数"
+    )
+    raw_payload: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True, comment="原始 API 返回数据"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, comment="记录创建时间（UTC）"
+    )
+
+
+class AISentimentResultModel(Base):
+    """AI 情绪分析结果表。
+
+    存储 LLM 对每条新闻的情绪分析结果，
+    包括情绪分、关注度、相关度、主题标签和资产关联。
+    """
+
+    __tablename__ = "ai_sentiment_result"
+    __table_args__ = (
+        UniqueConstraint("news_id", name="uq_ai_sentiment_news"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(_uuid4()),
+        comment="分析结果唯一标识（UUID）"
+    )
+    news_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("news_item.id", ondelete="CASCADE"),
+        nullable=False, comment="关联的原始新闻 ID"
+    )
+    trade_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="关联交易日"
+    )
+    asset_tags: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True, comment="资产标签 JSON 数组（指数代码/行业/概念）"
+    )
+    topics: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True, comment="主题标签 JSON 数组"
+    )
+    sentiment_score: Mapped[float | None] = mapped_column(
+        Float, nullable=True, comment="情绪分 [-1.0, 1.0]"
+    )
+    attention_score: Mapped[float | None] = mapped_column(
+        Float, nullable=True, comment="关注度分 [0, 100]"
+    )
+    relevance_score: Mapped[float | None] = mapped_column(
+        Float, nullable=True, comment="A 股市场相关度 [0, 1]"
+    )
+    summary: Mapped[str | None] = mapped_column(
+        String(256), nullable=True, comment="AI 生成摘要"
+    )
+    llm_model: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="使用的 LLM 模型标识"
+    )
+    llm_response: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True, comment="LLM 完整响应（调试用）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, comment="记录创建时间（UTC）"
+    )
+
+
+class DailySentimentAggregateModel(Base):
+    """每日情绪聚合表。
+
+    按 asset_tag 对当日所有 AI 分析结果聚合生成，
+    每条记录对应一个资产标签在某一交易日的汇总数据。
+    该表的聚合数据通过 FactorService 加载到 FactorContext，
+    供 AI 因子计算器使用。
+    """
+
+    __tablename__ = "daily_sentiment_aggregate"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "asset_tag", name="uq_daily_sentiment_date_tag"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="自增主键"
+    )
+    trade_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="交易日"
+    )
+    asset_tag: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="资产标签（指数代码 或 行业名）"
+    )
+    avg_sentiment: Mapped[float | None] = mapped_column(
+        Float, nullable=True, comment="算术平均情绪分"
+    )
+    weighted_sentiment: Mapped[float | None] = mapped_column(
+        Float, nullable=True, comment="关注度加权情绪分"
+    )
+    total_attention: Mapped[float | None] = mapped_column(
+        Float, nullable=True, comment="总关注度"
+    )
+    news_count: Mapped[int] = mapped_column(
+        Integer, default=0, comment="相关新闻数量"
+    )
+    top_topics: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True, comment="Top 主题 JSON 数组"
+    )
+    positive_ratio: Mapped[float | None] = mapped_column(
+        Float, nullable=True, comment="正面新闻占比 [0, 1]"
+    )
+    negative_ratio: Mapped[float | None] = mapped_column(
+        Float, nullable=True, comment="负面新闻占比 [0, 1]"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, comment="记录创建时间（UTC）"
+    )

@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from quant_etf_api.factors.base import FactorContext
 from quant_etf_api.infra.db.models.core import (
     BenchmarkIndexModel,
+    DailySentimentAggregateModel,
     FactorDefinitionModel,
     IndexDailyBarModel,
     IndexFactorValueModel,
@@ -385,6 +386,7 @@ class FactorService:
             index_bars={(r.index_code, r.trade_date): r for r in index_bar_rows},
             index_valuation={(r.index_code, r.trade_date): r for r in valuation_rows},
             macro_indicators=macro_indicators,
+            ai_sentiment=_load_ai_sentiment(self._db, lookback_start, trade_date),
         )
 
     def _bulk_upsert(self, rows: list[dict[str, Any]]) -> int:
@@ -417,6 +419,38 @@ class FactorService:
             self._db.rollback()
             logger.error("_bulk_upsert 失败，已回滚", exc_info=True)
             return 0
+
+
+def _load_ai_sentiment(
+    db: Session,
+    lookback_start: date,
+    trade_date: date,
+) -> dict[tuple[str, date], Any]:
+    """加载 AI 情绪聚合数据到 FactorContext 兼容格式。
+
+    Args:
+        db: 数据库会话。
+        lookback_start: 回望起始日期。
+        trade_date: 截止日期。
+
+    Returns:
+        key=(asset_tag, date), value=DailySentimentAggregateModel ORM 行的字典。
+    """
+    try:
+        rows = (
+            db.query(DailySentimentAggregateModel)
+            .filter(
+                and_(
+                    DailySentimentAggregateModel.trade_date >= lookback_start,
+                    DailySentimentAggregateModel.trade_date <= trade_date,
+                )
+            )
+            .all()
+        )
+        return {(r.asset_tag, r.trade_date): r for r in rows}
+    except Exception:
+        logger.warning("AI 情绪数据加载失败，跳过 AI 因子", exc_info=True)
+        return {}
 
 
 def _row_to_factor_row(row: IndexFactorValueModel) -> FactorRow:

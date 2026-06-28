@@ -89,6 +89,12 @@ def build_default_factor_registry() -> FactorRegistry:
     from quant_etf_api.factors.builtins.volume import VolumeRatio17dComputer, VolumeRatio20dComputer
 
     registry = FactorRegistry()
+
+    # ---- AI 因子（先注册，确保 sync_factor_definitions 时可发现） ----
+    from quant_etf_api.ai_factors.registry import register_ai_factors
+
+    register_ai_factors(registry)
+
     # 价格（原始字段，无需计算）
     registry.register(ClosePriceComputer())
     registry.register(ChangePctComputer())
