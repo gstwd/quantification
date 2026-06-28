@@ -216,17 +216,14 @@ def calc_factor_correlation_matrix(
         包含 factor_ids 和 matrix（二维列表）的字典。
     """
     # 查询当日所有因子值
-    query = (
-        db.query(
-            IndexFactorValueModel.index_code,
-            IndexFactorValueModel.factor_id,
-            IndexFactorValueModel.factor_value_numeric,
-        )
-        .filter(
-            IndexFactorValueModel.trade_date == trade_date,
-            IndexFactorValueModel.strategy_id.is_(None),
-            IndexFactorValueModel.factor_value_numeric.isnot(None),
-        )
+    query = db.query(
+        IndexFactorValueModel.index_code,
+        IndexFactorValueModel.factor_id,
+        IndexFactorValueModel.factor_value_numeric,
+    ).filter(
+        IndexFactorValueModel.trade_date == trade_date,
+        IndexFactorValueModel.strategy_id.is_(None),
+        IndexFactorValueModel.factor_value_numeric.isnot(None),
     )
     if factor_ids:
         query = query.filter(IndexFactorValueModel.factor_id.in_(factor_ids))
@@ -248,17 +245,13 @@ def calc_factor_correlation_matrix(
 
     # 只保留所有因子都有值的指数
     valid_indexes = [
-        code
-        for code, vals in data.items()
-        if all(fid in vals for fid in sorted_factor_ids)
+        code for code, vals in data.items() if all(fid in vals for fid in sorted_factor_ids)
     ]
     if len(valid_indexes) < 3:
         return {"factor_ids": sorted_factor_ids, "matrix": []}
 
     # 构建各因子的值向量
-    vectors = {
-        fid: [data[code][fid] for code in valid_indexes] for fid in sorted_factor_ids
-    }
+    vectors = {fid: [data[code][fid] for code in valid_indexes] for fid in sorted_factor_ids}
 
     # 计算相关矩阵
     n = len(sorted_factor_ids)

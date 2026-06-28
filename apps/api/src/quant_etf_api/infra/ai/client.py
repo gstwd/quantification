@@ -94,9 +94,12 @@ class AIClient:
     ) -> str:
         """调用 AI 模型进行对话。
 
+        通用的文本对话接口，不强制输出格式。需要 JSON 输出时，
+        使用 chat_json() 或 chat_json_with_repair()。
+
         Args:
             messages: 消息列表 [{"role": "system/user/assistant", "content": "..."}]。
-            **kwargs: 覆盖默认参数（temperature、max_tokens 等）。
+            **kwargs: 覆盖默认参数（temperature、max_tokens、response_format 等）。
 
         Returns:
             AI 响应文本内容。
@@ -132,9 +135,6 @@ class AIClient:
 
         if self.fallback_models:
             params["fallbacks"] = self.fallback_models
-
-        # 强制 JSON 输出
-        params["response_format"] = {"type": "json_object"}
 
         # 合并剩余额外参数
         params.update(kwargs)
@@ -179,7 +179,7 @@ class AIClient:
         Returns:
             解析后的 JSON dict，失败时返回 None。
         """
-        raw = self.chat(messages, **kwargs)
+        raw = self.chat(messages, response_format={"type": "json_object"}, **kwargs)
         if not raw or not raw.strip():
             logger.warning("AI 返回空响应")
             return None
@@ -203,7 +203,7 @@ class AIClient:
         Returns:
             解析后的 JSON dict，两次尝试都失败返回 None。
         """
-        raw = self.chat(messages, **kwargs)
+        raw = self.chat(messages, response_format={"type": "json_object"}, **kwargs)
         if not raw or not raw.strip():
             logger.warning("AI 返回空响应")
             return None

@@ -101,7 +101,9 @@ class BacktestService:
         strategy_index_codes = strategy_config.index_codes if strategy_config else []
 
         if strategy_config is not None and strategy_config.portfolio is None:
-            raise ValueError("策略未配置 portfolio 模块，无法执行回测。请在策略配置中添加 portfolio。")
+            raise ValueError(
+                "策略未配置 portfolio 模块，无法执行回测。请在策略配置中添加 portfolio。"
+            )
 
         if strategy_index_codes:
             # 策略有指数范围限定，强制使用策略的 index_codes
@@ -267,8 +269,8 @@ class BacktestService:
         7. 写入每日结果和指数结果
         8. 计算汇总绩效指标
         """
-        universe, index_codes, trading_dates, all_bars, all_valuation, all_macro = self._prepare_backtest_data(
-            row
+        universe, index_codes, trading_dates, all_bars, all_valuation, all_macro = (
+            self._prepare_backtest_data(row)
         )
 
         # 确保择时代理指数的行情数据和因子也被加载（代理指数可能不在策略标的池中）
@@ -299,9 +301,7 @@ class BacktestService:
         if enable_benchmark:
             # 确保基准指数的日线数据已加载（基准指数可能不在策略 universe 中）
             if benchmark_index_code not in index_codes:
-                benchmark_bars = self._load_all_index_bars(
-                    trading_dates, [benchmark_index_code]
-                )
+                benchmark_bars = self._load_all_index_bars(trading_dates, [benchmark_index_code])
                 all_bars.update(benchmark_bars)
             benchmark_returns = compute_buy_hold_benchmark(
                 all_bars, benchmark_index_code, trading_dates
@@ -414,11 +414,15 @@ class BacktestService:
             metric_accumulator.append((portfolio_return, 1 if has_positions else 0))
 
             # 写入指数结果并获取信号计数
-            high_cnt, mid_cnt, low_cnt, day_pos_count, day_pos_positive = (
-                self._write_index_results(
-                    backtest_id, trade_date, next_date, universe, result, all_bars, positions,
-                    scoring_mode=config.score.scoring_mode,
-                )
+            high_cnt, mid_cnt, low_cnt, day_pos_count, day_pos_positive = self._write_index_results(
+                backtest_id,
+                trade_date,
+                next_date,
+                universe,
+                result,
+                all_bars,
+                positions,
+                scoring_mode=config.score.scoring_mode,
             )
             # 更新每日行的信号计数
             daily_row.high_signal_count = high_cnt
@@ -445,7 +449,8 @@ class BacktestService:
 
         # 计算汇总指标（使用轻量累积器和内存中的信号准确率，避免依赖已 flush 的 ORM 对象）
         metrics = self._compute_summary_metrics(
-            metric_accumulator, benchmark_returns,
+            metric_accumulator,
+            benchmark_returns,
             total_in_pos_count=total_in_pos_count,
             total_in_pos_positive=total_in_pos_positive,
         )
@@ -455,7 +460,9 @@ class BacktestService:
 
     def _prepare_backtest_data(
         self, row: BacktestRunModel
-    ) -> tuple[list[dict[str, Any]], list[str], list[date], dict, dict, dict[str, dict[str, float]]]:
+    ) -> tuple[
+        list[dict[str, Any]], list[str], list[date], dict, dict, dict[str, dict[str, float]]
+    ]:
         """准备回测通用数据：标的、交易日、行情、估值、宏观指标。
 
         Returns:
@@ -698,15 +705,9 @@ class BacktestService:
             codes = universe_filter.get("index_codes", [])
             if codes:
                 rows = base_query.filter(BenchmarkIndexModel.index_code.in_(codes)).all()
-                return [
-                    {"index_code": r.index_code, "name_cn": r.name_cn}
-                    for r in rows
-                ]
+                return [{"index_code": r.index_code, "name_cn": r.name_cn} for r in rows]
         rows = base_query.all()
-        return [
-            {"index_code": r.index_code, "name_cn": r.name_cn}
-            for r in rows
-        ]
+        return [{"index_code": r.index_code, "name_cn": r.name_cn} for r in rows]
 
     def _get_index_trading_dates(
         self, start: date, end: date, index_codes: list[str]
@@ -827,9 +828,7 @@ class BacktestService:
 
     # ── 策略对比回测 ────────────────────────────────────────────────────
 
-    def create_comparison(
-        self, req: BacktestComparisonCreateRequest
-    ) -> BacktestComparisonSummary:
+    def create_comparison(self, req: BacktestComparisonCreateRequest) -> BacktestComparisonSummary:
         """创建策略对比回测，生成两个子回测和一个对比记录。
 
         两个子回测共享同一时间区间，但标的范围各自独立。
@@ -918,9 +917,7 @@ class BacktestService:
     ) -> tuple[list[BacktestComparisonSummary], int]:
         """分页返回对比回测列表，按创建时间倒序。"""
         try:
-            rows, total = self._backtest_repo.find_all_comparisons(
-                offset=offset, limit=limit
-            )
+            rows, total = self._backtest_repo.find_all_comparisons(offset=offset, limit=limit)
             items = [self._comp_row_to_summary(r) for r in rows]
             return items, total
         except Exception:
@@ -1018,9 +1015,7 @@ class BacktestService:
                 f"策略A: {errors.get('a', '未知错误')}; 策略B: {errors.get('b', '未知错误')}",
             )
         elif len(errors) == 1:
-            self._backtest_repo.mark_comparison_partial(
-                comparison_id, str(errors)
-            )
+            self._backtest_repo.mark_comparison_partial(comparison_id, str(errors))
         else:
             self._compute_and_save_comparison_metrics(comparison_id)
 
@@ -1112,9 +1107,7 @@ class BacktestService:
 
         self._backtest_repo.mark_comparison_success(comparison_id, comparison_metrics)
 
-    def _comp_row_to_summary(
-        self, row: BacktestComparisonModel
-    ) -> BacktestComparisonSummary:
+    def _comp_row_to_summary(self, row: BacktestComparisonModel) -> BacktestComparisonSummary:
         """将 ORM 行转换为 BacktestComparisonSummary。"""
         comp_metrics = None
         if row.comparison_metrics:

@@ -90,7 +90,9 @@ def validate_strategy_config(
 @router.get("/strategies/{strategy_id}/allocation", response_model=AllocationResponse)
 def run_allocation(
     strategy_id: str,
-    trade_date: date | None = Query(None, description="指定交易日（YYYY-MM-DD），不传则使用最新数据"),
+    trade_date: date | None = Query(
+        None, description="指定交易日（YYYY-MM-DD），不传则使用最新数据"
+    ),
     db: Session = Depends(get_db),
 ) -> AllocationResponse:
     """运行资产配置决策管线，返回择时、排名、仓位分配结果。

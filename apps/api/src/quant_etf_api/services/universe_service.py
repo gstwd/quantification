@@ -344,9 +344,7 @@ class UniverseService:
                 "updated": updated_count,
                 "unchanged": unchanged_count,
                 "failed": failed_count,
-                "duration_seconds": round(
-                    (utcnow() - start_time).total_seconds(), 1
-                ),
+                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
             }
             self._db.commit()
 

@@ -58,13 +58,13 @@ class BacktestStatus(StrEnum):
 class MarketPhase(StrEnum):
     """市场阶段枚举。"""
 
-    TRENDING_UP = "trending_up"       # 趋势上涨
-    TRENDING_DOWN = "trending_down"   # 趋势下跌
-    RANGING = "ranging"               # 震荡
-    ROTATION = "rotation"             # 风格/板块轮动
-    EUPHORIA = "euphoria"             # 情绪高潮
-    PANIC = "panic"                   # 恐慌
-    REPAIR = "repair"                 # 修复
+    TRENDING_UP = "trending_up"  # 趋势上涨
+    TRENDING_DOWN = "trending_down"  # 趋势下跌
+    RANGING = "ranging"  # 震荡
+    ROTATION = "rotation"  # 风格/板块轮动
+    EUPHORIA = "euphoria"  # 情绪高潮
+    PANIC = "panic"  # 恐慌
+    REPAIR = "repair"  # 修复
 
 
 class SizeStyle(StrEnum):

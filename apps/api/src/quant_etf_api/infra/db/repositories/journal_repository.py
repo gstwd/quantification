@@ -1,4 +1,5 @@
 """日志模块数据访问层。"""
+
 from __future__ import annotations
 
 from datetime import date
@@ -348,7 +349,9 @@ class JournalRepository(BaseRepository):
         """
         return self._db.get(JournalTagModel, tag_id)
 
-    def create_tag(self, name: str, color: str = "#3B82F6", description: str | None = None) -> JournalTagModel:
+    def create_tag(
+        self, name: str, color: str = "#3B82F6", description: str | None = None
+    ) -> JournalTagModel:
         """创建标签。
 
         Args:

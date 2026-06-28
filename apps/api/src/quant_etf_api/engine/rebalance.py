@@ -90,9 +90,7 @@ class DefaultRebalanceScheduler:
 
         return True
 
-    def _is_nearest_in_window(
-        self, current_date: date, target: int, window: str
-    ) -> bool:
+    def _is_nearest_in_window(self, current_date: date, target: int, window: str) -> bool:
         """判断当前日是否为目标窗口内的最近交易日。
 
         算法：从目标日向后查找，第一个交易日即为调仓日。

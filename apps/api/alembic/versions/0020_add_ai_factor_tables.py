@@ -4,6 +4,7 @@ Revision ID: 91d10638a7b6
 Revises: c27fec08be21
 Create Date: 2026-06-28 17:30:00.000000
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -38,7 +39,9 @@ def upgrade() -> None:
             comment="记录创建时间（UTC）",
         ),
         sa.UniqueConstraint(
-            "source_id", "title", "crawl_date",
+            "source_id",
+            "title",
+            "crawl_date",
             name="uq_news_source_title_date",
         ),
     )
@@ -77,7 +80,9 @@ def upgrade() -> None:
         "daily_sentiment_aggregate",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True, comment="自增主键"),
         sa.Column("trade_date", sa.Date(), nullable=False, comment="交易日"),
-        sa.Column("asset_tag", sa.String(64), nullable=False, comment="资产标签（指数代码或行业名）"),
+        sa.Column(
+            "asset_tag", sa.String(64), nullable=False, comment="资产标签（指数代码或行业名）"
+        ),
         sa.Column("avg_sentiment", sa.Float(), nullable=True, comment="算术平均情绪分"),
         sa.Column("weighted_sentiment", sa.Float(), nullable=True, comment="关注度加权情绪分"),
         sa.Column("total_attention", sa.Float(), nullable=True, comment="总关注度"),
@@ -92,7 +97,8 @@ def upgrade() -> None:
             comment="记录创建时间（UTC）",
         ),
         sa.UniqueConstraint(
-            "trade_date", "asset_tag",
+            "trade_date",
+            "asset_tag",
             name="uq_daily_sentiment_date_tag",
         ),
     )

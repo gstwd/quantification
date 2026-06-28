@@ -65,9 +65,7 @@ def _get_historical_bars(
         [
             (dt, v.open_price, v.high_price, v.low_price, v.close_price)
             for (code, dt), v in ctx.index_bars.items()
-            if code == index_code
-            and dt <= trade_date
-            and v.close_price is not None
+            if code == index_code and dt <= trade_date and v.close_price is not None
         ],
         key=lambda x: x[0],
     )
@@ -82,7 +80,8 @@ def _get_historical_bars(
 
 
 def _build_sorted_closes_for_code(
-    index_code: str, ctx: FactorContext,
+    index_code: str,
+    ctx: FactorContext,
 ) -> tuple[list[date], list[float]]:
     """提取指定指数的有序收盘价序列，供批量计算复用。
 
@@ -107,7 +106,8 @@ def _build_sorted_closes_for_code(
 
 
 def _build_sorted_bars_for_code(
-    index_code: str, ctx: FactorContext,
+    index_code: str,
+    ctx: FactorContext,
 ) -> list[tuple[date, float, float, float, float]]:
     """提取指定指数的有序 OHLC 序列，供批量计算复用。
 
@@ -125,6 +125,7 @@ def _build_sorted_bars_for_code(
         ],
         key=lambda x: x[0],
     )
+
 
 class MAComputer:
     """移动均线因子计算器。
@@ -169,7 +170,8 @@ class MAComputer:
         closes = _get_historical_closes(index_code, trade_date, ctx, self._period)
         if closes is None:
             return FactorValue(
-                factor_id=self.spec.factor_id, numeric=None,
+                factor_id=self.spec.factor_id,
+                numeric=None,
                 payload={"reason": f"收盘价数据不足 {self._period} 条"},
             )
         ma = round(sum(closes) / len(closes), 4)
@@ -180,7 +182,10 @@ class MAComputer:
         )
 
     def compute_batch(
-        self, index_code: str, dates: list[date], ctx: FactorContext,
+        self,
+        index_code: str,
+        dates: list[date],
+        ctx: FactorContext,
     ) -> dict[date, FactorValue]:
         """批量计算所有交易日的移动均线。
 
@@ -204,7 +209,8 @@ class MAComputer:
             idx = bisect.bisect_right(close_dates, trade_date) - 1
             if idx < 0 or close_dates[idx] != trade_date or idx < self._period - 1:
                 result[trade_date] = FactorValue(
-                    factor_id=self.spec.factor_id, numeric=None,
+                    factor_id=self.spec.factor_id,
+                    numeric=None,
                     payload={"reason": f"收盘价数据不足 {self._period} 条"},
                 )
                 continue
@@ -267,7 +273,8 @@ class ATRComputer:
         bars = _get_historical_bars(index_code, trade_date, ctx, self._period + 1)
         if bars is None:
             return FactorValue(
-                factor_id=self.spec.factor_id, numeric=None,
+                factor_id=self.spec.factor_id,
+                numeric=None,
                 payload={"reason": f"日线数据不足 {self._period + 1} 条"},
             )
 
@@ -280,7 +287,8 @@ class ATRComputer:
 
         if not tr_list:
             return FactorValue(
-                factor_id=self.spec.factor_id, numeric=None,
+                factor_id=self.spec.factor_id,
+                numeric=None,
                 payload={"reason": "无法计算 True Range"},
             )
 
@@ -292,7 +300,10 @@ class ATRComputer:
         )
 
     def compute_batch(
-        self, index_code: str, dates: list[date], ctx: FactorContext,
+        self,
+        index_code: str,
+        dates: list[date],
+        ctx: FactorContext,
     ) -> dict[date, FactorValue]:
         """批量计算所有交易日的 ATR。
 
@@ -315,7 +326,8 @@ class ATRComputer:
             idx = bisect.bisect_right(bar_dates, trade_date) - 1
             if idx < 0 or bar_dates[idx] != trade_date or idx < self._period:
                 result[trade_date] = FactorValue(
-                    factor_id=self.spec.factor_id, numeric=None,
+                    factor_id=self.spec.factor_id,
+                    numeric=None,
                     payload={"reason": f"日线数据不足 {self._period + 1} 条"},
                 )
                 continue
@@ -376,7 +388,8 @@ class DonchianHighComputer:
         bars = _get_historical_bars(index_code, trade_date, ctx, self._period)
         if bars is None:
             return FactorValue(
-                factor_id=self.spec.factor_id, numeric=None,
+                factor_id=self.spec.factor_id,
+                numeric=None,
                 payload={"reason": f"日线数据不足 {self._period} 条"},
             )
         highest = max(b[2] for b in bars if b[2] is not None)  # high price
@@ -387,7 +400,10 @@ class DonchianHighComputer:
         )
 
     def compute_batch(
-        self, index_code: str, dates: list[date], ctx: FactorContext,
+        self,
+        index_code: str,
+        dates: list[date],
+        ctx: FactorContext,
     ) -> dict[date, FactorValue]:
         """批量计算所有交易日的 Donchian 通道上轨。
 
@@ -411,7 +427,8 @@ class DonchianHighComputer:
             idx = bisect.bisect_right(bar_dates, trade_date) - 1
             if idx < 0 or bar_dates[idx] != trade_date or idx < self._period - 1:
                 result[trade_date] = FactorValue(
-                    factor_id=self.spec.factor_id, numeric=None,
+                    factor_id=self.spec.factor_id,
+                    numeric=None,
                     payload={"reason": f"日线数据不足 {self._period} 条"},
                 )
                 continue
@@ -461,7 +478,8 @@ class DonchianLowComputer:
         bars = _get_historical_bars(index_code, trade_date, ctx, self._period)
         if bars is None:
             return FactorValue(
-                factor_id=self.spec.factor_id, numeric=None,
+                factor_id=self.spec.factor_id,
+                numeric=None,
                 payload={"reason": f"日线数据不足 {self._period} 条"},
             )
         lowest = min(b[3] for b in bars if b[3] is not None)  # low price
@@ -472,7 +490,10 @@ class DonchianLowComputer:
         )
 
     def compute_batch(
-        self, index_code: str, dates: list[date], ctx: FactorContext,
+        self,
+        index_code: str,
+        dates: list[date],
+        ctx: FactorContext,
     ) -> dict[date, FactorValue]:
         """批量计算所有交易日的 Donchian 通道下轨。
 
@@ -496,7 +517,8 @@ class DonchianLowComputer:
             idx = bisect.bisect_right(bar_dates, trade_date) - 1
             if idx < 0 or bar_dates[idx] != trade_date or idx < self._period - 1:
                 result[trade_date] = FactorValue(
-                    factor_id=self.spec.factor_id, numeric=None,
+                    factor_id=self.spec.factor_id,
+                    numeric=None,
                     payload={"reason": f"日线数据不足 {self._period} 条"},
                 )
                 continue
@@ -540,8 +562,7 @@ class RSIComputer:
             category="technical",
             version="1.0.0",
             description=(
-                f"指数近 {self._period} 个交易日的相对强弱指标（RSI），"
-                "用于判断超买超卖。"
+                f"指数近 {self._period} 个交易日的相对强弱指标（RSI），用于判断超买超卖。"
             ),
             required_data=["index_bars"],
             lookback_days=max(15, int(self._period * 1.5) + 5),
@@ -557,7 +578,8 @@ class RSIComputer:
         closes = _get_historical_closes(index_code, trade_date, ctx, self._period + 1)
         if closes is None:
             return FactorValue(
-                factor_id=self.spec.factor_id, numeric=None,
+                factor_id=self.spec.factor_id,
+                numeric=None,
                 payload={"reason": f"收盘价数据不足 {self._period + 1} 条"},
             )
 
@@ -584,11 +606,18 @@ class RSIComputer:
         return FactorValue(
             factor_id=self.spec.factor_id,
             numeric=rsi,
-            payload={"period": self._period, "avg_gain": round(avg_gain, 4), "avg_loss": round(avg_loss, 4)},
+            payload={
+                "period": self._period,
+                "avg_gain": round(avg_gain, 4),
+                "avg_loss": round(avg_loss, 4),
+            },
         )
 
     def compute_batch(
-        self, index_code: str, dates: list[date], ctx: FactorContext,
+        self,
+        index_code: str,
+        dates: list[date],
+        ctx: FactorContext,
     ) -> dict[date, FactorValue]:
         """批量计算所有交易日的 RSI。
 
@@ -609,7 +638,8 @@ class RSIComputer:
             idx = bisect.bisect_right(close_dates, trade_date) - 1
             if idx < 0 or close_dates[idx] != trade_date or idx < self._period:
                 result[trade_date] = FactorValue(
-                    factor_id=self.spec.factor_id, numeric=None,
+                    factor_id=self.spec.factor_id,
+                    numeric=None,
                     payload={"reason": f"收盘价数据不足 {self._period + 1} 条"},
                 )
                 continue
@@ -634,7 +664,11 @@ class RSIComputer:
             result[trade_date] = FactorValue(
                 factor_id=self.spec.factor_id,
                 numeric=rsi,
-                payload={"period": self._period, "avg_gain": round(avg_gain, 4), "avg_loss": round(avg_loss, 4)},
+                payload={
+                    "period": self._period,
+                    "avg_gain": round(avg_gain, 4),
+                    "avg_loss": round(avg_loss, 4),
+                },
             )
         return result
 
@@ -677,14 +711,16 @@ class MaxDrawdown60dComputer:
         closes = _get_historical_closes(index_code, trade_date, ctx, 60)
         if closes is None:
             return FactorValue(
-                factor_id=self.spec.factor_id, numeric=None,
+                factor_id=self.spec.factor_id,
+                numeric=None,
                 payload={"reason": "收盘价数据不足 60 条"},
             )
         current_close = closes[-1]
         highest = max(closes)
         if highest <= 0:
             return FactorValue(
-                factor_id=self.spec.factor_id, numeric=None,
+                factor_id=self.spec.factor_id,
+                numeric=None,
                 payload={"reason": "最高价异常"},
             )
         drawdown = round((current_close - highest) / highest * 100, 2)

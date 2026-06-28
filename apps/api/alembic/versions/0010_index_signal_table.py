@@ -21,12 +21,8 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "index_signal",
-        sa.Column(
-            "id", sa.Integer, primary_key=True, autoincrement=True, comment="自增主键"
-        ),
-        sa.Column(
-            "trade_date", sa.Date, nullable=False, comment="信号对应的交易日期"
-        ),
+        sa.Column("id", sa.Integer, primary_key=True, autoincrement=True, comment="自增主键"),
+        sa.Column("trade_date", sa.Date, nullable=False, comment="信号对应的交易日期"),
         sa.Column(
             "index_code",
             sa.String(32),
@@ -40,9 +36,7 @@ def upgrade() -> None:
             nullable=False,
             comment="产生该信号的策略 ID",
         ),
-        sa.Column(
-            "signal_score", sa.Float, nullable=False, comment="综合得分，0-100"
-        ),
+        sa.Column("signal_score", sa.Float, nullable=False, comment="综合得分，0-100"),
         sa.Column(
             "signal_level",
             sa.String(32),
@@ -62,13 +56,9 @@ def upgrade() -> None:
             nullable=True,
             comment="产生该信号的研究运行 ID",
         ),
-        sa.UniqueConstraint(
-            "trade_date", "index_code", "strategy_id", name="uq_index_signal"
-        ),
+        sa.UniqueConstraint("trade_date", "index_code", "strategy_id", name="uq_index_signal"),
     )
-    op.create_index(
-        "ix_index_signal_strategy", "index_signal", ["strategy_id", "trade_date"]
-    )
+    op.create_index("ix_index_signal_strategy", "index_signal", ["strategy_id", "trade_date"])
 
 
 def downgrade() -> None:

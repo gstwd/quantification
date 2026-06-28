@@ -261,7 +261,9 @@ def retry_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     elif detail.run_type == "strategy_run":
         if detail.strategy_id is None:
             raise HTTPException(status_code=400, detail="策略运行记录缺少 strategy_id")
-        get_bg_executor().submit(_run_strategy_bg, detail.strategy_id, new_summary.run_id, detail.params)
+        get_bg_executor().submit(
+            _run_strategy_bg, detail.strategy_id, new_summary.run_id, detail.params
+        )
     elif detail.run_type == "cold_start":
         get_bg_executor().submit(_run_cold_start_bg, new_summary.run_id)
     elif detail.run_type == "universe_refresh":

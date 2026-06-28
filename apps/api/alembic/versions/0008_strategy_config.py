@@ -22,12 +22,8 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "strategy_config",
-        sa.Column(
-            "strategy_id", sa.String(64), primary_key=True, comment="策略唯一标识"
-        ),
-        sa.Column(
-            "display_name", sa.String(128), nullable=False, comment="策略中文显示名称"
-        ),
+        sa.Column("strategy_id", sa.String(64), primary_key=True, comment="策略唯一标识"),
+        sa.Column("display_name", sa.String(128), nullable=False, comment="策略中文显示名称"),
         sa.Column(
             "version", sa.String(32), nullable=False, server_default="1.0.0", comment="策略版本号"
         ),
@@ -46,9 +42,7 @@ def upgrade() -> None:
             server_default="a_share_etf",
             comment="资产范围",
         ),
-        sa.Column(
-            "config_json", sa.JSON, nullable=False, comment="完整策略配置 JSON"
-        ),
+        sa.Column("config_json", sa.JSON, nullable=False, comment="完整策略配置 JSON"),
         sa.Column(
             "status",
             sa.String(32),

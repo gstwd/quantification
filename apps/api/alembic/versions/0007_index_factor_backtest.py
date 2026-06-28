@@ -44,7 +44,10 @@ def upgrade() -> None:
         sa.Column("factor_payload", sa.JSON, comment="因子计算中间数据"),
         sa.Column("strategy_id", sa.String(64), comment="策略 ID，NULL 表示通用因子"),
         sa.UniqueConstraint(
-            "trade_date", "index_code", "factor_id", "strategy_id",
+            "trade_date",
+            "index_code",
+            "factor_id",
+            "strategy_id",
             name="uq_index_factor_value",
         ),
     )
@@ -81,12 +84,17 @@ def upgrade() -> None:
         sa.Column("in_portfolio", sa.Boolean, nullable=False, comment="是否纳入当日组合"),
         sa.Column("index_return", sa.Float, comment="T+1 日指数收益率，单位 %"),
         sa.UniqueConstraint(
-            "backtest_id", "trade_date", "index_code", name="uq_backtest_index",
+            "backtest_id",
+            "trade_date",
+            "index_code",
+            name="uq_backtest_index",
         ),
     )
     op.create_index("ix_backtest_index_backtest_id", "backtest_index_result", ["backtest_id"])
     op.create_index(
-        "ix_backtest_index_code", "backtest_index_result", ["backtest_id", "index_code"],
+        "ix_backtest_index_code",
+        "backtest_index_result",
+        ["backtest_id", "index_code"],
     )
 
 

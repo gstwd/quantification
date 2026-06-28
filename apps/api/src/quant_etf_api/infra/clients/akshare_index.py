@@ -172,7 +172,9 @@ class AkShareIndexClient(BaseDataClient):
             self._log_response(endpoint, len(_EM_INDEX_NAME_CACHE), elapsed)
         except FutureTimeoutError:
             elapsed = (time.perf_counter() - start) * 1000
-            self._log_error(endpoint, TimeoutError(f"东方财富 API 超时（{_EM_API_TIMEOUT}s）"), elapsed)
+            self._log_error(
+                endpoint, TimeoutError(f"东方财富 API 超时（{_EM_API_TIMEOUT}s）"), elapsed
+            )
             _EM_INDEX_NAME_CACHE = {}
         except Exception as e:
             elapsed = (time.perf_counter() - start) * 1000
@@ -508,8 +510,10 @@ class AkShareIndexClient(BaseDataClient):
                 return []
 
             # 中证指数官网 PE 列名可能为"滚动市盈率"或"动态市盈率"（依 AkShare 版本而异）
-            pe_col = "滚动市盈率" if "滚动市盈率" in df.columns else (
-                "动态市盈率" if "动态市盈率" in df.columns else None
+            pe_col = (
+                "滚动市盈率"
+                if "滚动市盈率" in df.columns
+                else ("动态市盈率" if "动态市盈率" in df.columns else None)
             )
             if pe_col is None:
                 elapsed = (time.perf_counter() - start) * 1000
@@ -602,10 +606,13 @@ class AkShareIndexClient(BaseDataClient):
             except (AttributeError, Exception) as e:
                 last_error = e
                 if attempt < max_retries - 1:
-                    wait_seconds = 2 ** attempt
+                    wait_seconds = 2**attempt
                     self._logger.info(
                         "指数 %s 估值拉取失败（第 %d 次），%d 秒后重试: %s",
-                        index_code, attempt + 1, wait_seconds, e
+                        index_code,
+                        attempt + 1,
+                        wait_seconds,
+                        e,
                     )
                     time.sleep(wait_seconds)
 

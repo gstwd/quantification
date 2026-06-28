@@ -156,9 +156,7 @@ def winsorize(
     return result
 
 
-def mad_outlier_detect(
-    values: dict[str, float], threshold: float = 3.0
-) -> dict[str, bool]:
+def mad_outlier_detect(values: dict[str, float], threshold: float = 3.0) -> dict[str, bool]:
     """MAD（中位数绝对偏差）异常值检测。
 
     不修改原值，仅标记是否为异常值。
@@ -175,11 +173,17 @@ def mad_outlier_detect(
 
     sorted_vals = sorted(values.values())
     n = len(sorted_vals)
-    median = sorted_vals[n // 2] if n % 2 == 1 else (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+    median = (
+        sorted_vals[n // 2] if n % 2 == 1 else (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+    )
 
     abs_deviations = [abs(v - median) for v in sorted_vals]
     abs_deviations.sort()
-    mad = abs_deviations[n // 2] if n % 2 == 1 else (abs_deviations[n // 2 - 1] + abs_deviations[n // 2]) / 2
+    mad = (
+        abs_deviations[n // 2]
+        if n % 2 == 1
+        else (abs_deviations[n // 2 - 1] + abs_deviations[n // 2]) / 2
+    )
 
     if mad == 0:
         return {k: False for k in values}

@@ -239,7 +239,9 @@ class DefaultScoreCalculator:
             return 0.0, "neutral", {"reason": "所有因子数据缺失"}
 
         total_weight = sum(abs(w) for w, _ in weighted_scores)
-        composite = sum(w * s for w, s in weighted_scores) / total_weight if total_weight > 0 else 0.0
+        composite = (
+            sum(w * s for w, s in weighted_scores) / total_weight if total_weight > 0 else 0.0
+        )
 
         # 判定 regime
         thresholds = config.thresholds

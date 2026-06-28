@@ -99,8 +99,7 @@ class AIFactorService:
 
         # 2.5 获取已保存新闻的 (source_id, title) → id 映射
         saved_news = {
-            (n.source_id, n.title): n.id
-            for n in self._news_repo.find_by_date(target_date)
+            (n.source_id, n.title): n.id for n in self._news_repo.find_by_date(target_date)
         }
 
         # raw_items 的 (source_id, title) → RawNewsItem 映射（复合键避免跨平台同名标题冲突）
@@ -132,7 +131,9 @@ class AIFactorService:
         new_sentiment_items: list = []
         if unanalyzed_raw:
             new_sentiment_items = self._analyzer.analyze_batch(
-                unanalyzed_raw, market_context, available_tags,
+                unanalyzed_raw,
+                market_context,
+                available_tags,
             )
         else:
             new_sentiment_items = []
@@ -144,7 +145,9 @@ class AIFactorService:
             # 构建 news_id → (source_id, title) 反向映射
             id_to_key = {v: k for k, v in saved_news.items()}
             existing_sentiment_items = self._db_results_to_sentiment_items(
-                existing_results, id_to_key, item_key_to_raw,
+                existing_results,
+                id_to_key,
+                item_key_to_raw,
             )
 
         # 合并全部 sentiment_items
@@ -212,19 +215,21 @@ class AIFactorService:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = []
         for item in items:
-            rows.append({
-                "source_id": item.source_id,
-                "source_name": item.source_name,
-                "title": item.title,
-                "url": item.url,
-                "rank": item.ranks[0] if item.ranks else None,
-                "crawl_date": crawl_date,
-                "first_seen_at": _parse_time(item.first_time),
-                "last_seen_at": _parse_time(item.last_time),
-                "appear_count": item.appear_count,
-                "raw_payload": None,
-                "created_at": now,
-            })
+            rows.append(
+                {
+                    "source_id": item.source_id,
+                    "source_name": item.source_name,
+                    "title": item.title,
+                    "url": item.url,
+                    "rank": item.ranks[0] if item.ranks else None,
+                    "crawl_date": crawl_date,
+                    "first_seen_at": _parse_time(item.first_time),
+                    "last_seen_at": _parse_time(item.last_time),
+                    "appear_count": item.appear_count,
+                    "raw_payload": None,
+                    "created_at": now,
+                }
+            )
         return rows
 
     def _to_result_rows(
@@ -241,28 +246,41 @@ class AIFactorService:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         seen_ids: set[str] = set()
         rows: list[dict] = []
+        skipped_no_match = 0
+        skipped_dup = 0
         for item in items:
             key = (item.source, item.title)
             news_id = news_map.get(key)
             if not news_id:
+                skipped_no_match += 1
                 continue
             # 去重：同一 news_id 在同一批次中只保留一条
             if news_id in seen_ids:
+                skipped_dup += 1
                 continue
             seen_ids.add(news_id)
-            rows.append({
-                "news_id": news_id,
-                "trade_date": trade_date,
-                "asset_tags": item.asset_tags,
-                "topics": item.topics,
-                "sentiment_score": item.sentiment_score,
-                "attention_score": item.attention_score,
-                "relevance_score": item.relevance_score,
-                "summary": item.summary,
-                "llm_model": self._client.model,
-                "llm_response": None,
-                "created_at": now,
-            })
+            rows.append(
+                {
+                    "news_id": news_id,
+                    "trade_date": trade_date,
+                    "asset_tags": item.asset_tags,
+                    "topics": item.topics,
+                    "sentiment_score": item.sentiment_score,
+                    "attention_score": item.attention_score,
+                    "relevance_score": item.relevance_score,
+                    "summary": item.summary,
+                    "llm_model": self._client.model,
+                    "llm_response": None,
+                    "created_at": now,
+                }
+            )
+        if skipped_no_match or skipped_dup:
+            logger.warning(
+                "_to_result_rows: %d 条因 news_map 无匹配跳过, %d 条因重复跳过, 最终写入 %d 条",
+                skipped_no_match,
+                skipped_dup,
+                len(rows),
+            )
         return rows
 
     def _to_agg_rows(self, aggregates: list) -> list[dict]:
@@ -270,18 +288,20 @@ class AIFactorService:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = []
         for agg in aggregates:
-            rows.append({
-                "trade_date": agg.date,
-                "asset_tag": agg.asset_tag,
-                "avg_sentiment": agg.avg_sentiment,
-                "weighted_sentiment": agg.weighted_sentiment,
-                "total_attention": agg.total_attention,
-                "news_count": agg.news_count,
-                "top_topics": agg.top_topics,
-                "positive_ratio": agg.positive_ratio,
-                "negative_ratio": agg.negative_ratio,
-                "created_at": now,
-            })
+            rows.append(
+                {
+                    "trade_date": agg.date,
+                    "asset_tag": agg.asset_tag,
+                    "avg_sentiment": agg.avg_sentiment,
+                    "weighted_sentiment": agg.weighted_sentiment,
+                    "total_attention": agg.total_attention,
+                    "news_count": agg.news_count,
+                    "top_topics": agg.top_topics,
+                    "positive_ratio": agg.positive_ratio,
+                    "negative_ratio": agg.negative_ratio,
+                    "created_at": now,
+                }
+            )
         return rows
 
     def _db_results_to_sentiment_items(

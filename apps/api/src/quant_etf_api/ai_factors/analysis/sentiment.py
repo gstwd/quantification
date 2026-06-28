@@ -210,11 +210,12 @@ class SentimentAnalyzer:
     # DeepSeek 推理文本中条目分隔符的模式（支持多种变体）
     _ENTRY_DELIMITER: re.Pattern = re.compile(
         r"\n(?="
-        r"\[\d+\]"           # [0]
+        r"\[\d+\]"  # [0]
         r"|"
-        r"\d+\.\s"           # 1.
+        r"\d+\.\s"  # 1.
         r"|"
-        r"\d+\.""            # 1."
+        r"\d+\."
+        "            # 1."
         r")"
     )
     # 条目开头的索引提取（支持 [0]、0.、0." 三种格式）
@@ -283,7 +284,9 @@ class SentimentAnalyzer:
 
             # 提取 summary
             summary = ""
-            sm = re.search(r'summary[：:]\s*[\""]?(.+?)[\""]?(?:\n|\n\[|\n\d+[\.．]|$)', entry_text, re.DOTALL)
+            sm = re.search(
+                r'summary[：:]\s*[\""]?(.+?)[\""]?(?:\n|\n\[|\n\d+[\.．]|$)', entry_text, re.DOTALL
+            )
             if sm:
                 summary = sm.group(1).strip()[:100]
 
@@ -352,8 +355,8 @@ class SentimentAnalyzer:
         # 匹配字段值：从 key: 开始到行尾（或遇到换行+下一字段/新条目）
         pattern = (
             rf"{field_name}[：:]"  # key:
-            r"\s*"                  # 可选空格
-            r"(.+?)"               # 值（非贪婪）
+            r"\s*"  # 可选空格
+            r"(.+?)"  # 值（非贪婪）
             r"(?:\n(?:sentiment_|relevance_|topics|asset_tags|summary)|\n\s*\n|\Z)"  # 到下一字段或结束
         )
         m = re.search(pattern, text, re.DOTALL)
@@ -369,7 +372,7 @@ class SentimentAnalyzer:
             try:
                 bracket_end = raw_val.find("]")
                 if bracket_end != -1:
-                    arr = json.loads(raw_val[:bracket_end + 1])
+                    arr = json.loads(raw_val[: bracket_end + 1])
                     if isinstance(arr, list):
                         return [str(t) for t in arr if t][:5]
             except (json.JSONDecodeError, TypeError):
@@ -426,7 +429,10 @@ class SentimentAnalyzer:
                 entries = [data]
 
         if not entries:
-            logger.warning("JSON 已解析但无有效 entries，data keys=%s", list(data.keys())[:5] if isinstance(data, dict) else "list")
+            logger.warning(
+                "JSON 已解析但无有效 entries，data keys=%s",
+                list(data.keys())[:5] if isinstance(data, dict) else "list",
+            )
             return None
 
         now = datetime.now(timezone.utc)

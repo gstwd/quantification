@@ -147,9 +147,7 @@ class StrategyService:
             self._db.commit()
         return result
 
-    def get_starred_summary(
-        self, trade_date: date | None = None
-    ) -> StarredSummaryResponse:
+    def get_starred_summary(self, trade_date: date | None = None) -> StarredSummaryResponse:
         """获取所有星标策略的当日执行摘要。
 
         对每个星标策略运行分配管线，判断是否为调仓日，
@@ -189,9 +187,7 @@ class StrategyService:
                     is_rebalance_day = True
 
                 # 运行分配管线
-                allocation = self.run_allocation(
-                    row.strategy_id, trade_date=effective_date
-                )
+                allocation = self.run_allocation(row.strategy_id, trade_date=effective_date)
                 if allocation is None:
                     continue
 
@@ -204,7 +200,9 @@ class StrategyService:
                         is_rebalance_day=is_rebalance_day,
                         rebalance_frequency=rebalance_cfg.frequency if rebalance_cfg else "daily",
                         rebalance_day_of_week=rebalance_cfg.day_of_week if rebalance_cfg else None,
-                        rebalance_day_of_month=rebalance_cfg.day_of_month if rebalance_cfg else None,
+                        rebalance_day_of_month=rebalance_cfg.day_of_month
+                        if rebalance_cfg
+                        else None,
                         timing=allocation.timing,
                         rankings=allocation.rankings,
                         plan=allocation.plan,
@@ -212,9 +210,7 @@ class StrategyService:
                     )
                 )
             except Exception:
-                logger.exception(
-                    "获取星标策略 %s 执行摘要失败，跳过", row.strategy_id
-                )
+                logger.exception("获取星标策略 %s 执行摘要失败，跳过", row.strategy_id)
                 continue
 
         return StarredSummaryResponse(trade_date=effective_date, items=items)
@@ -228,9 +224,7 @@ class StrategyService:
         svc = StrategyConfigService(self._db)
         return svc.create_config(req)
 
-    def update_config(
-        self, strategy_id: str, req: StrategyConfigUpdate
-    ) -> StrategyDetail | None:
+    def update_config(self, strategy_id: str, req: StrategyConfigUpdate) -> StrategyDetail | None:
         """更新策略配置。"""
         if self._db is None:
             return None

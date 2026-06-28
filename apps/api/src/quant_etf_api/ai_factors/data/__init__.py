@@ -2,7 +2,11 @@
 
 from quant_etf_api.ai_factors.data.cleaner import TextCleaner
 from quant_etf_api.ai_factors.data.collector import NewsCollector
-from quant_etf_api.ai_factors.data.models import DailyAggregateRecord, NewsItemRecord, SentimentResultRecord
+from quant_etf_api.ai_factors.data.models import (
+    DailyAggregateRecord,
+    NewsItemRecord,
+    SentimentResultRecord,
+)
 
 __all__ = [
     "NewsCollector",

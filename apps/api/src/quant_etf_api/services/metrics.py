@@ -94,7 +94,9 @@ def compute_performance_metrics(
     alpha, beta, ir, tracking_error = None, None, None, None
     if benchmark_returns and len(benchmark_returns) == n:
         alpha, beta = _calc_alpha_beta(daily_returns, benchmark_returns, trading_days_per_year)
-        ir, tracking_error = _calc_information_ratio(daily_returns, benchmark_returns, trading_days_per_year)
+        ir, tracking_error = _calc_information_ratio(
+            daily_returns, benchmark_returns, trading_days_per_year
+        )
 
     return PerformanceMetrics(
         total_return_pct=round(total_return_pct, 2),
@@ -235,7 +237,9 @@ def _calc_alpha_beta(
     mean_b = sum(benchmark_returns) / n
 
     # Beta = Cov(p, b) / Var(b)
-    cov = sum((daily_returns[i] - mean_p) * (benchmark_returns[i] - mean_b) for i in range(n)) / (n - 1)
+    cov = sum((daily_returns[i] - mean_p) * (benchmark_returns[i] - mean_b) for i in range(n)) / (
+        n - 1
+    )
     var_b = sum((r - mean_b) ** 2 for r in benchmark_returns) / (n - 1)
     beta = cov / var_b if var_b > 0 else 0.0
 

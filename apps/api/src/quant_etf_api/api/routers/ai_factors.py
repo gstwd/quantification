@@ -221,15 +221,17 @@ def _raw_to_news_rows(items: list, crawl_date: date) -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     rows = []
     for item in items:
-        rows.append({
-            "source_id": item.source_id,
-            "source_name": item.source_name,
-            "title": item.title,
-            "url": item.url,
-            "rank": item.ranks[0] if item.ranks else None,
-            "crawl_date": crawl_date,
-            "appear_count": item.appear_count,
-            "raw_payload": None,
-            "created_at": now,
-        })
+        rows.append(
+            {
+                "source_id": item.source_id,
+                "source_name": item.source_name,
+                "title": item.title,
+                "url": item.url,
+                "rank": item.ranks[0] if item.ranks else None,
+                "crawl_date": crawl_date,
+                "appear_count": item.appear_count,
+                "raw_payload": None,
+                "created_at": now,
+            }
+        )
     return rows

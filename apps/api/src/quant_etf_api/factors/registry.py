@@ -85,7 +85,10 @@ def build_default_factor_registry() -> FactorRegistry:
         PBPercentileComputer,
         PEPercentileComputer,
     )
-    from quant_etf_api.factors.builtins.volatility import Volatility17dComputer, Volatility20dComputer
+    from quant_etf_api.factors.builtins.volatility import (
+        Volatility17dComputer,
+        Volatility20dComputer,
+    )
     from quant_etf_api.factors.builtins.volume import VolumeRatio17dComputer, VolumeRatio20dComputer
 
     registry = FactorRegistry()

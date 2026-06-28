@@ -27,9 +27,9 @@ class TrendScorer:
 
     # 默认权重配置
     DEFAULT_WEIGHTS: ClassVar[dict[str, float]] = {
-        "RANK_WEIGHT": 0.5,       # 排名权重
+        "RANK_WEIGHT": 0.5,  # 排名权重
         "FREQUENCY_WEIGHT": 0.3,  # 频次权重
-        "HOTNESS_WEIGHT": 0.2,    # 热度加权重
+        "HOTNESS_WEIGHT": 0.2,  # 热度加权重
     }
 
     # 高排名阈值（排名 <= 此值视为"高位"）
@@ -148,9 +148,9 @@ class TrendScorer:
             attentions = [it.attention_score for it in tag_items]
             total_attn = sum(attentions)
             if total_attn > 0:
-                weighted_sentiment = sum(
-                    s * a for s, a in zip(sentiments, attentions, strict=True)
-                ) / total_attn
+                weighted_sentiment = (
+                    sum(s * a for s, a in zip(sentiments, attentions, strict=True)) / total_attn
+                )
             else:
                 weighted_sentiment = avg_sentiment
 

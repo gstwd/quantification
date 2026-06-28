@@ -22,7 +22,8 @@ def _make_context(
     """构建测试用上下文。"""
     return EngineContext(
         trade_date=date(2025, 1, 15),
-        universe=universe or [
+        universe=universe
+        or [
             {"etf_code": "A", "name_cn": "A", "category": "broad_index"},
             {"etf_code": "B", "name_cn": "B", "category": "broad_index"},
             {"etf_code": "C", "name_cn": "C", "category": "broad_index"},
@@ -113,9 +114,12 @@ class TestDefaultFilterEngine:
         assets = {"A": 80.0, "B": 60.0, "C": 40.0}
         context = _make_context(
             asset_factors={
-                ("A", "a"): 60.0, ("A", "b"): 60.0,  # 两个都满足
-                ("B", "a"): 60.0, ("B", "b"): 40.0,  # 只满足一个
-                ("C", "a"): 40.0, ("C", "b"): 40.0,  # 都不满足
+                ("A", "a"): 60.0,
+                ("A", "b"): 60.0,  # 两个都满足
+                ("B", "a"): 60.0,
+                ("B", "b"): 40.0,  # 只满足一个
+                ("C", "a"): 40.0,
+                ("C", "b"): 40.0,  # 都不满足
             },
         )
 
@@ -138,9 +142,12 @@ class TestDefaultFilterEngine:
         assets = {"A": 80.0, "B": 60.0, "C": 40.0}
         context = _make_context(
             asset_factors={
-                ("A", "a"): 90.0, ("A", "b"): 40.0,  # 只满足第一个
-                ("B", "a"): 40.0, ("B", "b"): 90.0,  # 只满足第二个
-                ("C", "a"): 40.0, ("C", "b"): 40.0,  # 都不满足
+                ("A", "a"): 90.0,
+                ("A", "b"): 40.0,  # 只满足第一个
+                ("B", "a"): 40.0,
+                ("B", "b"): 90.0,  # 只满足第二个
+                ("C", "a"): 40.0,
+                ("C", "b"): 40.0,  # 都不满足
             },
         )
 
@@ -191,9 +198,12 @@ class TestDefaultFilterEngine:
         assets = {"A": 80.0, "B": 60.0, "C": 40.0}
         context = _make_context(
             asset_factors={
-                ("A", "ma_5d"): 5100.0, ("A", "ma_20d"): 5050.0,  # 金叉
-                ("B", "ma_5d"): 5000.0, ("B", "ma_20d"): 5050.0,  # 死叉
-                ("C", "ma_5d"): 5000.0, ("C", "ma_20d"): 5000.0,  # 相等，不满足 gt
+                ("A", "ma_5d"): 5100.0,
+                ("A", "ma_20d"): 5050.0,  # 金叉
+                ("B", "ma_5d"): 5000.0,
+                ("B", "ma_20d"): 5050.0,  # 死叉
+                ("C", "ma_5d"): 5000.0,
+                ("C", "ma_20d"): 5000.0,  # 相等，不满足 gt
             },
         )
 
@@ -213,7 +223,8 @@ class TestDefaultFilterEngine:
         assets = {"A": 80.0, "B": 60.0}
         context = _make_context(
             asset_factors={
-                ("A", "ma_5d"): 5100.0, ("A", "ma_20d"): 5050.0,  # 正常
+                ("A", "ma_5d"): 5100.0,
+                ("A", "ma_20d"): 5050.0,  # 正常
                 ("B", "ma_5d"): 5100.0,  # B 缺少 ma_20d
             },
         )
@@ -236,8 +247,12 @@ class TestDefaultFilterEngine:
         assets = {"A": 80.0, "B": 60.0}
         context = _make_context(
             asset_factors={
-                ("A", "ma_5d"): 5100.0, ("A", "ma_20d"): 5050.0, ("A", "volume_ratio_20d"): 1.2,  # 两个都满足
-                ("B", "ma_5d"): 5100.0, ("B", "ma_20d"): 5050.0, ("B", "volume_ratio_20d"): 0.5,  # 量比不满足
+                ("A", "ma_5d"): 5100.0,
+                ("A", "ma_20d"): 5050.0,
+                ("A", "volume_ratio_20d"): 1.2,  # 两个都满足
+                ("B", "ma_5d"): 5100.0,
+                ("B", "ma_20d"): 5050.0,
+                ("B", "volume_ratio_20d"): 0.5,  # 量比不满足
             },
         )
 
@@ -256,8 +271,10 @@ class TestDefaultFilterEngine:
         assets = {"A": 80.0, "B": 60.0}
         context = _make_context(
             asset_factors={
-                ("A", "return_5d"): 3.5, ("A", "return_20d"): 8.2,  # 不相等，通过
-                ("B", "return_5d"): 5.0, ("B", "return_20d"): 5.0,  # 相等，不满足 neq
+                ("A", "return_5d"): 3.5,
+                ("A", "return_20d"): 8.2,  # 不相等，通过
+                ("B", "return_5d"): 5.0,
+                ("B", "return_20d"): 5.0,  # 相等，不满足 neq
             },
         )
 

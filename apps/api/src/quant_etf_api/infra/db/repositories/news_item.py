@@ -44,8 +44,12 @@ class NewsItemRepository(BaseRepository):
         # 分批前后的计数计算实际新增
         before = self._db.query(func.count(NewsItemModel.id)).scalar() or 0
 
-        stmt = insert(NewsItemModel).values(rows).on_conflict_do_nothing(
-            index_elements=["source_id", "title", "crawl_date"],
+        stmt = (
+            insert(NewsItemModel)
+            .values(rows)
+            .on_conflict_do_nothing(
+                index_elements=["source_id", "title", "crawl_date"],
+            )
         )
         try:
             self._db.execute(stmt)
@@ -82,10 +86,7 @@ class NewsItemRepository(BaseRepository):
         Returns:
             最近采集日期，无数据时返回 None。
         """
-        row = (
-            self._db.query(func.max(NewsItemModel.crawl_date))
-            .scalar()
-        )
+        row = self._db.query(func.max(NewsItemModel.crawl_date)).scalar()
         return row
 
 
@@ -238,13 +239,10 @@ class DailySentimentAggregateRepository(BaseRepository):
         Returns:
             DailySentimentAggregateModel 列表。
         """
-        q = (
-            self._db.query(DailySentimentAggregateModel)
-            .filter(
-                and_(
-                    DailySentimentAggregateModel.trade_date >= start_date,
-                    DailySentimentAggregateModel.trade_date <= end_date,
-                )
+        q = self._db.query(DailySentimentAggregateModel).filter(
+            and_(
+                DailySentimentAggregateModel.trade_date >= start_date,
+                DailySentimentAggregateModel.trade_date <= end_date,
             )
         )
         if asset_tag:

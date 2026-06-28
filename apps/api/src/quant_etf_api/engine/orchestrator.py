@@ -55,7 +55,9 @@ class StrategyEngine:
         self._risk = risk_manager or DefaultRiskManager()
 
     def run(
-        self, config: StrategyConfig, context: EngineContext,
+        self,
+        config: StrategyConfig,
+        context: EngineContext,
         include_details: bool = True,
     ) -> EngineResult:
         """执行策略管线。

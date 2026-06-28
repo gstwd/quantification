@@ -62,26 +62,43 @@ def check_daily_bar_anomalies(
             max_change = 15.0 if str(code).startswith(("0", "3", "5")) else 11.0
             if abs(change) > max_change:
                 anomalies.append(
-                    Anomaly(date=td, code=code, field="change_pct",
-                            value=round(change, 2),
-                            expected=f"±{max_change}% 以内",
-                            severity="error"))
+                    Anomaly(
+                        date=td,
+                        code=code,
+                        field="change_pct",
+                        value=round(change, 2),
+                        expected=f"±{max_change}% 以内",
+                        severity="error",
+                    )
+                )
 
         # 零量异动
         volume = getattr(b, "volume", None)
         if volume is not None and volume == 0 and change is not None and abs(change) > 0.01:
             anomalies.append(
-                Anomaly(date=td, code=code, field="volume",
-                        value=0, expected=">0（有价格变动）",
-                        severity="warning"))
+                Anomaly(
+                    date=td,
+                    code=code,
+                    field="volume",
+                    value=0,
+                    expected=">0（有价格变动）",
+                    severity="warning",
+                )
+            )
 
         # 收盘价异常
         close = getattr(b, "close_price", None)
         if close is not None and close <= 0:
             anomalies.append(
-                Anomaly(date=td, code=code, field="close_price",
-                        value=close, expected=">0",
-                        severity="error"))
+                Anomaly(
+                    date=td,
+                    code=code,
+                    field="close_price",
+                    value=close,
+                    expected=">0",
+                    severity="error",
+                )
+            )
 
     if anomalies:
         logger.warning("日线异常检测发现 %d 个问题", len(anomalies))
@@ -112,17 +129,29 @@ def check_valuation_anomalies(
             val = getattr(v, field_name, None)
             if val is not None and val < 0:
                 anomalies.append(
-                    Anomaly(date=td, code=code, field=field_name,
-                            value=round(val, 2), expected=">=0",
-                            severity="warning"))
+                    Anomaly(
+                        date=td,
+                        code=code,
+                        field=field_name,
+                        value=round(val, 2),
+                        expected=">=0",
+                        severity="warning",
+                    )
+                )
 
         for pct_field in ("pe_percentile", "pb_percentile"):
             pct_val = getattr(v, pct_field, None)
             if pct_val is not None and (pct_val < 0 or pct_val > 100):
                 anomalies.append(
-                    Anomaly(date=td, code=code, field=pct_field,
-                            value=round(pct_val, 2), expected="[0, 100]",
-                            severity="error"))
+                    Anomaly(
+                        date=td,
+                        code=code,
+                        field=pct_field,
+                        value=round(pct_val, 2),
+                        expected="[0, 100]",
+                        severity="error",
+                    )
+                )
 
     if anomalies:
         logger.warning("估值异常检测发现 %d 个问题", len(anomalies))
@@ -163,21 +192,29 @@ def check_continuity(
             if gap > 5:  # 超过 5 天视为异常缺口
                 if trading_days is None:
                     anomalies.append(
-                        Anomaly(date=str(curr_date), code=code, field="trade_date",
-                                value=f"距上次 {gap} 天",
-                                expected="≤5 天间隔",
-                                severity="warning"))
+                        Anomaly(
+                            date=str(curr_date),
+                            code=code,
+                            field="trade_date",
+                            value=f"距上次 {gap} 天",
+                            expected="≤5 天间隔",
+                            severity="warning",
+                        )
+                    )
                 else:
                     # 检查中间是否有交易日
-                    has_trading = any(
-                        prev_date < td < curr_date for td in trading_days
-                    )
+                    has_trading = any(prev_date < td < curr_date for td in trading_days)
                     if has_trading:
                         anomalies.append(
-                            Anomaly(date=str(curr_date), code=code, field="trade_date",
-                                    value=f"缺失 {gap} 天中的交易日",
-                                    expected="连续交易日",
-                                    severity="error"))
+                            Anomaly(
+                                date=str(curr_date),
+                                code=code,
+                                field="trade_date",
+                                value=f"缺失 {gap} 天中的交易日",
+                                expected="连续交易日",
+                                severity="error",
+                            )
+                        )
 
     if anomalies:
         logger.warning("连续性检测发现 %d 个缺口", len(anomalies))

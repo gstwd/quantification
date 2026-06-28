@@ -186,7 +186,7 @@ class SentimentDivergenceComputer:
 
         mean = sum(sentiments) / n
         variance = sum((s - mean) ** 2 for s in sentiments) / n
-        std_dev = variance ** 0.5
+        std_dev = variance**0.5
 
         return FactorValue(
             factor_id=self.spec.factor_id,

@@ -1,4 +1,5 @@
 """市场日志服务，编排日志 CRUD、自动填充、交易日历查询等业务逻辑。"""
+
 from __future__ import annotations
 
 import logging
@@ -414,7 +415,9 @@ class JournalService:
     # 观察分区
     # =========================================================================
 
-    def save_observations(self, entry_id: str, data: ObservationsBatchUpdate) -> list[ObservationRow]:
+    def save_observations(
+        self, entry_id: str, data: ObservationsBatchUpdate
+    ) -> list[ObservationRow]:
         """批量保存观察分区内容。
 
         Args:
@@ -425,8 +428,7 @@ class JournalService:
             更新后的观察分区列表。
         """
         obs_dicts = [
-            {"section_key": o.section_key, "content": o.content}
-            for o in data.observations
+            {"section_key": o.section_key, "content": o.content} for o in data.observations
         ]
         self._repo.bulk_upsert_observations(entry_id, obs_dicts)
 
@@ -657,28 +659,36 @@ class JournalService:
             change_pct_val = float(bar.change_pct) if bar.change_pct is not None else None
 
             # 计算 MA 偏离率
-            ma_20d_dev = self._calc_ma_deviation(close_price, factor_map.get((idx.index_code, "ma_20d")))
-            ma_60d_dev = self._calc_ma_deviation(close_price, factor_map.get((idx.index_code, "ma_60d")))
-            ma_120d_dev = self._calc_ma_deviation(close_price, factor_map.get((idx.index_code, "ma_120d")))
+            ma_20d_dev = self._calc_ma_deviation(
+                close_price, factor_map.get((idx.index_code, "ma_20d"))
+            )
+            ma_60d_dev = self._calc_ma_deviation(
+                close_price, factor_map.get((idx.index_code, "ma_60d"))
+            )
+            ma_120d_dev = self._calc_ma_deviation(
+                close_price, factor_map.get((idx.index_code, "ma_120d"))
+            )
 
-            snapshots.append({
-                "index_code": idx.index_code,
-                "index_name": idx.name_cn,
-                "index_category": "broad",
-                "sort_order": 0,
-                "close_price": close_price,
-                "change_pct": change_pct_val,
-                "volume_ratio_20d": factor_map.get((idx.index_code, "volume_ratio_20d")),
-                "return_5d": factor_map.get((idx.index_code, "return_5d")),
-                "return_20d": factor_map.get((idx.index_code, "return_20d")),
-                "return_60d": factor_map.get((idx.index_code, "return_60d")),
-                "return_120d": factor_map.get((idx.index_code, "return_120d")),
-                "ma_20d_deviation": ma_20d_dev,
-                "ma_60d_deviation": ma_60d_dev,
-                "ma_120d_deviation": ma_120d_dev,
-                "volatility_20d": factor_map.get((idx.index_code, "volatility_20d")),
-                "max_drawdown_60d": factor_map.get((idx.index_code, "max_drawdown_60d")),
-            })
+            snapshots.append(
+                {
+                    "index_code": idx.index_code,
+                    "index_name": idx.name_cn,
+                    "index_category": "broad",
+                    "sort_order": 0,
+                    "close_price": close_price,
+                    "change_pct": change_pct_val,
+                    "volume_ratio_20d": factor_map.get((idx.index_code, "volume_ratio_20d")),
+                    "return_5d": factor_map.get((idx.index_code, "return_5d")),
+                    "return_20d": factor_map.get((idx.index_code, "return_20d")),
+                    "return_60d": factor_map.get((idx.index_code, "return_60d")),
+                    "return_120d": factor_map.get((idx.index_code, "return_120d")),
+                    "ma_20d_deviation": ma_20d_dev,
+                    "ma_60d_deviation": ma_60d_dev,
+                    "ma_120d_deviation": ma_120d_dev,
+                    "volatility_20d": factor_map.get((idx.index_code, "volatility_20d")),
+                    "max_drawdown_60d": factor_map.get((idx.index_code, "max_drawdown_60d")),
+                }
+            )
 
         return snapshots
 

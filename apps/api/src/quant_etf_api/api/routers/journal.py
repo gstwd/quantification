@@ -1,4 +1,5 @@
 """市场日志模块 API 路由。"""
+
 from __future__ import annotations
 
 from datetime import date

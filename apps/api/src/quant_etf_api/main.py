@@ -67,6 +67,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     get_scheduler().stop()
     # 关闭共享后台任务线程池
     from quant_etf_api.api.executor import get_bg_executor
+
     get_bg_executor().shutdown(wait=False, cancel_futures=True)
 
 

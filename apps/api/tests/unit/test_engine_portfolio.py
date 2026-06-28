@@ -22,8 +22,7 @@ from quant_etf_api.engine.portfolio import (
 def _make_rankings(codes: list[str], scores: list[float]) -> list[AssetRanking]:
     """构建测试用排名列表。"""
     return [
-        AssetRanking(etf_code=c, name_cn=c, category="宽基", score=s)
-        for c, s in zip(codes, scores)
+        AssetRanking(etf_code=c, name_cn=c, category="宽基", score=s) for c, s in zip(codes, scores)
     ]
 
 

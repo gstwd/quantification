@@ -98,16 +98,18 @@ class StrategyExecutionService:
         signal_rows: list[dict[str, Any]] = []
         factor_rows: list[dict[str, Any]] = []
         for r in result.strategy_results:
-            signal_rows.append({
-                "trade_date": r.trade_date,
-                "index_code": r.etf_code,
-                "strategy_id": r.strategy_id,
-                "signal_score": r.signal_score,
-                "signal_level": r.signal_level,
-                "signal_label": r.signal_label,
-                "signal_payload": r.payload,
-                "run_id": run_id,
-            })
+            signal_rows.append(
+                {
+                    "trade_date": r.trade_date,
+                    "index_code": r.etf_code,
+                    "strategy_id": r.strategy_id,
+                    "signal_score": r.signal_score,
+                    "signal_level": r.signal_level,
+                    "signal_label": r.signal_label,
+                    "signal_payload": r.payload,
+                    "run_id": run_id,
+                }
+            )
             for fv in r.factor_values:
                 raw = fv.get("value")
                 num_val: float | None = None
@@ -116,15 +118,17 @@ class StrategyExecutionService:
                     num_val = float(raw)
                 elif raw is not None:
                     txt_val = str(raw)
-                factor_rows.append({
-                    "trade_date": r.trade_date,
-                    "index_code": r.etf_code,
-                    "factor_id": fv["factor_id"],
-                    "factor_value_numeric": num_val,
-                    "factor_value_text": txt_val,
-                    "factor_payload": fv.get("payload"),
-                    "strategy_id": r.strategy_id,
-                })
+                factor_rows.append(
+                    {
+                        "trade_date": r.trade_date,
+                        "index_code": r.etf_code,
+                        "factor_id": fv["factor_id"],
+                        "factor_value_numeric": num_val,
+                        "factor_value_text": txt_val,
+                        "factor_payload": fv.get("payload"),
+                        "strategy_id": r.strategy_id,
+                    }
+                )
 
         # 批量写入信号（旧记录已删除，直接插入）
         if signal_rows:
@@ -150,8 +154,7 @@ class StrategyExecutionService:
             },
         )
         logger.info(
-            "策略执行完成: %s signals=%d factors=%d",
-            config.strategy_id, signal_count, factor_count
+            "策略执行完成: %s signals=%d factors=%d", config.strategy_id, signal_count, factor_count
         )
 
     def _mark_run_failed(self, run_id: str, message: str) -> None:

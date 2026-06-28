@@ -1,4 +1,5 @@
 """市场日志模块请求/响应 Schema。"""
+
 from __future__ import annotations
 
 from datetime import date, datetime

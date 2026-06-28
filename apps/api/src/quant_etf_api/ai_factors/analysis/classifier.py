@@ -158,9 +158,7 @@ class TagClassifier:
 
         for i in range(0, len(items), self._batch_size):
             batch = items[i : i + self._batch_size]
-            news_text = "\n".join(
-                f"[{j}] {item.title}" for j, item in enumerate(batch, start=i)
-            )
+            news_text = "\n".join(f"[{j}] {item.title}" for j, item in enumerate(batch, start=i))
 
             system, user = self._prompt_loader.render(
                 PROMPT_NAME,

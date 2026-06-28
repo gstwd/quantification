@@ -161,7 +161,10 @@ class ERPPercentileComputer:
             return FactorValue(
                 factor_id=self.spec.factor_id,
                 numeric=None,
-                payload={"index_code": index_code, "reason": f"历史数据不足（{len(erp_history)} 点）"},
+                payload={
+                    "index_code": index_code,
+                    "reason": f"历史数据不足（{len(erp_history)} 点）",
+                },
             )
 
         # 计算百分位：历史中有多少比例的 ERP <= 当前 ERP

@@ -79,8 +79,14 @@ class ContextBuilder:
 
         if is_backtest:
             return self._build_backtest(
-                config, trade_date, index_codes, all_bars, all_valuation,
-                precomputed_factors, cached_universe, cached_metadata,
+                config,
+                trade_date,
+                index_codes,
+                all_bars,
+                all_valuation,
+                precomputed_factors,
+                cached_universe,
+                cached_metadata,
             )
         return self._build_live(config, trade_date)
 
@@ -155,7 +161,9 @@ class ContextBuilder:
             }
 
         # 通过 FactorProvider 加载因子值（基于有效交易日）
-        asset_factors = self._factor_provider.load_asset_factors(config, effective_date, index_codes)
+        asset_factors = self._factor_provider.load_asset_factors(
+            config, effective_date, index_codes
+        )
 
         # 按需补算：策略依赖的因子值缺失时自动触发 FactorService 计算
         if self._registry is not None:
@@ -165,7 +173,8 @@ class ContextBuilder:
             if missing:
                 logger.info(
                     "因子数据缺失，触发按需计算: trade_date=%s missing=%s",
-                    effective_date, missing[:5],
+                    effective_date,
+                    missing[:5],
                 )
                 from quant_etf_api.factors.service import FactorService
 
@@ -179,7 +188,8 @@ class ContextBuilder:
                     )
                     logger.info(
                         "按需因子计算完成: trade_date=%s factor_count=%d",
-                        effective_date, len(asset_factors),
+                        effective_date,
+                        len(asset_factors),
                     )
                 except Exception:
                     logger.warning("按需因子计算失败", exc_info=True)
@@ -338,9 +348,7 @@ class ContextBuilder:
             .first()
         )
         if result is not None and result[0] < trade_date:
-            logger.info(
-                "trade_date=%s 无数据，回退到最近交易日=%s", trade_date, result[0]
-            )
+            logger.info("trade_date=%s 无数据，回退到最近交易日=%s", trade_date, result[0])
             return result[0]
         return trade_date
 

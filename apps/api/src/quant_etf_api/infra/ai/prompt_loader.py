@@ -195,9 +195,9 @@ def _parse_prompt_template(raw: str) -> tuple[str, str]:
 
     if system_start != -1:
         system_end = user_start if user_start != -1 else len(raw)
-        system_prompt = raw[system_start + len("[system]"):system_end].strip()
+        system_prompt = raw[system_start + len("[system]") : system_end].strip()
 
     if user_start != -1:
-        user_prompt = raw[user_start + len("[user]"):].strip()
+        user_prompt = raw[user_start + len("[user]") :].strip()
 
     return system_prompt, user_prompt

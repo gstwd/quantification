@@ -4,6 +4,7 @@ Revision ID: 0017
 Revises: 0016
 Create Date: 2026-06-17
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -57,10 +58,34 @@ def upgrade() -> None:
         sa.Column("market_consistency", sa.SmallInteger, nullable=True, comment="市场一致性 0-100"),
         sa.Column("market_phase", sa.String(32), nullable=True, comment="市场阶段枚举值"),
         sa.Column("one_line_summary", sa.String(256), nullable=True, comment="一句话市场摘要"),
-        sa.Column("is_complete", sa.Boolean, nullable=False, server_default=sa.text("FALSE"), comment="是否已完成填写"),
-        sa.Column("word_count", sa.Integer, nullable=False, server_default=sa.text("0"), comment="非结构化内容总字数"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("NOW()"), comment="记录创建时间（UTC）"),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("NOW()"), comment="记录最后更新时间（UTC）"),
+        sa.Column(
+            "is_complete",
+            sa.Boolean,
+            nullable=False,
+            server_default=sa.text("FALSE"),
+            comment="是否已完成填写",
+        ),
+        sa.Column(
+            "word_count",
+            sa.Integer,
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="非结构化内容总字数",
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("NOW()"),
+            comment="记录创建时间（UTC）",
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("NOW()"),
+            comment="记录最后更新时间（UTC）",
+        ),
         sa.UniqueConstraint("trade_date", name="uq_journal_entry_trade_date"),
     )
     op.create_index("idx_journal_entry_trade_date", "journal_entry", ["trade_date"])
@@ -71,11 +96,28 @@ def upgrade() -> None:
     op.create_table(
         "journal_index_snapshot",
         sa.Column("id", sa.String(36), primary_key=True, comment="快照唯一标识（UUID）"),
-        sa.Column("entry_id", sa.String(36), sa.ForeignKey("journal_entry.id", ondelete="CASCADE"), nullable=False, comment="关联的日志 ID"),
+        sa.Column(
+            "entry_id",
+            sa.String(36),
+            sa.ForeignKey("journal_entry.id", ondelete="CASCADE"),
+            nullable=False,
+            comment="关联的日志 ID",
+        ),
         sa.Column("index_code", sa.String(32), nullable=False, comment="指数代码"),
         sa.Column("index_name", sa.String(128), nullable=False, comment="指数中文名称"),
-        sa.Column("index_category", sa.String(32), nullable=True, comment="指数分类：broad / industry / theme"),
-        sa.Column("sort_order", sa.SmallInteger, nullable=False, server_default=sa.text("0"), comment="展示排序"),
+        sa.Column(
+            "index_category",
+            sa.String(32),
+            nullable=True,
+            comment="指数分类：broad / industry / theme",
+        ),
+        sa.Column(
+            "sort_order",
+            sa.SmallInteger,
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="展示排序",
+        ),
         sa.Column("close_price", sa.Float, nullable=True, comment="收盘点位"),
         sa.Column("change_pct", sa.Float, nullable=True, comment="日涨跌幅（%）"),
         sa.Column("volume_ratio_20d", sa.Float, nullable=True, comment="20 日量比"),
@@ -96,7 +138,14 @@ def upgrade() -> None:
     op.create_table(
         "journal_market_data",
         sa.Column("id", sa.String(36), primary_key=True, comment="市场数据唯一标识（UUID）"),
-        sa.Column("entry_id", sa.String(36), sa.ForeignKey("journal_entry.id", ondelete="CASCADE"), nullable=False, unique=True, comment="关联的日志 ID（一对一）"),
+        sa.Column(
+            "entry_id",
+            sa.String(36),
+            sa.ForeignKey("journal_entry.id", ondelete="CASCADE"),
+            nullable=False,
+            unique=True,
+            comment="关联的日志 ID（一对一）",
+        ),
         sa.Column("market_up_stocks", sa.Integer, nullable=True, comment="全市场上涨家数"),
         sa.Column("market_down_stocks", sa.Integer, nullable=True, comment="全市场下跌家数"),
         sa.Column("market_flat_stocks", sa.Integer, nullable=True, comment="全市场平盘家数"),
@@ -105,9 +154,21 @@ def upgrade() -> None:
         sa.Column("total_turnover_yi", sa.Float, nullable=True, comment="全市场成交额（亿元）"),
         sa.Column("turnover_vs_prev_pct", sa.Float, nullable=True, comment="成交额较前日变化（%）"),
         sa.Column("north_bound_net_yi", sa.Float, nullable=True, comment="北向资金净流入（亿元）"),
-        sa.Column("margin_balance_change_yi", sa.Float, nullable=True, comment="两融余额变化（亿元）"),
-        sa.Column("size_style", sa.String(16), nullable=True, comment="大小盘风格：large_cap / small_cap / balanced"),
-        sa.Column("growth_style", sa.String(16), nullable=True, comment="成长价值风格：growth / value / balanced"),
+        sa.Column(
+            "margin_balance_change_yi", sa.Float, nullable=True, comment="两融余额变化（亿元）"
+        ),
+        sa.Column(
+            "size_style",
+            sa.String(16),
+            nullable=True,
+            comment="大小盘风格：large_cap / small_cap / balanced",
+        ),
+        sa.Column(
+            "growth_style",
+            sa.String(16),
+            nullable=True,
+            comment="成长价值风格：growth / value / balanced",
+        ),
         sa.Column("sector_leading", sa.String(32), nullable=True, comment="行业主导方向"),
         sa.Column("top_sectors", sa.Text, nullable=True, comment="领涨行业，逗号分隔"),
         sa.Column("bottom_sectors", sa.Text, nullable=True, comment="领跌行业，逗号分隔"),
@@ -119,11 +180,23 @@ def upgrade() -> None:
     op.create_table(
         "journal_observation",
         sa.Column("id", sa.String(36), primary_key=True, comment="观察唯一标识（UUID）"),
-        sa.Column("entry_id", sa.String(36), sa.ForeignKey("journal_entry.id", ondelete="CASCADE"), nullable=False, comment="关联的日志 ID"),
+        sa.Column(
+            "entry_id",
+            sa.String(36),
+            sa.ForeignKey("journal_entry.id", ondelete="CASCADE"),
+            nullable=False,
+            comment="关联的日志 ID",
+        ),
         sa.Column("section_key", sa.String(32), nullable=False, comment="分区标识"),
         sa.Column("section_label", sa.String(64), nullable=False, comment="分区中文标签"),
         sa.Column("content", sa.Text, nullable=True, comment="纯文本内容"),
-        sa.Column("sort_order", sa.SmallInteger, nullable=False, server_default=sa.text("0"), comment="分区展示顺序"),
+        sa.Column(
+            "sort_order",
+            sa.SmallInteger,
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="分区展示顺序",
+        ),
         sa.UniqueConstraint("entry_id", "section_key", name="uq_journal_observation_entry_section"),
     )
     op.create_index("idx_journal_observation_entry", "journal_observation", ["entry_id"])
@@ -133,29 +206,84 @@ def upgrade() -> None:
         "journal_tag",
         sa.Column("id", sa.String(36), primary_key=True, comment="标签唯一标识（UUID）"),
         sa.Column("name", sa.String(64), nullable=False, comment="标签名称"),
-        sa.Column("color", sa.String(7), nullable=False, server_default=sa.text("'#3B82F6'"), comment="十六进制颜色值"),
+        sa.Column(
+            "color",
+            sa.String(7),
+            nullable=False,
+            server_default=sa.text("'#3B82F6'"),
+            comment="十六进制颜色值",
+        ),
         sa.Column("description", sa.String(256), nullable=True, comment="标签说明"),
-        sa.Column("is_system", sa.Boolean, nullable=False, server_default=sa.text("FALSE"), comment="是否为预设标签"),
-        sa.Column("usage_count", sa.Integer, nullable=False, server_default=sa.text("0"), comment="使用次数"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("NOW()"), comment="记录创建时间（UTC）"),
+        sa.Column(
+            "is_system",
+            sa.Boolean,
+            nullable=False,
+            server_default=sa.text("FALSE"),
+            comment="是否为预设标签",
+        ),
+        sa.Column(
+            "usage_count",
+            sa.Integer,
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="使用次数",
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("NOW()"),
+            comment="记录创建时间（UTC）",
+        ),
         sa.UniqueConstraint("name", name="uq_journal_tag_name"),
     )
 
     # 6. 日志-标签映射表
     op.create_table(
         "journal_entry_tag",
-        sa.Column("entry_id", sa.String(36), sa.ForeignKey("journal_entry.id", ondelete="CASCADE"), primary_key=True, comment="日志 ID"),
-        sa.Column("tag_id", sa.String(36), sa.ForeignKey("journal_tag.id", ondelete="CASCADE"), primary_key=True, comment="标签 ID"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("NOW()"), comment="关联创建时间（UTC）"),
+        sa.Column(
+            "entry_id",
+            sa.String(36),
+            sa.ForeignKey("journal_entry.id", ondelete="CASCADE"),
+            primary_key=True,
+            comment="日志 ID",
+        ),
+        sa.Column(
+            "tag_id",
+            sa.String(36),
+            sa.ForeignKey("journal_tag.id", ondelete="CASCADE"),
+            primary_key=True,
+            comment="标签 ID",
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("NOW()"),
+            comment="关联创建时间（UTC）",
+        ),
     )
 
     # 7. AI 分析表
     op.create_table(
         "journal_ai_analysis",
         sa.Column("id", sa.String(36), primary_key=True, comment="分析结果唯一标识（UUID）"),
-        sa.Column("entry_id", sa.String(36), sa.ForeignKey("journal_entry.id", ondelete="CASCADE"), nullable=False, unique=True, comment="关联的日志 ID（一对一）"),
+        sa.Column(
+            "entry_id",
+            sa.String(36),
+            sa.ForeignKey("journal_entry.id", ondelete="CASCADE"),
+            nullable=False,
+            unique=True,
+            comment="关联的日志 ID（一对一）",
+        ),
         sa.Column("model", sa.String(64), nullable=False, comment="使用的 LLM 模型标识"),
-        sa.Column("status", sa.String(16), nullable=False, server_default=sa.text("'pending'"), comment="分析状态：pending / running / success / failed"),
+        sa.Column(
+            "status",
+            sa.String(16),
+            nullable=False,
+            server_default=sa.text("'pending'"),
+            comment="分析状态：pending / running / success / failed",
+        ),
         sa.Column("market_summary", sa.Text, nullable=True, comment="AI 生成的市场总结"),
         sa.Column("phase_judgment", sa.Text, nullable=True, comment="AI 生成的市场阶段判断"),
         sa.Column("style_judgment", sa.Text, nullable=True, comment="AI 生成的风格判断"),
@@ -166,7 +294,13 @@ def upgrade() -> None:
         sa.Column("raw_response", sa.Text, nullable=True, comment="LLM 原始响应（调试用）"),
         sa.Column("error_message", sa.Text, nullable=True, comment="失败时的错误信息"),
         sa.Column("tokens_used", sa.Integer, nullable=True, comment="消耗的 token 数"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("NOW()"), comment="记录创建时间（UTC）"),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("NOW()"),
+            comment="记录创建时间（UTC）",
+        ),
     )
 
     # 插入预设标签

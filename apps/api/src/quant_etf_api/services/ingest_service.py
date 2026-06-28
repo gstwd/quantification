@@ -1056,7 +1056,10 @@ class IngestService:
             if run is not None:
                 run.status = "success"
                 run.finished_at = utcnow()
-                run.metrics = {"reason": "concurrent_skip", "message": "另一个摄任务正在运行，跳过本次执行"}
+                run.metrics = {
+                    "reason": "concurrent_skip",
+                    "message": "另一个摄任务正在运行，跳过本次执行",
+                }
                 self._db.commit()
             return
         try:
@@ -1130,9 +1133,7 @@ class IngestService:
                     "valuation_records": index_valuation_count,
                 },
                 "macro": {"records": macro_count},
-                "duration_seconds": round(
-                    (utcnow() - start_time).total_seconds(), 1
-                ),
+                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
             }
             self._db.commit()
 
@@ -1205,9 +1206,7 @@ class IngestService:
                     "failed": etf_failed,
                     "skipped": etf_skipped,
                 },
-                "duration_seconds": round(
-                    (utcnow() - start_time).total_seconds(), 1
-                ),
+                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
             }
             self._db.commit()
 
@@ -1283,9 +1282,7 @@ class IngestService:
                     "bar_records": index_bar_count,
                     "valuation_records": index_valuation_count,
                 },
-                "duration_seconds": round(
-                    (utcnow() - start_time).total_seconds(), 1
-                ),
+                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
             }
             self._db.commit()
 
@@ -1344,9 +1341,7 @@ class IngestService:
             run.finished_at = utcnow()
             run.metrics = {
                 "macro": {"records": macro_count},
-                "duration_seconds": round(
-                    (utcnow() - start_time).total_seconds(), 1
-                ),
+                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
             }
             self._db.commit()
 
@@ -1425,7 +1420,9 @@ class IngestService:
 
             for idx in indexes:
                 try:
-                    index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code, incremental=False)
+                    index_bar_count += self._fetch_and_upsert_index_bars(
+                        idx.index_code, incremental=False
+                    )
                 except Exception as e:
                     logger.warning("指数 %s 日线拉取失败: %s", idx.index_code, e)
 
@@ -1459,9 +1456,7 @@ class IngestService:
                     "valuation_records": index_valuation_count,
                 },
                 "macro": {"records": macro_count},
-                "duration_seconds": round(
-                    (utcnow() - start_time).total_seconds(), 1
-                ),
+                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
             }
             self._db.commit()
 
@@ -1551,9 +1546,7 @@ class IngestService:
                 func.max(MacroIndicatorModel.ingested_at)
             ).scalar()
             # DateTime 列返回 naive datetime，去掉 tzinfo 后再比较
-            macro_stale_threshold = utcnow() - timedelta(
-                days=5
-            )
+            macro_stale_threshold = utcnow() - timedelta(days=5)
             macro_count = 0
             if macro_latest_ingest is None or macro_latest_ingest < macro_stale_threshold:
                 try:
@@ -1578,9 +1571,7 @@ class IngestService:
                     "valuation_records": index_val_count,
                 },
                 "macro": {"records": macro_count},
-                "duration_seconds": round(
-                    (utcnow() - start_time).total_seconds(), 1
-                ),
+                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
             }
             self._db.commit()
 

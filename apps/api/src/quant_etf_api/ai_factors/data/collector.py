@@ -117,9 +117,7 @@ class NewsCollector:
                     continue
 
                 platform_name = id_to_name.get(platform_id, platform_id)
-                platform_items = self._parse_platform_data(
-                    platform_id, platform_name, raw_data
-                )
+                platform_items = self._parse_platform_data(platform_id, platform_name, raw_data)
                 items.extend(platform_items)
 
                 logger.info(

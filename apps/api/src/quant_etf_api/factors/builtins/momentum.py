@@ -173,7 +173,9 @@ class Return5dComputer:
             key=交易日, value=FactorValue 的字典。
         """
         close_dates, close_prices = _build_sorted_closes(index_code, ctx)
-        return _calc_batch_returns(close_dates, close_prices, dates, n=5, factor_id=self.spec.factor_id)
+        return _calc_batch_returns(
+            close_dates, close_prices, dates, n=5, factor_id=self.spec.factor_id
+        )
 
 
 class Return20dComputer:
@@ -228,7 +230,9 @@ class Return20dComputer:
             key=交易日, value=FactorValue 的字典。
         """
         close_dates, close_prices = _build_sorted_closes(index_code, ctx)
-        return _calc_batch_returns(close_dates, close_prices, dates, n=20, factor_id=self.spec.factor_id)
+        return _calc_batch_returns(
+            close_dates, close_prices, dates, n=20, factor_id=self.spec.factor_id
+        )
 
 
 class Return17dComputer:
@@ -283,7 +287,9 @@ class Return17dComputer:
             key=交易日, value=FactorValue 的字典。
         """
         close_dates, close_prices = _build_sorted_closes(index_code, ctx)
-        return _calc_batch_returns(close_dates, close_prices, dates, n=17, factor_id=self.spec.factor_id)
+        return _calc_batch_returns(
+            close_dates, close_prices, dates, n=17, factor_id=self.spec.factor_id
+        )
 
 
 class Return60dComputer:
@@ -302,9 +308,7 @@ class Return60dComputer:
             name="60日收益率",
             category="momentum",
             version="2.0.0",
-            description=(
-                "指数近 60 个交易日的价格涨跌幅（%），衡量中长期趋势。"
-            ),
+            description=("指数近 60 个交易日的价格涨跌幅（%），衡量中长期趋势。"),
             required_data=["index_bars"],
             lookback_days=90,
         )
@@ -341,7 +345,9 @@ class Return60dComputer:
             key=交易日, value=FactorValue 的字典。
         """
         close_dates, close_prices = _build_sorted_closes(index_code, ctx)
-        return _calc_batch_returns(close_dates, close_prices, dates, n=60, factor_id=self.spec.factor_id)
+        return _calc_batch_returns(
+            close_dates, close_prices, dates, n=60, factor_id=self.spec.factor_id
+        )
 
 
 class Return120dComputer:
@@ -360,9 +366,7 @@ class Return120dComputer:
             name="120日收益率",
             category="momentum",
             version="1.0.0",
-            description=(
-                "指数近 120 个交易日的价格涨跌幅（%），衡量中长期趋势。"
-            ),
+            description=("指数近 120 个交易日的价格涨跌幅（%），衡量中长期趋势。"),
             required_data=["index_bars"],
             lookback_days=180,
         )
@@ -399,4 +403,6 @@ class Return120dComputer:
             key=交易日, value=FactorValue 的字典。
         """
         close_dates, close_prices = _build_sorted_closes(index_code, ctx)
-        return _calc_batch_returns(close_dates, close_prices, dates, n=120, factor_id=self.spec.factor_id)
+        return _calc_batch_returns(
+            close_dates, close_prices, dates, n=120, factor_id=self.spec.factor_id
+        )

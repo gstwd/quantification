@@ -49,7 +49,9 @@ def upgrade() -> None:
         "etf_daily_bar",
         sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
         sa.Column("trade_date", sa.Date, nullable=False),
-        sa.Column("etf_code", sa.String(16), sa.ForeignKey("etf_universe.etf_code"), nullable=False),
+        sa.Column(
+            "etf_code", sa.String(16), sa.ForeignKey("etf_universe.etf_code"), nullable=False
+        ),
         sa.Column("open_price", sa.Float, nullable=True),
         sa.Column("high_price", sa.Float, nullable=True),
         sa.Column("low_price", sa.Float, nullable=True),
@@ -68,7 +70,9 @@ def upgrade() -> None:
         "index_daily_bar",
         sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
         sa.Column("trade_date", sa.Date, nullable=False),
-        sa.Column("index_code", sa.String(32), sa.ForeignKey("benchmark_index.index_code"), nullable=False),
+        sa.Column(
+            "index_code", sa.String(32), sa.ForeignKey("benchmark_index.index_code"), nullable=False
+        ),
         sa.Column("open_price", sa.Float, nullable=True),
         sa.Column("high_price", sa.Float, nullable=True),
         sa.Column("low_price", sa.Float, nullable=True),
@@ -86,7 +90,9 @@ def upgrade() -> None:
         "etf_daily_share",
         sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
         sa.Column("trade_date", sa.Date, nullable=False),
-        sa.Column("etf_code", sa.String(16), sa.ForeignKey("etf_universe.etf_code"), nullable=False),
+        sa.Column(
+            "etf_code", sa.String(16), sa.ForeignKey("etf_universe.etf_code"), nullable=False
+        ),
         sa.Column("shares_total", sa.Float, nullable=True),
         sa.Column("shares_delta", sa.Float, nullable=True),
         sa.Column("shares_delta_pct", sa.Float, nullable=True),
@@ -158,20 +164,28 @@ def upgrade() -> None:
         "etf_factor_value",
         sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
         sa.Column("trade_date", sa.Date, nullable=False),
-        sa.Column("etf_code", sa.String(16), sa.ForeignKey("etf_universe.etf_code"), nullable=False),
-        sa.Column("factor_id", sa.String(64), sa.ForeignKey("factor_definition.factor_id"), nullable=False),
+        sa.Column(
+            "etf_code", sa.String(16), sa.ForeignKey("etf_universe.etf_code"), nullable=False
+        ),
+        sa.Column(
+            "factor_id", sa.String(64), sa.ForeignKey("factor_definition.factor_id"), nullable=False
+        ),
         sa.Column("factor_value_numeric", sa.Float, nullable=True),
         sa.Column("factor_value_text", sa.String(128), nullable=True),
         sa.Column("factor_payload", sa.JSON, nullable=True),
         sa.Column("strategy_id", sa.String(64), nullable=True),
-        sa.UniqueConstraint("trade_date", "etf_code", "factor_id", "strategy_id", name="uq_etf_factor_value"),
+        sa.UniqueConstraint(
+            "trade_date", "etf_code", "factor_id", "strategy_id", name="uq_etf_factor_value"
+        ),
     )
 
     op.create_table(
         "etf_signal",
         sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
         sa.Column("trade_date", sa.Date, nullable=False),
-        sa.Column("etf_code", sa.String(16), sa.ForeignKey("etf_universe.etf_code"), nullable=False),
+        sa.Column(
+            "etf_code", sa.String(16), sa.ForeignKey("etf_universe.etf_code"), nullable=False
+        ),
         sa.Column("strategy_id", sa.String(64), nullable=False),
         sa.Column("signal_score", sa.Float, nullable=False),
         sa.Column("signal_level", sa.String(32), nullable=False),
@@ -185,7 +199,9 @@ def upgrade() -> None:
         "research_run_item",
         sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
         sa.Column("run_id", sa.String(64), sa.ForeignKey("research_run.run_id"), nullable=False),
-        sa.Column("etf_code", sa.String(16), sa.ForeignKey("etf_universe.etf_code"), nullable=False),
+        sa.Column(
+            "etf_code", sa.String(16), sa.ForeignKey("etf_universe.etf_code"), nullable=False
+        ),
         sa.Column("status", sa.String(32), nullable=False),
         sa.Column("message", sa.Text, nullable=True),
         sa.Column("metrics", sa.JSON, nullable=True),

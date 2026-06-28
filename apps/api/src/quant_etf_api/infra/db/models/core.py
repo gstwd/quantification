@@ -286,7 +286,10 @@ class IndexFactorValueModel(Base):
     __tablename__ = "index_factor_value"
     __table_args__ = (
         UniqueConstraint(
-            "trade_date", "index_code", "factor_id", "strategy_id",
+            "trade_date",
+            "index_code",
+            "factor_id",
+            "strategy_id",
             name="uq_index_factor_value",
         ),
     )
@@ -388,21 +391,13 @@ class IndexSignalModel(Base):
     strategy_id: Mapped[str] = mapped_column(
         String(64), nullable=False, comment="产生该信号的策略 ID"
     )
-    signal_score: Mapped[float] = mapped_column(
-        Float, nullable=False, comment="综合得分，0-100"
-    )
+    signal_score: Mapped[float] = mapped_column(Float, nullable=False, comment="综合得分，0-100")
     signal_level: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="信号等级：HIGH/MID/LOW"
     )
-    signal_label: Mapped[str] = mapped_column(
-        String(128), nullable=False, comment="信号中文标签"
-    )
-    signal_payload: Mapped[dict | None] = mapped_column(
-        JSON, comment="信号计算明细"
-    )
-    run_id: Mapped[str | None] = mapped_column(
-        String(64), comment="产生该信号的研究运行 ID"
-    )
+    signal_label: Mapped[str] = mapped_column(String(128), nullable=False, comment="信号中文标签")
+    signal_payload: Mapped[dict | None] = mapped_column(JSON, comment="信号计算明细")
+    run_id: Mapped[str | None] = mapped_column(String(64), comment="产生该信号的研究运行 ID")
 
 
 class ResearchRunModel(Base):
@@ -546,18 +541,14 @@ class BacktestDailyResultModel(Base):
     total_exposure: Mapped[float | None] = mapped_column(
         Float, comment="总仓位比例，0-1（配置模式）"
     )
-    cash_ratio: Mapped[float | None] = mapped_column(
-        Float, comment="现金比例，0-1（配置模式）"
-    )
+    cash_ratio: Mapped[float | None] = mapped_column(Float, comment="现金比例，0-1（配置模式）")
     positions: Mapped[dict | None] = mapped_column(
         JSON, comment="持仓明细，etf_code → 权重（配置模式）"
     )
     benchmark_return: Mapped[float | None] = mapped_column(
         Float, comment="基准指数当日收益率，单位 %"
     )
-    turnover: Mapped[float | None] = mapped_column(
-        Float, comment="当日换手率，0-1"
-    )
+    turnover: Mapped[float | None] = mapped_column(Float, comment="当日换手率，0-1")
 
 
 class BacktestEtfResultModel(Base):
@@ -620,9 +611,7 @@ class BacktestIndexResultModel(Base):
     signal_level: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="信号等级：HIGH/MID/LOW"
     )
-    in_portfolio: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, comment="是否纳入当日组合"
-    )
+    in_portfolio: Mapped[bool] = mapped_column(Boolean, nullable=False, comment="是否纳入当日组合")
     index_return: Mapped[float | None] = mapped_column(
         Float, comment="T+1 日指数收益率，单位 %，末日为 NULL"
     )
@@ -647,12 +636,8 @@ class BacktestComparisonModel(Base):
     name: Mapped[str | None] = mapped_column(
         String(128), nullable=True, comment="对比名称，用户可选标签"
     )
-    strategy_a_id: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="策略 A 的 ID"
-    )
-    strategy_b_id: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="策略 B 的 ID"
-    )
+    strategy_a_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="策略 A 的 ID")
+    strategy_b_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="策略 B 的 ID")
     backtest_a_id: Mapped[str] = mapped_column(
         ForeignKey("backtest_run.backtest_id"),
         nullable=False,
@@ -689,12 +674,8 @@ class BacktestComparisonModel(Base):
         default=utcnow,
         comment="记录创建时间（UTC）",
     )
-    started_at: Mapped[datetime | None] = mapped_column(
-        DateTime, comment="开始执行时间（UTC）"
-    )
-    finished_at: Mapped[datetime | None] = mapped_column(
-        DateTime, comment="完成时间（UTC）"
-    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, comment="开始执行时间（UTC）")
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, comment="完成时间（UTC）")
     progress: Mapped[int] = mapped_column(
         Integer,
         default=0,
@@ -762,7 +743,9 @@ class StrategyConfigModel(Base):
         String(32), nullable=False, default="daily", comment="运行频率：daily/weekly/monthly"
     )
     config_json: Mapped[dict] = mapped_column(
-        JSON, nullable=False, comment="完整策略配置 JSON，包含 score/filters/rank/portfolio/risk 等模块"
+        JSON,
+        nullable=False,
+        comment="完整策略配置 JSON，包含 score/filters/rank/portfolio/risk 等模块",
     )
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="active", comment="状态：active=启用, disabled=禁用"
@@ -827,9 +810,7 @@ class TradingCalendarModel(Base):
 
     __tablename__ = "trading_calendar"
 
-    trade_date: Mapped[Date] = mapped_column(
-        Date, primary_key=True, comment="日期"
-    )
+    trade_date: Mapped[Date] = mapped_column(Date, primary_key=True, comment="日期")
     is_trading_day: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, comment="是否为交易日"
     )
@@ -846,9 +827,7 @@ class JournalEntryModel(Base):
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(_uuid4()), comment="日志唯一标识（UUID）"
     )
-    trade_date: Mapped[date] = mapped_column(
-        Date, nullable=False, unique=True, comment="交易日期"
-    )
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, unique=True, comment="交易日期")
     market_temperature: Mapped[int | None] = mapped_column(
         SmallInteger, nullable=True, comment="市场温度 0-100"
     )
@@ -870,18 +849,13 @@ class JournalEntryModel(Base):
     one_line_summary: Mapped[str | None] = mapped_column(
         String(256), nullable=True, comment="一句话市场摘要"
     )
-    is_complete: Mapped[bool] = mapped_column(
-        Boolean, default=False, comment="是否已完成填写"
-    )
-    word_count: Mapped[int] = mapped_column(
-        Integer, default=0, comment="非结构化内容总字数"
-    )
+    is_complete: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否已完成填写")
+    word_count: Mapped[int] = mapped_column(Integer, default=0, comment="非结构化内容总字数")
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, comment="记录创建时间（UTC）"
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow,
-        onupdate=utcnow, comment="记录最后更新时间（UTC）"
+        DateTime, default=utcnow, onupdate=utcnow, comment="记录最后更新时间（UTC）"
     )
 
 
@@ -897,33 +871,23 @@ class JournalIndexSnapshotModel(Base):
         String(36), primary_key=True, default=lambda: str(_uuid4()), comment="快照唯一标识（UUID）"
     )
     entry_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("journal_entry.id", ondelete="CASCADE"), nullable=False,
-        comment="关联的日志 ID"
+        String(36),
+        ForeignKey("journal_entry.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="关联的日志 ID",
     )
-    index_code: Mapped[str] = mapped_column(
-        String(32), nullable=False, comment="指数代码"
-    )
-    index_name: Mapped[str] = mapped_column(
-        String(128), nullable=False, comment="指数中文名称"
-    )
+    index_code: Mapped[str] = mapped_column(String(32), nullable=False, comment="指数代码")
+    index_name: Mapped[str] = mapped_column(String(128), nullable=False, comment="指数中文名称")
     index_category: Mapped[str | None] = mapped_column(
         String(32), nullable=True, comment="指数分类：broad / industry / theme"
     )
-    sort_order: Mapped[int] = mapped_column(
-        SmallInteger, default=0, comment="展示排序"
-    )
-    close_price: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="收盘点位"
-    )
-    change_pct: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="日涨跌幅（%）"
-    )
+    sort_order: Mapped[int] = mapped_column(SmallInteger, default=0, comment="展示排序")
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True, comment="收盘点位")
+    change_pct: Mapped[float | None] = mapped_column(Float, nullable=True, comment="日涨跌幅（%）")
     volume_ratio_20d: Mapped[float | None] = mapped_column(
         Float, nullable=True, comment="20 日量比"
     )
-    return_5d: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="5 日收益率（%）"
-    )
+    return_5d: Mapped[float | None] = mapped_column(Float, nullable=True, comment="5 日收益率（%）")
     return_20d: Mapped[float | None] = mapped_column(
         Float, nullable=True, comment="20 日收益率（%）"
     )
@@ -956,12 +920,17 @@ class JournalMarketDataModel(Base):
     __tablename__ = "journal_market_data"
 
     id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(_uuid4()),
-        comment="市场数据唯一标识（UUID）"
+        String(36),
+        primary_key=True,
+        default=lambda: str(_uuid4()),
+        comment="市场数据唯一标识（UUID）",
     )
     entry_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("journal_entry.id", ondelete="CASCADE"),
-        nullable=False, unique=True, comment="关联的日志 ID（一对一）"
+        String(36),
+        ForeignKey("journal_entry.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        comment="关联的日志 ID（一对一）",
     )
     market_up_stocks: Mapped[int | None] = mapped_column(
         Integer, nullable=True, comment="全市场上涨家数"
@@ -972,9 +941,7 @@ class JournalMarketDataModel(Base):
     market_flat_stocks: Mapped[int | None] = mapped_column(
         Integer, nullable=True, comment="全市场平盘家数"
     )
-    limit_up_stocks: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, comment="涨停家数"
-    )
+    limit_up_stocks: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="涨停家数")
     limit_down_stocks: Mapped[int | None] = mapped_column(
         Integer, nullable=True, comment="跌停家数"
     )
@@ -997,8 +964,9 @@ class JournalMarketDataModel(Base):
         String(16), nullable=True, comment="成长价值风格：growth / value / balanced"
     )
     sector_leading: Mapped[str | None] = mapped_column(
-        String(32), nullable=True,
-        comment="行业主导方向：tech / dividend / cyclical / financial / consumption / healthcare / balanced"
+        String(32),
+        nullable=True,
+        comment="行业主导方向：tech / dividend / cyclical / financial / consumption / healthcare / balanced",
     )
     top_sectors: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="领涨行业，逗号分隔"
@@ -1009,9 +977,7 @@ class JournalMarketDataModel(Base):
     data_source: Mapped[str | None] = mapped_column(
         String(128), nullable=True, comment="数据来源说明"
     )
-    notes: Mapped[str | None] = mapped_column(
-        Text, nullable=True, comment="补充备注"
-    )
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True, comment="补充备注")
 
 
 class JournalObservationModel(Base):
@@ -1026,8 +992,10 @@ class JournalObservationModel(Base):
         String(36), primary_key=True, default=lambda: str(_uuid4()), comment="观察唯一标识（UUID）"
     )
     entry_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("journal_entry.id", ondelete="CASCADE"), nullable=False,
-        comment="关联的日志 ID"
+        String(36),
+        ForeignKey("journal_entry.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="关联的日志 ID",
     )
     section_key: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="分区标识，如 biggest_phenomenon"
@@ -1035,12 +1003,8 @@ class JournalObservationModel(Base):
     section_label: Mapped[str] = mapped_column(
         String(64), nullable=False, comment="分区中文标签，如 今日最大现象"
     )
-    content: Mapped[str | None] = mapped_column(
-        Text, nullable=True, comment="纯文本内容"
-    )
-    sort_order: Mapped[int] = mapped_column(
-        SmallInteger, default=0, comment="分区展示顺序"
-    )
+    content: Mapped[str | None] = mapped_column(Text, nullable=True, comment="纯文本内容")
+    sort_order: Mapped[int] = mapped_column(SmallInteger, default=0, comment="分区展示顺序")
 
 
 class JournalTagModel(Base):
@@ -1051,15 +1015,9 @@ class JournalTagModel(Base):
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(_uuid4()), comment="标签唯一标识（UUID）"
     )
-    name: Mapped[str] = mapped_column(
-        String(64), nullable=False, unique=True, comment="标签名称"
-    )
-    color: Mapped[str] = mapped_column(
-        String(7), default="#3B82F6", comment="十六进制颜色值"
-    )
-    description: Mapped[str | None] = mapped_column(
-        String(256), nullable=True, comment="标签说明"
-    )
+    name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, comment="标签名称")
+    color: Mapped[str] = mapped_column(String(7), default="#3B82F6", comment="十六进制颜色值")
+    description: Mapped[str | None] = mapped_column(String(256), nullable=True, comment="标签说明")
     is_system: Mapped[bool] = mapped_column(
         Boolean, default=False, comment="是否为预设标签，预设标签不可删除"
     )
@@ -1077,12 +1035,16 @@ class JournalEntryTagModel(Base):
     __tablename__ = "journal_entry_tag"
 
     entry_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("journal_entry.id", ondelete="CASCADE"),
-        primary_key=True, comment="日志 ID"
+        String(36),
+        ForeignKey("journal_entry.id", ondelete="CASCADE"),
+        primary_key=True,
+        comment="日志 ID",
     )
     tag_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("journal_tag.id", ondelete="CASCADE"),
-        primary_key=True, comment="标签 ID"
+        String(36),
+        ForeignKey("journal_tag.id", ondelete="CASCADE"),
+        primary_key=True,
+        comment="标签 ID",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, comment="关联创建时间（UTC）"
@@ -1095,19 +1057,24 @@ class JournalAIAnalysisModel(Base):
     __tablename__ = "journal_ai_analysis"
 
     id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(_uuid4()),
-        comment="分析结果唯一标识（UUID）"
+        String(36),
+        primary_key=True,
+        default=lambda: str(_uuid4()),
+        comment="分析结果唯一标识（UUID）",
     )
     entry_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("journal_entry.id", ondelete="CASCADE"),
-        nullable=False, unique=True, comment="关联的日志 ID（一对一）"
+        String(36),
+        ForeignKey("journal_entry.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        comment="关联的日志 ID（一对一）",
     )
-    model: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="使用的 LLM 模型标识"
-    )
+    model: Mapped[str] = mapped_column(String(64), nullable=False, comment="使用的 LLM 模型标识")
     status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="pending",
-        comment="分析状态：pending / running / success / failed"
+        String(16),
+        nullable=False,
+        default="pending",
+        comment="分析状态：pending / running / success / failed",
     )
     market_summary: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="AI 生成的市场总结"
@@ -1121,9 +1088,7 @@ class JournalAIAnalysisModel(Base):
     core_narrative: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="AI 生成的核心叙事"
     )
-    risk_alert: Mapped[str | None] = mapped_column(
-        Text, nullable=True, comment="AI 生成的风险提示"
-    )
+    risk_alert: Mapped[str | None] = mapped_column(Text, nullable=True, comment="AI 生成的风险提示")
     focus_direction: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="AI 生成的后续关注方向"
     )
@@ -1162,8 +1127,7 @@ class NewsItemModel(Base):
     )
 
     id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(_uuid4()),
-        comment="新闻唯一标识（UUID）"
+        String(36), primary_key=True, default=lambda: str(_uuid4()), comment="新闻唯一标识（UUID）"
     )
     source_id: Mapped[str] = mapped_column(
         String(64), nullable=False, comment="来源平台 ID，如 toutiao/baidu"
@@ -1171,27 +1135,17 @@ class NewsItemModel(Base):
     source_name: Mapped[str | None] = mapped_column(
         String(128), nullable=True, comment="来源平台中文名"
     )
-    title: Mapped[str] = mapped_column(
-        Text, nullable=False, comment="新闻标题（已清洗）"
-    )
-    url: Mapped[str | None] = mapped_column(
-        Text, nullable=True, comment="新闻链接（已规范化）"
-    )
-    rank: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, comment="热榜排名（1=榜首）"
-    )
-    crawl_date: Mapped[date] = mapped_column(
-        Date, nullable=False, comment="采集日期"
-    )
+    title: Mapped[str] = mapped_column(Text, nullable=False, comment="新闻标题（已清洗）")
+    url: Mapped[str | None] = mapped_column(Text, nullable=True, comment="新闻链接（已规范化）")
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="热榜排名（1=榜首）")
+    crawl_date: Mapped[date] = mapped_column(Date, nullable=False, comment="采集日期")
     first_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, comment="首次上榜时间"
     )
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, comment="最后上榜时间"
     )
-    appear_count: Mapped[int] = mapped_column(
-        Integer, default=1, comment="出现次数"
-    )
+    appear_count: Mapped[int] = mapped_column(Integer, default=1, comment="出现次数")
     raw_payload: Mapped[dict | None] = mapped_column(
         JSON, nullable=True, comment="原始 API 返回数据"
     )
@@ -1208,27 +1162,25 @@ class AISentimentResultModel(Base):
     """
 
     __tablename__ = "ai_sentiment_result"
-    __table_args__ = (
-        UniqueConstraint("news_id", name="uq_ai_sentiment_news"),
-    )
+    __table_args__ = (UniqueConstraint("news_id", name="uq_ai_sentiment_news"),)
 
     id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(_uuid4()),
-        comment="分析结果唯一标识（UUID）"
+        String(36),
+        primary_key=True,
+        default=lambda: str(_uuid4()),
+        comment="分析结果唯一标识（UUID）",
     )
     news_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("news_item.id", ondelete="CASCADE"),
-        nullable=False, comment="关联的原始新闻 ID"
+        String(36),
+        ForeignKey("news_item.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="关联的原始新闻 ID",
     )
-    trade_date: Mapped[date] = mapped_column(
-        Date, nullable=False, comment="关联交易日"
-    )
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="关联交易日")
     asset_tags: Mapped[dict | None] = mapped_column(
         JSON, nullable=True, comment="资产标签 JSON 数组（指数代码/行业/概念）"
     )
-    topics: Mapped[dict | None] = mapped_column(
-        JSON, nullable=True, comment="主题标签 JSON 数组"
-    )
+    topics: Mapped[dict | None] = mapped_column(JSON, nullable=True, comment="主题标签 JSON 数组")
     sentiment_score: Mapped[float | None] = mapped_column(
         Float, nullable=True, comment="情绪分 [-1.0, 1.0]"
     )
@@ -1238,9 +1190,7 @@ class AISentimentResultModel(Base):
     relevance_score: Mapped[float | None] = mapped_column(
         Float, nullable=True, comment="A 股市场相关度 [0, 1]"
     )
-    summary: Mapped[str | None] = mapped_column(
-        String(256), nullable=True, comment="AI 生成摘要"
-    )
+    summary: Mapped[str | None] = mapped_column(String(256), nullable=True, comment="AI 生成摘要")
     llm_model: Mapped[str | None] = mapped_column(
         String(128), nullable=True, comment="使用的 LLM 模型标识"
     )
@@ -1269,9 +1219,7 @@ class DailySentimentAggregateModel(Base):
     id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, autoincrement=True, comment="自增主键"
     )
-    trade_date: Mapped[date] = mapped_column(
-        Date, nullable=False, comment="交易日"
-    )
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="交易日")
     asset_tag: Mapped[str] = mapped_column(
         String(64), nullable=False, comment="资产标签（指数代码 或 行业名）"
     )
@@ -1281,12 +1229,8 @@ class DailySentimentAggregateModel(Base):
     weighted_sentiment: Mapped[float | None] = mapped_column(
         Float, nullable=True, comment="关注度加权情绪分"
     )
-    total_attention: Mapped[float | None] = mapped_column(
-        Float, nullable=True, comment="总关注度"
-    )
-    news_count: Mapped[int] = mapped_column(
-        Integer, default=0, comment="相关新闻数量"
-    )
+    total_attention: Mapped[float | None] = mapped_column(Float, nullable=True, comment="总关注度")
+    news_count: Mapped[int] = mapped_column(Integer, default=0, comment="相关新闻数量")
     top_topics: Mapped[dict | None] = mapped_column(
         JSON, nullable=True, comment="Top 主题 JSON 数组"
     )

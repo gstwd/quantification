@@ -68,9 +68,7 @@ def calc_volume_ratio_17d(
     return round(today_bar.volume / avg, 4) if avg > 0 else None
 
 
-def calc_5d_return(
-    code: str, trade_date: date, all_bars: dict[tuple[str, date], Any]
-) -> float:
+def calc_5d_return(code: str, trade_date: date, all_bars: dict[tuple[str, date], Any]) -> float:
     """计算近 5 日收益率（%）。
 
     适用于 ETF 和指数，因为两者 K 线结构相同。

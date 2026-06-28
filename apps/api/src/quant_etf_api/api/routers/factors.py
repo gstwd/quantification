@@ -224,7 +224,9 @@ def factor_ic_analysis(
                 count=n,
             )
         else:
-            summary = ICSummary(ic_mean=None, ic_std=None, ic_ir=None, ic_positive_ratio=None, count=0)
+            summary = ICSummary(
+                ic_mean=None, ic_std=None, ic_ir=None, ic_positive_ratio=None, count=0
+            )
     except Exception:
         logger.warning("IC 分析失败: factor_id=%s", factor_id, exc_info=True)
         raise HTTPException(status_code=500, detail="IC 分析计算失败") from None

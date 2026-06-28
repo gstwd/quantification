@@ -62,9 +62,7 @@ class EqualWeightAllocator:
 
         return {r.etf_code: round(weight, 4) for r in rankings}
 
-    def _get_total_exposure(
-        self, config: PortfolioConfig, timing: TimingSignal | None
-    ) -> float:
+    def _get_total_exposure(self, config: PortfolioConfig, timing: TimingSignal | None) -> float:
         """根据择时信号确定总仓位上限。"""
         if timing and config.timing_exposure:
             return config.timing_exposure.get(timing.regime, config.default_exposure)
@@ -104,9 +102,7 @@ class ScoreWeightAllocator:
 
         return positions
 
-    def _get_total_exposure(
-        self, config: PortfolioConfig, timing: TimingSignal | None
-    ) -> float:
+    def _get_total_exposure(self, config: PortfolioConfig, timing: TimingSignal | None) -> float:
         """根据择时信号确定总仓位上限。"""
         if timing and config.timing_exposure:
             return config.timing_exposure.get(timing.regime, config.default_exposure)
@@ -145,9 +141,7 @@ class WinnerTakeAllAllocator:
 
         return {winner.etf_code: round(total_exposure, 4)}
 
-    def _get_total_exposure(
-        self, config: PortfolioConfig, timing: TimingSignal | None
-    ) -> float:
+    def _get_total_exposure(self, config: PortfolioConfig, timing: TimingSignal | None) -> float:
         """根据择时信号确定总仓位上限。"""
         if timing and config.timing_exposure:
             return config.timing_exposure.get(timing.regime, config.default_exposure)

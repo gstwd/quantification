@@ -32,7 +32,8 @@ def _make_context(
     """构建测试用上下文。"""
     return EngineContext(
         trade_date=date(2025, 1, 15),
-        universe=universe or [
+        universe=universe
+        or [
             {"etf_code": "510300", "name_cn": "沪深300ETF", "category": "broad_index"},
             {"etf_code": "510500", "name_cn": "中证500ETF", "category": "broad_index"},
         ],
