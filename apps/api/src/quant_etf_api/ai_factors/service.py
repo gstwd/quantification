@@ -13,9 +13,13 @@ from sqlalchemy.orm import Session
 from quant_etf_api.ai_factors.analysis.classifier import TagClassifier
 from quant_etf_api.ai_factors.analysis.scorer import TrendScorer
 from quant_etf_api.ai_factors.analysis.sentiment import SentimentAnalyzer
-from quant_etf_api.ai_factors.base import RawNewsItem
+from quant_etf_api.ai_factors.base import (
+    RawNewsItem,
+    build_available_tags,
+)
 from quant_etf_api.ai_factors.data.collector import NewsCollector
 from quant_etf_api.infra.ai.client import AIClient
+from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.infra.db.repositories.news_item import (
     AISentimentResultRepository,
     DailySentimentAggregateRepository,
@@ -51,6 +55,7 @@ class AIFactorService:
         self._news_repo = NewsItemRepository(db)
         self._result_repo = AISentimentResultRepository(db)
         self._agg_repo = DailySentimentAggregateRepository(db)
+        self._benchmark_repo = BenchmarkIndexRepository(db)
 
     # ---- 完整流程 ----
 
@@ -64,10 +69,11 @@ class AIFactorService:
 
         1. 采集新闻（热榜 + RSS）
         2. 新闻去重存储
-        3. AI 情绪分析
-        4. 标签分类
-        5. 情绪聚合
-        6. 所有结果持久化
+        3. 过滤已分析新闻，仅对新新闻调用 LLM
+        4. AI 情绪分析（仅未分析新闻）
+        5. 标签分类（全部新闻）
+        6. 情绪聚合
+        7. 所有结果持久化
 
         Args:
             target_date: 目标交易日，默认为今天。
@@ -75,7 +81,7 @@ class AIFactorService:
             market_context: 市场背景描述（如 "央行降准后次日"）。
 
         Returns:
-            统计字典 {"collected": N, "analyzed": N, "aggregated": N}。
+            统计字典 {"collected": N, "saved": N, "analyzed": N, "aggregated": N}。
         """
         if target_date is None:
             target_date = date.today()
@@ -84,25 +90,66 @@ class AIFactorService:
         raw_items = self._collector.fetch_all(platform_ids)
         if not raw_items:
             logger.warning("未采集到任何新闻")
-            return {"collected": 0, "analyzed": 0, "aggregated": 0}
+            return {"collected": 0, "saved": 0, "analyzed": 0, "aggregated": 0}
 
         # 2. 存储原始新闻（去重）
         news_rows = self._to_news_rows(raw_items, target_date)
         saved_count = self._news_repo.save_batch(news_rows)
         logger.info("新闻存储: %d 条新增 (共 %d 条采集)", saved_count, len(raw_items))
 
-        # 3. AI 情绪分析
-        sentiment_items = self._analyzer.analyze_batch(raw_items, market_context)
+        # 2.5 获取已保存新闻的 title→id 映射
+        saved_news = {n.title: n.id for n in self._news_repo.find_by_date(target_date)}
 
-        # 4. 标签分类
-        sentiment_items = self._classifier.classify_to_asset_tags(sentiment_items)
+        # 2.6 检查已分析新闻，拆分未分析/已分析
+        all_news_ids = list(saved_news.values())
+        existing_ids = self._result_repo.find_existing_news_ids(all_news_ids)
+        skipped_count = len(existing_ids)
+
+        # 拆分 raw_items：按 title 对应 news_id 是否已分析
+        title_to_raw = {item.title: item for item in raw_items}
+        unanalyzed_raw: list[RawNewsItem] = []
+        for item in raw_items:
+            nid = saved_news.get(item.title)
+            if nid is None or nid not in existing_ids:
+                unanalyzed_raw.append(item)
+
+        if skipped_count > 0:
+            logger.info(
+                "跳过 %d 条已分析新闻，待分析 %d 条",
+                skipped_count,
+                len(unanalyzed_raw),
+            )
+
+        # 3. AI 情绪分析（注入动态指数标签，仅分析未分析新闻）
+        index_map = self._get_dynamic_index_map()
+        available_tags = build_available_tags(index_map)
+        new_sentiment_items: list = []
+        if unanalyzed_raw:
+            new_sentiment_items = self._analyzer.analyze_batch(
+                unanalyzed_raw, market_context, available_tags,
+            )
+        else:
+            new_sentiment_items = []
+
+        # 3.5 从 DB 加载已分析新闻的 NewsSentimentItem（复用已有分析结果）
+        existing_sentiment_items: list = []
+        if existing_ids:
+            existing_results = self._result_repo.find_by_news_ids(list(existing_ids))
+            id_to_title = {v: k for k, v in saved_news.items()}
+            existing_sentiment_items = self._db_results_to_sentiment_items(
+                existing_results, id_to_title, title_to_raw,
+            )
+
+        # 合并全部 sentiment_items
+        sentiment_items = new_sentiment_items + existing_sentiment_items
+
+        # 4. 标签分类（全部新闻统一分类）
+        sentiment_items = self._classifier.classify_to_asset_tags(sentiment_items, available_tags)
 
         # 5. 情绪聚合
         aggregates = self._scorer.aggregate_daily(sentiment_items, target_date)
 
         # 6. 持久化分析结果
-        # 获取已保存新闻的 ID（需要从 DB 重新查询以获取 UUID）
-        saved_news = {n.title: n.id for n in self._news_repo.find_by_date(target_date)}
         result_rows = self._to_result_rows(sentiment_items, saved_news, target_date)
         result_count = self._result_repo.save_batch(result_rows)
 
@@ -111,9 +158,11 @@ class AIFactorService:
         agg_count = self._agg_repo.save_batch(agg_rows)
 
         logger.info(
-            "AI 分析链路完成: 采集=%d, 存储=%d, AI分析=%d, 聚合=%d 组",
+            "AI 分析链路完成: 采集=%d, 存储=%d, 跳过=%d, 新分析=%d, AI分析=%d, 聚合=%d 组",
             len(raw_items),
             saved_count,
+            skipped_count,
+            len(new_sentiment_items),
             result_count,
             agg_count,
         )
@@ -126,6 +175,26 @@ class AIFactorService:
         }
 
     # ---- 内部方法 ----
+
+    def _get_dynamic_index_map(self) -> dict[str, str]:
+        """从 benchmark_index 表动态加载活跃指数映射。
+
+        实时查询数据库，确保每次分析都使用最新的指数列表。
+        查询失败时回退到静态的 INDEX_TAGS。
+
+        Returns:
+            index_code → name_cn 的映射字典。
+        """
+        try:
+            rows = self._benchmark_repo.find_active()
+            if rows:
+                return {r.index_code: r.name_cn for r in rows}
+        except Exception:
+            logger.warning("动态加载指数标签失败，回退到静态列表", exc_info=True)
+
+        from quant_etf_api.ai_factors.base import INDEX_TAGS
+
+        return dict(INDEX_TAGS)
 
     def _to_news_rows(
         self,
@@ -197,6 +266,54 @@ class AIFactorService:
                 "created_at": now,
             })
         return rows
+
+    def _db_results_to_sentiment_items(
+        self,
+        db_results: list,
+        id_to_title: dict[str, str],
+        title_to_raw: dict[str, RawNewsItem],
+    ) -> list:
+        """将 AISentimentResultModel 列表转换为 NewsSentimentItem 列表。
+
+        用于复用已分析新闻的结果，避免重复调用 LLM。
+
+        Args:
+            db_results: 已有分析结果的 ORM 模型列表。
+            id_to_title: news_id → title 反向映射。
+            title_to_raw: title → RawNewsItem 正向映射（用于获取来源信息）。
+
+        Returns:
+            NewsSentimentItem 列表。
+        """
+        from quant_etf_api.ai_factors.base import NewsSentimentItem
+
+        now = datetime.now(timezone.utc)
+        items: list[NewsSentimentItem] = []
+
+        for row in db_results:
+            title = id_to_title.get(row.news_id, "")
+            raw = title_to_raw.get(title)
+            if raw is None:
+                continue
+
+            items.append(
+                NewsSentimentItem(
+                    timestamp=now,
+                    source=raw.source_id,
+                    source_name=raw.source_name,
+                    title=raw.title,
+                    url=raw.url,
+                    asset_tags=row.asset_tags or [],
+                    sentiment_score=row.sentiment_score or 0.0,
+                    attention_score=row.attention_score or 0.0,
+                    relevance_score=row.relevance_score or 0.0,
+                    topics=row.topics or [],
+                    summary=row.summary or "",
+                    raw_text=raw.title,
+                )
+            )
+
+        return items
 
 
 def _parse_time(time_str: str) -> datetime | None:

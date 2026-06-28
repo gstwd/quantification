@@ -75,3 +75,18 @@ export async function fetchIndexSummary(
   )
   return data
 }
+
+/** 活跃指数选项 */
+export interface IndexOption {
+  index_code: string
+  name_cn: string
+}
+
+/** 获取所有活跃指数（供选择器使用）。
+ *
+ * @returns 活跃指数列表
+ */
+export async function fetchActiveIndexes(): Promise<IndexOption[]> {
+  const { data } = await apiClient.get<IndexOption[]>('/indexes/active')
+  return data
+}

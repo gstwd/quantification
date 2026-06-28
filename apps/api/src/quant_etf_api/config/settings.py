@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     startup_fill_enabled: bool = Field(
         default=True, description="系统启动时是否自动检查并补全数据缺口"
     )
+    ai_analysis_enabled: bool = Field(
+        default=True, description="是否在日频调度中自动触发 AI 舆情分析"
+    )
 
     # 日志配置
     log_level: str = Field(default="INFO", description="日志级别：DEBUG / INFO / WARNING / ERROR")

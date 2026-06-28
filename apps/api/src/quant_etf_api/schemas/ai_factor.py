@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
-from typing import Any
+from datetime import date
 
 from pydantic import BaseModel, Field
 
@@ -53,9 +52,10 @@ class DailySentimentResponse(BaseModel):
 class AIAnalysisRunResponse(BaseModel):
     """AI 分析执行结果。"""
 
-    status: str = Field(description="执行状态: success / failed")
+    status: str = Field(description="执行状态: success / failed / accepted")
     collected: int = Field(default=0, description="采集新闻数")
     saved: int = Field(default=0, description="存储新增数")
     analyzed: int = Field(default=0, description="AI 分析数")
     aggregated: int = Field(default=0, description="聚合组数")
     error: str | None = Field(default=None, description="错误信息")
+    run_id: str | None = Field(default=None, description="运行 ID（异步模式时返回）")

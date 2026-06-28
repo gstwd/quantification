@@ -97,6 +97,36 @@ class DailyIngestScheduler:
             except Exception:
                 logger.exception("调度器: 因子计算初始化失败，不影响摄取结果")
 
+            # AI 舆情分析（可选，失败不影响已完成的摄取和因子计算）
+            settings = get_settings()
+            if settings.ai_analysis_enabled:
+                try:
+                    from quant_etf_api.ai_factors.service import AIFactorService  # noqa: PLC0415
+                    from quant_etf_api.infra.ai.client import AIClient  # noqa: PLC0415
+
+                    ai_client = AIClient.from_settings(settings)
+                    valid, err = ai_client.validate()
+                    if valid:
+                        run_svc = RunService(db)
+                        ai_run = run_svc.create_run("ai_analysis", None, today)
+                        try:
+                            stats = AIFactorService(db, ai_client).run_full_pipeline(
+                                target_date=today,
+                            )
+                            run_svc.mark_success(ai_run.run_id, metrics=stats)
+                            logger.info(
+                                "调度器: AI 分析完成 run_id=%s stats=%s",
+                                ai_run.run_id,
+                                stats,
+                            )
+                        except Exception as exc:
+                            run_svc.mark_failed(ai_run.run_id, str(exc))
+                            logger.exception("调度器: AI 分析失败，不影响前面的任务")
+                    else:
+                        logger.warning("调度器: AI 分析跳过（%s）", err)
+                except Exception:
+                    logger.exception("调度器: AI 分析初始化失败，不影响前面的任务")
+
         except Exception:
             logger.exception("调度器: 日频入库失败")
         finally:

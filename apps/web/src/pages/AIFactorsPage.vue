@@ -141,11 +141,11 @@
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
-import { fetchDailySentiment, fetchIndexSummary, triggerAnalyze, triggerCollect } from '../api/aiFactors'
+import { fetchActiveIndexes, fetchDailySentiment, fetchIndexSummary, triggerAnalyze, triggerCollect } from '../api/aiFactors'
 import type { DailySentimentResponse } from '../types/api'
 
-/** 预置指数选项 */
-const INDEX_OPTIONS: { code: string; name: string }[] = [
+/** 指数选项（从后端动态加载，回退到预置列表） */
+const INDEX_OPTIONS = ref<{ code: string; name: string }[]>([
   { code: '000300', name: '沪深300' },
   { code: '000905', name: '中证500' },
   { code: '000016', name: '上证50' },
@@ -153,7 +153,7 @@ const INDEX_OPTIONS: { code: string; name: string }[] = [
   { code: '000688', name: '科创50' },
   { code: '000852', name: '中证1000' },
   { code: '399673', name: '创业板50' },
-]
+])
 
 /** 获取今天的日期字符串（YYYY-MM-DD） */
 function todayStr(): string {
@@ -192,12 +192,16 @@ async function handleCollect() {
   }
 }
 
-/** 触发完整 AI 分析链路 */
+/** 触发完整 AI 分析链路（异步模式） */
 async function handleAnalyze() {
   analyzing.value = true
   try {
     const res = await triggerAnalyze(todayStr(), marketContext.value || undefined)
-    if (res.status === 'success') {
+    if (res.status === 'accepted' && res.run_id) {
+      showActionMsg(true, `任务已提交（run_id: ${res.run_id}），正在后台执行，可在「运行记录」页面查看进度`)
+    } else if (res.status === 'rejected') {
+      showActionMsg(false, `任务被拒绝：${res.error ?? '已有进行中的任务'}`)
+    } else if (res.status === 'success') {
       const parts: string[] = []
       if (res.collected) parts.push(`采集 ${res.collected} 条`)
       if (res.saved) parts.push(`入库 ${res.saved} 条`)
@@ -367,9 +371,21 @@ watch([trendData, trendChartEl], () => {
 
 // ---- 生命周期 ----
 
-onMounted(() => {
+onMounted(async () => {
   // 页面加载时自动查询今天数据
   handleQuery()
+  // 动态加载活跃指数列表
+  try {
+    const indexes = await fetchActiveIndexes()
+    if (indexes.length > 0) {
+      INDEX_OPTIONS.value = indexes.map((idx) => ({
+        code: idx.index_code,
+        name: idx.name_cn,
+      }))
+    }
+  } catch {
+    // 加载失败时保持预置列表
+  }
 })
 
 onUnmounted(() => {

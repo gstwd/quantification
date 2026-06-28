@@ -2,7 +2,7 @@
 
 提供以下端点：
 - POST /ai-factors/collect: 触发新闻采集
-- POST /ai-factors/analyze: 触发完整 AI 分析链路
+- POST /ai-factors/analyze: 触发完整 AI 分析链路（异步，返回 run_id）
 - GET /ai-factors/sentiment/{date}: 查询某日情绪聚合
 - GET /ai-factors/summary/{index_code}: 某指数情绪摘要
 """
@@ -17,8 +17,11 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
+from quant_etf_api.api.executor import get_bg_executor
 from quant_etf_api.config.settings import Settings, get_settings
 from quant_etf_api.infra.ai.client import AIClient
+from quant_etf_api.infra.db.base import SessionLocal
+from quant_etf_api.infra.db.models.core import ResearchRunModel
 from quant_etf_api.infra.db.repositories.news_item import (
     DailySentimentAggregateRepository,
     NewsItemRepository,
@@ -27,10 +30,52 @@ from quant_etf_api.schemas.ai_factor import (
     AIAnalysisRunResponse,
     DailySentimentResponse,
 )
+from quant_etf_api.services.run_service import RunService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai-factors", tags=["AI 因子"])
+
+
+# ---------------------------------------------------------------------------
+# 后台任务函数
+# ---------------------------------------------------------------------------
+
+
+def _run_ai_analysis_bg(run_id: str, market_context: str) -> None:
+    """在独立 Session 中执行 AI 分析，避免与请求 Session 冲突。
+
+    Args:
+        run_id: 运行记录 ID。
+        market_context: 市场背景描述。
+    """
+    db = SessionLocal()
+    try:
+        RunService(db).mark_running(run_id)
+        from quant_etf_api.ai_factors.service import AIFactorService
+
+        settings = get_settings()
+        client = AIClient.from_settings(settings)
+        today = date.today()
+        service = AIFactorService(db, client)
+        stats = service.run_full_pipeline(
+            target_date=today,
+            market_context=market_context,
+        )
+        RunService(db).mark_success(run_id, metrics=stats)
+    except Exception as e:
+        logger.exception("AI 分析任务异常: run_id=%s", run_id)
+        RunService(db).mark_failed(
+            run_id,
+            f"AI 分析异常: {type(e).__name__}: {e!s}",
+        )
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# API 端点
+# ---------------------------------------------------------------------------
 
 
 @router.post("/collect", response_model=AIAnalysisRunResponse)
@@ -73,25 +118,45 @@ def trigger_analyze(
 ) -> AIAnalysisRunResponse:
     """触发完整 AI 分析链路（新闻采集 → AI 分析 → 聚合）。
 
-    该接口为同步执行，适合手动触发或定时任务调用。
-    """
-    from quant_etf_api.ai_factors.service import AIFactorService
+    该接口为异步模式：创建运行记录后立即返回 run_id，
+    实际分析在后台线程池中执行。通过 GET /runs/{run_id} 查询进度。
 
+    同一交易日同时只允许一个 running 任务：若已有 pending/running 记录，
+    返回 rejected 并提示已有 run_id。
+    """
+    today = target_date or date.today()
+
+    # 互斥检查：当天不能有两个 pending/running 的 AI 分析任务
+    existing = (
+        db.query(ResearchRunModel)
+        .filter(
+            ResearchRunModel.run_type == "ai_analysis",
+            ResearchRunModel.trade_date == today,
+            ResearchRunModel.status.in_(["pending", "running"]),
+        )
+        .first()
+    )
+    if existing is not None:
+        return AIAnalysisRunResponse(
+            status="rejected",
+            error=f"已有进行中的 AI 分析任务（run_id={existing.run_id}）",
+            run_id=existing.run_id,
+        )
+
+    # 校验 LLM 配置
     client = AIClient.from_settings(settings)
     valid, error = client.validate()
     if not valid:
         return AIAnalysisRunResponse(status="failed", error=error)
 
-    service = AIFactorService(db, client)
-    try:
-        stats = service.run_full_pipeline(
-            target_date=target_date,
-            market_context=market_context,
-        )
-        return AIAnalysisRunResponse(status="success", **stats)
-    except Exception as e:
-        logger.exception("AI 分析链路失败")
-        return AIAnalysisRunResponse(status="failed", error=str(e))
+    # 创建运行记录并提交后台执行
+    summary = RunService(db).create_run("ai_analysis", None, today)
+    get_bg_executor().submit(_run_ai_analysis_bg, summary.run_id, market_context)
+
+    return AIAnalysisRunResponse(
+        status="accepted",
+        run_id=summary.run_id,
+    )
 
 
 @router.get("/sentiment/{query_date}", response_model=list[DailySentimentResponse])

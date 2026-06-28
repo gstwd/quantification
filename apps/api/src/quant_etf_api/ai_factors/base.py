@@ -157,5 +157,20 @@ CONCEPT_TAGS: list[str] = [
     "碳中和",
 ]
 
-# 合并所有可用标签
+# 合并所有可用标签（静态回退，LLM 不可用时的关键词匹配降级方案）
 ALL_AVAILABLE_TAGS: list[str] = list(INDEX_TAGS.keys()) + SECTOR_TAGS + CONCEPT_TAGS
+
+
+def build_available_tags(index_map: dict[str, str]) -> list[str]:
+    """根据动态指数映射构建完整的可用标签列表。
+
+    合并来自 benchmark_index 表的动态指数标签与静态行业/概念标签，
+    供 LLM 分类器使用。
+
+    Args:
+        index_map: index_code → name_cn 的动态映射（从 benchmark_index 表查询）。
+
+    Returns:
+        完整的标签列表（指数代码 + 行业标签 + 概念标签）。
+    """
+    return list(index_map.keys()) + SECTOR_TAGS + CONCEPT_TAGS

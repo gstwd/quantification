@@ -274,6 +274,10 @@ def retry_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
         get_bg_executor().submit(_run_macro_refresh_bg, new_summary.run_id)
     elif detail.run_type == "startup_fill":
         get_bg_executor().submit(_run_startup_fill_bg, new_summary.run_id)
+    elif detail.run_type == "ai_analysis":
+        from quant_etf_api.api.routers.ai_factors import _run_ai_analysis_bg  # noqa: PLC0415
+
+        get_bg_executor().submit(_run_ai_analysis_bg, new_summary.run_id, "")
     else:
         raise HTTPException(status_code=400, detail=f"不支持重试的运行类型: {detail.run_type}")
 

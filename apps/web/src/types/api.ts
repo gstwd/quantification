@@ -724,6 +724,8 @@ export interface AIAnalysisRunResponse {
   analyzed: number
   aggregated: number
   error: string | null
+  /** 异步模式运行 ID（status=accepted 时返回） */
+  run_id?: string | null
 }
 
 /** 每日情绪聚合数据 */

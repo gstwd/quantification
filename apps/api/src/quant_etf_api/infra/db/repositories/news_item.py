@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 from sqlalchemy import and_, func
@@ -123,6 +123,50 @@ class AISentimentResultRepository(BaseRepository):
         except Exception:
             self._db.rollback()
             raise
+
+    def find_existing_news_ids(self, news_ids: list[str]) -> set[str]:
+        """查询已有 AI 分析记录的 news_id 集合。
+
+        用于跳过已分析新闻，避免重复调用 LLM。
+
+        Args:
+            news_ids: 待检查的 news_id 列表。
+
+        Returns:
+            已有分析记录的 news_id 集合。
+        """
+        if not news_ids:
+            return set()
+
+        rows = (
+            self._db.query(AISentimentResultModel.news_id)
+            .filter(AISentimentResultModel.news_id.in_(news_ids))
+            .all()
+        )
+        return {r[0] for r in rows}
+
+    def find_by_news_ids(
+        self,
+        news_ids: list[str],
+    ) -> list[AISentimentResultModel]:
+        """按 news_id 批量查询已有分析结果。
+
+        用于复用已分析新闻的结果，参与后续聚合。
+
+        Args:
+            news_ids: news_id 列表。
+
+        Returns:
+            AISentimentResultModel 列表。
+        """
+        if not news_ids:
+            return []
+
+        return (
+            self._db.query(AISentimentResultModel)
+            .filter(AISentimentResultModel.news_id.in_(news_ids))
+            .all()
+        )
 
 
 class DailySentimentAggregateRepository(BaseRepository):

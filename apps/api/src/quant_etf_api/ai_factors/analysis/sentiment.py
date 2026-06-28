@@ -17,11 +17,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 
-from quant_etf_api.ai_factors.base import ALL_AVAILABLE_TAGS, NewsSentimentItem, RawNewsItem
+from quant_etf_api.ai_factors.base import NewsSentimentItem, RawNewsItem
 from quant_etf_api.ai_factors.analysis.scorer import TrendScorer
 from quant_etf_api.infra.ai.client import AIClient
 from quant_etf_api.infra.ai.prompt_loader import PromptLoader
@@ -65,6 +64,7 @@ class SentimentAnalyzer:
         self,
         items: list[RawNewsItem],
         market_context: str = DEFAULT_MARKET_CONTEXT,
+        available_tags: list[str] | None = None,
     ) -> list[NewsSentimentItem]:
         """批量分析新闻情绪。
 
@@ -73,6 +73,7 @@ class SentimentAnalyzer:
         Args:
             items: 原始新闻列表。
             market_context: 当前市场背景（如 "央行降准后次日"）。
+            available_tags: 可用标签列表，默认使用 ALL_AVAILABLE_TAGS。
 
         Returns:
             NewsSentimentItem 列表，保持输入顺序。AI 调用失败时返回
@@ -80,6 +81,11 @@ class SentimentAnalyzer:
         """
         if not items:
             return []
+
+        if available_tags is None:
+            from quant_etf_api.ai_factors.base import ALL_AVAILABLE_TAGS
+
+            available_tags = ALL_AVAILABLE_TAGS
 
         # 过滤：仅保留可能与金融相关的新闻
         from quant_etf_api.ai_factors.data.cleaner import TextCleaner
@@ -100,7 +106,7 @@ class SentimentAnalyzer:
         # 处理金融相关新闻（分批 LLM 分析）
         for i in range(0, len(finance_items), self._batch_size):
             batch = finance_items[i : i + self._batch_size]
-            batch_results = self._analyze_single_batch(batch, market_context)
+            batch_results = self._analyze_single_batch(batch, market_context, available_tags)
             results.extend(batch_results)
 
         # 处理非金融新闻（跳过 AI 分析）
@@ -129,6 +135,7 @@ class SentimentAnalyzer:
         self,
         items: list[RawNewsItem],
         market_context: str,
+        available_tags: list[str],
     ) -> list[NewsSentimentItem]:
         """调用 LLM 分析一批新闻。"""
         if not self._client.api_key:
@@ -141,7 +148,7 @@ class SentimentAnalyzer:
             variables={
                 "current_date": datetime.now().strftime("%Y-%m-%d"),
                 "market_context": market_context,
-                "available_tags": ", ".join(ALL_AVAILABLE_TAGS),
+                "available_tags": ", ".join(available_tags),
                 "news_list": self._format_news(items),
             },
         )
