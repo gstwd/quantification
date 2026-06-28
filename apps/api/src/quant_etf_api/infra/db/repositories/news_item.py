@@ -27,6 +27,9 @@ class NewsItemRepository(BaseRepository):
     ) -> int:
         """批量保存新闻条目（ON CONFLICT DO NOTHING 模式，自动去重）。
 
+        通过前后计数计算实际新增行数，避免依赖 cursor.rowcount
+        在 ON CONFLICT 语句中返回 -1 的问题。
+
         Args:
             rows: 待写入的新闻字典列表。
 
@@ -38,13 +41,18 @@ class NewsItemRepository(BaseRepository):
 
         from sqlalchemy.dialects.postgresql import insert
 
+        # 分批前后的计数计算实际新增
+        before = self._db.query(func.count(NewsItemModel.id)).scalar() or 0
+
         stmt = insert(NewsItemModel).values(rows).on_conflict_do_nothing(
             index_elements=["source_id", "title", "crawl_date"],
         )
         try:
-            result = self._db.execute(stmt)
+            self._db.execute(stmt)
             self._db.commit()
-            return result.rowcount
+
+            after = self._db.query(func.count(NewsItemModel.id)).scalar() or 0
+            return max(0, after - before)
         except Exception:
             self._db.rollback()
             raise
@@ -90,11 +98,13 @@ class AISentimentResultRepository(BaseRepository):
     ) -> int:
         """批量保存 AI 分析结果（ON CONFLICT DO UPDATE 模式）。
 
+        所有输入行都会生效（插入或更新），直接返回输入行数。
+
         Args:
             rows: 待写入的字典列表。
 
         Returns:
-            写入的记录数。
+            写入的记录数（= 输入行数）。
         """
         if not rows:
             return 0
@@ -117,9 +127,9 @@ class AISentimentResultRepository(BaseRepository):
             },
         )
         try:
-            result = self._db.execute(stmt)
+            self._db.execute(stmt)
             self._db.commit()
-            return result.rowcount
+            return len(rows)
         except Exception:
             self._db.rollback()
             raise
@@ -178,11 +188,13 @@ class DailySentimentAggregateRepository(BaseRepository):
     ) -> int:
         """批量保存情绪聚合数据（ON CONFLICT DO UPDATE 模式）。
 
+        所有输入行都会生效（插入或更新），直接返回输入行数。
+
         Args:
             rows: 待写入的字典列表。
 
         Returns:
-            写入的记录数。
+            写入的记录数（= 输入行数）。
         """
         if not rows:
             return 0
@@ -203,9 +215,9 @@ class DailySentimentAggregateRepository(BaseRepository):
             },
         )
         try:
-            result = self._db.execute(stmt)
+            self._db.execute(stmt)
             self._db.commit()
-            return result.rowcount
+            return len(rows)
         except Exception:
             self._db.rollback()
             raise

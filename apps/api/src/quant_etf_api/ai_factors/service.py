@@ -97,19 +97,25 @@ class AIFactorService:
         saved_count = self._news_repo.save_batch(news_rows)
         logger.info("新闻存储: %d 条新增 (共 %d 条采集)", saved_count, len(raw_items))
 
-        # 2.5 获取已保存新闻的 title→id 映射
-        saved_news = {n.title: n.id for n in self._news_repo.find_by_date(target_date)}
+        # 2.5 获取已保存新闻的 (source_id, title) → id 映射
+        saved_news = {
+            (n.source_id, n.title): n.id
+            for n in self._news_repo.find_by_date(target_date)
+        }
+
+        # raw_items 的 (source_id, title) → RawNewsItem 映射（复合键避免跨平台同名标题冲突）
+        item_key_to_raw = {(it.source_id, it.title): it for it in raw_items}
 
         # 2.6 检查已分析新闻，拆分未分析/已分析
         all_news_ids = list(saved_news.values())
         existing_ids = self._result_repo.find_existing_news_ids(all_news_ids)
         skipped_count = len(existing_ids)
 
-        # 拆分 raw_items：按 title 对应 news_id 是否已分析
-        title_to_raw = {item.title: item for item in raw_items}
+        # 拆分 raw_items：按 (source_id, title) 对应 news_id 是否已分析
         unanalyzed_raw: list[RawNewsItem] = []
         for item in raw_items:
-            nid = saved_news.get(item.title)
+            key = (item.source_id, item.title)
+            nid = saved_news.get(key)
             if nid is None or nid not in existing_ids:
                 unanalyzed_raw.append(item)
 
@@ -135,9 +141,10 @@ class AIFactorService:
         existing_sentiment_items: list = []
         if existing_ids:
             existing_results = self._result_repo.find_by_news_ids(list(existing_ids))
-            id_to_title = {v: k for k, v in saved_news.items()}
+            # 构建 news_id → (source_id, title) 反向映射
+            id_to_key = {v: k for k, v in saved_news.items()}
             existing_sentiment_items = self._db_results_to_sentiment_items(
-                existing_results, id_to_title, title_to_raw,
+                existing_results, id_to_key, item_key_to_raw,
             )
 
         # 合并全部 sentiment_items
@@ -223,16 +230,26 @@ class AIFactorService:
     def _to_result_rows(
         self,
         items: list,
-        news_map: dict[str, str],
+        news_map: dict[tuple[str, str], str],
         trade_date: date,
     ) -> list[dict]:
-        """将 NewsSentimentItem 列表转换为 AI 分析结果写入行。"""
+        """将 NewsSentimentItem 列表转换为 AI 分析结果写入行。
+
+        使用 (source_id, title) 复合键在 news_map 中查找，
+        避免跨平台同名标题映射到同一 news_id 导致 ON CONFLICT 冲突。
+        """
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        rows = []
+        seen_ids: set[str] = set()
+        rows: list[dict] = []
         for item in items:
-            news_id = news_map.get(item.title)
+            key = (item.source, item.title)
+            news_id = news_map.get(key)
             if not news_id:
                 continue
+            # 去重：同一 news_id 在同一批次中只保留一条
+            if news_id in seen_ids:
+                continue
+            seen_ids.add(news_id)
             rows.append({
                 "news_id": news_id,
                 "trade_date": trade_date,
@@ -270,8 +287,8 @@ class AIFactorService:
     def _db_results_to_sentiment_items(
         self,
         db_results: list,
-        id_to_title: dict[str, str],
-        title_to_raw: dict[str, RawNewsItem],
+        id_to_key: dict[str, tuple[str, str]],
+        key_to_raw: dict[tuple[str, str], RawNewsItem],
     ) -> list:
         """将 AISentimentResultModel 列表转换为 NewsSentimentItem 列表。
 
@@ -279,8 +296,8 @@ class AIFactorService:
 
         Args:
             db_results: 已有分析结果的 ORM 模型列表。
-            id_to_title: news_id → title 反向映射。
-            title_to_raw: title → RawNewsItem 正向映射（用于获取来源信息）。
+            id_to_key: news_id → (source_id, title) 反向映射。
+            key_to_raw: (source_id, title) → RawNewsItem 正向映射（用于获取来源信息）。
 
         Returns:
             NewsSentimentItem 列表。
@@ -291,8 +308,10 @@ class AIFactorService:
         items: list[NewsSentimentItem] = []
 
         for row in db_results:
-            title = id_to_title.get(row.news_id, "")
-            raw = title_to_raw.get(title)
+            key = id_to_key.get(row.news_id)
+            if key is None:
+                continue
+            raw = key_to_raw.get(key)
             if raw is None:
                 continue
 
