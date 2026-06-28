@@ -1,0 +1,25 @@
+[Unit]
+Description=Quant ETF API Server
+Documentation=https://github.com/your-org/quant-etf
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/quant-etf/apps/api
+EnvironmentFile=/opt/quant-etf/.env
+Environment=PATH=/opt/quant-etf/apps/api/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/quant-etf/apps/api/.venv/bin/uvicorn quant_etf_api.main:app --host 127.0.0.1 --port 8000 --workers 2 --log-level info
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+
+# 日志输出到 journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=quant-etf-api
+
+[Install]
+WantedBy=multi-user.target
