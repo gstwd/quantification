@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ZIP_FILE="${SCRIPT_DIR}/dist.zip"
-NGINX_ROOT="/docker/web"
+NGINX_ROOT="/var/www/quant-etf"
 
 log()  { echo "[$(date '+%H:%M:%S')] $*"; }
 err()  { echo "[$(date '+%H:%M:%S')] ERROR: $*" >&2; }

@@ -32,8 +32,8 @@
           @click="onDayClick(day)"
         >
           <span class="day-number">{{ day.dayOfMonth }}</span>
-          <div v-if="day.hasEntry" class="day-info">
-            <span class="day-phase">{{ phaseLabel(day.marketPhase) }}</span>
+          <div v-if="day.has_entry" class="day-info">
+            <span class="day-phase">{{ phaseLabel(day.market_phase) }}</span>
             <div class="day-tags" v-if="day.tags.length > 0">
               <span
                 v-for="tag in day.tags.slice(0, 2)"
@@ -148,7 +148,7 @@ function goToCurrentMonth(): void {
 
 async function onDayClick(day: any): Promise<void> {
   if (day.isEmpty || !day.is_trading_day) return
-  if (day.hasEntry && day.entry_id) {
+  if (day.has_entry && day.entry_id) {
     router.push(`/journal/${day.entry_id}`)
   } else {
     // Create entry for this date
