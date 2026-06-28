@@ -711,3 +711,37 @@ export interface CalendarResponse {
   month: number | null
   days: CalendarDay[]
 }
+
+// =============================================================================
+// AI 舆情分析模块
+// =============================================================================
+
+/** AI 分析运行响应 */
+export interface AIAnalysisRunResponse {
+  status: string
+  collected: number
+  saved: number
+  analyzed: number
+  aggregated: number
+  error: string | null
+}
+
+/** 每日情绪聚合数据 */
+export interface DailySentimentResponse {
+  trade_date: string
+  asset_tag: string
+  /** 平均情绪分 [-1, 1] */
+  avg_sentiment: number
+  /** 关注度加权情绪分 [-1, 1] */
+  weighted_sentiment: number
+  /** 总关注度 [0, 100] */
+  total_attention: number
+  /** 相关新闻数量 */
+  news_count: number
+  /** Top 热门主题 */
+  top_topics: string[]
+  /** 正面新闻占比 [0, 1] */
+  positive_ratio: number
+  /** 负面新闻占比 [0, 1] */
+  negative_ratio: number
+}

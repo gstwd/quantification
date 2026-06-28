@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
+import AIFactorsPage from '../pages/AIFactorsPage.vue'
 import BacktestCreatePage from '../pages/BacktestCreatePage.vue'
 import BacktestComparisonCreatePage from '../pages/BacktestComparisonCreatePage.vue'
 import BacktestComparisonDetailPage from '../pages/BacktestComparisonDetailPage.vue'
@@ -33,6 +34,7 @@ const router = createRouter({
     { path: '/journal/calendar', component: JournalCalendarPage },
     { path: '/journal/:entryId', component: JournalEntryPage, props: true },
     { path: '/journal/date/:date', component: JournalEntryPage, props: true },
+    { path: '/ai-factors', component: AIFactorsPage },
     { path: '/factors', component: FactorsPage },
     { path: '/factors/:factorId', component: FactorDetailPage, props: true },
     { path: '/runs', component: RunsPage },
