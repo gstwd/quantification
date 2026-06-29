@@ -146,3 +146,16 @@ export async function fetchLatestDataDate(): Promise<string | null> {
   )
   return data.trade_date ?? null
 }
+
+/** 获取前一交易日日期（基于 A 股交易日历）。
+ *
+ * 用于定死展示前一交易日 AI 舆情概览，前一天无数据时展示为空。
+ *
+ * @returns 前一交易日（YYYY-MM-DD）或 null
+ */
+export async function fetchPreviousTradingDay(): Promise<string | null> {
+  const { data } = await apiClient.get<{ trade_date: string | null }>(
+    '/ai-factors/previous-trading-day',
+  )
+  return data.trade_date ?? null
+}

@@ -314,6 +314,23 @@ def get_latest_data_date(
     return {"trade_date": latest.isoformat() if latest else None}
 
 
+@router.get("/previous-trading-day")
+def get_previous_trading_day() -> dict[str, str | None]:
+    """获取前一交易日日期（基于 A 股交易日历），供前端定死展示前一天舆情概览使用。
+
+    注意：latest_trading_day(reference) 含 reference 当日，因此 reference 传入昨天
+    才能拿到不含今天的真正的"前一交易日"。
+    """
+    from datetime import timedelta
+
+    from quant_etf_api.infra.trading_calendar import TradingCalendar
+
+    yesterday = date.today() - timedelta(days=1)
+    cal = TradingCalendar()
+    prev = cal.latest_trading_day(yesterday)
+    return {"trade_date": prev.isoformat()}
+
+
 def _raw_to_news_rows(items: list, crawl_date: date) -> list[dict[str, Any]]:
     """将 RawNewsItem 转为 DB 行。"""
     from datetime import datetime, timezone

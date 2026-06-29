@@ -138,7 +138,7 @@
       </div>
 
       <div v-if="sentimentLoading" class="loading">加载中...</div>
-      <div v-else-if="!sentimentDate" class="empty">暂无 AI 舆情数据</div>
+      <div v-else-if="!sentimentDate || sentimentRows.length === 0" class="empty">暂无 AI 舆情数据</div>
       <template v-else>
         <!-- 三列排名 -->
         <div class="sentiment-columns">
@@ -373,7 +373,7 @@ import { RouterLink } from 'vue-router'
 
 import type { DailySentimentResponse, DataQualityResponse, MarketSynthesisResponse, StarredSummaryResponse, SystemStatusResponse, TagNewsItem } from '../types/api'
 import { fetchDataQuality, fetchSystemStatus, triggerColdStart, triggerDailyIngest } from '../api/runs'
-import { fetchDailySentiment, fetchLatestDataDate, fetchMarketSynthesis, fetchSentimentNews } from '../api/aiFactors'
+import { fetchDailySentiment, fetchMarketSynthesis, fetchPreviousTradingDay, fetchSentimentNews } from '../api/aiFactors'
 import { fetchStarredSummary } from '../api/strategies'
 import { useStrategyStore } from '../stores/strategies'
 import HelpTip from '../components/HelpTip.vue'
@@ -457,17 +457,17 @@ async function toggleTagExpand(tag: string) {
   }
 }
 
-/** 加载 AI 舆情概览数据。 */
+/** 加载 AI 舆情概览数据（定死展示前一交易日）。 */
 async function loadSentimentOverview() {
   sentimentLoading.value = true
   try {
-    const latestDate = await fetchLatestDataDate()
-    if (!latestDate) return
-    sentimentDate.value = latestDate
+    const prevDate = await fetchPreviousTradingDay()
+    if (!prevDate) return
+    sentimentDate.value = prevDate
 
     const [rows, synth] = await Promise.all([
-      fetchDailySentiment(latestDate),
-      fetchMarketSynthesis(latestDate),
+      fetchDailySentiment(prevDate),
+      fetchMarketSynthesis(prevDate),
     ])
     sentimentRows.value = rows
     synthesis.value = synth
