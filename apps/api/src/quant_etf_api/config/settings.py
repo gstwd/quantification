@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     llm_max_tokens: int = Field(default=4096, description="AI 分析最大输出 token 数")
     llm_temperature: float = Field(default=0.3, description="AI 分析温度参数")
     llm_timeout_seconds: int = Field(default=60, description="LLM 请求超时时间")
+    ai_max_analysis_items: int = Field(
+        default=150,
+        description="单次 AI 分析最大新闻条数，超出部分仅计算关注度不调用 LLM",
+    )
 
 
 @lru_cache

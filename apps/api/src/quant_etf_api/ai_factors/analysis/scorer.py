@@ -92,6 +92,41 @@ class TrendScorer:
 
         return round(max(0.0, min(100.0, total)), 2)
 
+    @staticmethod
+    def calculate_attention_potential(
+        rank: int = 99,
+        count: int = 1,
+        is_finance_source: bool = False,
+    ) -> float:
+        """计算新闻的"分析优先级"分数（预排序用，不含时间衰减）。
+
+        用于在 LLM 分析前对金融相关新闻排序，让高价值新闻优先分析。
+        与 calculate_attention_score 的区别：
+        - 不含时间衰减（采集阶段所有新闻都是"当前"新闻）
+        - 增加来源优先级加成（财经专属来源得分更高）
+
+        Args:
+            rank: 热榜排名（1=榜首），无排名时用 99。
+            count: 出现次数。
+            is_finance_source: 是否来自已知财经来源。
+
+        Returns:
+            优先级分数 [0, ~130]，分数越高越值得 LLM 分析。
+        """
+        # 排名分：排名越高（数字越小），分数越高
+        rank_score = max(0, 11 - min(rank, 10)) * 10  # [10, 100]
+
+        # 频次分：出现次数越多，分数越高（上限 10 次）
+        freq_score = min(count, 10) * 10  # [10, 100]
+
+        # 来源优先级：财经专属来源 +30 分加成
+        source_bonus = 30.0 if is_finance_source else 0.0
+
+        # 综合得分（权重与 calculate_attention_score 一致）
+        total = rank_score * 0.5 + freq_score * 0.3 + source_bonus * 0.5
+
+        return round(max(0.0, total), 2)
+
     def aggregate_daily(
         self,
         items: list[NewsSentimentItem],

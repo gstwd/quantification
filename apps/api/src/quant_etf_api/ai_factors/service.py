@@ -41,17 +41,30 @@ class AIFactorService:
         self,
         db: Session,
         client: AIClient,
+        max_analysis_items: int | None = None,
     ) -> None:
         """初始化 AI 因子服务。
 
         Args:
             db: SQLAlchemy 数据库会话。
             client: AI 客户端实例。
+            max_analysis_items: 单次 LLM 分析最大新闻数，None 时从配置读取。
         """
+        from quant_etf_api.config.settings import get_settings
+
+        if max_analysis_items is None:
+            try:
+                max_analysis_items = get_settings().ai_max_analysis_items
+            except Exception:
+                max_analysis_items = 150
+
         self._db = db
         self._client = client
         self._collector = NewsCollector()
-        self._analyzer = SentimentAnalyzer(client)
+        self._analyzer = SentimentAnalyzer(
+            client,
+            max_analysis_items=max_analysis_items,
+        )
         self._classifier = TagClassifier(client)
         self._scorer = TrendScorer()
         self._synthesizer = MarketSynthesisAnalyzer(client)

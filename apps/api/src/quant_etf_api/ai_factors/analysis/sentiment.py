@@ -32,8 +32,11 @@ logger = logging.getLogger(__name__)
 PROMPT_NAME = "sentiment_analysis"
 
 # 批量分析时每次发送给 AI 的最大新闻条数
-# 每条分析约需 100-150 tokens 输出，默认 max_tokens=2000，保守设为 10 条/批
-DEFAULT_BATCH_SIZE = 10
+# 每条分析约需 100-150 tokens 输出，默认 max_tokens=4096，设为 20 条/批
+DEFAULT_BATCH_SIZE = 20
+
+# 单次分析的最大金融新闻条数（超出部分仅计算关注度，不调用 LLM）
+DEFAULT_MAX_ANALYSIS_ITEMS = 150
 
 # 已知财经来源 ID（这些来源的新闻直接视为金融相关，跳过关键词过滤）
 _FINANCE_SOURCE_IDS: frozenset[str] = frozenset(
@@ -43,11 +46,19 @@ _FINANCE_SOURCE_IDS: frozenset[str] = frozenset(
         "thepaper",  # 澎湃新闻（含财经频道）
     ]
 )
-# 已知财经 RSS 源域名前缀
+# 已知财经 RSS 源域名前缀（来源域名匹配任一项即视为金融相关，跳过关键词过滤）
 _FINANCE_RSS_DOMAINS: tuple[str, ...] = (
     "https://finance.yahoo.com",
     "https://feeds.content.dowjones.io",
     "https://www.economist.com",
+    "https://seekingalpha.com",  # Seeking Alpha（投资分析）
+    "https://www.investing.com",  # Investing.com（综合财经）
+    "https://cointelegraph.com",  # CoinTelegraph（加密资产）
+    "https://www.coindesk.com",  # CoinDesk（加密资产）
+    "https://www.oilprice.com",  # OilPrice.com（大宗商品）
+    "https://www.yicai.com",  # 第一财经
+    "https://wallstreetcn.com",  # 华尔街见闻 RSS
+    "https://rsshub.app",  # RSSHub 桥接（财新等）
 )
 
 
@@ -56,21 +67,31 @@ class SentimentAnalyzer:
 
     调用 LLM 对新闻标题进行情绪评分、资产关联和主题提取。
     内部使用 TrendScorer 计算非 AI 的关注度分数。
+
+    分析流程：
+    1. 来源/关键词过滤 → 区分金融/非金融新闻
+    2. 预过滤低价值条目（低排名 + 低频次 + 非财经源）
+    3. 按优先级排序，截断至 max_analysis_items
+    4. 分批 LLM 分析（每批 batch_size 条）
+    5. 超限/非金融新闻仅计算关注度，不调用 LLM
     """
 
     def __init__(
         self,
         client: AIClient,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        max_analysis_items: int = DEFAULT_MAX_ANALYSIS_ITEMS,
     ) -> None:
         """初始化情绪分析器。
 
         Args:
             client: AI 客户端实例。
             batch_size: 每批次发送给 LLM 的最大新闻数。
+            max_analysis_items: 单次分析的最大金融新闻条数，超出部分不调用 LLM。
         """
         self._client = client
         self._batch_size = batch_size
+        self._max_analysis_items = max_analysis_items
         self._prompt_loader = PromptLoader()
         self._scorer = TrendScorer()
 
@@ -99,7 +120,7 @@ class SentimentAnalyzer:
 
             available_tags = ALL_AVAILABLE_TAGS
 
-        # 过滤：仅保留可能与金融相关的新闻
+        # 步骤 1：过滤，区分金融/非金融新闻
         # 判定逻辑：来源为财经平台 OR 标题含金融关键词
         from quant_etf_api.ai_factors.data.cleaner import TextCleaner
 
@@ -114,25 +135,63 @@ class SentimentAnalyzer:
             else:
                 non_finance.append(it)
 
+        # 步骤 2：预过滤低价值金融新闻（排名极低 + 仅出现 1 次 + 非财经专属源）
+        low_attention_items: list[RawNewsItem] = []
+        filtered_finance: list[RawNewsItem] = []
+        for it in finance_items:
+            is_finance_source = (
+                it.source_id in _FINANCE_SOURCE_IDS
+                or it.source_id.startswith(_FINANCE_RSS_DOMAINS)
+            )
+            min_rank = min(it.ranks) if it.ranks else 99
+            if min_rank > 50 and it.appear_count <= 1 and not is_finance_source:
+                low_attention_items.append(it)
+            else:
+                filtered_finance.append(it)
+
+        # 步骤 3：按分析优先级排序，仅对前 max_analysis_items 条调用 LLM
+        from quant_etf_api.ai_factors.analysis.scorer import TrendScorer
+
+        def _get_priority_key(it: RawNewsItem) -> float:
+            is_finance_src = (
+                it.source_id in _FINANCE_SOURCE_IDS
+                or it.source_id.startswith(_FINANCE_RSS_DOMAINS)
+            )
+            min_rank = min(it.ranks) if it.ranks else 99
+            return TrendScorer.calculate_attention_potential(
+                rank=min_rank,
+                count=it.appear_count,
+                is_finance_source=is_finance_src,
+            )
+
+        filtered_finance.sort(key=_get_priority_key, reverse=True)
+
+        # 截断：前 N 条正常分析，超出的用降级处理
+        llm_items = filtered_finance[: self._max_analysis_items]
+        fallback_finance = filtered_finance[self._max_analysis_items :]
+
         logger.info(
-            "新闻过滤: %d 条中 %d 条金融相关, %d 条跳过",
+            "新闻过滤: %d 条 → %d 条金融(LLM:%d, 低价值跳过:%d, 超限:%d), %d 条非金融跳过",
             len(items),
             len(finance_items),
+            len(llm_items),
+            len(low_attention_items),
+            len(fallback_finance),
             len(non_finance),
         )
 
-        # 非金融新闻也保留，但 sentiment/relevance 为 0，attention 正常计算
         results: list[NewsSentimentItem] = []
 
-        # 处理金融相关新闻（分批 LLM 分析）
-        for i in range(0, len(finance_items), self._batch_size):
-            batch = finance_items[i : i + self._batch_size]
+        # 步骤 4：处理高优先级金融新闻（分批 LLM 分析）
+        for i in range(0, len(llm_items), self._batch_size):
+            batch = llm_items[i : i + self._batch_size]
             batch_results = self._analyze_single_batch(batch, available_tags)
             results.extend(batch_results)
 
-        # 处理非金融新闻（跳过 AI 分析）
+        # 步骤 5：处理非 LLM 分析的新闻（非金融 + 低价值 + 超出上限）
+        # 统一处理：sentiment=0, relevance=0, 仅计算 attention
         now = datetime.now(timezone.utc)
-        for item in non_finance:
+        for item in non_finance + low_attention_items + fallback_finance:
             results.append(
                 NewsSentimentItem(
                     timestamp=now,
