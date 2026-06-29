@@ -7,6 +7,8 @@ Create Date: 2026-06-29 11:00:00.000000
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -130,7 +132,7 @@ def upgrade() -> None:
     )
 
     # 写入种子数据
-    now = sa.func.now()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     rows = [
         {
             "keyword": item["keyword"],

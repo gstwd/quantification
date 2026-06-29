@@ -2,11 +2,11 @@
   <div class="page">
     <div class="page-header">
       <h1 class="page-title">AI 舆情分析</h1>
-    </div>
+      <HelpTip text="基于大语言模型（LLM）的 A 股市场舆情分析模块。<br><br><b>数据来源</b>：11 个中文热榜平台（头条/百度/华尔街见闻等）+ 18 个中英文 RSS 财经源。<br><b>分析流程</b>：新闻采集 → LLM 情绪评分 → 标签分类（指数/行业/概念）→ 情绪聚合 → 市场研判。<br><b>定时调度</b>：每天 23:30 自动执行，覆盖当天新闻。<br><b>策略集成</b>：分析结果（6 个 AI 因子）可在策略配置中引用，参与资产评分和仓位决策。" position="bottom" maxWidth="440px" /></div>
 
     <!-- ════════ 操作面板 ════════ -->
     <div class="card">
-      <div class="card-header"><span class="card-title">操作面板</span></div>
+      <div class="card-header"><span class="card-title">操作面板</span><HelpTip text="<b>采集新闻</b>：从热榜（头条/百度/华尔街见闻等）和 18 个 RSS 源抓取当日财经新闻。<br><b>AI 分析</b>：异步任务，依次执行 LLM 情绪分析 → 标签分类 → 情绪聚合 → 市场研判，结果存入数据库。<br>系统每天 23:30 自动执行 AI 分析（无需手动触发）。" position="bottom" maxWidth="360px" /></div>
       <div class="card-body">
         <div class="action-row">
           <button class="btn-primary" :disabled="collecting" @click="handleCollect">
@@ -25,7 +25,7 @@
 
     <!-- ════════ 每日情绪查询 ════════ -->
     <div class="card">
-      <div class="card-header"><span class="card-title">每日情绪查询</span></div>
+      <div class="card-header"><span class="card-title">每日情绪查询</span><HelpTip text="按交易日查询各资产标签的 AI 情绪聚合数据。<br><br><b>平均情绪</b>：所有相关新闻的 sentiment 简单均值。<br><b>加权情绪</b>：按关注度（热度/排名）加权，更能反映主流舆论。<br><b>正面/负面占比</b>：sentiment>&nbsp;0.15 为正面，<&nbsp;−0.15 为负面。<br><br>预警阈值可调：超出阈值的资产会在查询结果上方高亮提醒。" position="bottom" maxWidth="380px" /></div>
       <div class="card-body">
         <div class="action-row">
           <input v-model="queryDate" class="form-input" type="date" />
@@ -97,7 +97,7 @@
 
     <!-- ════════ 跨指数情绪对比 ════════ -->
     <div class="card">
-      <div class="card-header"><span class="card-title">跨指数情绪对比</span></div>
+      <div class="card-header"><span class="card-title">跨指数情绪对比</span><HelpTip text="选择 2–8 个指数，并列对比同一天的 AI 情绪指标。<br><br>通过分组柱状图直观比较：哪些指数情绪最积极/最消极，正面新闻占比高低。<br>情绪趋同可能预示系统性行情，情绪分化则反映结构性机会。<br><br>点击标签按钮选择指数，最少 2 个、最多 8 个。" position="bottom" maxWidth="380px" /></div>
       <div class="card-body">
         <div class="action-row">
           <select v-model="compareDate" class="form-input select-input">
@@ -124,7 +124,7 @@
 
     <!-- ════════ 市场综合研判 ════════ -->
     <div class="card">
-      <div class="card-header"><span class="card-title">每日市场研判</span></div>
+      <div class="card-header"><span class="card-title">每日市场研判</span><HelpTip text="由 LLM（大语言模型）基于当日全市场 AI 情绪聚合数据自动生成的综合研判（200–300 字）。<br><br>包含三个方面：<br><b>正文</b>：当日市场情绪概况与核心主题<br><b>关键主题</b>：3–5 个最重要的话题方向<br><b>风险提示</b>：情绪极端值、分歧异常等需警惕的信号<br><br>每次 AI 分析完成后自动生成，LLM 不可用时跳过。" position="bottom" maxWidth="400px" /></div>
       <div class="card-body">
         <div class="action-row">
           <input v-model="synthesisDate" class="form-input" type="date" />
@@ -152,7 +152,7 @@
 
     <!-- ════════ 指数情绪趋势 ════════ -->
     <div class="card">
-      <div class="card-header"><span class="card-title">指数情绪趋势</span></div>
+      <div class="card-header"><span class="card-title">指数情绪趋势</span><HelpTip text="追踪单个指数在不同时间窗口内的 AI 情绪变化趋势。<br><br>折线图展示平均情绪和加权情绪的时序走势，柱状图叠加当日新闻数量。<br>可切换 7/14/30/60 天窗口，观察情绪动量变化和拐点信号。<br><br>情绪持续向上 → 市场信心增强；情绪高位回落 → 关注反转风险。" position="bottom" maxWidth="380px" /></div>
       <div class="card-body">
         <div class="action-row">
           <select v-model="trendIndex" class="form-input select-input">
@@ -194,6 +194,7 @@ import {
   triggerCollect,
 } from '../api/aiFactors'
 import type { DailySentimentResponse, MarketSynthesisResponse } from '../types/api'
+import HelpTip from '../components/HelpTip.vue'
 
 /** 今天的日期字符串（YYYY-MM-DD） */
 function todayStr(): string {

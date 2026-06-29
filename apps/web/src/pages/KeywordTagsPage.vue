@@ -3,11 +3,12 @@
     <div class="page-header">
       <h1 class="page-title">关键词标签管理</h1>
       <span class="page-desc">管理新闻分类的关键词→资产标签映射规则</span>
+      <HelpTip text="AI 舆情分析链路中的<b>标签分类器</b>使用此映射表，将新闻标题中的关键词自动匹配到资产标签（如"沪深300" → "000300"）。<br><br><b>优先级</b>：数值越大越先匹配（同一条新闻优先匹配高优先级关键词）。<br><b>数据库映射优先</b>：DB 中有数据时自动替代代码中的静态默认映射；清空 DB 则回退到内置默认值。<br><br>映射的标签可以是<b>指数代码</b>（如 000300）或<b>行业/概念</b>（如 新能源、人工智能），直接影响舆情因子与指数的绑定结果。" position="bottom" maxWidth="420px" />
     </div>
 
     <!-- 新增行 -->
     <div class="card">
-      <div class="card-header"><span class="card-title">新增映射</span></div>
+      <div class="card-header"><span class="card-title">新增映射</span><HelpTip text="<b>关键词</b>：新闻标题中要匹配的关键词（如"科创板""AI大模型"）。<br><b>资产标签</b>：匹配后赋予的标签，是指数代码（如 000300）或行业/概念名（如 人工智能）。<br><b>优先级</b>：数值越大越先匹配。指数级关键词建议设 8–10，行业级建议 5–8，通用词建议 0–3。" position="bottom" maxWidth="380px" /></div>
       <div class="card-body">
         <div class="add-row">
           <input v-model="newKeyword" class="form-input" placeholder="关键词（如 芯片）" @keyup.enter="handleCreate" />
@@ -20,7 +21,7 @@
 
     <!-- 批量导入 -->
     <div class="card">
-      <div class="card-header"><span class="card-title">批量导入</span></div>
+      <div class="card-header"><span class="card-title">批量导入</span><HelpTip text="每行一条映射，格式：<b>关键词:标签</b>（英文冒号）。<br>已存在的关键词自动更新标签值（upsert），不重复插入。<br><br>示例：<br>芯片:半导体<br>AI:人工智能<br>沪深300:000300<br><br>支持 <b>#</b> 开头的注释行。" position="bottom" maxWidth="340px" /></div>
       <div class="card-body">
         <div class="batch-row">
           <textarea
@@ -54,7 +55,7 @@
               <th>关键词</th>
               <th>标签</th>
               <th>启用</th>
-              <th>优先级</th>
+              <th>优先级 <HelpTip text="数值越大越先匹配。匹配顺序：按优先级降序 → 同级按 ID 升序。" position="top" maxWidth="280px" /></th>
               <th>操作</th>
             </tr>
           </thead>
@@ -129,6 +130,7 @@ import {
   updateKeywordTag,
 } from '../api/keywordTags'
 import type { KeywordTagConfig } from '../types/api'
+import HelpTip from '../components/HelpTip.vue'
 
 // ---- 列表 ----
 const rows = ref<KeywordTagConfig[]>([])
