@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 import httpx
@@ -41,27 +42,19 @@ DEFAULT_PLATFORMS: list[dict[str, str]] = [
     {"id": "zhihu", "name": "知乎"},
 ]
 
-# 默认 RSS 源（中英文财经源，覆盖市场/金融/行业）
-DEFAULT_RSS_FEEDS: list[str] = [
-    # ---- 中文财经 ----
-    "https://www.yicai.com/feed/",                       # 第一财经
-    "https://wallstreetcn.com/feed",                     # 华尔街见闻
-    "https://rsshub.app/caixin/latest",                  # 财新（via RSSHub）
-    # ---- 综合财经（英文） ----
-    "https://finance.yahoo.com/news/rssindex",           # Yahoo Finance
-    "https://feeds.content.dowjones.io/public/rss/mw_topstories",  # MarketWatch（新地址）
-    "https://www.investing.com/rss/news.rss",            # Investing.com
-    "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",  # NYT Business
-    "https://feeds.bbci.co.uk/news/business/rss.xml",    # BBC Business
-    "https://www.economist.com/finance-and-economics/rss.xml",  # The Economist
-    # ---- 专业金融/投资 ----
-    "https://seekingalpha.com/feed.xml",                 # Seeking Alpha
-    # ---- 加密/另类资产 ----
-    "https://cointelegraph.com/rss",                     # CoinTelegraph
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",   # CoinDesk
-    # ---- 大宗商品 ----
-    "https://www.oilprice.com/rss/main",                 # OilPrice.com
-]
+# 默认 RSS 源（可通过环境变量配置，热榜已提供充足中文新闻，RSS 为可选补充）
+#   RSSHUB_BASE_URL=https://your-rsshub.instance  # RSSHub 自建实例地址
+#   RSS_FEEDS=caixin/latest,cls/telegraph           # 逗号分隔的 RSS 路径
+def _build_default_rss_feeds() -> list[str]:
+    """根据环境变量构建默认 RSS 源列表。"""
+    rsshub_base = os.getenv("RSSHUB_BASE_URL", "").rstrip("/")
+    rss_feeds_env = os.getenv("RSS_FEEDS", "")
+    if rsshub_base and rss_feeds_env:
+        return [f"{rsshub_base}/{path.strip()}" for path in rss_feeds_env.split(",") if path.strip()]
+    return []
+
+
+DEFAULT_RSS_FEEDS: list[str] = _build_default_rss_feeds()
 
 # NewsNow API 默认地址
 DEFAULT_NEWSNOW_API = "https://newsnow.busiyi.world/api/s"
