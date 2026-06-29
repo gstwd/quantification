@@ -57,36 +57,112 @@
         <div v-if="queryLoading" class="loading">加载中...</div>
         <div v-else-if="sentimentRows.length === 0 && queried" class="empty">暂无数据</div>
         <template v-else-if="sentimentRows.length > 0">
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>资产标签</th>
-                  <th>平均情绪</th>
-                  <th>加权情绪</th>
-                  <th>关注度</th>
-                  <th>新闻数</th>
-                  <th>正面占比</th>
-                  <th>负面占比</th>
-                  <th>热门主题</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in sentimentRows" :key="row.asset_tag">
-                  <td><span class="code-mono">{{ row.asset_tag }}</span></td>
-                  <td><span :class="sentimentClass(row.avg_sentiment)">{{ row.avg_sentiment.toFixed(3) }}</span></td>
-                  <td><span :class="sentimentClass(row.weighted_sentiment)">{{ row.weighted_sentiment.toFixed(3) }}</span></td>
-                  <td class="text-muted">{{ row.total_attention.toFixed(1) }}</td>
-                  <td class="text-muted">{{ row.news_count }}</td>
-                  <td class="text-rise">{{ (row.positive_ratio * 100).toFixed(1) }}%</td>
-                  <td class="text-fall">{{ (row.negative_ratio * 100).toFixed(1) }}%</td>
-                  <td>
-                    <span v-for="topic in row.top_topics" :key="topic" class="chip chip-topic">{{ topic }}</span>
-                    <span v-if="row.top_topics.length === 0" class="text-muted">—</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <!-- 综合（_general / _other） -->
+          <div v-if="specialRows.length > 0" class="section-group">
+            <div class="section-title">综合</div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>资产标签</th>
+                    <th>平均情绪</th>
+                    <th>加权情绪</th>
+                    <th>关注度</th>
+                    <th>新闻数</th>
+                    <th>正面占比</th>
+                    <th>负面占比</th>
+                    <th>热门主题</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in specialRows" :key="row.asset_tag">
+                    <td><span class="code-mono">{{ row.asset_tag }}</span></td>
+                    <td><span :class="sentimentClass(row.avg_sentiment)">{{ row.avg_sentiment.toFixed(3) }}</span></td>
+                    <td><span :class="sentimentClass(row.weighted_sentiment)">{{ row.weighted_sentiment.toFixed(3) }}</span></td>
+                    <td class="text-muted">{{ row.total_attention.toFixed(1) }}</td>
+                    <td class="text-muted">{{ row.news_count }}</td>
+                    <td class="text-rise">{{ (row.positive_ratio * 100).toFixed(1) }}%</td>
+                    <td class="text-fall">{{ (row.negative_ratio * 100).toFixed(1) }}%</td>
+                    <td>
+                      <span v-for="topic in row.top_topics" :key="topic" class="chip chip-topic">{{ topic }}</span>
+                      <span v-if="row.top_topics.length === 0" class="text-muted">—</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- 指数 -->
+          <div v-if="indexRows.length > 0" class="section-group">
+            <div class="section-title">指数</div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>资产标签</th>
+                    <th>平均情绪</th>
+                    <th>加权情绪</th>
+                    <th>关注度</th>
+                    <th>新闻数</th>
+                    <th>正面占比</th>
+                    <th>负面占比</th>
+                    <th>热门主题</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in indexRows" :key="row.asset_tag">
+                    <td><span class="code-mono">{{ row.asset_tag }}</span></td>
+                    <td><span :class="sentimentClass(row.avg_sentiment)">{{ row.avg_sentiment.toFixed(3) }}</span></td>
+                    <td><span :class="sentimentClass(row.weighted_sentiment)">{{ row.weighted_sentiment.toFixed(3) }}</span></td>
+                    <td class="text-muted">{{ row.total_attention.toFixed(1) }}</td>
+                    <td class="text-muted">{{ row.news_count }}</td>
+                    <td class="text-rise">{{ (row.positive_ratio * 100).toFixed(1) }}%</td>
+                    <td class="text-fall">{{ (row.negative_ratio * 100).toFixed(1) }}%</td>
+                    <td>
+                      <span v-for="topic in row.top_topics" :key="topic" class="chip chip-topic">{{ topic }}</span>
+                      <span v-if="row.top_topics.length === 0" class="text-muted">—</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- 行业主题 -->
+          <div v-if="sectorRows.length > 0" class="section-group">
+            <div class="section-title">行业主题</div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>资产标签</th>
+                    <th>平均情绪</th>
+                    <th>加权情绪</th>
+                    <th>关注度</th>
+                    <th>新闻数</th>
+                    <th>正面占比</th>
+                    <th>负面占比</th>
+                    <th>热门主题</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in sectorRows" :key="row.asset_tag">
+                    <td><span class="code-mono">{{ row.asset_tag }}</span></td>
+                    <td><span :class="sentimentClass(row.avg_sentiment)">{{ row.avg_sentiment.toFixed(3) }}</span></td>
+                    <td><span :class="sentimentClass(row.weighted_sentiment)">{{ row.weighted_sentiment.toFixed(3) }}</span></td>
+                    <td class="text-muted">{{ row.total_attention.toFixed(1) }}</td>
+                    <td class="text-muted">{{ row.news_count }}</td>
+                    <td class="text-rise">{{ (row.positive_ratio * 100).toFixed(1) }}%</td>
+                    <td class="text-fall">{{ (row.negative_ratio * 100).toFixed(1) }}%</td>
+                    <td>
+                      <span v-for="topic in row.top_topics" :key="topic" class="chip chip-topic">{{ topic }}</span>
+                      <span v-if="row.top_topics.length === 0" class="text-muted">—</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <!-- 主题分布柱状图 -->
@@ -312,6 +388,38 @@ const alertItems = computed(() =>
     sentiment: r.weighted_sentiment,
     newsCount: r.news_count,
   })),
+)
+
+/** 判断资产标签类型。
+ *
+ * 根据标签值自动推断类型：
+ * - _general / _other → 'special'（系统聚合桶）
+ * - 6 位纯数字（如 000300）→ 'index'（指数代码）
+ * - 其他（中文行业/概念标签）→ 'sector'
+ */
+function getTagType(assetTag: string): 'special' | 'index' | 'sector' {
+  if (assetTag === '_general' || assetTag === '_other') return 'special'
+  if (/^\d{6}$/.test(assetTag)) return 'index'
+  return 'sector'
+}
+
+/** 综合标签行（_general / _other），固定在顶部。 */
+const specialRows = computed(() =>
+  sentimentRows.value.filter((r) => getTagType(r.asset_tag) === 'special'),
+)
+
+/** 指数类型行，按加权情绪降序排列。 */
+const indexRows = computed(() =>
+  sentimentRows.value
+    .filter((r) => getTagType(r.asset_tag) === 'index')
+    .sort((a, b) => b.weighted_sentiment - a.weighted_sentiment),
+)
+
+/** 行业主题类型行，按加权情绪降序排列。 */
+const sectorRows = computed(() =>
+  sentimentRows.value
+    .filter((r) => getTagType(r.asset_tag) === 'sector')
+    .sort((a, b) => b.weighted_sentiment - a.weighted_sentiment),
 )
 
 async function handleQuery() {
@@ -639,7 +747,11 @@ onUnmounted(() => {
 .run-link { color: var(--accent); text-decoration: underline; font-weight: 500; white-space: nowrap; }
 
 /* ── 表格 ── */
-.table-wrap { margin-top: 12px; overflow-x: auto; }
+.section-group { margin-top: 12px; }
+.section-group + .section-group { margin-top: 20px; }
+.section-title { font-size: 13px; font-weight: 600; color: var(--accent); padding: 6px 0; border-bottom: 2px solid var(--border); margin-bottom: 8px; }
+
+.table-wrap { margin-top: 0; overflow-x: auto; }
 .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .data-table th { text-align: left; padding: 8px 10px; color: var(--text-muted); font-weight: 500; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .data-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
