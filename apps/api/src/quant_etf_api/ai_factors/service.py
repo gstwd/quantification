@@ -1,6 +1,6 @@
 """AI 因子服务编排。
 
-编排新闻采集 → AI 分析 → 情绪聚合 → 持久化的完整流程。
+编排新闻采集 → AI 分析 → 情绪聚合 → 市场研判 → 持久化的完整流程。
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from quant_etf_api.ai_factors.analysis.classifier import TagClassifier
 from quant_etf_api.ai_factors.analysis.scorer import TrendScorer
 from quant_etf_api.ai_factors.analysis.sentiment import SentimentAnalyzer
+from quant_etf_api.ai_factors.analysis.synthesis import MarketSynthesisAnalyzer
 from quant_etf_api.ai_factors.base import (
     RawNewsItem,
     build_available_tags,
@@ -23,6 +24,7 @@ from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRe
 from quant_etf_api.infra.db.repositories.news_item import (
     AISentimentResultRepository,
     DailySentimentAggregateRepository,
+    MarketSynthesisRepository,
     NewsItemRepository,
 )
 
@@ -52,10 +54,18 @@ class AIFactorService:
         self._analyzer = SentimentAnalyzer(client)
         self._classifier = TagClassifier(client)
         self._scorer = TrendScorer()
+        self._synthesizer = MarketSynthesisAnalyzer(client)
         self._news_repo = NewsItemRepository(db)
         self._result_repo = AISentimentResultRepository(db)
         self._agg_repo = DailySentimentAggregateRepository(db)
+        self._synthesis_repo = MarketSynthesisRepository(db)
         self._benchmark_repo = BenchmarkIndexRepository(db)
+
+        # 从 DB 加载动态关键词→标签映射（失败时回退到静态默认值）
+        try:
+            self._classifier.load_keyword_map(db)
+        except Exception:
+            logger.warning("加载关键词标签配置失败，将使用静态默认值", exc_info=True)
 
     # ---- 完整流程 ----
 
@@ -63,7 +73,6 @@ class AIFactorService:
         self,
         target_date: date | None = None,
         platform_ids: list[str] | None = None,
-        market_context: str = "",
     ) -> dict[str, int]:
         """执行完整的 AI 分析链路。
 
@@ -78,7 +87,6 @@ class AIFactorService:
         Args:
             target_date: 目标交易日，默认为今天。
             platform_ids: 指定热榜平台，默认全部。
-            market_context: 市场背景描述（如 "央行降准后次日"）。
 
         Returns:
             统计字典 {"collected": N, "saved": N, "analyzed": N, "aggregated": N}。
@@ -132,7 +140,6 @@ class AIFactorService:
         if unanalyzed_raw:
             new_sentiment_items = self._analyzer.analyze_batch(
                 unanalyzed_raw,
-                market_context,
                 available_tags,
             )
         else:
@@ -167,14 +174,22 @@ class AIFactorService:
         agg_rows = self._to_agg_rows(aggregates)
         agg_count = self._agg_repo.save_batch(agg_rows)
 
+        # 7. 市场综合研判（基于聚合结果，失败不影响主链路）
+        synthesis_ok = False
+        try:
+            synthesis_ok = self._run_market_synthesis(aggregates, target_date)
+        except Exception:
+            logger.exception("市场研判生成失败，不影响主链路")
+
         logger.info(
-            "AI 分析链路完成: 采集=%d, 存储=%d, 跳过=%d, 新分析=%d, AI分析=%d, 聚合=%d 组",
+            "AI 分析链路完成: 采集=%d, 存储=%d, 跳过=%d, 新分析=%d, AI分析=%d, 聚合=%d 组, 研判=%s",
             len(raw_items),
             saved_count,
             skipped_count,
             len(new_sentiment_items),
             result_count,
             agg_count,
+            "OK" if synthesis_ok else "跳过",
         )
 
         return {
@@ -182,6 +197,7 @@ class AIFactorService:
             "saved": saved_count,
             "analyzed": result_count,
             "aggregated": agg_count,
+            "synthesis": 1 if synthesis_ok else 0,
         }
 
     # ---- 内部方法 ----
@@ -353,6 +369,34 @@ class AIFactorService:
             )
 
         return items
+
+    def _run_market_synthesis(
+        self,
+        aggregates: list,
+        target_date: date,
+    ) -> bool:
+        """生成并持久化当日市场综合研判。
+
+        调用 MarketSynthesisAnalyzer 生成研判，通过 MarketSynthesisRepository 写入 DB。
+        所有异常内部捕获，返回 bool 表示是否成功。
+
+        Args:
+            aggregates: DailySentimentAggregate 列表。
+            target_date: 交易日。
+
+        Returns:
+            True 表示研判生成并保存成功。
+        """
+        if not aggregates:
+            logger.info("无聚合数据，跳过市场研判")
+            return False
+
+        result = self._synthesizer.generate(aggregates, target_date)
+        if result is None:
+            return False
+
+        row = MarketSynthesisAnalyzer.to_db_row(result, target_date, self._client.model)
+        return self._synthesis_repo.save(row)
 
 
 def _parse_time(time_str: str) -> datetime | None:

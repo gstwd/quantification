@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import logging
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from quant_etf_api.ai_factors.base import ALL_AVAILABLE_TAGS, NewsSentimentItem
 from quant_etf_api.infra.ai.client import AIClient
@@ -31,9 +31,16 @@ class TagClassifier:
 
     将新闻标题分类到预定义的资产/行业/概念标签中。
     当 LLM 不可用时，使用关键词匹配作为降级方案。
+
+    关键词→标签映射优先级：
+    1. 数据库 keyword_tag_config 表（动态，通过 load_keyword_map() 加载）
+    2. 内置 _KEYWORD_TAG_MAP（静态回退，当 DB 无数据时使用）
     """
 
-    # 内置关键词→标签映射（降级方案）
+    # 实例级动态映射（None 表示使用静态回退）
+    _keyword_map: dict[str, str] | None = None
+
+    # 内置关键词→标签映射（静态回退方案）
     _KEYWORD_TAG_MAP: ClassVar[dict[str, str]] = {
         # 指数
         "沪深300": "000300",
@@ -102,6 +109,42 @@ class TagClassifier:
         self._client = client
         self._batch_size = batch_size
         self._prompt_loader = PromptLoader()
+
+    def load_keyword_map(self, db: Any) -> None:
+        """从数据库加载活跃的关键词→标签映射（优先生效）。
+
+        加载成功后替代静态 _KEYWORD_TAG_MAP。
+        加载失败时保持 self._keyword_map=None，回退到静态默认值。
+
+        Args:
+            db: SQLAlchemy Session 实例。
+        """
+        from quant_etf_api.infra.db.repositories.keyword_tag_config import (
+            KeywordTagConfigRepository,
+        )
+
+        try:
+            repo = KeywordTagConfigRepository(db)
+            mappings = repo.get_keyword_map()
+            if mappings:
+                self._keyword_map = mappings
+                logger.info("已从 DB 加载 %d 条关键词→标签映射", len(mappings))
+            else:
+                logger.info("DB 中无活跃的关键词→标签映射，使用静态默认值")
+        except Exception:
+            logger.warning("加载关键词标签配置失败，回退到静态默认值", exc_info=True)
+
+    def _get_active_keyword_map(self) -> dict[str, str]:
+        """获取当前生效的关键词→标签映射。
+
+        优先返回 DB 加载的动态映射，无数据时回退到静态默认值。
+
+        Returns:
+            keyword → tag 的映射字典。
+        """
+        if self._keyword_map is not None:
+            return self._keyword_map
+        return dict(self._KEYWORD_TAG_MAP)
 
     def classify_to_asset_tags(
         self,
@@ -226,14 +269,17 @@ class TagClassifier:
     def _classify_via_keyword(self, items: list[NewsSentimentItem]) -> None:
         """使用关键词匹配进行降级分类。
 
+        优先使用 DB 加载的动态映射，无数据时回退到静态默认值。
+
         Args:
             items: 待分类的新闻列表（原地修改）。
         """
+        keyword_map = self._get_active_keyword_map()
         for item in items:
             text = item.title + " " + (item.summary or "")
             matched_tags: list[str] = []
 
-            for keyword, tag in self._KEYWORD_TAG_MAP.items():
+            for keyword, tag in keyword_map.items():
                 if keyword in text:
                     if tag not in matched_tags:
                         matched_tags.append(tag)

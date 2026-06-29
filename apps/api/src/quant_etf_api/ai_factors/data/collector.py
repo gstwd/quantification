@@ -41,9 +41,30 @@ DEFAULT_PLATFORMS: list[dict[str, str]] = [
     {"id": "zhihu", "name": "知乎"},
 ]
 
-# 默认 RSS 源
+# 默认 RSS 源（中英文财经源，覆盖市场/金融/行业）
 DEFAULT_RSS_FEEDS: list[str] = [
-    "https://finance.yahoo.com/news/rssindex",
+    # ---- 中文财经 ----
+    "https://feedx.net/rss/eastmoney.xml",              # 东方财富
+    "https://feedx.net/rss/21jingji.xml",                # 21 世纪经济报道
+    "https://feedx.net/rss/xueqiu.xml",                  # 雪球热帖
+    # ---- 综合财经（英文） ----
+    "https://finance.yahoo.com/news/rssindex",           # Yahoo Finance
+    "https://feeds.reuters.com/reuters/businessNews",    # Reuters Business
+    "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrket01&id=100003114",  # CNBC Top News
+    "https://feeds.marketwatch.com/marketwatch/topstories",  # MarketWatch
+    "https://www.investing.com/rss/news.rss",            # Investing.com
+    "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",  # NYT Business
+    "https://feeds.bbci.co.uk/news/business/rss.xml",    # BBC Business
+    "https://www.economist.com/finance-and-economics/rss.xml",  # The Economist
+    # ---- 专业金融/投资 ----
+    "https://seekingalpha.com/feed.xml",                 # Seeking Alpha
+    "https://www.zerohedge.com/fullrss2.xml",            # ZeroHedge
+    "https://feeds.feedburner.com/TheMisesInstitute",    # Mises Institute
+    # ---- 加密/另类资产 ----
+    "https://cointelegraph.com/rss",                     # CoinTelegraph
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",   # CoinDesk
+    # ---- 大宗商品 ----
+    "https://www.oilprice.com/rss/main",                 # OilPrice.com
 ]
 
 # NewsNow API 默认地址

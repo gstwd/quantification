@@ -726,6 +726,8 @@ export interface AIAnalysisRunResponse {
   error: string | null
   /** 异步模式运行 ID（status=accepted 时返回） */
   run_id?: string | null
+  /** 市场研判生成数（0 或 1） */
+  synthesis?: number
 }
 
 /** 每日情绪聚合数据 */
@@ -746,4 +748,25 @@ export interface DailySentimentResponse {
   positive_ratio: number
   /** 负面新闻占比 [0, 1] */
   negative_ratio: number
+}
+
+/** 市场综合研判 */
+export interface MarketSynthesisResponse {
+  trade_date: string
+  content: string
+  key_topics: string[]
+  risk_notes: string | null
+  sentiment_summary: Record<string, unknown>
+  created_at: string
+}
+
+/** 关键词→标签映射配置 */
+export interface KeywordTagConfig {
+  id: number
+  keyword: string
+  tag: string
+  is_active: boolean
+  priority: number
+  created_at: string | null
+  updated_at: string | null
 }

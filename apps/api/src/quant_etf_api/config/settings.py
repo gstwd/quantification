@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     ai_analysis_enabled: bool = Field(
         default=True, description="是否在日频调度中自动触发 AI 舆情分析"
     )
+    ai_schedule_time: str = Field(
+        default="23:30", description="AI 舆情分析触发时间（HH:MM），默认夜里 23:30，覆盖当天全部新闻"
+    )
 
     # 日志配置
     log_level: str = Field(default="INFO", description="日志级别：DEBUG / INFO / WARNING / ERROR")

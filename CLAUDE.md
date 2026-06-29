@@ -267,3 +267,8 @@ Key rules (details in the doc):
 - **`get_default_factor_registry()` vs `build_default_factor_registry()`**: 进程级单例通过 `get_default_factor_registry()` 获取（首次构建后缓存），避免 `BacktestService` 每请求重建。只有 `cli.py` 和 `registry.py` 内部使用 `build_default_factor_registry()`。
 - **`BatchFactorComputer` Protocol**: 定义在 `factors/base.py`，回测因子预计算时优先调用 `compute_batch()`（一次遍历 bar 数据覆盖所有日期）。已在 momentum.py（return_5d/20d/60d/120d）实现。新增回测频繁使用的因子时建议实现此协议。
 - **`validate_config` 是 `@staticmethod`**: `StrategyConfigService.validate_config()` 不依赖 DB 会话，直接静态调用无需实例化服务。
+- **AI 分析双调度器**: 数据摄取+因子计算在 `schedule_time`（默认 17:30）执行，AI 舆情分析在 `ai_schedule_time`（默认 23:30）独立执行。两个调度器通过 `main.py` lifespan 分别启动，互不影响。`ai_analysis_enabled=False` 时 AI 调度器不启动。
+- **AI 因子在策略引擎中的行为**: AI 因子仅在已有 `daily_sentiment_aggregate` 数据的交易日有效。缺失数据时返回 `FactorValue(numeric=None)`，评分引擎默认 `missing_factor_strategy="ignore"` 会静默跳过。不要在 filter 规则中使用 AI 因子（None 会导致 filter 失败=资产被排除）。AI 因子专用 transform 函数：`sentiment_score`（[-1,1]→[0,100]）、`attention_score`（裁剪到 [0,100]）。
+- **关键词标签可配置化**: `keyword_tag_config` 表存储关键词→资产标签映射，替代硬编码的 `classifier._KEYWORD_TAG_MAP`。`TagClassifier._classify_via_keyword()` 优先使用 DB 映射，回退到静态默认值。CRUD 端点: `GET/POST/PUT/DELETE /keyword-tags`。
+- **市场综合研判**: `market_synthesis` 表存储每日 AI 生成的市场概况（200-300 字中文研判）。在 `AIFactorService.run_full_pipeline()` 步骤 7 自动生成，LLM 不可用时静默跳过。API: `GET /ai-factors/synthesis/{date}`。
+- **AI 因子注册**: 6 个 AI 因子（sentiment_1d/5d/divergence, attention_1d/5d, topic_momentum）通过 `register_ai_factors()` 在 `build_default_factor_registry()` 中注册，可像内置因子一样在策略配置中引用。

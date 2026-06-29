@@ -43,7 +43,6 @@ DEFAULT_SENTIMENT_PROMPT = """[system]
 
 [user]
 当前日期：${current_date}
-市场背景：${market_context}
 可用资产标签：${available_tags}
 
 新闻列表（每行格式：[index] [来源] 标题 | 排名信息）：
@@ -64,6 +63,29 @@ DEFAULT_CLASSIFY_PROMPT = """[system]
 新闻列表：
 ${news_list}"""
 
+DEFAULT_MARKET_SYNTHESIS_PROMPT = """[system]
+你是资深 A 股市场策略分析师。你收到的是当日各指数/行业的 AI 情绪聚合数据，
+请据此生成一份 200-300 字的中国市场综合研判。
+
+输出格式（严格 JSON，不可包含任何其他文字）：
+{"content":"200-300字中文研判正文，用流畅的段落表达","key_topics":["主题1","主题2","主题3","主题4","主题5"],"risk_notes":"简短的风险提示，1-2句话。如无明显风险则写'暂无特别风险提示'。"}
+
+研判要求：
+- 从情绪数据中提炼 3-5 个关键市场主题，按重要性排序
+- 指出当日情绪最积极和最消极的板块
+- 如果多指数情绪趋同（都偏正或都偏负），指出市场情绪的一致性
+- 如果情绪分歧大（有正有负），指出分歧来源和结构性特征
+- 语言简洁专业，避免空洞的套话
+- 风险提示聚焦情绪极端值、分歧异常、或需警惕的信号
+
+[user]
+当前日期：${current_date}
+
+以下是当日各资产标签的 AI 情绪聚合数据（JSON 格式）：
+${sentiment_data}
+
+请生成市场研判 JSON。"""
+
 
 class PromptLoader:
     """Prompt 模板加载器，支持内置默认模板和外部文件两种方式。
@@ -74,6 +96,7 @@ class PromptLoader:
     _builtin: ClassVar[dict[str, str]] = {
         "sentiment_analysis": DEFAULT_SENTIMENT_PROMPT,
         "news_classify": DEFAULT_CLASSIFY_PROMPT,
+        "market_synthesis": DEFAULT_MARKET_SYNTHESIS_PROMPT,
     }
 
     def __init__(self, prompts_dir: str | Path | None = None) -> None:

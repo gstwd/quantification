@@ -1243,3 +1243,71 @@ class DailySentimentAggregateModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, comment="记录创建时间（UTC）"
     )
+
+
+class MarketSynthesisModel(Base):
+    """每日市场综合研判表。
+
+    由 MarketSynthesisAnalyzer 调用 LLM 生成，综合当日各指数情绪
+    聚合数据和热门主题，输出一份 200-300 字的中文市场概况。
+    每天最多一条记录。
+    """
+
+    __tablename__ = "market_synthesis"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(_uuid4()), comment="UUID 主键"
+    )
+    trade_date: Mapped[date] = mapped_column(
+        Date, unique=True, nullable=False, comment="交易日，每天一条综合研判"
+    )
+    content: Mapped[str] = mapped_column(
+        Text, nullable=False, comment="200-300 字中文市场研判正文"
+    )
+    sentiment_summary: Mapped[dict] = mapped_column(
+        JSON, nullable=False, default=dict, comment="关键指数情绪摘要"
+    )
+    key_topics: Mapped[list] = mapped_column(
+        JSON, nullable=False, default=list, comment="Top 5-8 市场主题"
+    )
+    risk_notes: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="风险提示，来自 AI 分析"
+    )
+    llm_model: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="", comment="使用的 LLM 模型标识"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, comment="记录创建时间（UTC）"
+    )
+
+
+class KeywordTagConfigModel(Base):
+    """关键词→资产标签映射配置表。
+
+    替代硬编码的 _KEYWORD_TAG_MAP，支持通过 API/前端动态管理。
+    分类器优先使用此表中的活跃映射，DB 无数据时回退到静态默认值。
+    """
+
+    __tablename__ = "keyword_tag_config"
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, comment="自增主键"
+    )
+    keyword: Mapped[str] = mapped_column(
+        String(128), unique=True, nullable=False, comment="匹配关键词"
+    )
+    tag: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="映射到的资产标签"
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, comment="是否启用"
+    )
+    priority: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment="优先级（越大越先匹配）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, comment="创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, comment="更新时间（UTC）"
+    )

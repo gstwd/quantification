@@ -13,6 +13,7 @@ import FactorDetailPage from '../pages/FactorDetailPage.vue'
 import FactorsPage from '../pages/FactorsPage.vue'
 import JournalCalendarPage from '../pages/JournalCalendarPage.vue'
 import JournalEntryPage from '../pages/JournalEntryPage.vue'
+import KeywordTagsPage from '../pages/KeywordTagsPage.vue'
 import RunsPage from '../pages/RunsPage.vue'
 import IndexDetailPage from '../pages/IndexDetailPage.vue'
 import IndexListPage from '../pages/IndexListPage.vue'
@@ -35,6 +36,7 @@ const router = createRouter({
     { path: '/journal/:entryId', component: JournalEntryPage, props: true },
     { path: '/journal/date/:date', component: JournalEntryPage, props: true },
     { path: '/ai-factors', component: AIFactorsPage },
+    { path: '/keyword-tags', component: KeywordTagsPage },
     { path: '/factors', component: FactorsPage },
     { path: '/factors/:factorId', component: FactorDetailPage, props: true },
     { path: '/runs', component: RunsPage },

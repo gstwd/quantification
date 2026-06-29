@@ -49,6 +49,47 @@ class DailySentimentResponse(BaseModel):
     negative_ratio: float = Field(default=0.0, description="负面占比")
 
 
+class MarketSynthesisResponse(BaseModel):
+    """每日市场综合研判 API 响应。"""
+
+    trade_date: date = Field(description="交易日")
+    content: str = Field(description="200-300 字中文研判正文")
+    key_topics: list[str] = Field(default_factory=list, description="Top 5-8 市场主题")
+    risk_notes: str | None = Field(default=None, description="风险提示")
+    sentiment_summary: dict = Field(default_factory=dict, description="关键指数情绪摘要")
+    created_at: str = Field(default="", description="创建时间（ISO 格式）")
+
+
+class KeywordTagConfigResponse(BaseModel):
+    """关键词→标签映射 API 响应。"""
+
+    id: int = Field(description="主键")
+    keyword: str = Field(description="匹配关键词")
+    tag: str = Field(description="映射到的资产标签")
+    is_active: bool = Field(default=True, description="是否启用")
+    priority: int = Field(default=0, description="优先级（越大越先匹配）")
+    created_at: str | None = Field(default=None, description="创建时间")
+    updated_at: str | None = Field(default=None, description="更新时间")
+
+
+class KeywordTagConfigCreate(BaseModel):
+    """创建关键词→标签映射请求。"""
+
+    keyword: str = Field(description="匹配关键词", min_length=1, max_length=128)
+    tag: str = Field(description="映射到的资产标签", min_length=1, max_length=64)
+    is_active: bool = Field(default=True, description="是否启用")
+    priority: int = Field(default=0, description="优先级")
+
+
+class KeywordTagConfigUpdate(BaseModel):
+    """更新关键词→标签映射请求（所有字段可选）。"""
+
+    keyword: str | None = Field(default=None, description="匹配关键词", min_length=1, max_length=128)
+    tag: str | None = Field(default=None, description="映射到的资产标签", min_length=1, max_length=64)
+    is_active: bool | None = Field(default=None, description="是否启用")
+    priority: int | None = Field(default=None, description="优先级")
+
+
 class AIAnalysisRunResponse(BaseModel):
     """AI 分析执行结果。"""
 
@@ -57,5 +98,6 @@ class AIAnalysisRunResponse(BaseModel):
     saved: int = Field(default=0, description="存储新增数")
     analyzed: int = Field(default=0, description="AI 分析数")
     aggregated: int = Field(default=0, description="聚合组数")
+    synthesis: int = Field(default=0, description="市场研判生成数（0或1）")
     error: str | None = Field(default=None, description="错误信息")
     run_id: str | None = Field(default=None, description="运行 ID（异步模式时返回）")

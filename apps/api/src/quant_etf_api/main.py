@@ -18,6 +18,7 @@ from quant_etf_api.api.routers import (
     health,
     indexes,
     journal,
+    keyword_tags,
     market_data,
     runs,
     strategies,
@@ -26,7 +27,7 @@ from quant_etf_api.api.routers import (
 from quant_etf_api.config.logging_config import setup_logging
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.factors.registry import FactorRegistry, get_default_factor_registry
-from quant_etf_api.infra.scheduler import get_scheduler
+from quant_etf_api.infra.scheduler import get_ai_scheduler, get_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +62,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     runs.recover_stuck_runs_on_startup()
     if settings.schedule_enabled:
         get_scheduler().start()
+    if settings.ai_analysis_enabled:
+        get_ai_scheduler().start()
     if settings.startup_fill_enabled:
         _trigger_startup_fill()
     yield
     get_scheduler().stop()
+    if settings.ai_analysis_enabled:
+        get_ai_scheduler().stop()
     # 关闭共享后台任务线程池
     from quant_etf_api.api.executor import get_bg_executor
 
@@ -93,6 +98,7 @@ app.include_router(runs.router, prefix=settings.api_prefix)
 app.include_router(backtests.router, prefix=settings.api_prefix)
 app.include_router(ai_factors.router, prefix=settings.api_prefix)
 app.include_router(journal.router, prefix=settings.api_prefix)
+app.include_router(keyword_tags.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

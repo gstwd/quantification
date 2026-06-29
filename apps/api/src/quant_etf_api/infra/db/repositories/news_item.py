@@ -257,3 +257,82 @@ class DailySentimentAggregateRepository(BaseRepository):
         if asset_tag:
             q = q.filter(DailySentimentAggregateModel.asset_tag == asset_tag)
         return q.order_by(DailySentimentAggregateModel.trade_date).all()
+
+
+class MarketSynthesisRepository(BaseRepository):
+    """每日市场综合研判仓库。"""
+
+    def save(self, row: dict[str, Any]) -> bool:
+        """保存或更新市场研判（upsert on trade_date）。
+
+        Args:
+            row: 待写入的字典，含 id/trade_date/content 等字段。
+
+        Returns:
+            True 表示写入成功。
+        """
+        from sqlalchemy.dialects.postgresql import insert
+
+        from quant_etf_api.infra.db.models.core import MarketSynthesisModel
+
+        stmt = insert(MarketSynthesisModel).values(row)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["trade_date"],
+            set_={
+                "content": stmt.excluded.content,
+                "sentiment_summary": stmt.excluded.sentiment_summary,
+                "key_topics": stmt.excluded.key_topics,
+                "risk_notes": stmt.excluded.risk_notes,
+                "llm_model": stmt.excluded.llm_model,
+            },
+        )
+        try:
+            self._db.execute(stmt)
+            self._db.commit()
+            return True
+        except Exception:
+            self._db.rollback()
+            logger = __import__("logging").getLogger(__name__)
+            logger.error("市场研判保存失败", exc_info=True)
+            return False
+
+    def find_by_date(self, target_date: date) -> Any | None:
+        """查询指定日期的市场研判。
+
+        Args:
+            target_date: 交易日。
+
+        Returns:
+            MarketSynthesisModel 实例或 None。
+        """
+        from quant_etf_api.infra.db.models.core import MarketSynthesisModel
+
+        return (
+            self._db.query(MarketSynthesisModel)
+            .filter(MarketSynthesisModel.trade_date == target_date)
+            .first()
+        )
+
+    def find_by_date_range(
+        self, start_date: date, end_date: date
+    ) -> list[Any]:
+        """查询日期范围内的市场研判。
+
+        Args:
+            start_date: 起始日期（含）。
+            end_date: 截止日期（含）。
+
+        Returns:
+            MarketSynthesisModel 列表，按日期升序。
+        """
+        from quant_etf_api.infra.db.models.core import MarketSynthesisModel
+
+        return (
+            self._db.query(MarketSynthesisModel)
+            .filter(
+                MarketSynthesisModel.trade_date >= start_date,
+                MarketSynthesisModel.trade_date <= end_date,
+            )
+            .order_by(MarketSynthesisModel.trade_date)
+            .all()
+        )

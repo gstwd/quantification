@@ -1,9 +1,9 @@
 /** AI 舆情分析 API 客户端。
  *
- * 提供新闻采集、AI 分析触发、情绪数据查询等端点。
+ * 提供新闻采集、AI 分析触发、情绪数据查询、市场研判等端点。
  */
 import { apiClient } from './client'
-import type { AIAnalysisRunResponse, DailySentimentResponse } from '../types/api'
+import type { AIAnalysisRunResponse, DailySentimentResponse, MarketSynthesisResponse } from '../types/api'
 
 /** 触发新闻采集（仅采集，不含 AI 分析）。
  *
@@ -24,16 +24,13 @@ export async function triggerCollect(
 /** 触发完整 AI 分析链路（采集 + AI 分析 + 聚合）。
  *
  * @param targetDate - 可选，目标交易日，默认今天
- * @param marketContext - 可选，市场背景描述（如"央行降准后次日"）
  * @returns 分析运行结果（collected/saved/analyzed/aggregated 数量）
  */
 export async function triggerAnalyze(
   targetDate?: string,
-  marketContext?: string,
 ): Promise<AIAnalysisRunResponse> {
   const params: Record<string, string> = {}
   if (targetDate) params.target_date = targetDate
-  if (marketContext) params.market_context = marketContext
   const { data } = await apiClient.post<AIAnalysisRunResponse>(
     '/ai-factors/analyze',
     null,
@@ -89,4 +86,46 @@ export interface IndexOption {
 export async function fetchActiveIndexes(): Promise<IndexOption[]> {
   const { data } = await apiClient.get<IndexOption[]>('/indexes/active')
   return data
+}
+
+/** 查询指定日期的市场综合研判。
+ *
+ * @param tradeDate - 交易日（YYYY-MM-DD）
+ * @returns 市场研判数据，无数据时返回 null
+ */
+export async function fetchMarketSynthesis(
+  tradeDate: string,
+): Promise<MarketSynthesisResponse | null> {
+  const { data } = await apiClient.get<MarketSynthesisResponse | null>(
+    `/ai-factors/synthesis/${tradeDate}`,
+  )
+  return data
+}
+
+/** 查询日期范围内的市场研判列表。
+ *
+ * @param start - 起始日期（YYYY-MM-DD）
+ * @param end - 截止日期（YYYY-MM-DD）
+ * @returns 市场研判列表
+ */
+export async function fetchSynthesisRange(
+  start: string,
+  end: string,
+): Promise<MarketSynthesisResponse[]> {
+  const { data } = await apiClient.get<MarketSynthesisResponse[]>(
+    '/ai-factors/synthesis-range',
+    { params: { start, end } },
+  )
+  return data
+}
+
+/** 获取最新有情绪数据的交易日。
+ *
+ * @returns 最新交易日（YYYY-MM-DD）或 null
+ */
+export async function fetchLatestDataDate(): Promise<string | null> {
+  const { data } = await apiClient.get<{ trade_date: string | null }>(
+    '/ai-factors/latest-data-date',
+  )
+  return data.trade_date ?? null
 }

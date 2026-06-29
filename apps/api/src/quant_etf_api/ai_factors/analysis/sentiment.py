@@ -35,9 +35,6 @@ PROMPT_NAME = "sentiment_analysis"
 # 每条分析约需 100-150 tokens 输出，默认 max_tokens=2000，保守设为 10 条/批
 DEFAULT_BATCH_SIZE = 10
 
-# 默认市场背景（无特殊背景时）
-DEFAULT_MARKET_CONTEXT = "正常交易时段，无特殊宏观事件"
-
 # 已知财经来源 ID（这些来源的新闻直接视为金融相关，跳过关键词过滤）
 _FINANCE_SOURCE_IDS: frozenset[str] = frozenset(
     [
@@ -80,7 +77,6 @@ class SentimentAnalyzer:
     def analyze_batch(
         self,
         items: list[RawNewsItem],
-        market_context: str = DEFAULT_MARKET_CONTEXT,
         available_tags: list[str] | None = None,
     ) -> list[NewsSentimentItem]:
         """批量分析新闻情绪。
@@ -89,7 +85,6 @@ class SentimentAnalyzer:
 
         Args:
             items: 原始新闻列表。
-            market_context: 当前市场背景（如 "央行降准后次日"）。
             available_tags: 可用标签列表，默认使用 ALL_AVAILABLE_TAGS。
 
         Returns:
@@ -132,7 +127,7 @@ class SentimentAnalyzer:
         # 处理金融相关新闻（分批 LLM 分析）
         for i in range(0, len(finance_items), self._batch_size):
             batch = finance_items[i : i + self._batch_size]
-            batch_results = self._analyze_single_batch(batch, market_context, available_tags)
+            batch_results = self._analyze_single_batch(batch, available_tags)
             results.extend(batch_results)
 
         # 处理非金融新闻（跳过 AI 分析）
@@ -160,7 +155,6 @@ class SentimentAnalyzer:
     def _analyze_single_batch(
         self,
         items: list[RawNewsItem],
-        market_context: str,
         available_tags: list[str],
     ) -> list[NewsSentimentItem]:
         """调用 LLM 分析一批新闻。
@@ -177,7 +171,6 @@ class SentimentAnalyzer:
             PROMPT_NAME,
             variables={
                 "current_date": datetime.now().strftime("%Y-%m-%d"),
-                "market_context": market_context,
                 "available_tags": ", ".join(available_tags),
                 "news_list": self._format_news(items),
             },

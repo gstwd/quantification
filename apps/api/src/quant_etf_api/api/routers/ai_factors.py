@@ -29,6 +29,7 @@ from quant_etf_api.infra.db.repositories.news_item import (
 from quant_etf_api.schemas.ai_factor import (
     AIAnalysisRunResponse,
     DailySentimentResponse,
+    MarketSynthesisResponse,
 )
 from quant_etf_api.services.run_service import RunService
 
@@ -42,12 +43,11 @@ router = APIRouter(prefix="/ai-factors", tags=["AI 因子"])
 # ---------------------------------------------------------------------------
 
 
-def _run_ai_analysis_bg(run_id: str, market_context: str) -> None:
+def _run_ai_analysis_bg(run_id: str) -> None:
     """在独立 Session 中执行 AI 分析，避免与请求 Session 冲突。
 
     Args:
         run_id: 运行记录 ID。
-        market_context: 市场背景描述。
     """
     db = SessionLocal()
     try:
@@ -60,7 +60,6 @@ def _run_ai_analysis_bg(run_id: str, market_context: str) -> None:
         service = AIFactorService(db, client)
         stats = service.run_full_pipeline(
             target_date=today,
-            market_context=market_context,
         )
         RunService(db).mark_success(run_id, metrics=stats)
     except Exception as e:
@@ -112,7 +111,6 @@ def trigger_collect(
 def trigger_analyze(
     background_tasks: BackgroundTasks,
     target_date: date | None = Query(default=None, description="目标交易日，默认今天"),
-    market_context: str = Query(default="", description="市场背景描述"),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> AIAnalysisRunResponse:
@@ -151,7 +149,7 @@ def trigger_analyze(
 
     # 创建运行记录并提交后台执行
     summary = RunService(db).create_run("ai_analysis", None, today)
-    get_bg_executor().submit(_run_ai_analysis_bg, summary.run_id, market_context)
+    get_bg_executor().submit(_run_ai_analysis_bg, summary.run_id)
 
     return AIAnalysisRunResponse(
         status="accepted",
@@ -212,6 +210,82 @@ def get_index_summary(
         )
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# 市场研判
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/synthesis/{trade_date}",
+    response_model=MarketSynthesisResponse | None,
+)
+def get_synthesis(
+    trade_date: date,
+    db: Session = Depends(get_db),
+) -> MarketSynthesisResponse | None:
+    """查询指定日期的市场综合研判。"""
+    from quant_etf_api.infra.db.repositories.news_item import MarketSynthesisRepository
+
+    repo = MarketSynthesisRepository(db)
+    row = repo.find_by_date(trade_date)
+    if row is None:
+        return None
+    return MarketSynthesisResponse(
+        trade_date=row.trade_date,
+        content=row.content,
+        key_topics=row.key_topics or [],
+        risk_notes=row.risk_notes,
+        sentiment_summary=row.sentiment_summary or {},
+        created_at=row.created_at.isoformat() if row.created_at else "",
+    )
+
+
+@router.get(
+    "/synthesis-range",
+    response_model=list[MarketSynthesisResponse],
+)
+def get_synthesis_range(
+    start: date = Query(description="起始日期（含）"),
+    end: date = Query(description="截止日期（含）"),
+    db: Session = Depends(get_db),
+) -> list[MarketSynthesisResponse]:
+    """查询日期范围内的市场综合研判。"""
+    from quant_etf_api.infra.db.repositories.news_item import MarketSynthesisRepository
+
+    repo = MarketSynthesisRepository(db)
+    rows = repo.find_by_date_range(start, end)
+    return [
+        MarketSynthesisResponse(
+            trade_date=r.trade_date,
+            content=r.content,
+            key_topics=r.key_topics or [],
+            risk_notes=r.risk_notes,
+            sentiment_summary=r.sentiment_summary or {},
+            created_at=r.created_at.isoformat() if r.created_at else "",
+        )
+        for r in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 辅助端点
+# ---------------------------------------------------------------------------
+
+
+@router.get("/latest-data-date")
+def get_latest_data_date(
+    db: Session = Depends(get_db),
+) -> dict[str, str | None]:
+    """获取最新有情绪数据的交易日，供前端快捷日期选择使用。"""
+    from quant_etf_api.infra.db.models.core import DailySentimentAggregateModel
+    from sqlalchemy import func
+
+    latest = (
+        db.query(func.max(DailySentimentAggregateModel.trade_date)).scalar()
+    )
+    return {"trade_date": latest.isoformat() if latest else None}
 
 
 def _raw_to_news_rows(items: list, crawl_date: date) -> list[dict[str, Any]]:

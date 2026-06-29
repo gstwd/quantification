@@ -7,13 +7,19 @@
 - ai_sentiment_1d: 最近 1 个交易日加权情绪分
 - ai_sentiment_5d: 最近 5 个交易日情绪移动平均
 - ai_sentiment_divergence: 情绪分歧度（多源情绪标准差）
+
+行为约定：
+- 当 ctx.ai_sentiment 中无对应 (index_code, trade_date) 的数据时，
+  返回 FactorValue(numeric=None)，表示"数据不足无法计算"。
+- 策略引擎的 missing_factor_strategy="ignore" 会跳过 None 值因子。
+- 这意味着：未执行 AI 分析的交易日，AI 情绪因子被静默忽略，
+  不影响其他因子的评分计算。
 """
 
 from __future__ import annotations
 
 from datetime import date, timedelta
 
-from quant_etf_api.ai_factors.base import DailySentimentAggregate
 from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
 
 
