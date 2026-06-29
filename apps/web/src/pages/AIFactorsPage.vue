@@ -112,7 +112,7 @@
                 </thead>
                 <tbody>
                   <tr v-for="row in indexRows" :key="row.asset_tag">
-                    <td><span class="code-mono">{{ row.asset_tag }}</span></td>
+                    <td><span class="code-mono">{{ row.asset_tag }}</span><span class="index-name">{{ indexNameMap[row.asset_tag] || '' }}</span></td>
                     <td><span :class="sentimentClass(row.avg_sentiment)">{{ row.avg_sentiment.toFixed(3) }}</span></td>
                     <td><span :class="sentimentClass(row.weighted_sentiment)">{{ row.weighted_sentiment.toFixed(3) }}</span></td>
                     <td class="text-muted">{{ row.total_attention.toFixed(1) }}</td>
@@ -402,6 +402,15 @@ function getTagType(assetTag: string): 'special' | 'index' | 'sector' {
   if (/^\d{6}$/.test(assetTag)) return 'index'
   return 'sector'
 }
+
+/** 指数代码 → 中文名称映射。 */
+const indexNameMap = computed(() => {
+  const map: Record<string, string> = {}
+  for (const idx of INDEX_OPTIONS.value) {
+    map[idx.code] = idx.name
+  }
+  return map
+})
 
 /** 综合标签行（_general / _other），固定在顶部。 */
 const specialRows = computed(() =>
@@ -771,6 +780,7 @@ onUnmounted(() => {
 
 /* ── 通用 ── */
 .code-mono { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; font-size: 12px; }
+.index-name { color: var(--text-muted); font-size: 12px; margin-left: 6px; }
 .text-rise { color: var(--success); font-weight: 600; }
 .text-fall { color: var(--danger); font-weight: 600; }
 .text-muted { color: var(--text-muted); }
