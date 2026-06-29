@@ -74,15 +74,15 @@ export async function deleteKeywordTag(id: number): Promise<void> {
 
 /** 批量导入关键词标签映射。
  *
- * @param mappings - { keyword: tag } 字典
- * @returns { created: number, updated: number }
+ * @param items - { keyword, tag, priority } 列表
+ * @returns { processed: number }
  */
 export async function batchImportKeywordTags(
-  mappings: Record<string, string>,
-): Promise<{ created: number; updated: number }> {
-  const { data } = await apiClient.post<{ created: number; updated: number }>(
+  items: Array<{ keyword: string; tag: string; priority: number }>,
+): Promise<{ processed: number }> {
+  const { data } = await apiClient.post<{ processed: number }>(
     '/keyword-tags/batch-import',
-    mappings,
+    items,
   )
   return data
 }

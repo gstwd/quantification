@@ -16,6 +16,7 @@ from quant_etf_api.infra.db.repositories.keyword_tag_config import (
     KeywordTagConfigRepository,
 )
 from quant_etf_api.schemas.ai_factor import (
+    KeywordTagBatchItem,
     KeywordTagConfigCreate,
     KeywordTagConfigResponse,
     KeywordTagConfigUpdate,
@@ -130,19 +131,19 @@ def delete_keyword_tag(
 
 @router.post("/batch-import")
 def batch_import_keyword_tags(
-    body: dict[str, str],
+    body: list[KeywordTagBatchItem],
     db: Session = Depends(get_db),
 ) -> dict[str, int]:
     """批量导入关键词标签映射。
 
-    body 格式: {"关键词1": "标签1", "关键词2": "标签2", ...}
-    ON CONFLICT DO UPDATE: 已存在的 keyword 会更新其 tag。
+    body 格式: [{"keyword": "...", "tag": "...", "priority": N}, ...]
+    ON CONFLICT DO UPDATE: 已存在的 keyword 会更新其 tag、priority。
     """
     if not body:
-        raise HTTPException(status_code=400, detail="请求体为空，需要 keyword:tag 映射")
+        raise HTTPException(status_code=400, detail="请求体为空，需要 keyword/tag/priority 列表")
     repo = KeywordTagConfigRepository(db)
     try:
-        result = repo.batch_import(body)
+        result = repo.batch_import([it.model_dump() for it in body])
         return result
     except Exception as e:
         logger.exception("批量导入关键词标签失败")

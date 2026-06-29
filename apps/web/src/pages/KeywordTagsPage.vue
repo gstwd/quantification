@@ -21,7 +21,7 @@
 
     <!-- 批量导入 -->
     <div class="card">
-      <div class="card-header"><span class="card-title">批量导入</span><HelpTip text="每行一条映射，格式：<b>关键词:标签</b>（英文冒号）。<br>已存在的关键词自动更新标签值（upsert），不重复插入。<br><br>示例：<br>芯片:半导体<br>AI:人工智能<br>沪深300:000300<br><br>支持 <b>#</b> 开头的注释行。" position="bottom" maxWidth="340px" /></div>
+      <div class="card-header"><span class="card-title">批量导入</span><HelpTip text="每行一条映射，格式：<b>关键词:标签[:优先级]</b>（英文冒号，优先级可选默认0）。<br>已存在的关键词自动更新标签值和优先级（upsert），不重复插入。<br><br>示例：<br>芯片:半导体:8<br>AI:人工智能<br>沪深300:000300:10<br><br>支持 <b>#</b> 开头的注释行。" position="bottom" maxWidth="360px" /></div>
       <div class="card-body">
         <div class="batch-row">
           <textarea
@@ -213,22 +213,34 @@ async function handleBatchImport() {
   const text = batchText.value.trim()
   if (!text) return
 
-  const mappings: Record<string, string> = {}
+  const items: Array<{ keyword: string; tag: string; priority: number }> = []
   for (const line of text.split('\n')) {
     const trimmed = line.trim()
     if (!trimmed || trimmed.startsWith('#')) continue
-    const colonIdx = trimmed.indexOf(':')
-    if (colonIdx === -1) {
-      batchMsg.value = `格式错误：${trimmed}`
+    // 格式: keyword:tag 或 keyword:tag:priority
+    const parts = trimmed.split(':')
+    if (parts.length < 2 || parts.length > 3) {
+      batchMsg.value = `格式错误：${trimmed}（期望 keyword:tag 或 keyword:tag:priority）`
       batchOk.value = false
       return
     }
-    const kw = trimmed.slice(0, colonIdx).trim()
-    const tg = trimmed.slice(colonIdx + 1).trim()
-    if (kw && tg) mappings[kw] = tg
+    const kw = parts[0].trim()
+    const tg = parts[1].trim()
+    const pri = parts.length === 3 ? parseInt(parts[2].trim(), 10) : 0
+    if (!kw || !tg) {
+      batchMsg.value = `格式错误：${trimmed}（关键词或标签为空）`
+      batchOk.value = false
+      return
+    }
+    if (parts.length === 3 && isNaN(pri)) {
+      batchMsg.value = `格式错误：${trimmed}（优先级不是有效数字）`
+      batchOk.value = false
+      return
+    }
+    items.push({ keyword: kw, tag: tg, priority: pri })
   }
 
-  if (Object.keys(mappings).length === 0) {
+  if (items.length === 0) {
     batchMsg.value = '无有效映射'
     batchOk.value = false
     return
@@ -236,8 +248,8 @@ async function handleBatchImport() {
 
   batchMsg.value = ''
   try {
-    const result = await batchImportKeywordTags(mappings)
-    batchMsg.value = `导入完成：${result.created} 条`
+    const result = await batchImportKeywordTags(items)
+    batchMsg.value = `导入完成：已处理 ${result.processed} 条`
     batchOk.value = true
     batchText.value = ''
     await loadList()

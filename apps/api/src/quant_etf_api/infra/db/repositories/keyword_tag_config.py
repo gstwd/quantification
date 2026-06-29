@@ -162,48 +162,49 @@ class KeywordTagConfigRepository(BaseRepository):
 
     def batch_import(
         self,
-        mappings: dict[str, str],
+        items: list[dict[str, Any]],
     ) -> dict[str, int]:
         """批量导入关键词映射（ON CONFLICT DO UPDATE）。
 
         Args:
-            mappings: keyword → tag 的字典。
+            items: 映射条目列表，每项包含 keyword/tag/priority。
 
         Returns:
-            {"created": N, "updated": N} 统计。
+            {"processed": N} 统计。
         """
         from sqlalchemy.dialects.postgresql import insert
 
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = [
             {
-                "keyword": kw,
-                "tag": tag,
+                "keyword": it["keyword"],
+                "tag": it["tag"],
                 "is_active": True,
-                "priority": 0,
+                "priority": it.get("priority", 0),
                 "created_at": now,
                 "updated_at": now,
             }
-            for kw, tag in mappings.items()
+            for it in items
         ]
 
         if not rows:
-            return {"created": 0, "updated": 0}
+            return {"processed": 0}
 
         stmt = insert(KeywordTagConfigModel).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=["keyword"],
             set_={
                 "tag": stmt.excluded.tag,
+                "priority": stmt.excluded.priority,
+                "is_active": True,
                 "updated_at": now,
             },
         )
 
         try:
-            result = self._db.execute(stmt)
+            self._db.execute(stmt)
             self._db.commit()
-            # ON CONFLICT DO UPDATE 的 rowcount 对已更新的行可能不止 1
-            return {"created": result.rowcount, "updated": 0}
+            return {"processed": len(rows)}
         except Exception:
             self._db.rollback()
             logger.exception("批量导入关键词标签失败")

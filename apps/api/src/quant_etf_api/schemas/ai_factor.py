@@ -90,6 +90,14 @@ class KeywordTagConfigUpdate(BaseModel):
     priority: int | None = Field(default=None, description="优先级")
 
 
+class KeywordTagBatchItem(BaseModel):
+    """批量导入单条映射。"""
+
+    keyword: str = Field(description="匹配关键词", min_length=1, max_length=128)
+    tag: str = Field(description="映射到的资产标签", min_length=1, max_length=64)
+    priority: int = Field(default=0, description="优先级（越大越先匹配）")
+
+
 class AIAnalysisRunResponse(BaseModel):
     """AI 分析执行结果。"""
 
