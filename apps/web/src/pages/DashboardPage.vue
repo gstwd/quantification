@@ -97,8 +97,9 @@
                 v-for="[code, weight] in topPositions(item.plan.positions)"
                 :key="code"
                 class="position-tag"
+                :title="code"
               >
-                {{ code }} <strong>{{ (weight * 100).toFixed(0) }}%</strong>
+                {{ getIndexName(item.rankings, code) || code }} <strong>{{ (weight * 100).toFixed(0) }}%</strong>
               </span>
               <span
                 v-if="Object.keys(item.plan.positions).length > 5"
@@ -357,6 +358,12 @@ async function loadStarredSummary() {
   } finally {
     starredLoading.value = false
   }
+}
+
+/** 从排名数据中查找 ETF 代码对应的指数名称 */
+function getIndexName(rankings: Array<{ etf_code: string; name_cn: string }>, code: string): string | null {
+  const found = rankings.find(r => r.etf_code === code)
+  return found?.name_cn ?? null
 }
 
 /** 取消星标 */
