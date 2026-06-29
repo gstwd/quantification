@@ -49,6 +49,16 @@ class DailySentimentResponse(BaseModel):
     negative_ratio: float = Field(default=0.0, description="负面占比")
 
 
+class TagNewsItemResponse(BaseModel):
+    """资产标签下的单条新闻明细 API 响应。"""
+
+    title: str = Field(description="新闻标题")
+    url: str = Field(default="", description="新闻链接")
+    source_name: str = Field(default="", description="来源平台中文名")
+    sentiment_score: float = Field(default=0.0, description="情绪分 [-1, 1]")
+    attention_score: float = Field(default=0.0, description="关注度分 [0, 100]")
+
+
 class MarketSynthesisResponse(BaseModel):
     """每日市场综合研判 API 响应。"""
 

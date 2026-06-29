@@ -128,6 +128,138 @@
       </div>
     </div>
 
+    <!-- AI 舆情概览 -->
+    <div class="section">
+      <div class="section-header">
+        <h2 class="section-title">AI 舆情概览</h2>
+        <span v-if="sentimentLoading" class="section-badge">加载中...</span>
+        <span v-else-if="sentimentDate" class="section-badge">{{ sentimentDate }}</span>
+        <RouterLink to="/ai-factors" class="link-accent section-link">完整报告 →</RouterLink>
+      </div>
+
+      <div v-if="sentimentLoading" class="loading">加载中...</div>
+      <div v-else-if="!sentimentDate" class="empty">暂无 AI 舆情数据</div>
+      <template v-else>
+        <!-- 三列排名 -->
+        <div class="sentiment-columns">
+          <!-- 情绪最积极 Top 3 -->
+          <div class="sentiment-col">
+            <div class="sentiment-col-title text-rise">🟢 情绪最积极</div>
+            <div v-if="topPositive.length === 0" class="empty-sm">—</div>
+            <div
+              v-for="row in topPositive"
+              :key="row.asset_tag"
+              class="sentiment-row"
+              :class="{ 'sentiment-row-expanded': expandedTag === row.asset_tag }"
+              @click="toggleTagExpand(row.asset_tag)"
+            >
+              <div class="sentiment-row-main">
+                <span class="sentiment-tag">{{ row.asset_tag }}</span>
+                <span class="sentiment-val text-rise">{{ row.weighted_sentiment.toFixed(2) }}</span>
+                <span class="sentiment-expand">{{ expandedTag === row.asset_tag ? '▲' : '▼' }}</span>
+              </div>
+              <!-- 展开新闻列表 -->
+              <div v-if="expandedTag === row.asset_tag" class="sentiment-news-list">
+                <div v-if="loadingTag === row.asset_tag" class="loading-sm">加载中...</div>
+                <div v-else-if="(tagNewsMap[row.asset_tag] || []).length === 0" class="empty-sm">暂无新闻明细</div>
+                <a
+                  v-for="news in tagNewsMap[row.asset_tag] || []"
+                  :key="news.title"
+                  :href="news.url || '#'"
+                  target="_blank"
+                  class="sentiment-news-item"
+                  :class="news.sentiment_score > 0.15 ? 'news-positive' : news.sentiment_score < -0.15 ? 'news-negative' : 'news-neutral'"
+                >
+                  <span class="news-dot"></span>
+                  <span class="news-title">{{ news.title }}</span>
+                  <span class="news-source">{{ news.source_name }}</span>
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <!-- 情绪最消极 Top 3 -->
+          <div class="sentiment-col">
+            <div class="sentiment-col-title text-fall">🔴 情绪最消极</div>
+            <div v-if="topNegative.length === 0" class="empty-sm">—</div>
+            <div
+              v-for="row in topNegative"
+              :key="row.asset_tag"
+              class="sentiment-row"
+              :class="{ 'sentiment-row-expanded': expandedTag === row.asset_tag }"
+              @click="toggleTagExpand(row.asset_tag)"
+            >
+              <div class="sentiment-row-main">
+                <span class="sentiment-tag">{{ row.asset_tag }}</span>
+                <span class="sentiment-val text-fall">{{ row.weighted_sentiment.toFixed(2) }}</span>
+                <span class="sentiment-expand">{{ expandedTag === row.asset_tag ? '▲' : '▼' }}</span>
+              </div>
+              <div v-if="expandedTag === row.asset_tag" class="sentiment-news-list">
+                <div v-if="loadingTag === row.asset_tag" class="loading-sm">加载中...</div>
+                <div v-else-if="(tagNewsMap[row.asset_tag] || []).length === 0" class="empty-sm">暂无新闻明细</div>
+                <a
+                  v-for="news in tagNewsMap[row.asset_tag] || []"
+                  :key="news.title"
+                  :href="news.url || '#'"
+                  target="_blank"
+                  class="sentiment-news-item"
+                  :class="news.sentiment_score > 0.15 ? 'news-positive' : news.sentiment_score < -0.15 ? 'news-negative' : 'news-neutral'"
+                >
+                  <span class="news-dot"></span>
+                  <span class="news-title">{{ news.title }}</span>
+                  <span class="news-source">{{ news.source_name }}</span>
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <!-- 关注度最高 Top 3 -->
+          <div class="sentiment-col">
+            <div class="sentiment-col-title text-accent">🔥 关注度最高</div>
+            <div v-if="topAttention.length === 0" class="empty-sm">—</div>
+            <div
+              v-for="row in topAttention"
+              :key="row.asset_tag"
+              class="sentiment-row"
+              :class="{ 'sentiment-row-expanded': expandedTag === row.asset_tag }"
+              @click="toggleTagExpand(row.asset_tag)"
+            >
+              <div class="sentiment-row-main">
+                <span class="sentiment-tag">{{ row.asset_tag }}</span>
+                <span class="sentiment-val attention-val">{{ row.total_attention.toFixed(1) }}</span>
+                <span class="sentiment-expand">{{ expandedTag === row.asset_tag ? '▲' : '▼' }}</span>
+              </div>
+              <div v-if="expandedTag === row.asset_tag" class="sentiment-news-list">
+                <div v-if="loadingTag === row.asset_tag" class="loading-sm">加载中...</div>
+                <div v-else-if="(tagNewsMap[row.asset_tag] || []).length === 0" class="empty-sm">暂无新闻明细</div>
+                <a
+                  v-for="news in tagNewsMap[row.asset_tag] || []"
+                  :key="news.title"
+                  :href="news.url || '#'"
+                  target="_blank"
+                  class="sentiment-news-item"
+                  :class="news.sentiment_score > 0.15 ? 'news-positive' : news.sentiment_score < -0.15 ? 'news-negative' : 'news-neutral'"
+                >
+                  <span class="news-dot"></span>
+                  <span class="news-title">{{ news.title }}</span>
+                  <span class="news-source">{{ news.source_name }}</span>
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 每日市场研判 -->
+        <div v-if="synthesis" class="synthesis-card">
+          <div class="synthesis-title">📋 每日市场研判</div>
+          <div class="synthesis-body">{{ synthesis.content }}</div>
+          <div v-if="synthesis.key_topics.length > 0" class="synthesis-topics">
+            <span v-for="t in synthesis.key_topics" :key="t" class="chip chip-topic">{{ t }}</span>
+          </div>
+        </div>
+      </template>
+    </div>
+
     <!-- 数据源状态 -->
     <div v-if="systemStatus" class="section">
       <div class="section-header">
@@ -239,8 +371,9 @@
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import type { DataQualityResponse, StarredSummaryResponse, SystemStatusResponse } from '../types/api'
+import type { DailySentimentResponse, DataQualityResponse, MarketSynthesisResponse, StarredSummaryResponse, SystemStatusResponse, TagNewsItem } from '../types/api'
 import { fetchDataQuality, fetchSystemStatus, triggerColdStart, triggerDailyIngest } from '../api/runs'
+import { fetchDailySentiment, fetchLatestDataDate, fetchMarketSynthesis, fetchSentimentNews } from '../api/aiFactors'
 import { fetchStarredSummary } from '../api/strategies'
 import { useStrategyStore } from '../stores/strategies'
 import HelpTip from '../components/HelpTip.vue'
@@ -263,6 +396,87 @@ const strategyStore = useStrategyStore()
 
 const starredSummary = ref<StarredSummaryResponse | null>(null)
 const starredLoading = ref(false)
+
+// ──── AI 舆情概览 ────
+
+const sentimentDate = ref<string | null>(null)
+const sentimentRows = ref<DailySentimentResponse[]>([])
+const synthesis = ref<MarketSynthesisResponse | null>(null)
+const sentimentLoading = ref(false)
+const expandedTag = ref<string | null>(null)
+const loadingTag = ref<string | null>(null)
+const tagNewsMap = ref<Record<string, TagNewsItem[]>>({})
+
+/** 判断资产标签类型（与 AIFactorsPage 中逻辑一致）。 */
+function getTagType(assetTag: string): 'special' | 'index' | 'sector' {
+  if (assetTag === '_general' || assetTag === '_other') return 'special'
+  if (/^\d{6}$/.test(assetTag)) return 'index'
+  return 'sector'
+}
+
+/** 行业主题情绪 Top 3（加权情绪降序） */
+const topPositive = computed(() =>
+  sentimentRows.value
+    .filter((r) => getTagType(r.asset_tag) === 'sector')
+    .sort((a, b) => b.weighted_sentiment - a.weighted_sentiment)
+    .slice(0, 3),
+)
+
+/** 行业主题情绪 Bottom 3（加权情绪升序，最低在前） */
+const topNegative = computed(() =>
+  sentimentRows.value
+    .filter((r) => getTagType(r.asset_tag) === 'sector')
+    .sort((a, b) => a.weighted_sentiment - b.weighted_sentiment)
+    .slice(0, 3),
+)
+
+/** 行业主题关注度 Top 3（总关注度降序） */
+const topAttention = computed(() =>
+  sentimentRows.value
+    .filter((r) => getTagType(r.asset_tag) === 'sector')
+    .sort((a, b) => b.total_attention - a.total_attention)
+    .slice(0, 3),
+)
+
+/** 切换标签新闻展开/收起，首次展开时按需加载新闻明细。 */
+async function toggleTagExpand(tag: string) {
+  if (expandedTag.value === tag) {
+    expandedTag.value = null
+    return
+  }
+  expandedTag.value = tag
+  if (!tagNewsMap.value[tag] && sentimentDate.value) {
+    loadingTag.value = tag
+    try {
+      tagNewsMap.value[tag] = await fetchSentimentNews(sentimentDate.value, tag)
+    } catch {
+      tagNewsMap.value[tag] = []
+    } finally {
+      loadingTag.value = null
+    }
+  }
+}
+
+/** 加载 AI 舆情概览数据。 */
+async function loadSentimentOverview() {
+  sentimentLoading.value = true
+  try {
+    const latestDate = await fetchLatestDataDate()
+    if (!latestDate) return
+    sentimentDate.value = latestDate
+
+    const [rows, synth] = await Promise.all([
+      fetchDailySentiment(latestDate),
+      fetchMarketSynthesis(latestDate),
+    ])
+    sentimentRows.value = rows
+    synthesis.value = synth
+  } catch {
+    // 舆情加载失败不影响主页面
+  } finally {
+    sentimentLoading.value = false
+  }
+}
 
 /** 数据质量分组配置 */
 const qualityGroups = computed(() => {
@@ -430,6 +644,7 @@ onMounted(() =>
     loadQuality(),
     strategyStore.loadAll(),
     loadStarredSummary(),
+    loadSentimentOverview(),
   ]),
 )
 </script>
@@ -768,6 +983,43 @@ onMounted(() =>
 }
 
 .link-accent { color: var(--accent); }
+
+.section-link { font-size: 12px; margin-left: auto; }
+
+/* ── AI 舆情概览 ── */
+.sentiment-columns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 12px; }
+.sentiment-col { background: var(--surface-2); border-radius: var(--radius-sm); padding: 12px 14px; min-height: 80px; }
+.sentiment-col-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+.sentiment-row { cursor: pointer; border-radius: var(--radius-sm); transition: background .15s; }
+.sentiment-row:hover { background: rgba(59, 130, 246, 0.06); }
+.sentiment-row-expanded { background: rgba(59, 130, 246, 0.08); }
+.sentiment-row-main { display: flex; align-items: center; gap: 8px; padding: 6px 8px; }
+.sentiment-tag { font-weight: 600; font-size: 13px; min-width: 50px; }
+.sentiment-val { font-weight: 700; font-size: 13px; margin-left: auto; }
+.attention-val { color: #f59e0b; }
+.sentiment-expand { font-size: 10px; color: var(--text-muted); margin-left: 4px; }
+
+/* 新闻展开列表 */
+.sentiment-news-list { padding: 0 8px 8px; max-height: 240px; overflow-y: auto; }
+.sentiment-news-item { display: flex; align-items: center; gap: 6px; padding: 4px 6px; font-size: 11px; border-radius: 2px; text-decoration: none; transition: background .1s; }
+.sentiment-news-item:hover { background: rgba(255, 255, 255, 0.04); }
+.news-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+.news-positive .news-dot { background: var(--success); }
+.news-negative .news-dot { background: var(--danger); }
+.news-neutral .news-dot { background: var(--text-muted); }
+.news-title { color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.news-source { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
+
+/* 市场研判卡片 */
+.synthesis-card { margin-top: 16px; background: var(--surface-2); border-radius: var(--radius-sm); padding: 16px; }
+.synthesis-title { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+.synthesis-body { font-size: 13px; line-height: 1.7; color: var(--text); white-space: pre-line; }
+.synthesis-topics { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+.chip-topic { background: rgba(59, 130, 246, 0.12); color: var(--accent); display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px; }
+
+.text-accent { color: var(--accent); }
+.loading-sm { padding: 8px; text-align: center; color: var(--text-muted); font-size: 11px; }
+.empty-sm { padding: 8px; text-align: center; color: var(--text-muted); font-size: 11px; }
 
 /* === 响应式 === */
 @media (max-width: 640px) {

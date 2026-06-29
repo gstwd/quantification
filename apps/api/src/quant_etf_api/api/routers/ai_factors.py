@@ -23,6 +23,7 @@ from quant_etf_api.infra.ai.client import AIClient
 from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.infra.db.models.core import ResearchRunModel
 from quant_etf_api.infra.db.repositories.news_item import (
+    AISentimentResultRepository,
     DailySentimentAggregateRepository,
     NewsItemRepository,
 )
@@ -30,6 +31,7 @@ from quant_etf_api.schemas.ai_factor import (
     AIAnalysisRunResponse,
     DailySentimentResponse,
     MarketSynthesisResponse,
+    TagNewsItemResponse,
 )
 from quant_etf_api.services.run_service import RunService
 
@@ -177,6 +179,30 @@ def get_sentiment(
             top_topics=r.top_topics or [],
             positive_ratio=r.positive_ratio or 0.0,
             negative_ratio=r.negative_ratio or 0.0,
+        )
+        for r in rows
+    ]
+
+
+@router.get("/sentiment/{query_date}/news", response_model=list[TagNewsItemResponse])
+def get_sentiment_news(
+    query_date: date,
+    asset_tag: str = Query(description="资产标签"),
+    db: Session = Depends(get_db),
+) -> list[TagNewsItemResponse]:
+    """查询指定日期的指定资产标签下的所有新闻明细。
+
+    返回该标签下每条新闻的标题、链接、来源、情绪分和关注度分。
+    """
+    repo = AISentimentResultRepository(db)
+    rows = repo.find_news_by_tag(query_date, asset_tag)
+    return [
+        TagNewsItemResponse(
+            title=r["title"],
+            url=r["url"],
+            source_name=r["source_name"],
+            sentiment_score=r["sentiment_score"],
+            attention_score=r["attention_score"],
         )
         for r in rows
     ]

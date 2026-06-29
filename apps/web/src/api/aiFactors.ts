@@ -3,7 +3,7 @@
  * 提供新闻采集、AI 分析触发、情绪数据查询、市场研判等端点。
  */
 import { apiClient } from './client'
-import type { AIAnalysisRunResponse, DailySentimentResponse, MarketSynthesisResponse } from '../types/api'
+import type { AIAnalysisRunResponse, DailySentimentResponse, MarketSynthesisResponse, TagNewsItem } from '../types/api'
 
 /** 触发新闻采集（仅采集，不含 AI 分析）。
  *
@@ -52,6 +52,23 @@ export async function fetchDailySentiment(
   const { data } = await apiClient.get<DailySentimentResponse[]>(
     `/ai-factors/sentiment/${queryDate}`,
     { params: assetTag ? { asset_tag: assetTag } : {} },
+  )
+  return data
+}
+
+/** 查询指定日期、指定资产标签下的所有新闻明细。
+ *
+ * @param date - 交易日（YYYY-MM-DD）
+ * @param assetTag - 资产标签（如 "科技"、"军工"）
+ * @returns 新闻明细列表（含标题、链接、情绪分等）
+ */
+export async function fetchSentimentNews(
+  date: string,
+  assetTag: string,
+): Promise<TagNewsItem[]> {
+  const { data } = await apiClient.get<TagNewsItem[]>(
+    `/ai-factors/sentiment/${date}/news`,
+    { params: { asset_tag: assetTag } },
   )
   return data
 }

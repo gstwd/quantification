@@ -750,6 +750,15 @@ export interface DailySentimentResponse {
   negative_ratio: number
 }
 
+/** 资产标签下的单条新闻明细 */
+export interface TagNewsItem {
+  title: string
+  url: string
+  source_name: string
+  sentiment_score: number
+  attention_score: number
+}
+
 /** 市场综合研判 */
 export interface MarketSynthesisResponse {
   trade_date: string

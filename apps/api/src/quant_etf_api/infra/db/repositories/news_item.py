@@ -8,7 +8,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 
 from quant_etf_api.infra.db.models.core import (
     AISentimentResultModel,
@@ -187,6 +188,53 @@ class AISentimentResultRepository(BaseRepository):
             .filter(AISentimentResultModel.news_id.in_(news_ids))
             .all()
         )
+
+    def find_news_by_tag(
+        self,
+        trade_date: date,
+        asset_tag: str,
+    ) -> list[dict[str, object]]:
+        """查询指定交易日、指定资产标签下的所有新闻明细。
+
+        通过 JOIN news_item 和 ai_sentiment_result 表，
+        筛选 asset_tags JSON 数组中包含指定标签的记录。
+
+        Args:
+            trade_date: 交易日。
+            asset_tag: 资产标签（如 "科技"、"军工"）。
+
+        Returns:
+            新闻明细列表，每项含 title/url/sentiment_score/attention_score/source_name。
+        """
+        rows = (
+            self._db.query(
+                NewsItemModel.title,
+                NewsItemModel.url,
+                NewsItemModel.source_name,
+                AISentimentResultModel.sentiment_score,
+                AISentimentResultModel.attention_score,
+            )
+            .join(
+                AISentimentResultModel,
+                AISentimentResultModel.news_id == NewsItemModel.id,
+            )
+            .filter(
+                AISentimentResultModel.trade_date == trade_date,
+                AISentimentResultModel.asset_tags.cast(JSONB).contains([asset_tag]),
+            )
+            .order_by(AISentimentResultModel.attention_score.desc())
+            .all()
+        )
+        return [
+            {
+                "title": row.title or "",
+                "url": row.url or "",
+                "source_name": row.source_name or "",
+                "sentiment_score": float(row.sentiment_score or 0),
+                "attention_score": float(row.attention_score or 0),
+            }
+            for row in rows
+        ]
 
 
 class DailySentimentAggregateRepository(BaseRepository):
