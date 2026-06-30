@@ -387,6 +387,21 @@ export interface BenchmarkIndex {
   index_name: string
 }
 
+/** 指数列表汇总数据，包含最新行情和估值快照 */
+export interface IndexSummary {
+  index_code: string
+  index_name: string
+  close_price: number | null
+  change_pct: number | null
+  bar_date: string | null
+  pe: number | null
+  pe_percentile: number | null
+  pb: number | null
+  pb_percentile: number | null
+  dividend_yield: number | null
+  valuation_date: string | null
+}
+
 export interface IndexCreatePayload {
   index_code: string
   name_cn?: string

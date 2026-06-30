@@ -495,6 +495,92 @@ class IngestService:
         )
         return [BenchmarkIndex(index_code=r.index_code, index_name=r.name_cn) for r in rows]
 
+    def get_index_summaries(self) -> list["IndexSummary"]:
+        """返回所有活跃指数的汇总数据（最新行情 + 估值快照），单次查询。
+
+        使用子查询分别取每个指数的最新 bar 和最新 valuation，
+        通过 OUTER JOIN 关联，无数据时对应字段返回 None。
+        不触发冷启动拉取 —— 仅查询 DB 已有数据。
+
+        Returns:
+            指数汇总列表，按 index_code 升序排列。
+        """
+        from quant_etf_api.schemas.market_data import IndexSummary
+
+        # 子查询：每个指数的最新 bar 日期
+        latest_bar_dates = (
+            self._db.query(
+                IndexDailyBarModel.index_code,
+                func.max(IndexDailyBarModel.trade_date).label("max_bar_date"),
+            )
+            .group_by(IndexDailyBarModel.index_code)
+            .subquery("latest_bar_dates")
+        )
+
+        # 子查询：每个指数的最新估值日期
+        latest_val_dates = (
+            self._db.query(
+                IndexValuationModel.index_code,
+                func.max(IndexValuationModel.trade_date).label("max_val_date"),
+            )
+            .group_by(IndexValuationModel.index_code)
+            .subquery("latest_val_dates")
+        )
+
+        rows = (
+            self._db.query(
+                BenchmarkIndexModel.index_code,
+                BenchmarkIndexModel.name_cn,
+                IndexDailyBarModel.close_price,
+                IndexDailyBarModel.change_pct,
+                IndexDailyBarModel.trade_date.label("bar_date"),
+                IndexValuationModel.pe,
+                IndexValuationModel.pe_percentile,
+                IndexValuationModel.pb,
+                IndexValuationModel.pb_percentile,
+                IndexValuationModel.dividend_yield,
+                IndexValuationModel.trade_date.label("valuation_date"),
+            )
+            .filter(BenchmarkIndexModel.is_active.is_(True))
+            .outerjoin(
+                latest_bar_dates,
+                BenchmarkIndexModel.index_code == latest_bar_dates.c.index_code,
+            )
+            .outerjoin(
+                IndexDailyBarModel,
+                (IndexDailyBarModel.index_code == latest_bar_dates.c.index_code)
+                & (IndexDailyBarModel.trade_date == latest_bar_dates.c.max_bar_date),
+            )
+            .outerjoin(
+                latest_val_dates,
+                BenchmarkIndexModel.index_code == latest_val_dates.c.index_code,
+            )
+            .outerjoin(
+                IndexValuationModel,
+                (IndexValuationModel.index_code == latest_val_dates.c.index_code)
+                & (IndexValuationModel.trade_date == latest_val_dates.c.max_val_date),
+            )
+            .order_by(BenchmarkIndexModel.index_code)
+            .all()
+        )
+
+        return [
+            IndexSummary(
+                index_code=r.index_code,
+                index_name=r.name_cn,
+                close_price=float(r.close_price) if r.close_price is not None else None,
+                change_pct=float(r.change_pct) if r.change_pct is not None else None,
+                bar_date=r.bar_date,
+                pe=float(r.pe) if r.pe is not None else None,
+                pe_percentile=float(r.pe_percentile) if r.pe_percentile is not None else None,
+                pb=float(r.pb) if r.pb is not None else None,
+                pb_percentile=float(r.pb_percentile) if r.pb_percentile is not None else None,
+                dividend_yield=float(r.dividend_yield) if r.dividend_yield is not None else None,
+                valuation_date=r.valuation_date,
+            )
+            for r in rows
+        ]
+
     def _query_index_bars(
         self,
         index_code: str,

@@ -9,6 +9,7 @@ from quant_etf_api.schemas.market_data import (
     BenchmarkIndex,
     DailyBar,
     DateRangeResponse,
+    IndexSummary,
     IndexValuation,
     MacroIndicatorSchema,
     ShareSnapshot,
@@ -24,6 +25,18 @@ def list_benchmark_indexes(
 ) -> list[BenchmarkIndex]:
     """列出所有活跃的基准指数。"""
     return IngestService(db).get_benchmark_indexes()
+
+
+@router.get("/market-data/indexes/summary", response_model=list[IndexSummary])
+def list_index_summaries(
+    db: Session = Depends(get_db),
+) -> list[IndexSummary]:
+    """列出所有活跃指数的汇总数据（最新行情 + 估值快照）。
+
+    不触发数据冷启动拉取 —— 若某指数暂无行情或估值数据，对应字段返回 null。
+    前端指数列表页只需一次请求即可获取全部所需数据。
+    """
+    return IngestService(db).get_index_summaries()
 
 
 @router.get("/market-data/etfs/{etf_code}/daily-bars", response_model=list[DailyBar])

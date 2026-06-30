@@ -3,7 +3,7 @@
     <div class="page-header">
       <div class="header-left">
         <h1 class="page-title">指数数据</h1>
-        <span class="count-badge">{{ indexes.length }} 个</span>
+        <span class="count-badge">{{ summaries.length }} 个</span>
       </div>
       <div class="header-actions">
         <button class="btn-secondary" :disabled="refreshing" @click="handleRefreshData">{{ refreshing ? '刷新中...' : '刷新数据' }}</button>
@@ -15,7 +15,7 @@
     <div v-if="refreshMsg" class="refresh-banner" :class="refreshOk ? 'banner-ok' : 'banner-err'">{{ refreshMsg }}</div>
 
     <div v-if="loading" class="loading">加载中...</div>
-    <div v-else-if="indexes.length === 0" class="empty">暂无指数数据</div>
+    <div v-else-if="summaries.length === 0" class="empty">暂无指数数据</div>
     <div v-else class="table-wrap">
       <table class="data-table">
         <thead>
@@ -33,7 +33,7 @@
         </thead>
         <tbody>
           <tr
-            v-for="item in indexes"
+            v-for="item in summaries"
             :key="item.index_code"
             class="clickable-row"
             @click="$router.push(`/indexes/${item.index_code}`)"
@@ -97,17 +97,15 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { triggerIndexRefresh } from '../api/runs'
 import {
   createIndex,
   deleteIndex,
-  fetchBenchmarkIndexes,
-  fetchIndexDailyBars,
-  fetchIndexValuation,
+  fetchIndexSummaries,
 } from '../api/market_data'
-import type { BenchmarkIndex, DailyBar, IndexValuation } from '../types/api'
+import type { IndexSummary } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
 
@@ -119,10 +117,8 @@ function factorHelp(key: string): string {
   return getIndicator('factors', key)?.description ?? ''
 }
 
-const indexes = ref<BenchmarkIndex[]>([])
+const summaries = ref<IndexSummary[]>([])
 const loading = ref(false)
-const latestBars = ref<Record<string, DailyBar>>({})
-const latestValuations = ref<Record<string, IndexValuation>>({})
 const refreshing = ref(false)
 const refreshMsg = ref('')
 const refreshOk = ref(true)
@@ -145,78 +141,63 @@ async function handleRefreshData() {
   }
 }
 
-/** 加载指数列表 */
+/** 加载指数汇总数据（单次请求替代原有的 1+2N 次请求） */
 async function loadIndexes() {
   loading.value = true
   try {
-    indexes.value = await fetchBenchmarkIndexes()
-    await loadLatestData()
+    summaries.value = await fetchIndexSummaries()
   } finally {
     loading.value = false
   }
 }
 
-/** 加载所有指数的最新行情和估值数据 */
-async function loadLatestData() {
-  const promises = indexes.value.map(async (idx) => {
-    const code = idx.index_code
-    try {
-      const [bars, valuations] = await Promise.all([
-        fetchIndexDailyBars(code, { limit: 1 }),
-        fetchIndexValuation(code, { limit: 1 }),
-      ])
-      if (bars.length > 0) {
-        latestBars.value[code] = bars[0]
-      }
-      if (valuations.length > 0) {
-        latestValuations.value[code] = valuations[0]
-      }
-    } catch {
-      // 单个指数数据获取失败不影响其他指数
-    }
-  })
-  await Promise.all(promises)
-}
+/** index_code → IndexSummary 快速查找映射 */
+const summaryMap = computed<Record<string, IndexSummary>>(() => {
+  const map: Record<string, IndexSummary> = {}
+  for (const s of summaries.value) {
+    map[s.index_code] = s
+  }
+  return map
+})
 
 /** 获取最新收盘价 */
 function getLatestClose(code: string): string {
-  const bar = latestBars.value[code]
-  return bar?.close_price?.toFixed(2) ?? '—'
+  return summaryMap.value[code]?.close_price?.toFixed(2) ?? '—'
 }
 
 /** 获取涨跌幅文本 */
 function getChangePct(code: string): string {
-  const bar = latestBars.value[code]
-  if (!bar || bar.change_pct === null || bar.change_pct === undefined) return '—'
-  return (bar.change_pct >= 0 ? '+' : '') + bar.change_pct.toFixed(2) + '%'
+  const s = summaryMap.value[code]
+  if (!s || s.change_pct === null || s.change_pct === undefined) return '—'
+  return (s.change_pct >= 0 ? '+' : '') + s.change_pct.toFixed(2) + '%'
 }
 
 /** 获取涨跌幅样式类 */
 function getChangePctClass(code: string): string {
-  const bar = latestBars.value[code]
-  if (!bar || bar.change_pct === null || bar.change_pct === undefined) return ''
-  return bar.change_pct >= 0 ? 'text-rise' : 'text-fall'
+  const s = summaryMap.value[code]
+  if (!s || s.change_pct === null || s.change_pct === undefined) return ''
+  return s.change_pct >= 0 ? 'text-rise' : 'text-fall'
 }
 
 /** 获取 PE 值 */
 function getPE(code: string): string {
-  return latestValuations.value[code]?.pe?.toFixed(1) ?? '—'
+  return summaryMap.value[code]?.pe?.toFixed(1) ?? '—'
 }
 
 /** 获取 PE 分位 */
 function getPEPercentile(code: string): string {
-  const p = latestValuations.value[code]?.pe_percentile
+  const p = summaryMap.value[code]?.pe_percentile
   return p !== null && p !== undefined ? p.toFixed(0) + '%' : '—'
 }
 
 /** 获取 PB 值 */
 function getPB(code: string): string {
-  return latestValuations.value[code]?.pb?.toFixed(2) ?? '—'
+  return summaryMap.value[code]?.pb?.toFixed(2) ?? '—'
 }
 
 /** 获取 PB 分位 */
 function getPBPercentile(code: string): string {
-  const p = latestValuations.value[code]?.pb_percentile
+  const p = summaryMap.value[code]?.pb_percentile
   return p !== null && p !== undefined ? p.toFixed(0) + '%' : '—'
 }
 
@@ -259,8 +240,20 @@ async function submitAdd() {
       index_code: code,
       name_cn: addName.value.trim() || undefined,
     })
-    indexes.value.push(newIndex)
-    indexes.value.sort((a, b) => a.index_code.localeCompare(b.index_code))
+    summaries.value.push({
+      index_code: newIndex.index_code,
+      index_name: newIndex.index_name,
+      close_price: null,
+      change_pct: null,
+      bar_date: null,
+      pe: null,
+      pe_percentile: null,
+      pb: null,
+      pb_percentile: null,
+      dividend_yield: null,
+      valuation_date: null,
+    })
+    summaries.value.sort((a, b) => a.index_code.localeCompare(b.index_code))
     closeAddModal()
   } catch (e: unknown) {
     const err = e as { response?: { data?: { detail?: string } } }
@@ -276,7 +269,7 @@ async function handleDelete(indexCode: string, indexName: string) {
   if (!window.confirm(`确认停用指数 ${indexCode}（${indexName}）？停用后历史数据保留，可重新添加恢复。`)) return
   try {
     await deleteIndex(indexCode)
-    indexes.value = indexes.value.filter(i => i.index_code !== indexCode)
+    summaries.value = summaries.value.filter(i => i.index_code !== indexCode)
   } catch (e: unknown) {
     const err = e as { response?: { data?: { detail?: string } } }
     alert(err?.response?.data?.detail ?? '操作失败，请重试')

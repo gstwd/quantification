@@ -62,6 +62,26 @@ class BenchmarkIndex(BaseModel):
     index_name: str
 
 
+class IndexSummary(BaseModel):
+    """指数列表汇总数据，包含最新行情和估值快照。
+
+    所有行情/估值字段均可为 None，当对应数据表无记录时返回 null，
+    前端通过 — 占位符展示。不触发数据冷启动拉取。
+    """
+
+    index_code: str
+    index_name: str
+    close_price: float | None = None
+    change_pct: float | None = None
+    bar_date: date | None = None
+    pe: float | None = None
+    pe_percentile: float | None = None
+    pb: float | None = None
+    pb_percentile: float | None = None
+    dividend_yield: float | None = None
+    valuation_date: date | None = None
+
+
 class DateRangeResponse(BaseModel):
     """日线数据日期范围响应。"""
 

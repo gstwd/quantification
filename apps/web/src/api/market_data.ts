@@ -1,9 +1,15 @@
 import { apiClient } from './client'
-import type { BenchmarkIndex, DailyBar, DateRange, IndexCreatePayload, IndexValuation, MacroIndicator } from '../types/api'
+import type { BenchmarkIndex, DailyBar, DateRange, IndexCreatePayload, IndexSummary, IndexValuation, MacroIndicator } from '../types/api'
 
 /** 获取所有基准指数列表 */
 export async function fetchBenchmarkIndexes(): Promise<BenchmarkIndex[]> {
   const { data } = await apiClient.get<BenchmarkIndex[]>('/market-data/indexes')
+  return data
+}
+
+/** 获取所有活跃指数的汇总数据（行情 + 估值快照） */
+export async function fetchIndexSummaries(): Promise<IndexSummary[]> {
+  const { data } = await apiClient.get<IndexSummary[]>('/market-data/indexes/summary')
   return data
 }
 
