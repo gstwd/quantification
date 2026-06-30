@@ -61,7 +61,9 @@ class DailyIngestScheduler:
             microsecond=0,
         )
         if target <= now:
-            target = target.replace(day=now.day + 1)
+            from datetime import timedelta
+
+            target = target + timedelta(days=1)
         return (target - now).total_seconds()
 
     def _execute_daily_ingest(self) -> None:
