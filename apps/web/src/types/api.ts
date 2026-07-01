@@ -175,6 +175,8 @@ export interface BacktestCreateRequest {
   enable_benchmark?: boolean
   /** 基准指数代码，默认 000300（沪深300） */
   benchmark_index_code?: string
+  /** 执行模型：next_day=T日信号T+1开盘执行（默认），same_day=T日信号T日收盘执行 */
+  execution_model?: 'same_day' | 'next_day'
 }
 
 export interface BacktestMetrics {

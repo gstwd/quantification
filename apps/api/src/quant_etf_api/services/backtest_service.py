@@ -122,9 +122,10 @@ class BacktestService:
             )
 
         params = dict(req.params) if req.params else {}
-        # 保存基准配置到 params，供执行时读取
+        # 保存基准配置和执行模型到 params，供执行时读取
         params["_enable_benchmark"] = req.enable_benchmark
         params["_benchmark_index_code"] = req.benchmark_index_code
+        params["_execution_model"] = req.execution_model
 
         try:
             row = BacktestRunModel(
@@ -295,6 +296,7 @@ class BacktestService:
         params = row.params or {}
         enable_benchmark = params.get("_enable_benchmark", True)
         benchmark_index_code = params.get("_benchmark_index_code", "000300")
+        execution_model = params.get("_execution_model", "next_day")
 
         # 基准日收益率序列
         benchmark_returns: list[float] = []
@@ -314,6 +316,8 @@ class BacktestService:
         peak = 1.0
         prev_positions: dict[str, float] = {}
         last_rebalance_date: date | None = None
+        # T+1 执行模式：T 日调仓生成的待执行仓位，T+1 日生效
+        pending_positions: dict[str, float] | None = None
         # 进度跟踪：每完成约 10% 交易日写一次进度
         last_progress = 0
         total_dates = len(trading_dates)
@@ -355,30 +359,64 @@ class BacktestService:
 
             next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
 
-            # 确定持仓
-            if should_rebalance:
-                positions = dict(result.positions) if result.positions else {}
-                day_total_exposure = result.total_exposure
-                day_cash_ratio = result.cash_ratio
-                last_rebalance_date = trade_date
+            # 确定持仓（支持两种执行模式）
+            if execution_model == "next_day":
+                # T+1 执行模式：调仓日生成新仓位，下一交易日开盘执行。
+                # 当天沿用旧仓位计算收益，新仓位记入 pending，T+1 生效。
+                # 仓位变化图表将在 T+1 日显示变化，贴近实盘 T+1 制度。
+                if should_rebalance:
+                    # 调仓日：沿用旧仓位，新仓位待下一交易日执行
+                    new_target = dict(result.positions) if result.positions else {}
+                    if pending_positions is not None:
+                        # 上一期待执行仓位今日生效（连续调仓日场景）
+                        positions = pending_positions
+                    else:
+                        positions = dict(prev_positions)
+                    pending_positions = new_target if new_target else None
+                    # total_exposure/cash_ratio 基于当天实际持仓计算，与 positions 一致
+                    day_total_exposure = round(sum(positions.values()), 4)
+                    day_cash_ratio = round(1.0 - day_total_exposure, 4)
+                    last_rebalance_date = trade_date
+                    # 换手率基于新旧目标仓位计算
+                    turnover = 0.0
+                    if prev_positions and new_target:
+                        turnover = self._compute_turnover(prev_positions, new_target)
+                else:
+                    # 非调仓日：如有待执行仓位，今日生效
+                    if pending_positions is not None:
+                        positions = pending_positions
+                        pending_positions = None
+                    else:
+                        positions = dict(prev_positions)
+                    day_total_exposure = round(sum(positions.values()), 4)
+                    day_cash_ratio = round(1.0 - day_total_exposure, 4)
+                    turnover = 0.0
             else:
-                # 非调仓日沿用上次持仓，total_exposure/cash_ratio 由实际持仓推导
-                positions = dict(prev_positions)
-                day_total_exposure = round(sum(positions.values()), 4)
-                day_cash_ratio = round(1.0 - day_total_exposure, 4)
+                # same_day 模式：T 日信号 T 日收盘执行（原逻辑，学术回测简化）
+                if should_rebalance:
+                    positions = dict(result.positions) if result.positions else {}
+                    day_total_exposure = result.total_exposure
+                    day_cash_ratio = result.cash_ratio
+                    last_rebalance_date = trade_date
+                else:
+                    # 非调仓日沿用上次持仓，total_exposure/cash_ratio 由实际持仓推导
+                    positions = dict(prev_positions)
+                    day_total_exposure = round(sum(positions.values()), 4)
+                    day_cash_ratio = round(1.0 - day_total_exposure, 4)
 
-            # 计算组合收益
+                # 换手率（仅在调仓日计算）
+                turnover = 0.0
+                if prev_positions and should_rebalance:
+                    turnover = self._compute_turnover(prev_positions, positions)
+                pending_positions = None  # same_day 模式不使用 pending
+
+            # 计算组合收益（使用当天实际持仓）
             if positions:
                 portfolio_return = self._compute_allocation_return(
                     positions, trade_date, next_date, all_bars
                 )
             else:
                 portfolio_return = 0.0
-
-            # 换手率（仅在调仓日计算）
-            turnover = 0.0
-            if prev_positions and should_rebalance:
-                turnover = self._compute_turnover(prev_positions, positions)
 
             # 更新累计和回撤
             cumulative *= 1 + portfolio_return / 100

@@ -178,19 +178,22 @@ class StrategyService:
                 if config is None:
                     continue
 
-                # 判断调仓日（基于交易日对齐后的有效日期）
+                # 运行分配管线（内部会将 trade_date 对齐到 DB 中有数据的实际交易日）
+                allocation = self.run_allocation(row.strategy_id, trade_date=effective_date)
+                if allocation is None:
+                    continue
+
+                # 基于分配管线实际使用的数据日期判断调仓日，
+                # 确保 is_rebalance_day 与 data_date 使用相同的有效日期，
+                # 避免出现"今日调仓"但"执行日"是另一个日期的矛盾显示
+                actual_date = allocation.data_date
                 if config.rebalance is not None:
                     is_rebalance_day = scheduler.should_rebalance(
-                        config.rebalance, effective_date, None
+                        config.rebalance, actual_date, None
                     )
                 else:
                     # 无调仓配置默认视为每日调仓
                     is_rebalance_day = True
-
-                # 运行分配管线
-                allocation = self.run_allocation(row.strategy_id, trade_date=effective_date)
-                if allocation is None:
-                    continue
 
                 rebalance_cfg = config.rebalance
                 items.append(

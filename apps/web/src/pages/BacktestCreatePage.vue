@@ -105,6 +105,20 @@
         </div>
       </div>
 
+      <div class="form-section">
+        <label class="form-label">执行模型 <HelpTip :text="configHelp('execution_model')" /></label>
+        <div class="radio-group">
+          <label class="radio-label">
+            <input v-model="form.execution_model" type="radio" value="next_day" />
+            T+1 开盘执行（推荐）— T日收盘出信号，T+1日开盘执行，贴近实盘
+          </label>
+          <label class="radio-label">
+            <input v-model="form.execution_model" type="radio" value="same_day" />
+            T日收盘执行 — T日信号即时生效，学术回测简化（含隔夜跳空偏差）
+          </label>
+        </div>
+      </div>
+
       <div v-if="error" class="error-msg">{{ error }}</div>
 
       <div class="form-actions">
@@ -149,6 +163,7 @@ const form = reactive({
   index_codes: [] as string[],
   enable_benchmark: true,
   benchmark_index_code: '000300',
+  execution_model: 'next_day' as 'same_day' | 'next_day',
 })
 
 const submitting = ref(false)
@@ -214,6 +229,7 @@ async function submit() {
       index_codes: form.index_codes,
       enable_benchmark: form.enable_benchmark,
       benchmark_index_code: form.benchmark_index_code,
+      execution_model: form.execution_model,
     })
     router.push(`/backtests/${summary.backtest_id}`)
   } catch (e: unknown) {

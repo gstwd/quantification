@@ -125,7 +125,7 @@
               {{ formatRebalanceLabel(item) }}
             </span>
             <span v-if="item.data_date" class="exec-date">
-              执行日 {{ formatExecDate(item.data_date) }}
+              数据截止 {{ formatExecDate(item.data_date) }}
             </span>
           </div>
 
