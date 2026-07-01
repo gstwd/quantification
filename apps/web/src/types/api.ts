@@ -275,6 +275,8 @@ export interface ComparisonCreateRequest {
   enable_benchmark?: boolean
   benchmark_index_code?: string
   name?: string | null
+  /** 执行模型（两个策略共享）：next_day=T+1开盘执行（默认），same_day=T日收盘执行 */
+  execution_model?: 'same_day' | 'next_day'
 }
 
 /** 双策略对比指标 */

@@ -909,6 +909,7 @@ class BacktestService:
                 index_codes=req.a_index_codes,
                 enable_benchmark=req.enable_benchmark,
                 benchmark_index_code=req.benchmark_index_code,
+                execution_model=req.execution_model,
             )
         )
 
@@ -923,6 +924,7 @@ class BacktestService:
                 index_codes=req.b_index_codes,
                 enable_benchmark=req.enable_benchmark,
                 benchmark_index_code=req.benchmark_index_code,
+                execution_model=req.execution_model,
             )
         )
 

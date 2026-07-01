@@ -145,6 +145,8 @@ class BacktestComparisonCreateRequest(BaseModel):
         enable_benchmark: 是否启用基准对比。
         benchmark_index_code: 基准指数代码，默认沪深300。
         name: 可选的对比名称。
+        execution_model: 两个策略共享的执行模型。"next_day"=T+1开盘执行（默认），
+            "same_day"=T日收盘执行。对比回测要求两个策略使用相同的执行模型。
     """
 
     strategy_a_id: str
@@ -156,6 +158,7 @@ class BacktestComparisonCreateRequest(BaseModel):
     enable_benchmark: bool = True
     benchmark_index_code: str = "000300"
     name: str | None = None
+    execution_model: Literal["same_day", "next_day"] = "next_day"
 
 
 class ComparisonMetrics(BaseModel):
