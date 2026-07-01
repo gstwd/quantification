@@ -198,11 +198,11 @@
       <template v-else>
         <!-- 三列排名 -->
         <div class="sentiment-columns">
-          <!-- 情绪最积极 Top 3 -->
+          <!-- 情绪前三（加权情绪降序） -->
           <div class="sentiment-col sentiment-col-positive">
             <div class="sentiment-col-title">
               <span class="col-icon">🟢</span>
-              情绪最积极
+              情绪前三
             </div>
             <div v-if="topPositive.length === 0" class="empty-sm">—</div>
             <div
@@ -238,11 +238,11 @@
             </div>
           </div>
 
-          <!-- 情绪最消极 Top 3 -->
-          <div class="sentiment-col sentiment-col-negative">
+          <!-- 情绪倒三（加权情绪升序，末三位） -->
+          <div class="sentiment-col sentiment-col-bottom">
             <div class="sentiment-col-title">
-              <span class="col-icon">🔴</span>
-              情绪最消极
+              <span class="col-icon">🔵</span>
+              情绪倒三
             </div>
             <div v-if="topNegative.length === 0" class="empty-sm">—</div>
             <div
@@ -510,7 +510,7 @@ const topPositive = computed(() =>
     .slice(0, 3),
 )
 
-/** 行业主题情绪 Bottom 3（加权情绪升序，最低在前） */
+/** 行业主题情绪倒三（加权情绪升序，末三位在前） */
 const topNegative = computed(() =>
   sentimentRows.value
     .filter((r) => getTagType(r.asset_tag) === 'sector')
@@ -1559,7 +1559,7 @@ onMounted(() =>
 }
 
 .sentiment-col-positive { border-top: 2px solid var(--success); }
-.sentiment-col-negative { border-top: 2px solid var(--danger); }
+.sentiment-col-bottom { border-top: 2px solid #60a5fa; }
 .sentiment-col-attention { border-top: 2px solid var(--warning); }
 
 .sentiment-col-title {
