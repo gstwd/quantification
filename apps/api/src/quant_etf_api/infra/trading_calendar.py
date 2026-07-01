@@ -8,6 +8,7 @@ API 不可用时降级为周末判断。
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -21,6 +22,10 @@ _cache: dict[str, Any] = {
     "trading_days": None,  # set[date] | None
     "loaded_at": None,  # datetime | None
 }
+
+# 缓存加载锁：防止多线程并发调用 akshare → mini_racer（V8），
+# V8 在 Windows 上非线程安全，并发初始化会触发 partition_address_space 崩溃。
+_cache_lock = threading.Lock()
 
 
 def _is_weekend(d: date) -> bool:
@@ -65,6 +70,9 @@ def _load_from_akshare() -> set[date] | None:
 def _get_cached_trading_days() -> set[date] | None:
     """获取缓存的交易日集合，缓存过期时重新加载。
 
+    使用双重检查锁定（DCL）模式：先无锁检查缓存命中（快速路径），
+    缓存未命中时加锁并再次检查，避免多线程并发调用 akshare。
+
     Returns:
         交易日集合，加载失败时返回 None。
     """
@@ -72,15 +80,24 @@ def _get_cached_trading_days() -> set[date] | None:
     cached = _cache["trading_days"]
     loaded_at = _cache["loaded_at"]
 
+    # 快速路径：缓存有效，无需加锁
     if cached is not None and loaded_at is not None:
         if now - loaded_at < _CACHE_TTL:
             return cached
 
-    # 缓存过期或未初始化，重新加载
-    trading_days = _load_from_akshare()
-    _cache["trading_days"] = trading_days
-    _cache["loaded_at"] = now
-    return trading_days
+    # 慢速路径：缓存过期或未初始化，加锁加载
+    with _cache_lock:
+        # 再次检查：可能在等待锁期间已被其他线程填充
+        cached = _cache["trading_days"]
+        loaded_at = _cache["loaded_at"]
+        if cached is not None and loaded_at is not None:
+            if now - loaded_at < _CACHE_TTL:
+                return cached
+
+        trading_days = _load_from_akshare()
+        _cache["trading_days"] = trading_days
+        _cache["loaded_at"] = now
+        return trading_days
 
 
 def _refresh_cache() -> set[date] | None:

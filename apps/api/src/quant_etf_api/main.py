@@ -56,10 +56,31 @@ def _trigger_startup_fill() -> None:
     threading.Thread(target=_bg, daemon=True, name="startup-fill").start()
 
 
+def _warm_trading_calendar() -> None:
+    """启动时预热交易日历缓存。
+
+    在后台线程中触发 TradingCalendar 初始化，确保首次请求时缓存已命中，
+    避免请求线程进入 _load_from_akshare() 慢速路径。
+    即使预热失败，_get_cached_trading_days() 的线程锁仍能防止并发崩溃，
+    且降级方案（周末判断）可保证功能正常。
+    """
+    from quant_etf_api.infra.trading_calendar import TradingCalendar
+
+    def _bg() -> None:
+        try:
+            TradingCalendar().refresh()
+            logger.info("交易日历缓存预热完成")
+        except Exception:
+            logger.warning("交易日历缓存预热失败（将降级为周末判断）", exc_info=True)
+
+    threading.Thread(target=_bg, daemon=True, name="warm-calendar").start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 启动时恢复卡死的运行记录
     runs.recover_stuck_runs_on_startup()
+    _warm_trading_calendar()  # 预热交易日历缓存，防止首个请求触发 mini_racer 并发崩溃
     if settings.schedule_enabled:
         get_scheduler().start()
     if settings.ai_analysis_enabled:
