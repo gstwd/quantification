@@ -17,7 +17,6 @@ from quant_etf_api.api.routers import (
     factors,
     health,
     indexes,
-    journal,
     keyword_tags,
     market_data,
     runs,
@@ -118,7 +117,6 @@ app.include_router(factors.router, prefix=settings.api_prefix)
 app.include_router(runs.router, prefix=settings.api_prefix)
 app.include_router(backtests.router, prefix=settings.api_prefix)
 app.include_router(ai_factors.router, prefix=settings.api_prefix)
-app.include_router(journal.router, prefix=settings.api_prefix)
 app.include_router(keyword_tags.router, prefix=settings.api_prefix)
 
 

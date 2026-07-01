@@ -6,7 +6,6 @@ __all__ = [
     "factors",
     "health",
     "indexes",
-    "journal",
     "market_data",
     "runs",
     "strategies",
