@@ -94,12 +94,14 @@ class AllocationResponse(BaseModel):
         rankings: 资产轮动排名列表。
         plan: 仓位分配方案，含 positions、total_exposure、cash_ratio、reasoning。
         data_date: 本次决策所用因子数据的交易日，用于展示数据新鲜度。
+        pipeline_detail: 管线调试详情，含评分分解、过滤明细、择时因子等中间数据。
     """
 
     timing: dict[str, Any]
     rankings: list[dict[str, Any]]
     plan: dict[str, Any]
     data_date: date | None = None
+    pipeline_detail: dict[str, Any] | None = None
 
 
 class StarredStrategyItem(BaseModel):

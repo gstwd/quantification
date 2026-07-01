@@ -125,6 +125,7 @@ class StrategyService:
                 "method": config.portfolio.method if config.portfolio else "signal_only",
             },
             data_date=context.trade_date,
+            pipeline_detail=asdict(result.pipeline_detail) if result.pipeline_detail else None,
         )
 
     # ── 星标管理 ──────────────────────────────────────────────────────────

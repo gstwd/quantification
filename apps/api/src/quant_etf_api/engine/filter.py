@@ -11,6 +11,7 @@ from typing import Protocol
 
 from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.engine.config import FilterConfig
+from quant_etf_api.engine.pipeline_detail import AssetFilterDetail, FilterRuleResult
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +85,19 @@ class DefaultFilterEngine:
         config: FilterConfig,
         assets: dict[str, float],
         context: EngineContext,
+        debug: list[AssetFilterDetail] | None = None,
     ) -> dict[str, float]:
-        """过滤不满足条件的资产。"""
+        """过滤不满足条件的资产。
+
+        Args:
+            config: 过滤配置。
+            assets: 资产得分，key=etf_code。
+            context: 引擎上下文。
+            debug: 可选的调试收集列表，传入时记录每资产的过滤判定明细。
+
+        Returns:
+            过滤后的资产得分。
+        """
         if not config.rules:
             return assets
 
@@ -93,14 +105,51 @@ class DefaultFilterEngine:
         use_and = config.logic == "AND"
 
         for code, score in assets.items():
-            passed = self._evaluate_asset(code, config, context, use_and)
+            rule_results: list[FilterRuleResult] = []
+            passed = self._evaluate_asset(code, config, context, use_and, rule_results)
             if passed:
                 result[code] = score
+
+            if debug is not None:
+                name_cn = (
+                    context.asset_metadata.get(code, {}).get("name_cn", code)
+                    if hasattr(context, "asset_metadata")
+                    else code
+                )
+                # 构建失败原因描述
+                fail_reason = ""
+                if not passed:
+                    failed_rules = [r for r in rule_results if not r.passed]
+                    if failed_rules:
+                        parts = []
+                        for r in failed_rules:
+                            if isinstance(r.threshold, str):
+                                parts.append(
+                                    f"{r.factor}({r.factor_value}) {r.op} {r.threshold}"
+                                    f"({r.compare_value})"
+                                )
+                            else:
+                                parts.append(f"{r.factor}({r.factor_value}) {r.op} {r.threshold}")
+                        fail_reason = "；".join(parts)
+                debug.append(
+                    AssetFilterDetail(
+                        etf_code=code,
+                        name_cn=name_cn,
+                        passed=passed,
+                        rule_results=rule_results,
+                        fail_reason=fail_reason,
+                    )
+                )
 
         return result
 
     def _evaluate_asset(
-        self, code: str, config: FilterConfig, context: EngineContext, use_and: bool
+        self,
+        code: str,
+        config: FilterConfig,
+        context: EngineContext,
+        use_and: bool,
+        rule_results: list[FilterRuleResult] | None = None,
     ) -> bool:
         """评估单个资产是否通过所有过滤规则。
 
@@ -108,16 +157,32 @@ class DefaultFilterEngine:
         - 因子 vs 固定阈值：使用 rule.value。
         - 因子 vs 因子（跨因子比较）：使用 rule.compare_to 引用另一个因子的值。
         """
-        for rule in config.rules:
+        for i, rule in enumerate(config.rules):
             factor_value = context.asset_factors.get((code, rule.factor))
+            compare_value = None
 
             if rule.compare_to is not None:
                 # 跨因子比较模式
                 compare_value = context.asset_factors.get((code, rule.compare_to))
                 rule_passed = _check_rule(factor_value, rule.op, compare_value)
+                threshold = rule.compare_to
             else:
                 # 固定阈值模式（原有逻辑）
                 rule_passed = _check_rule(factor_value, rule.op, rule.value)
+                threshold = rule.value
+
+            if rule_results is not None:
+                rule_results.append(
+                    FilterRuleResult(
+                        rule_index=i,
+                        factor=rule.factor,
+                        op=rule.op,
+                        threshold=threshold,
+                        factor_value=factor_value,
+                        compare_value=compare_value,
+                        passed=rule_passed,
+                    )
+                )
 
             if use_and and not rule_passed:
                 return False

@@ -485,6 +485,55 @@ export interface CorrelationResponse {
   trade_date: string
 }
 
+/** 单个因子在评分中的贡献分解 */
+export interface FactorScoreBreakdown {
+  factor_id: string
+  raw_value: number | null
+  transformed_value: number | null
+  weight: number
+  contribution: number
+  status: string // "ok" | "missing_excluded" | "missing_zero" | "missing_ignored"
+}
+
+/** 单个资产的评分明细 */
+export interface AssetScoreDetail {
+  etf_code: string
+  name_cn: string
+  raw_score: number | null
+  final_score: number | null
+  factors: FactorScoreBreakdown[]
+  excluded: boolean
+  exclude_reason: string
+}
+
+/** 单条过滤规则对单个资产的判定结果 */
+export interface FilterRuleResult {
+  rule_index: number
+  factor: string
+  op: string
+  threshold: unknown // number | [number, number] | string (compare_to 因子ID)
+  factor_value: number | null
+  compare_value: number | null
+  passed: boolean
+}
+
+/** 单个资产的过滤明细 */
+export interface AssetFilterDetail {
+  etf_code: string
+  name_cn: string
+  passed: boolean
+  rule_results: FilterRuleResult[]
+  fail_reason: string
+}
+
+/** 管线调试完整详情 */
+export interface PipelineDetail {
+  scoring: AssetScoreDetail[]
+  filter_results: AssetFilterDetail[] | null
+  timing_detail: Record<string, unknown> | null
+  cross_section_stats: Record<string, unknown> | null
+}
+
 /** 资产配置决策管线响应 */
 export interface AllocationTiming {
   regime: string
@@ -516,6 +565,8 @@ export interface AllocationResponse {
   plan: AllocationPlan
   /** 本次决策所用因子数据的交易日（YYYY-MM-DD），用于展示数据新鲜度 */
   data_date?: string | null
+  /** 管线调试详情，含评分分解、过滤明细、择时因子等中间数据 */
+  pipeline_detail?: PipelineDetail | null
 }
 
 /** 星标策略执行摘要中的单个策略项 */

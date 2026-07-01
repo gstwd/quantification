@@ -18,6 +18,7 @@ from quant_etf_api.domain.strategies.models import (
 from quant_etf_api.engine.base import EngineContext, EngineResult
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.engine.filter import DefaultFilterEngine, FilterEngine
+from quant_etf_api.engine.pipeline_detail import PipelineDetail
 from quant_etf_api.engine.portfolio import build_allocator
 from quant_etf_api.engine.rank import DefaultRankEngine, RankEngine
 from quant_etf_api.engine.risk import DefaultRiskManager, RiskManager
@@ -81,14 +82,16 @@ class StrategyEngine:
         effective = self._resolve_regime_config(config, timing)
 
         # 2. 资产评分（根据 scoring_mode 选择评分器）
+        scoring_debug: list[Any] = []
         if effective.score.scoring_mode != "absolute":
-            scores = CrossSectionScorer().calculate(effective.score, context)
+            scores = CrossSectionScorer().calculate(effective.score, context, debug=scoring_debug)
         else:
-            scores = self._score.calculate(effective.score, context)
+            scores = self._score.calculate(effective.score, context, debug=scoring_debug)
 
         # 3. 过滤（可选）
+        filter_debug: list[Any] = []
         if effective.filters:
-            scores = self._filter.filter(effective.filters, scores, context)
+            scores = self._filter.filter(effective.filters, scores, context, debug=filter_debug)
 
         # 4. 排名
         rankings = self._rank.rank(effective.rank, scores, context)
@@ -115,6 +118,11 @@ class StrategyEngine:
                 effective, context, timing, scores, rankings, positions, total_exposure, cash_ratio
             )
 
+        # 8. 构建管线调试详情
+        pipeline_detail = self._build_pipeline_detail(
+            effective, scoring_debug, filter_debug, timing
+        )
+
         return EngineResult(
             trade_date=context.trade_date,
             strategy_id=config.strategy_id,
@@ -125,6 +133,7 @@ class StrategyEngine:
             total_exposure=total_exposure,
             cash_ratio=cash_ratio,
             strategy_results=strategy_results,
+            pipeline_detail=pipeline_detail,
         )
 
     def _run_timing(self, config: StrategyConfig, context: EngineContext) -> TimingSignal:
@@ -266,3 +275,54 @@ class StrategyEngine:
             )
 
         return results
+
+    def _build_pipeline_detail(
+        self,
+        config: StrategyConfig,
+        scoring_debug: list[Any],
+        filter_debug: list[Any],
+        timing: TimingSignal | None,
+    ) -> PipelineDetail:
+        """构建管线调试详情。
+
+        从评分器、过滤器收集的调试数据中组装 PipelineDetail，
+        并补充择时明细和横截面统计信息。
+
+        Args:
+            config: 策略配置。
+            scoring_debug: 评分阶段收集的 AssetScoreDetail 列表。
+            filter_debug: 过滤阶段收集的 AssetFilterDetail 列表。
+            timing: 择时信号。
+
+        Returns:
+            管线调试完整详情。
+        """
+        from statistics import mean, stdev
+
+        # 横截面统计（仅 zscore/rank 模式）
+        cross_section_stats: dict[str, Any] | None = None
+        if config.score.scoring_mode != "absolute" and scoring_debug:
+            raw_vals = [
+                s.raw_score for s in scoring_debug if not s.excluded and s.raw_score is not None
+            ]
+            if len(raw_vals) >= 2:
+                cross_section_stats = {
+                    "count": len(raw_vals),
+                    "mean": round(mean(raw_vals), 2),
+                    "std": round(stdev(raw_vals), 2),
+                    "min": round(min(raw_vals), 2),
+                    "max": round(max(raw_vals), 2),
+                    "scoring_mode": config.score.scoring_mode,
+                }
+
+        # 择时明细
+        timing_detail: dict[str, Any] | None = None
+        if timing and timing.factors:
+            timing_detail = dict(timing.factors)
+
+        return PipelineDetail(
+            scoring=scoring_debug,
+            filter_results=filter_debug if config.filters else None,
+            timing_detail=timing_detail,
+            cross_section_stats=cross_section_stats,
+        )

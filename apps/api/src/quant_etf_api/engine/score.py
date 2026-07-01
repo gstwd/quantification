@@ -10,6 +10,10 @@ from typing import Any, Protocol
 
 from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.engine.config import ScoreConfig, TimingConfig
+from quant_etf_api.engine.pipeline_detail import (
+    AssetScoreDetail,
+    FactorScoreBreakdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -220,14 +224,47 @@ class DefaultScoreCalculator:
     仅对有值因子归一化权重，支持 missing_factor_strategy 控制缺失行为。
     """
 
-    def calculate(self, config: ScoreConfig, context: EngineContext) -> dict[str, float]:
-        """计算每资产综合得分。"""
+    def calculate(
+        self,
+        config: ScoreConfig,
+        context: EngineContext,
+        debug: list[AssetScoreDetail] | None = None,
+    ) -> dict[str, float]:
+        """计算每资产综合得分。
+
+        Args:
+            config: 评分配置。
+            context: 引擎上下文。
+            debug: 可选的调试收集列表，传入时填充每资产的评分明细。
+
+        Returns:
+            key=etf_code, value=得分（0-100）。
+        """
         scores: dict[str, float] = {}
         for item in context.universe:
             code = item["etf_code"]
-            score = self._score_single_asset(code, config, context)
+            name_cn = item.get("name_cn", code)
+            breakdown: list[FactorScoreBreakdown] = []
+            score = self._score_single_asset(code, config, context, breakdown)
             if score is not None:
                 scores[code] = score
+            if debug is not None:
+                # 回填 contribution
+                total_abs = sum(abs(b.weight) for b in breakdown if b.status == "ok")
+                for b in breakdown:
+                    if b.status == "ok" and total_abs > 0:
+                        b.contribution = round((b.transformed_value or 0) * b.weight / total_abs, 2)
+                debug.append(
+                    AssetScoreDetail(
+                        etf_code=code,
+                        name_cn=name_cn,
+                        raw_score=score,
+                        final_score=score,
+                        factors=breakdown,
+                        excluded=score is None,
+                        exclude_reason="因子数据缺失" if score is None else "",
+                    )
+                )
         return scores
 
     def calculate_timing(
@@ -278,9 +315,23 @@ class DefaultScoreCalculator:
         return round(composite, 1), regime, details
 
     def _score_single_asset(
-        self, code: str, config: ScoreConfig, context: EngineContext
+        self,
+        code: str,
+        config: ScoreConfig,
+        context: EngineContext,
+        breakdown: list[FactorScoreBreakdown] | None = None,
     ) -> float | None:
-        """计算单个资产的综合得分。"""
+        """计算单个资产的综合得分。
+
+        Args:
+            code: 资产代码。
+            config: 评分配置。
+            context: 引擎上下文。
+            breakdown: 可选的调试收集列表，传入时记录每个因子的计算明细。
+
+        Returns:
+            综合得分（0-100），因子缺失且策略为 exclude 时返回 None。
+        """
         weighted_scores: list[tuple[float, float]] = []
 
         for factor_id, weight in config.factors.items():
@@ -288,12 +339,37 @@ class DefaultScoreCalculator:
 
             if raw_value is None:
                 if config.missing_factor_strategy == "exclude":
+                    if breakdown is not None:
+                        breakdown.append(
+                            FactorScoreBreakdown(
+                                factor_id=factor_id,
+                                raw_value=None,
+                                transformed_value=None,
+                                weight=weight,
+                                contribution=0.0,
+                                status="missing_excluded",
+                            )
+                        )
                     return None
                 if config.missing_factor_strategy == "zero":
                     raw_value = 0.0
+                    status = "missing_zero"
                 else:
                     # ignore: 跳过该因子，不参与加权
+                    if breakdown is not None:
+                        breakdown.append(
+                            FactorScoreBreakdown(
+                                factor_id=factor_id,
+                                raw_value=None,
+                                transformed_value=None,
+                                weight=weight,
+                                contribution=0.0,
+                                status="missing_ignored",
+                            )
+                        )
                     continue
+            else:
+                status = "ok"
 
             transform_name = config.transforms.get(factor_id)
             if transform_name:
@@ -303,6 +379,20 @@ class DefaultScoreCalculator:
                 transformed = raw_value
 
             weighted_scores.append((weight, transformed))
+
+            if breakdown is not None:
+                breakdown.append(
+                    FactorScoreBreakdown(
+                        factor_id=factor_id,
+                        raw_value=raw_value,
+                        transformed_value=round(transformed, 1)
+                        if isinstance(transformed, float)
+                        else transformed,
+                        weight=weight,
+                        contribution=0.0,  # 最终统一回填
+                        status=status,
+                    )
+                )
 
         if not weighted_scores:
             return None
@@ -336,12 +426,15 @@ class CrossSectionScorer:
         self,
         config: "ScoreConfig",
         context: "EngineContext",
+        debug: list[AssetScoreDetail] | None = None,
     ) -> dict[str, float]:
         """横截面评分计算。
 
         Args:
             config: 评分配置，需设置 scoring_mode。
             context: 引擎上下文。
+            debug: 可选的调试收集列表，传入时填充每资产的评分明细
+                和横截面统计信息。
 
         Returns:
             key=etf_code, value=得分（0-100）。
@@ -352,19 +445,50 @@ class CrossSectionScorer:
 
         # 第一步：对每资产计算加权原始值
         raw_scores: dict[str, float] = {}
+        # 调试收集：每资产的评分分解
+        asset_breakdowns: dict[str, list[FactorScoreBreakdown]] = {}
         for item in context.universe:
             code = item["etf_code"]
+            name_cn = item.get("name_cn", code)
             weighted_sum = 0.0
             total_weight = 0.0
+            skip_asset = False
+            breakdown: list[FactorScoreBreakdown] = []
             for factor_id, weight in config.factors.items():
                 raw_value = context.asset_factors.get((code, factor_id))
                 if raw_value is None:
                     if config.missing_factor_strategy == "exclude":
+                        skip_asset = True
+                        if debug is not None:
+                            breakdown.append(
+                                FactorScoreBreakdown(
+                                    factor_id=factor_id,
+                                    raw_value=None,
+                                    transformed_value=None,
+                                    weight=weight,
+                                    contribution=0.0,
+                                    status="missing_excluded",
+                                )
+                            )
                         break
                     if config.missing_factor_strategy == "zero":
                         raw_value = 0.0
+                        status = "missing_zero"
                     else:
+                        if debug is not None:
+                            breakdown.append(
+                                FactorScoreBreakdown(
+                                    factor_id=factor_id,
+                                    raw_value=None,
+                                    transformed_value=None,
+                                    weight=weight,
+                                    contribution=0.0,
+                                    status="missing_ignored",
+                                )
+                            )
                         continue
+                else:
+                    status = "ok"
 
                 transform_name = config.transforms.get(factor_id)
                 if transform_name:
@@ -376,10 +500,55 @@ class CrossSectionScorer:
                 weighted_sum += transformed * weight
                 total_weight += abs(weight)
 
+                if debug is not None:
+                    breakdown.append(
+                        FactorScoreBreakdown(
+                            factor_id=factor_id,
+                            raw_value=raw_value,
+                            transformed_value=round(transformed, 1)
+                            if isinstance(transformed, float)
+                            else transformed,
+                            weight=weight,
+                            contribution=0.0,
+                            status=status,
+                        )
+                    )
+
+            if skip_asset:
+                if debug is not None:
+                    # 回填 contribution
+                    total_abs = sum(abs(b.weight) for b in breakdown if b.status == "ok")
+                    for b in breakdown:
+                        if b.status == "ok" and total_abs > 0:
+                            b.contribution = round(
+                                (b.transformed_value or 0) * b.weight / total_abs, 2
+                            )
+                    debug.append(
+                        AssetScoreDetail(
+                            etf_code=code,
+                            name_cn=name_cn,
+                            raw_score=None,
+                            final_score=None,
+                            factors=breakdown,
+                            excluded=True,
+                            exclude_reason="因子数据缺失（exclude 策略）",
+                        )
+                    )
+                continue
+
             if total_weight > 0:
-                raw_scores[code] = weighted_sum / total_weight
+                raw_score = weighted_sum / total_weight
             else:
-                raw_scores[code] = 0.0
+                raw_score = 0.0
+            raw_scores[code] = raw_score
+
+            if debug is not None:
+                # 回填 contribution
+                total_abs = sum(abs(b.weight) for b in breakdown if b.status == "ok")
+                for b in breakdown:
+                    if b.status == "ok" and total_abs > 0:
+                        b.contribution = round((b.transformed_value or 0) * b.weight / total_abs, 2)
+                asset_breakdowns[code] = breakdown
 
         if not raw_scores:
             return {}
@@ -401,6 +570,23 @@ class CrossSectionScorer:
                 f"CrossSectionScorer 不支持 scoring_mode='{mode}'，"
                 f"absolute 模式应使用 DefaultScoreCalculator"
             )
+
+        # 第三步：填充调试数据
+        if debug is not None:
+            for item in context.universe:
+                code = item["etf_code"]
+                name_cn = item.get("name_cn", code)
+                if code in raw_scores:
+                    debug.append(
+                        AssetScoreDetail(
+                            etf_code=code,
+                            name_cn=name_cn,
+                            raw_score=round(raw_scores[code], 2),
+                            final_score=normalized.get(code),
+                            factors=asset_breakdowns.get(code, []),
+                            excluded=False,
+                        )
+                    )
 
         return normalized
 

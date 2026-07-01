@@ -355,6 +355,185 @@
         </div>
       </div>
 
+      <!-- 管线调试详情 -->
+      <div v-if="allocation?.pipeline_detail" class="debug-section">
+        <h2 class="section-title">管线调试详情</h2>
+
+        <!-- Tab 切换 -->
+        <div class="debug-tabs">
+          <button
+            v-for="tab in debugTabs"
+            :key="tab.key"
+            :class="['debug-tab', { active: activeDebugTab === tab.key }]"
+            @click="activeDebugTab = tab.key"
+          >
+            {{ tab.label }}
+            <span v-if="tab.count != null" class="tab-count">{{ tab.count }}</span>
+          </button>
+        </div>
+
+        <!-- 评分明细 Tab -->
+        <div v-if="activeDebugTab === 'scoring'" class="debug-panel">
+          <!-- 横截面统计 -->
+          <div v-if="allocation.pipeline_detail.cross_section_stats" class="debug-stat-bar">
+            <span v-for="(val, key) in allocation.pipeline_detail.cross_section_stats" :key="key" class="stat-chip">
+              <template v-if="key === 'count'">资产数 </template>
+              <template v-else-if="key === 'mean'">均值 </template>
+              <template v-else-if="key === 'std'">标准差 </template>
+              <template v-else-if="key === 'min'">最低 </template>
+              <template v-else-if="key === 'max'">最高 </template>
+              <template v-else-if="key === 'scoring_mode'">模式 </template>
+              <template v-else>{{ key }} </template>
+              {{ typeof val === 'number' ? val.toFixed(2) : val }}
+            </span>
+          </div>
+
+          <details
+            v-for="asset in allocation.pipeline_detail.scoring"
+            :key="asset.etf_code"
+            class="debug-asset"
+            :class="{ excluded: asset.excluded }"
+          >
+            <summary class="debug-asset-header">
+              <span class="debug-code mono">{{ asset.etf_code }}</span>
+              <span class="debug-name">{{ asset.name_cn }}</span>
+              <span v-if="asset.excluded" class="debug-excluded-tag">已排除</span>
+              <span v-else-if="asset.final_score != null" class="debug-final-score">{{ asset.final_score.toFixed(1) }}</span>
+              <span v-else class="debug-na">-</span>
+              <span v-if="asset.excluded" class="debug-exclude-reason">{{ asset.exclude_reason }}</span>
+            </summary>
+            <div v-if="asset.factors.length > 0" class="debug-asset-body">
+              <table class="debug-factor-table">
+                <thead>
+                  <tr>
+                    <th>因子</th>
+                    <th>原始值</th>
+                    <th>变换后</th>
+                    <th>权重</th>
+                    <th>贡献</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="f in asset.factors" :key="f.factor_id" :class="`factor-status-${f.status}`">
+                    <td class="mono">{{ f.factor_id }}</td>
+                    <td class="mono">{{ f.raw_value != null ? (typeof f.raw_value === 'number' ? f.raw_value.toFixed(2) : f.raw_value) : '-' }}</td>
+                    <td class="mono">{{ f.transformed_value != null ? (typeof f.transformed_value === 'number' ? f.transformed_value.toFixed(1) : f.transformed_value) : '-' }}</td>
+                    <td class="mono">{{ f.weight }}</td>
+                    <td class="mono">{{ f.contribution.toFixed(2) }}</td>
+                    <td>
+                      <span :class="['status-badge', `status-${f.status}`]">
+                        {{ statusLabel(f.status) }}
+                      </span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-if="asset.raw_score != null" class="debug-raw-score">
+                原始得分: {{ asset.raw_score.toFixed(2) }}
+                <span v-if="asset.raw_score !== asset.final_score && asset.final_score != null">
+                  → 归一化: {{ asset.final_score.toFixed(1) }}
+                </span>
+              </div>
+            </div>
+            <div v-else class="debug-empty">无因子数据</div>
+          </details>
+        </div>
+
+        <!-- 过滤明细 Tab -->
+        <div v-if="activeDebugTab === 'filter'" class="debug-panel">
+          <div v-if="allocation.pipeline_detail.filter_results && allocation.pipeline_detail.filter_results.length > 0">
+            <!-- 过滤汇总 -->
+            <div class="debug-stat-bar">
+              <span class="stat-chip">
+                通过 {{ allocation.pipeline_detail.filter_results.filter(a => a.passed).length }}
+              </span>
+              <span class="stat-chip chip-fail">
+                未通过 {{ allocation.pipeline_detail.filter_results.filter(a => !a.passed).length }}
+              </span>
+              <span class="stat-chip chip-total">
+                总计 {{ allocation.pipeline_detail.filter_results.length }}
+              </span>
+            </div>
+
+            <details
+              v-for="asset in allocation.pipeline_detail.filter_results"
+              :key="asset.etf_code"
+              class="debug-asset"
+              :class="{ excluded: !asset.passed }"
+            >
+              <summary class="debug-asset-header">
+                <span class="debug-code mono">{{ asset.etf_code }}</span>
+                <span class="debug-name">{{ asset.name_cn }}</span>
+                <span v-if="asset.passed" class="debug-passed-tag">通过</span>
+                <span v-else class="debug-failed-tag">未通过</span>
+                <span v-if="!asset.passed" class="debug-exclude-reason">{{ asset.fail_reason }}</span>
+              </summary>
+              <div class="debug-asset-body">
+                <table class="debug-factor-table">
+                  <thead>
+                    <tr>
+                      <th>规则</th>
+                      <th>因子</th>
+                      <th>操作符</th>
+                      <th>阈值</th>
+                      <th>因子值</th>
+                      <th>结果</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="r in asset.rule_results" :key="r.rule_index" :class="{ 'rule-fail': !r.passed }">
+                      <td>{{ r.rule_index + 1 }}</td>
+                      <td class="mono">{{ r.factor }}</td>
+                      <td class="mono">{{ r.op }}</td>
+                      <td class="mono">{{ formatThreshold(r.threshold) }}</td>
+                      <td class="mono">{{ r.factor_value != null ? (typeof r.factor_value === 'number' ? r.factor_value.toFixed(2) : r.factor_value) : '-' }}</td>
+                      <td>
+                        <span :class="r.passed ? 'result-pass' : 'result-fail'">
+                          {{ r.passed ? '✓ 通过' : '✗ 未通过' }}
+                        </span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          </div>
+          <div v-else class="debug-empty-hint">无过滤规则配置</div>
+        </div>
+
+        <!-- 择时明细 Tab -->
+        <div v-if="activeDebugTab === 'timing'" class="debug-panel">
+          <div v-if="allocation.pipeline_detail.timing_detail && Object.keys(allocation.pipeline_detail.timing_detail).length > 0">
+            <table class="debug-factor-table">
+              <thead>
+                <tr>
+                  <th>因子/指标</th>
+                  <th>原始值</th>
+                  <th>变换后</th>
+                  <th>权重</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(detail, fid) in allocation.pipeline_detail.timing_detail" :key="fid">
+                  <td class="mono">{{ fid }}</td>
+                  <td class="mono">{{ detail.raw != null ? (typeof detail.raw === 'number' ? detail.raw.toFixed(2) : detail.raw) : '-' }}</td>
+                  <td class="mono">{{ detail.transformed != null ? detail.transformed : '-' }}</td>
+                  <td class="mono">{{ detail.weight != null ? detail.weight : '-' }}</td>
+                  <td>
+                    <span :class="['status-badge', detail.status === 'missing' ? 'status-missing_ignored' : 'status-ok']">
+                      {{ detail.status === 'missing' ? '缺失' : '正常' }}
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-else class="debug-empty-hint">无择时信号数据</div>
+        </div>
+      </div>
+
       <!-- 标的K线（决策日期前后：前60后20个交易日） -->
       <div v-if="allocation && allocation.rankings && allocation.rankings.length > 0" class="kline-section">
         <h2 class="section-title">标的K线（决策日 {{ decisionDate }} 前后）</h2>
@@ -546,6 +725,52 @@ async function handleUpdate(): Promise<void> {
   if (success) {
     showEdit.value = false
   }
+}
+
+// ── 管线调试面板 ──────────────────────────────────────────────────────────
+
+/** 调试 Tab 配置 */
+const debugTabs = computed(() => {
+  const pd = allocation.value?.pipeline_detail
+  if (!pd) return []
+  const tabs: { key: string; label: string; count: number | null }[] = [
+    { key: 'scoring', label: '评分明细', count: pd.scoring?.length ?? 0 },
+  ]
+  if (pd.filter_results) {
+    tabs.push({
+      key: 'filter',
+      label: '过滤明细',
+      count: pd.filter_results.filter((a) => !a.passed).length || null,
+    })
+  }
+  if (pd.timing_detail && Object.keys(pd.timing_detail).length > 0) {
+    tabs.push({
+      key: 'timing',
+      label: '择时明细',
+      count: Object.keys(pd.timing_detail).length,
+    })
+  }
+  return tabs
+})
+const activeDebugTab = ref('scoring')
+
+/** 因子状态中文标签映射 */
+function statusLabel(status: string): string {
+  const map: Record<string, string> = {
+    ok: '正常',
+    missing_excluded: '缺失(排除)',
+    missing_zero: '缺失(按0)',
+    missing_ignored: '缺失(忽略)',
+  }
+  return map[status] || status
+}
+
+/** 格式化过滤规则阈值（数字/数组/字符串） */
+function formatThreshold(t: unknown): string {
+  if (Array.isArray(t) && t.length === 2) return `[${t[0]}, ${t[1]}]`
+  if (typeof t === 'number') return String(t)
+  if (typeof t === 'string') return t
+  return String(t ?? '-')
 }
 
 /** 运行决策管线（支持指定交易日） */
@@ -1080,5 +1305,197 @@ onUnmounted(() => disposeCharts())
   border: none;
   border-top: 1px solid var(--border);
   border-radius: 0;
+}
+
+/* ── 管线调试面板 ──────────────────────────────────────────────────────── */
+
+.debug-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.debug-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.debug-tab {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.debug-tab:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.debug-tab.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.tab-count {
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.2);
+  padding: 0 5px;
+  border-radius: 8px;
+  min-width: 18px;
+  text-align: center;
+}
+
+.debug-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.debug-stat-bar {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.stat-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+}
+.stat-chip.chip-fail { color: #f87171; border-color: rgba(239, 68, 68, 0.3); }
+.stat-chip.chip-total { color: var(--text-muted); }
+
+/* 调试卷卡 */
+.debug-asset {
+  border-bottom: 1px solid var(--border);
+}
+.debug-asset:last-child { border-bottom: none; }
+.debug-asset.excluded { border-left: 3px solid #f87171; }
+.debug-asset:not(.excluded) { border-left: 3px solid #4ade80; }
+
+.debug-asset-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  user-select: none;
+}
+.debug-asset-header:hover { background: var(--surface-2); }
+
+.debug-code {
+  font-size: 12px;
+  font-weight: 600;
+  min-width: 56px;
+}
+.debug-name { color: var(--text-muted); flex: 1; }
+.debug-final-score {
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 13px;
+}
+.debug-na { color: var(--text-muted); }
+
+.debug-excluded-tag,
+.debug-failed-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+.debug-passed-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+}
+.debug-exclude-reason {
+  font-size: 11px;
+  color: #f87171;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.debug-asset-body {
+  padding: 8px 12px 12px;
+}
+
+.debug-factor-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.debug-factor-table th {
+  text-align: left;
+  padding: 4px 6px;
+  color: var(--text-muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+}
+.debug-factor-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.2);
+}
+
+.debug-raw-score {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 4px 8px;
+  background: var(--surface-2);
+  border-radius: 4px;
+}
+
+/* 因子状态标签 */
+.status-badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 6px;
+}
+.status-ok { color: #4ade80; }
+.status-missing_excluded { color: #f87171; }
+.status-missing_zero { color: #f59e0b; }
+.status-missing_ignored { color: var(--text-muted); }
+
+/* 过滤结果 */
+.rule-fail td { color: #f87171; }
+.result-pass { color: #4ade80; font-size: 11px; }
+.result-fail { color: #f87171; font-size: 11px; }
+
+/* 因子状态行着色 */
+.factor-status-missing_excluded td { opacity: 0.6; }
+.factor-status-missing_ignored td { opacity: 0.5; }
+
+.debug-empty {
+  padding: 8px 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.debug-empty-hint {
+  padding: 24px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
 }
 </style>

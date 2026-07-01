@@ -15,6 +15,7 @@ from quant_etf_api.domain.strategies.models import (
     StrategyResult,
     TimingSignal,
 )
+from quant_etf_api.engine.pipeline_detail import PipelineDetail
 
 
 @dataclass
@@ -56,6 +57,7 @@ class EngineResult:
         total_exposure: 总仓位比例。
         cash_ratio: 现金比例。
         strategy_results: 兼容旧接口的 StrategyResult 列表。
+        pipeline_detail: 管线调试详情，含评分分解、过滤明细等中间数据。
     """
 
     trade_date: date
@@ -67,3 +69,4 @@ class EngineResult:
     total_exposure: float
     cash_ratio: float
     strategy_results: list[StrategyResult]
+    pipeline_detail: PipelineDetail | None = None
