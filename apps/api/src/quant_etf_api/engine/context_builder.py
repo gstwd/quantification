@@ -166,9 +166,10 @@ class ContextBuilder:
         )
 
         # 按需补算：策略依赖的因子值缺失时自动触发 FactorService 计算
-        # 检查分两层：
+        # 检查分三层：
         # 1. 因子 ID 是否完全不存在（整个因子从未计算过）
         # 2. 部分资产的因子值缺失（调度器计算时部分指数数据未就绪导致跳过）
+        # 3. 因子行存在但值为 NULL（调度器计算时行情数据未完全就绪）
         if self._registry is not None:
             factor_ids = self._factor_provider.collect_required_factor_ids(config)
             loaded_ids = {fid for (_, fid) in asset_factors}
@@ -195,6 +196,26 @@ class ContextBuilder:
                         affected_fids,
                     )
                     missing = list(affected_fids)
+
+            # 检查因子值是否为 NULL（行存在但无实际数值，
+            # 常见于调度器在行情数据就绪前计算导致）
+            if not missing and factor_ids and index_codes:
+                null_pairs = [
+                    (c, f)
+                    for c in index_codes
+                    for f in factor_ids
+                    if (c, f) in asset_factors and asset_factors[(c, f)] is None
+                ]
+                if null_pairs:
+                    null_fids = {f for _, f in null_pairs}
+                    logger.info(
+                        "部分因子值为 NULL，触发按需补算: trade_date=%s "
+                        "affected_factors=%s",
+                        effective_date,
+                        null_fids,
+                    )
+                    missing = list(null_fids)
+
             if missing:
                 logger.info(
                     "因子数据缺失，触发按需计算: trade_date=%s missing=%s",
