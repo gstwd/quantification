@@ -80,6 +80,34 @@ class AIFactorService:
         except Exception:
             logger.warning("加载关键词标签配置失败，将使用静态默认值", exc_info=True)
 
+        # === 多源新闻搜索增强（可选，仅在配置了搜索提供者时激活） ===
+        self._enhancer: NewsEnhancer | None = None
+        try:
+            from quant_etf_api.config.settings import get_settings
+            settings = get_settings()
+            if any([
+                getattr(settings, "tavily_api_keys", None),
+                getattr(settings, "bocha_api_keys", None),
+                getattr(settings, "brave_api_keys", None),
+                getattr(settings, "serpapi_api_keys", None),
+                getattr(settings, "anspire_api_keys", None),
+                getattr(settings, "searxng_urls", None),
+            ]):
+                from quant_etf_api.infra.news_sources.manager import NewsSourceManager
+                from quant_etf_api.services.news_enhancer import NewsEnhancer
+                manager = NewsSourceManager(
+                    tavily_keys=getattr(settings, "tavily_api_keys", None),
+                    bocha_keys=getattr(settings, "bocha_api_keys", None),
+                    brave_keys=getattr(settings, "brave_api_keys", None),
+                    serpapi_keys=getattr(settings, "serpapi_api_keys", None),
+                    anspire_keys=getattr(settings, "anspire_api_keys", None),
+                    searxng_urls=getattr(settings, "searxng_urls", None),
+                )
+                self._enhancer = NewsEnhancer(manager)
+                logger.info("多源新闻搜索增强已激活")
+        except Exception:
+            logger.warning("多源新闻搜索增强初始化失败，将仅使用热榜数据", exc_info=True)
+
     # ---- 完整流程 ----
 
     def run_full_pipeline(
@@ -112,6 +140,16 @@ class AIFactorService:
         if not raw_items:
             logger.warning("未采集到任何新闻")
             return {"collected": 0, "saved": 0, "analyzed": 0, "aggregated": 0}
+
+        # 1.5 多源新闻搜索增强（可选，失败不影响主链路）
+        if self._enhancer is not None:
+            try:
+                enhanced = self._enhancer.enhance(raw_items)
+                if enhanced:
+                    raw_items = raw_items + enhanced
+                    logger.info("新闻增强: +%d 条", len(enhanced))
+            except Exception:
+                logger.warning("新闻增强失败，使用原始热榜数据", exc_info=True)
 
         # 2. 存储原始新闻（去重）
         news_rows = self._to_news_rows(raw_items, target_date)

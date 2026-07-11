@@ -253,6 +253,195 @@ class AIClient:
         return True, ""
 
 
+class MultiChannelAIClient:
+    """多渠道 AI 客户端 — 在现有 AIClient 基础上增加渠道路由能力。
+
+    不修改 AIClient 的任何代码，仅新增包装层。
+    当 LLM_CHANNELS 环境变量未配置时，退化为单模型模式。
+
+    使用方式::
+
+        registry = LLMChannelRegistry.from_env()
+        client = MultiChannelAIClient(registry)
+        result = client.chat([{"role": "user", "content": "你好"}])
+    """
+
+    def __init__(
+        self,
+        registry: Any = None,
+        fallback_client: AIClient | None = None,
+    ) -> None:
+        """初始化多渠道客户端。
+
+        Args:
+            registry: LLMChannelRegistry 实例。
+            fallback_client: 传统单模型 AIClient（向后兼容兜底）。
+        """
+        from quant_etf_api.infra.ai.channels import LLMChannelRegistry
+
+        self._registry: LLMChannelRegistry = (
+            registry if isinstance(registry, LLMChannelRegistry)
+            else LLMChannelRegistry()
+        )
+        self._fallback = fallback_client
+        self._clients: dict[str, AIClient] = {}
+
+        # 预构建每个渠道的 AIClient 实例
+        for name, cfg in self._registry.channels.items():
+            model = cfg.default_model or (cfg.models[0] if cfg.models else "gpt-4o-mini")
+            self._clients[name] = AIClient(
+                model=model,
+                api_key=cfg.api_key,
+                api_base=cfg.base_url,
+                temperature=cfg.temperature,
+                max_tokens=cfg.max_tokens,
+                timeout=cfg.timeout,
+            )
+            logger.info("多渠道 AI 客户端: channel=%s model=%s", name, model)
+
+    @property
+    def is_multi_channel(self) -> bool:
+        """是否处于多渠道模式。"""
+        return self._registry.is_configured
+
+    def _get_client(self, channel: str | None = None) -> AIClient:
+        """获取指定渠道的 AIClient 实例。
+
+        Args:
+            channel: 渠道名称，None 时使用默认渠道。
+
+        Returns:
+            AIClient 实例。
+        """
+        if channel and channel in self._clients:
+            return self._clients[channel]
+
+        if self._clients:
+            default_name = next(iter(self._clients))
+            return self._clients[default_name]
+
+        if self._fallback:
+            return self._fallback
+
+        # 最终兜底：使用空 AIClient
+        return AIClient()
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        channel: str | None = None,
+        model: str | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """通过指定渠道/模型调用 AI。
+
+        未指定 channel 时使用默认渠道，未指定 model 时使用渠道默认模型。
+        指定 channel 不可用时自动尝试 fallback_client。
+
+        Args:
+            messages: 消息列表。
+            channel: 渠道名称（可选）。
+            model: 模型名称（可选，覆盖渠道默认模型）。
+            **kwargs: 传递给底层 AIClient.chat() 的额外参数。
+
+        Returns:
+            AI 响应文本。
+        """
+        if model:
+            kwargs["model"] = model
+
+        # 优先使用多渠道
+        if self._clients:
+            try:
+                client = self._get_client(channel)
+                return client.chat(messages, **kwargs)
+            except Exception:
+                if channel is not None and len(self._clients) > 1:
+                    # 指定渠道失败，尝试下一个渠道
+                    for name, c in self._clients.items():
+                        if name != channel:
+                            try:
+                                logger.warning(
+                                    "渠道 %s 失败，切换到 %s", channel, name
+                                )
+                                return c.chat(messages, **kwargs)
+                            except Exception:
+                                continue
+
+        # 回退到传统客户端
+        if self._fallback:
+            return self._fallback.chat(messages, **kwargs)
+
+        raise RuntimeError("没有可用的 AI 渠道")
+
+    def chat_json(
+        self,
+        messages: list[dict[str, str]],
+        channel: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any] | None:
+        """调用 AI 并强制返回 JSON。"""
+        if self._clients:
+            client = self._get_client(channel)
+            return client.chat_json(messages, **kwargs)
+        if self._fallback:
+            return self._fallback.chat_json(messages, **kwargs)
+        return None
+
+    def chat_json_with_repair(
+        self,
+        messages: list[dict[str, str]],
+        channel: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any] | None:
+        """调用 AI 获取 JSON，解析失败时自动修复。"""
+        if self._clients:
+            client = self._get_client(channel)
+            return client.chat_json_with_repair(messages, **kwargs)
+        if self._fallback:
+            return self._fallback.chat_json_with_repair(messages, **kwargs)
+        return None
+
+    def validate(self) -> tuple[bool, str]:
+        """验证是否至少有一个渠道可用。"""
+        if self._clients:
+            return True, f"多渠道模式，共 {len(self._clients)} 个渠道"
+        if self._fallback:
+            return self._fallback.validate()
+        return False, "未配置任何 AI 渠道"
+
+    @classmethod
+    def from_settings(cls, settings: Any = None) -> MultiChannelAIClient:
+        """从项目 Settings 构建多渠道客户端。
+
+        自动检测 LLM_CHANNELS 环境变量。
+        如果 LLM_CHANNELS 未配置，退化为单模型模式（使用现有 AIClient）。
+
+        Args:
+            settings: Settings 实例。
+
+        Returns:
+            MultiChannelAIClient 实例。
+        """
+        from quant_etf_api.infra.ai.channels import LLMChannelRegistry
+
+        registry = LLMChannelRegistry.from_env()
+
+        fallback: AIClient | None = None
+        if not registry.is_configured:
+            # 无多渠道配置，使用传统单模型
+            try:
+                from quant_etf_api.config.settings import get_settings
+
+                s = settings or get_settings()
+                fallback = AIClient.from_settings(s)
+                logger.info("LLM 多渠道未配置，使用单模型模式: %s", fallback.model)
+            except Exception:
+                fallback = AIClient()
+
+        return cls(registry=registry, fallback_client=fallback)
+
+
 # ------------------------------------------------------------------
 # JSON 提取工具
 # ------------------------------------------------------------------
