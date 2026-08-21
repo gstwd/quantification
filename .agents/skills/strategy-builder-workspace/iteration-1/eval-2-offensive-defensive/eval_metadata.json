@@ -1,0 +1,12 @@
+{
+  "eval_id": 2,
+  "eval_name": "offensive-defensive",
+  "prompt": "做一个攻守兼备策略：PE百分位+60日收益率择时，20日动量+波动率打分，选前2名等权持有",
+  "assertions": [
+    "timing 配置 pe_percentile + return_60d",
+    "score 配置 return_20d + volatility_20d",
+    "top_n=2, equal_weight",
+    "timing_exposure 映射 correct",
+    "API 创建成功"
+  ]
+}

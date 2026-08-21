@@ -1,0 +1,9 @@
+{
+  "expectations": [
+    {"text": "明确回复系统不支持做空", "passed": true, "evidence": "gap_analysis.blocker: 系统仅支持做多（仓位权重 >= 0）"},
+    {"text": "指出具体限制条款", "passed": true, "evidence": "引用 limits.md 第1条：仅支持做多，不支持做空/杠杆"},
+    {"text": "提供变通方案（只做多）", "passed": true, "evidence": "workaround: 只能做多强势方，等同于常规二八轮动"},
+    {"text": "给出系统改进建议", "passed": true, "evidence": "improvement_suggestion: 增加做空/杠杆支持"}
+  ],
+  "pass_rate": 1.0
+}

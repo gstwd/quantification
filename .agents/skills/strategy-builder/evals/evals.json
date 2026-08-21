@@ -1,0 +1,29 @@
+{
+  "skill_name": "strategy-builder",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我在系统里配置一个宽基轮动策略：从沪深300、中证500、创业板指里面，每天选近20个交易日涨得最好的那个满仓持有。如果三个指数最近20天都在跌，就空仓。",
+      "expected_output": "策略配置JSON包含index_codes=['000300','000905','399006']、scoring_mode=rank、filter return_20d>=0、top_n=1、winner_take_all、default_exposure=1.0。配置能正常创建并通过回测验证。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "我要做一个攻守兼备的策略：用PE百分位和60日收益率判断市场冷热决定仓位（低估+趋势向好就重仓，高估就轻仓），然后在沪深300、中证500、创业板里用20日动量+20日波动率综合打分，选前2名等权持有。帮我配置出来。",
+      "expected_output": "策略配置包含timing(pe_percentile+return_60d)、score(return_20d+volatility_20d,scoring_mode=absolute)、top_n=2、equal_weight、timing_exposure映射。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "我有个配对交易的想法：每天比较沪深300和中证500的20日涨幅，做多涨幅高的那个，同时做空涨幅低的那个。能配置出来吗？",
+      "expected_output": "技能应明确回复：系统不支持做空，仅支持做多。给出变通方案（只做多不做空）、系统改进建议（增加做空/多空配对支持）。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "给我配个趋势策略",
+      "expected_output": "技能应主动询问：什么指数？趋势怎么定义（均线/收益率/通道）？仓位怎么管理？空仓条件是什么？不应直接生成配置。",
+      "files": []
+    }
+  ]
+}

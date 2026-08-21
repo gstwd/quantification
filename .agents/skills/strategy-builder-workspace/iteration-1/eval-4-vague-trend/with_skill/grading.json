@@ -1,0 +1,9 @@
+{
+  "expectations": [
+    {"text": "主动询问交易标的", "passed": true, "evidence": "questions_asked[0] 询问了追踪哪些指数"},
+    {"text": "主动询问趋势定义方式", "passed": true, "evidence": "questions_asked[1] 给出了3种趋势判断选项"},
+    {"text": "主动询问仓位管理方式", "passed": true, "evidence": "questions_asked[2] 询问了仓位和空仓条件"},
+    {"text": "未盲目生成配置", "passed": true, "evidence": "status='needs_clarification', 未产生 config JSON"}
+  ],
+  "pass_rate": 1.0
+}

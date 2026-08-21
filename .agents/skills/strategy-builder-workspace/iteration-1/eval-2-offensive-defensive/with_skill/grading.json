@@ -1,0 +1,14 @@
+{
+  "expectations": [
+    {"text": "包含 timing 配置, 因子为 pe_percentile + return_60d", "passed": true, "evidence": "config.timing.factors = {'pe_percentile': 0.5, 'return_60d': 0.5}"},
+    {"text": "timing transforms: pe_percentile→invert_percentile, return_60d→momentum_score", "passed": true, "evidence": "config.timing.transforms 正确配置"},
+    {"text": "timing thresholds: offensive=60, defensive=30", "passed": true, "evidence": "config.timing.thresholds 正确"},
+    {"text": "score 包含 return_20d(正向) + volatility_20d(负向)", "passed": true, "evidence": "config.score.factors = {'return_20d': 0.6, 'volatility_20d': -0.4}"},
+    {"text": "scoring_mode 为 absolute", "passed": true, "evidence": "config.score.scoring_mode = 'absolute'"},
+    {"text": "top_n 为 2", "passed": true, "evidence": "config.rank.top_n = 2"},
+    {"text": "portfolio.method 为 equal_weight", "passed": true, "evidence": "config.portfolio.method = 'equal_weight'"},
+    {"text": "timing_exposure 正确映射: offensive=0.90, neutral=0.50, defensive=0.10", "passed": true, "evidence": "config.portfolio.timing_exposure 完全匹配"},
+    {"text": "策略可通过 API 创建成功", "passed": true, "evidence": "POST /api/strategies 返回 200, strategy_id='offensive_defensive'"}
+  ],
+  "pass_rate": 1.0
+}
