@@ -98,13 +98,22 @@ class BacktestService:
         # 加载策略配置，检查是否有 index_codes 限定
         config_svc = StrategyConfigService(self._db)
         strategy_config = config_svc.get_parsed_config(req.strategy_id)
-        strategy_index_codes = strategy_config.index_codes if strategy_config else []
+        if strategy_config is None:
+            raise ValueError(f"策略 {req.strategy_id} 配置不存在或解析失败，无法执行回测")
 
-        if strategy_config is not None and strategy_config.portfolio is None:
+        if strategy_config.portfolio is None:
             raise ValueError(
                 "策略未配置 portfolio 模块，无法执行回测。请在策略配置中添加 portfolio。"
             )
 
+        # P4：回测创建前复用配置校验，未知/停用因子或非法变换函数直接拒绝
+        config_validation = config_svc.validate_parsed(strategy_config)
+        if not config_validation.valid:
+            raise ValueError(
+                f"策略 {req.strategy_id} 配置校验失败: {'; '.join(config_validation.errors)}"
+            )
+
+        strategy_index_codes = strategy_config.index_codes
         if strategy_index_codes:
             # 策略有指数范围限定，强制使用策略的 index_codes
             universe_filter = {"mode": "subset", "index_codes": strategy_index_codes}

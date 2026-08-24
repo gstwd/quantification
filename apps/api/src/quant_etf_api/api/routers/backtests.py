@@ -27,7 +27,11 @@ router = APIRouter(tags=["backtests"])
 @router.post("/backtests", response_model=BacktestSummary, status_code=202)
 def create_backtest(req: BacktestCreateRequest, db: Session = Depends(get_db)) -> BacktestSummary:
     """创建回测任务并入队异步执行，立即返回 pending 状态。"""
-    summary = BacktestService(db).create_backtest(req)
+    try:
+        summary = BacktestService(db).create_backtest(req)
+    except ValueError as e:
+        # 策略配置校验失败（未配置 portfolio / 引用未知因子等）→ 422
+        raise HTTPException(status_code=422, detail=str(e))
     get_job_queue().enqueue("backtest", {"backtest_id": summary.backtest_id})
     return summary
 
@@ -58,7 +62,11 @@ def create_comparison(
     db: Session = Depends(get_db),
 ) -> BacktestComparisonSummary:
     """创建策略对比回测，入队对比任务（由队列派发两个子回测）。"""
-    summary = BacktestService(db).create_comparison(req)
+    try:
+        summary = BacktestService(db).create_comparison(req)
+    except ValueError as e:
+        # 任一策略配置校验失败 → 422，不创建对比记录
+        raise HTTPException(status_code=422, detail=str(e))
     get_job_queue().enqueue("comparison", {"comparison_id": summary.comparison_id})
     return summary
 

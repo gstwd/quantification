@@ -99,7 +99,11 @@ def run_allocation(
 
     支持通过 trade_date 参数查看历史某一天的决策结果。
     """
-    result = StrategyService(db).run_allocation(strategy_id, trade_date=trade_date)
+    try:
+        result = StrategyService(db).run_allocation(strategy_id, trade_date=trade_date)
+    except ValueError as e:
+        # 配置引用未知/停用因子等校验失败 → 快速失败，返回 422 而非静默错误结果
+        raise HTTPException(status_code=422, detail=str(e))
     if result is None:
         raise HTTPException(
             status_code=404,

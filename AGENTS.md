@@ -209,7 +209,7 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: E
 - `POST /strategies` — 创建配置
 - `PUT /strategies/{id}` — 更新配置
 - `DELETE /strategies/{id}` — 删除配置
-- `POST /strategies/validate` — 校验配置
+- `POST /strategies/validate` — 校验配置（含因子 ID 与变换函数校验，见 P4 修复）
 
 ## Gotchas
 
@@ -267,7 +267,7 @@ Key rules (details in the doc):
 - **index_daily_bar OHLC 字段**: `IndexDailyBarModel` 有 `open_price`、`high_price`、`low_price`、`close_price` 字段，技术指标因子（ATR/Donchian）通过 `ctx.index_bars` 直接访问。
 - **`get_default_factor_registry()` vs `build_default_factor_registry()`**: 进程级单例通过 `get_default_factor_registry()` 获取（首次构建后缓存），避免 `BacktestService` 每请求重建。只有 `cli.py` 和 `registry.py` 内部使用 `build_default_factor_registry()`。
 - **`BatchFactorComputer` Protocol**: 定义在 `factors/base.py`，回测因子预计算时优先调用 `compute_batch()`（一次遍历 bar 数据覆盖所有日期）。已在 momentum.py（return_5d/20d/60d/120d）实现。新增回测频繁使用的因子时建议实现此协议。
-- **`validate_config` 是 `@staticmethod`**: `StrategyConfigService.validate_config()` 不依赖 DB 会话，直接静态调用无需实例化服务。
+- **配置校验含因子 ID 校验（P4）**: `StrategyConfigService.validate_config()` / `validate_parsed()` 依赖 DB 会话（查询 `factor_definition` active 集）与进程级因子注册表，不再是无状态静态方法。未知因子、停用/未同步因子、未知变换函数均进入 errors 快速失败。`run_allocation` 与 `create_backtest`/`create_comparison` 在运行期复用该校验（422），星标摘要聚合接口跳过坏策略并记日志。
 - **AI 分析双调度器**: 数据摄取在 `schedule_time`（默认 17:30）执行、AI 舆情分析在 `ai_schedule_time`（默认 23:30）执行；两个调度器均为纯定时器，只入队任务。摄取完成后由 `handle_daily_ingest` 自动入队当日 `factor_computation`。`ai_analysis_enabled=False` 时 AI 调度器不启动。
 - **AI 因子在策略引擎中的行为**: AI 因子仅在已有 `daily_sentiment_aggregate` 数据的交易日有效。缺失数据时返回 `FactorValue(numeric=None)`，评分引擎默认 `missing_factor_strategy="ignore"` 会静默跳过。不要在 filter 规则中使用 AI 因子（None 会导致 filter 失败=资产被排除）。AI 因子专用 transform 函数：`sentiment_score`（[-1,1]→[0,100]）、`attention_score`（裁剪到 [0,100]）。
 - **关键词标签可配置化**: `keyword_tag_config` 表存储关键词→资产标签映射，替代硬编码的 `classifier._KEYWORD_TAG_MAP`。`TagClassifier._classify_via_keyword()` 优先使用 DB 映射，回退到静态默认值。CRUD 端点: `GET/POST/PUT/DELETE /keyword-tags`。

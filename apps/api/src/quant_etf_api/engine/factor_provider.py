@@ -51,6 +51,7 @@ class FactorProvider:
         """从策略配置中收集所有需要的因子 ID。
 
         遍历 timing.factors、score.factors、filters.rules，
+        排名模块的动量/估值子因子（rank.momentum_factor / rank.valuation_factor），
         以及 regime_rules 中所有 regime 的 score/filters 配置，
         去重后返回完整的因子 ID 列表。
 
@@ -75,6 +76,10 @@ class FactorProvider:
                 factor_ids.add(rule.factor)
                 if rule.compare_to:
                     factor_ids.add(rule.compare_to)
+
+        # 排名模块引用的子因子（动量/估值子排名直接读取 asset_factors）
+        factor_ids.add(config.rank.momentum_factor)
+        factor_ids.add(config.rank.valuation_factor)
 
         # regime 条件化配置中引用的因子
         for regime_rule in config.regime_rules.values():

@@ -105,6 +105,14 @@ class StrategyService:
         if config is None:
             return None
 
+        # P4 运行期兜底：引用未知/停用因子时快速失败，
+        # 避免静默跳过因子后产出错误仓位/信号（星标摘要会捕获并跳过该策略）
+        validation = config_svc.validate_parsed(config)
+        if not validation.valid:
+            raise ValueError(
+                f"策略 {strategy_id} 配置校验失败: {'; '.join(validation.errors)}"
+            )
+
         # 构建上下文（使用统一 build 方法，由策略配置驱动因子选择）
         from quant_etf_api.factors.registry import get_default_factor_registry
 
@@ -243,5 +251,17 @@ class StrategyService:
         return svc.delete_config(strategy_id)
 
     def validate_config(self, config_json: dict[str, Any]) -> StrategyValidationResult:
-        """校验策略配置。"""
-        return StrategyConfigService.validate_config(config_json)
+        """校验策略配置（含因子 ID 与变换函数校验）。
+
+        Args:
+            config_json: 策略配置 JSON。
+
+        Returns:
+            校验结果。
+        """
+        if self._db is None:
+            return StrategyValidationResult(
+                valid=False,
+                errors=["未提供数据库 Session，无法完成因子校验"],
+            )
+        return StrategyConfigService(self._db).validate_config(config_json)

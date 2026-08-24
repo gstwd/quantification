@@ -8,6 +8,9 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from quant_etf_api.engine.config import StrategyConfig
+from quant_etf_api.engine.factor_provider import FactorProvider
+from quant_etf_api.engine.score import _TRANSFORM_REGISTRY
+from quant_etf_api.factors.registry import get_default_factor_registry
 from quant_etf_api.infra.db.models.core import StrategyConfigModel
 from quant_etf_api.infra.db.repositories.strategy_config import StrategyConfigRepository
 from quant_etf_api.schemas.strategy import (
@@ -152,9 +155,8 @@ class StrategyConfigService:
             self._db.commit()
         return result
 
-    @staticmethod
-    def validate_config(config_json: dict[str, Any]) -> StrategyValidationResult:
-        """校验策略配置 JSON 是否合法（不依赖数据库，可静态调用）。
+    def validate_config(self, config_json: dict[str, Any]) -> StrategyValidationResult:
+        """校验策略配置 JSON 是否合法（含因子 ID 与变换函数校验）。
 
         Args:
             config_json: 策略配置 JSON（仅含引擎配置，不含 strategy_id/display_name 等元数据字段）。
@@ -162,9 +164,6 @@ class StrategyConfigService:
         Returns:
             校验结果。
         """
-        errors: list[str] = []
-        warnings: list[str] = []
-
         try:
             # strategy_id 和 display_name 存储在顶层列中，校验时补入占位值
             validation_input = {
@@ -175,6 +174,43 @@ class StrategyConfigService:
             config = StrategyConfig(**validation_input)
         except Exception as e:
             return StrategyValidationResult(valid=False, errors=[f"配置解析失败: {e}"])
+
+        return self.validate_parsed(config)
+
+    def validate_parsed(self, config: StrategyConfig) -> StrategyValidationResult:
+        """校验已解析的 StrategyConfig（供运行时路径复用，避免二次解析）。
+
+        在结构校验基础上，额外校验：
+        - 引用的每个因子 ID 均存在于注册表且已在 factor_definition 中启用
+        - transforms 引用的变换函数均存在于引擎变换注册表
+
+        Args:
+            config: 已解析的策略配置。
+
+        Returns:
+            校验结果。
+        """
+        errors, warnings = self._structural_validation(config)
+        errors.extend(self._factor_reference_errors(config))
+        errors.extend(self._transform_validation_errors(config))
+        return StrategyValidationResult(
+            valid=len(errors) == 0,
+            errors=errors,
+            warnings=warnings,
+        )
+
+    @staticmethod
+    def _structural_validation(config: StrategyConfig) -> tuple[list[str], list[str]]:
+        """结构字段校验（不依赖数据库，纯静态）。
+
+        Args:
+            config: 已解析的策略配置。
+
+        Returns:
+            (errors, warnings) 二元组。
+        """
+        errors: list[str] = []
+        warnings: list[str] = []
 
         # 必填字段校验
         if not config.strategy_id:
@@ -232,11 +268,70 @@ class StrategyConfigService:
             if config.risk.min_cash_ratio < 0 or config.risk.min_cash_ratio >= 1:
                 errors.append("min_cash_ratio 必须在 [0, 1) 范围内")
 
-        return StrategyValidationResult(
-            valid=len(errors) == 0,
-            errors=errors,
-            warnings=warnings,
-        )
+        return errors, warnings
+
+    def _factor_reference_errors(self, config: StrategyConfig) -> list[str]:
+        """校验配置引用的全部因子 ID 存在且启用。
+
+        合法因子集合 = 注册表存在（可计算）且 factor_definition 中 is_active=True
+        （compute_and_store 只计算已启用因子，停用因子永远无值，引用即为静默失效）。
+
+        Args:
+            config: 已解析的策略配置。
+
+        Returns:
+            错误信息列表。
+        """
+        required_ids = FactorProvider.collect_required_factor_ids(config)
+        if not required_ids:
+            return []
+
+        active_ids = {row.factor_id for row in self._repo.find_active()}
+        registry_ids = {spec.factor_id for spec in get_default_factor_registry().specs()}
+
+        errors: list[str] = []
+        for factor_id in required_ids:
+            if factor_id not in registry_ids:
+                errors.append(
+                    f"未知因子 '{factor_id}'：请检查拼写（可用因子见 GET /factors）"
+                )
+            elif factor_id not in active_ids:
+                errors.append(
+                    f"因子 '{factor_id}' 已停用或未同步："
+                    "请运行 POST /factors/init 同步并确保 is_active=true"
+                )
+        return errors
+
+    @staticmethod
+    def _transform_validation_errors(config: StrategyConfig) -> list[str]:
+        """校验 transforms 引用的变换函数均存在。
+
+        覆盖评分、择时及 regime 条件化配置中的 transforms，
+        避免未知变换名在引擎执行时才抛出 KeyError。
+
+        Args:
+            config: 已解析的策略配置。
+
+        Returns:
+            错误信息列表。
+        """
+        transforms: dict[str, str] = {}
+        if config.score:
+            transforms.update(config.score.transforms)
+        if config.timing:
+            transforms.update(config.timing.transforms)
+        for regime_rule in config.regime_rules.values():
+            if regime_rule.score:
+                transforms.update(regime_rule.score.transforms)
+
+        errors: list[str] = []
+        for factor_id, transform_name in transforms.items():
+            if transform_name and transform_name not in _TRANSFORM_REGISTRY:
+                errors.append(
+                    f"未知变换函数 '{transform_name}'（用于因子 {factor_id}），"
+                    f"可用: {sorted(_TRANSFORM_REGISTRY)}"
+                )
+        return errors
 
     def get_parsed_config(self, strategy_id: str) -> StrategyConfig | None:
         """获取解析后的 StrategyConfig 对象。
