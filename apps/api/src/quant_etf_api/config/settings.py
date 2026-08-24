@@ -64,25 +64,6 @@ class Settings(BaseSettings):
         description="单次 AI 分析最大新闻条数，超出部分仅计算关注度不调用 LLM",
     )
 
-    # ========== 数据源多源管理 ==========
-
-    data_source_priority: str = Field(
-        default="",
-        description=(
-            "数据源优先级顺序（逗号分隔的数据源名称）。"
-            "越靠前越优先，如 'tushare,akshare_index,akshare_fund'。"
-            "未配置的数据源不会被跳过，仅影响排序。"
-        ),
-    )
-    circuit_breaker_failure_threshold: int = Field(
-        default=3,
-        description="熔断器连续失败次数阈值，达到后进入熔断状态",
-    )
-    circuit_breaker_cooldown_seconds: float = Field(
-        default=300.0,
-        description="熔断器冷却时间（秒），熔断后此时间内不再尝试",
-    )
-
     # ========== 新闻多源搜索配置 ==========
 
     tavily_api_keys: list[str] = Field(
