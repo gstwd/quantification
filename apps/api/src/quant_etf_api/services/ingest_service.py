@@ -35,19 +35,8 @@ from quant_etf_api.schemas.market_data import (
 
 logger = logging.getLogger(__name__)
 
-# 每个资源独立一把锁，防止并发冷启动时多线程重复拉取同一外部 API
-_fetch_locks: dict[str, threading.Lock] = {}
-_fetch_locks_meta = threading.Lock()
-
 # 防止 run_daily_ingest 被调度器、手动按钮、重试同时触发
 _daily_ingest_lock = threading.Lock()
-
-
-def _get_lock(key: str) -> threading.Lock:
-    with _fetch_locks_meta:
-        if key not in _fetch_locks:
-            _fetch_locks[key] = threading.Lock()
-        return _fetch_locks[key]
 
 
 # ────────────────────────── ETF 行 → Schema ──────────────────────────
@@ -139,6 +128,50 @@ class IngestService:
     def __init__(self, db: Session, universe_repo: EtfUniverseRepository | None = None) -> None:
         self._db = db
         self._universe_repo = universe_repo or EtfUniverseRepository(db)
+
+    def _enqueue_data_fill(self, resource: str, code: str | None = None) -> None:
+        """查询未命中时入队后台补数任务，不在请求线程同步抓取。
+
+        相同资源在 pending/running 状态下通过 job_key 幂等去重，
+        避免并发 GET 重复触发同一资源的抓取。
+
+        Args:
+            resource: 资源类型：bars/shares/index_bars/index_valuation/macro。
+            code: 标的代码，macro 类型为空。
+        """
+        from quant_etf_api.infra.job_queue.queue import get_job_queue
+
+        payload: dict = {"resource": resource}
+        if code:
+            payload["code"] = code
+        job_key = f"{resource}:{code}" if code else resource
+        get_job_queue().enqueue("data_fill", payload, job_key=job_key, max_attempts=2)
+
+    def fill_resource(self, resource: str, code: str | None = None) -> int:
+        """按资源类型执行后台补数（data_fill 处理器调用）。
+
+        Args:
+            resource: 资源类型：bars/shares/index_bars/index_valuation/macro。
+            code: 标的代码，macro 类型为空。
+
+        Returns:
+            写入的记录数。
+
+        Raises:
+            ValueError: 未知的资源类型。
+        """
+        if resource == "bars":
+            return self._fetch_and_upsert_bars_full_history(code or "")
+        if resource == "shares":
+            self._fetch_and_upsert_shares(code or "", date.today())
+            return 1
+        if resource == "index_bars":
+            return self._fetch_and_upsert_index_bars(code or "")
+        if resource == "index_valuation":
+            return self._fetch_and_upsert_index_valuation(code or "")
+        if resource == "macro":
+            return self._fetch_and_upsert_macro()
+        raise ValueError(f"未知补数资源类型: {resource}")
 
     def latest_trade_date(self) -> date:
         """获取最近交易日，通过交易日历而非简单返回今天。
@@ -297,21 +330,14 @@ class IngestService:
         """ETF 日线读穿透缓存。
 
         提供 start_date/end_date 时使用日期范围查询，否则使用 limit。
+        未命中时不再在请求线程同步抓取外部 API，而是入队后台补数任务，
+        本次请求直接返回空列表，避免阻塞请求线程池。
         """
         try:
             rows = self._query_etf_bars(etf_code, limit, start_date, end_date)
             if rows:
                 return [_bar_row_to_schema(r) for r in rows]
-
-            with _get_lock(f"bars:{etf_code}"):
-                rows = self._query_etf_bars(etf_code, limit, start_date, end_date)
-                if rows:
-                    return [_bar_row_to_schema(r) for r in rows]
-
-                self._fetch_and_upsert_bars_full_history(etf_code)
-                rows = self._query_etf_bars(etf_code, limit, start_date, end_date)
-                if rows:
-                    return [_bar_row_to_schema(r) for r in rows]
+            self._enqueue_data_fill("bars", etf_code)
         except Exception:
             logger.warning("get_daily_bars failed for %s", etf_code, exc_info=True)
             self._db.rollback()
@@ -400,21 +426,15 @@ class IngestService:
         start_date: date | None = None,
         end_date: date | None = None,
     ) -> list[ShareSnapshot]:
-        """ETF 份额读穿透缓存。"""
+        """ETF 份额读穿透缓存。
+
+        未命中时入队后台补数任务，不再在请求线程同步抓取外部 API。
+        """
         try:
             rows = self._query_shares(etf_code, limit, start_date, end_date)
             if rows:
                 return [_share_row_to_schema(r) for r in rows]
-
-            with _get_lock(f"shares:{etf_code}"):
-                rows = self._query_shares(etf_code, limit, start_date, end_date)
-                if rows:
-                    return [_share_row_to_schema(r) for r in rows]
-
-                self._fetch_and_upsert_shares(etf_code, date.today())
-                rows = self._query_shares(etf_code, limit, start_date, end_date)
-                if rows:
-                    return [_share_row_to_schema(r) for r in rows]
+            self._enqueue_data_fill("shares", etf_code)
         except Exception:
             logger.warning("get_share_history failed for %s", etf_code, exc_info=True)
             self._db.rollback()
@@ -609,21 +629,15 @@ class IngestService:
         start_date: date | None = None,
         end_date: date | None = None,
     ) -> list[DailyBar]:
-        """指数日线读穿透缓存。"""
+        """指数日线读穿透缓存。
+
+        未命中时入队后台补数任务，不再在请求线程同步抓取外部 API。
+        """
         try:
             rows = self._query_index_bars(index_code, limit, start_date, end_date)
             if rows:
                 return [_index_bar_row_to_schema(r) for r in rows]
-
-            with _get_lock(f"index_bars:{index_code}"):
-                rows = self._query_index_bars(index_code, limit, start_date, end_date)
-                if rows:
-                    return [_index_bar_row_to_schema(r) for r in rows]
-
-                self._fetch_and_upsert_index_bars(index_code)
-                rows = self._query_index_bars(index_code, limit, start_date, end_date)
-                if rows:
-                    return [_index_bar_row_to_schema(r) for r in rows]
+            self._enqueue_data_fill("index_bars", index_code)
         except Exception:
             logger.warning(
                 "get_index_daily_bars failed for %s, returning []", index_code, exc_info=True
@@ -706,21 +720,13 @@ class IngestService:
         """指数估值读穿透缓存。
 
         提供 start_date/end_date 时使用日期范围查询，否则使用 limit。
+        未命中时入队后台补数任务，不再在请求线程同步抓取外部 API。
         """
         try:
             rows = self._query_index_valuation(index_code, limit, start_date, end_date)
             if rows:
                 return [_index_valuation_row_to_schema(r) for r in rows]
-
-            with _get_lock(f"index_valuation:{index_code}"):
-                rows = self._query_index_valuation(index_code, limit, start_date, end_date)
-                if rows:
-                    return [_index_valuation_row_to_schema(r) for r in rows]
-
-                self._fetch_and_upsert_index_valuation(index_code)
-                rows = self._query_index_valuation(index_code, limit, start_date, end_date)
-                if rows:
-                    return [_index_valuation_row_to_schema(r) for r in rows]
+            self._enqueue_data_fill("index_valuation", index_code)
         except Exception:
             logger.warning(
                 "get_index_valuation failed for %s, returning []", index_code, exc_info=True
@@ -796,7 +802,10 @@ class IngestService:
     def get_macro_indicators(
         self, indicator_code: str, limit: int = 60
     ) -> list[MacroIndicatorSchema]:
-        """宏观指标读穿透缓存。"""
+        """宏观指标读穿透缓存。
+
+        未命中时入队后台补数任务，不再在请求线程同步抓取外部 API。
+        """
         try:
             rows = (
                 self._db.query(MacroIndicatorModel)
@@ -807,28 +816,7 @@ class IngestService:
             )
             if rows:
                 return [_macro_row_to_schema(r) for r in reversed(rows)]
-
-            with _get_lock(f"macro:{indicator_code}"):
-                rows = (
-                    self._db.query(MacroIndicatorModel)
-                    .filter(MacroIndicatorModel.indicator_code == indicator_code)
-                    .order_by(MacroIndicatorModel.period.desc())
-                    .limit(limit)
-                    .all()
-                )
-                if rows:
-                    return [_macro_row_to_schema(r) for r in reversed(rows)]
-
-                self._fetch_and_upsert_macro()
-                rows = (
-                    self._db.query(MacroIndicatorModel)
-                    .filter(MacroIndicatorModel.indicator_code == indicator_code)
-                    .order_by(MacroIndicatorModel.period.desc())
-                    .limit(limit)
-                    .all()
-                )
-                if rows:
-                    return [_macro_row_to_schema(r) for r in reversed(rows)]
+            self._enqueue_data_fill("macro")
         except Exception:
             logger.warning(
                 "get_macro_indicators failed for %s, returning []", indicator_code, exc_info=True

@@ -34,6 +34,14 @@ class Settings(BaseSettings):
         default="23:30", description="AI 舆情分析触发时间（HH:MM），默认夜里 23:30，覆盖当天全部新闻"
     )
 
+    # 后台任务队列
+    job_queue_workers: int = Field(
+        default=4, ge=1, description="后台任务队列 worker 线程数"
+    )
+    job_poll_interval_seconds: float = Field(
+        default=1.0, gt=0, description="任务队列空转时的轮询间隔（秒）"
+    )
+
     # 日志配置
     log_level: str = Field(default="INFO", description="日志级别：DEBUG / INFO / WARNING / ERROR")
     log_file: str | None = Field(

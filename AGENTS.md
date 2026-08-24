@@ -114,8 +114,8 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
   - `retry.py` — `@with_retry()` 装饰器，指数退避重试，参数可通过环境变量 `AKSHARE_RETRY_MAX_ATTEMPTS` / `AKSHARE_RETRY_BASE_DELAY` 配置
 - **`infra/trading_calendar.py`** — `TradingCalendar` 类，通过 `akshare.tool_trade_date_hist_sina()` 获取 A 股交易日历，内存缓存 TTL=1 天，API 不可用时降级为周末判断
-- **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends. 调度器同步执行，不走线程池
-- **`api/executor.py`** — 共享后台任务线程池。所有 bg 路由（runs、backtests）通过 `get_bg_executor()` 获取统一 executor，`main.py` lifespan 统一 shutdown。所有 bg 函数统一 `mark_running` → `mark_success/failed` 状态流转，外层 try/except 兜底。
+- **`infra/job_queue/`** — **统一后台任务队列**：`background_job` 表（迁移 0023）+ `JobRepository`（`FOR UPDATE SKIP LOCKED` 认领）+ `JobQueue`（固定 worker 线程池，`settings.job_queue_workers` 默认 4）+ `handlers.py`（`JOB_HANDLERS` 分发表）。所有后台任务（摄取/因子/回测/对比/AI/启动补全/日历预热/GET 补数）统一 `enqueue(job_type, payload, job_key=...)`，支持 `job_key` 幂等去重与 `max_attempts` 重试。进程重启后 `recover_stuck_jobs()` 将 running 任务标记失败。
+- **`infra/scheduler/`** — `DailyIngestScheduler` / `AIAnalysisScheduler`: daemon `Thread` + `Event` 定时器，仅负责在预定时间将任务入队（`job_key="daily_ingest"` / `ai_analysis:{date}`），实际执行在任务队列 worker 中，调度线程不做任何同步外部调用。
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
   - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, AllocationPlan dataclasses)
@@ -163,7 +163,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - 通过 `FactorProvider` 加载因子值，消除硬编码因子计算
 - `services/context_builder.py` 是向后兼容 shim，re-export 自 engine 版本
 
-### Database schema (24 tables, migrations 0001–0016)
+### Database schema (25 tables, migrations 0001–0023)
 
 | Group | Tables |
 |---|---|
@@ -173,6 +173,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 | Runtime | `research_run`, `research_run_item` |
 | Backtest | `backtest_run`（含 progress 列）, `backtest_daily_result`, `backtest_etf_result`, `backtest_index_result` |
 | Strategy | `strategy_config` |
+| Task queue | `background_job` |
 
 Key migrations:
 - 0001–0004: 基础表结构、回测表、指数/宏观表、ETF 种子数据
@@ -192,7 +193,7 @@ Key migrations:
 
 ## Current State
 
-Services fully wired to PostgreSQL. 23 tables across 13 migrations (0001→0013). Each data type has exactly **one** source: ETF K-line→Sina, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh. Startup health check triggers `startup_fill` to backfill data gaps.
+Services fully wired to PostgreSQL. Each data type has exactly **one** source: ETF K-line→Sina, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → 未命中时入队 `data_fill` 后台任务并返回空列表（不再在请求线程同步抓取）。后台任务统一走 `background_job` 持久化队列（迁移 0023），调度器仅负责定时入队。`POST /api/runs/daily-ingest` 触发手动入队。Startup 时 lifespan 入队 `startup_fill` / `warm_calendar` 任务。
 
 **Strategy Engine**: `engine/` 包实现组件化策略执行管线。策略通过 `strategy_config` 表的 JSON 配置驱动，`StrategyConfigService` 管理 CRUD，`StrategyEngine` 执行管线。`FactorProvider` 桥接因子层与引擎层，`ContextBuilder` 统一构建实时和回测上下文。`BacktestService` 和 `StrategyExecutionService` 统一使用引擎执行。
 
@@ -240,9 +241,9 @@ Services fully wired to PostgreSQL. 23 tables across 13 migrations (0001→0013)
 - **FilterRule.compare_to**: 过滤器支持跨因子比较（如 `ma_5d > ma_20d`）。`compare_to` 与 `value` 二选一，不能同时设置。`between` 操作符不支持 `compare_to`。
 - **FactorProvider.collect_required_factor_ids() 必须收集 compare_to**: 遍历 filter rules 时不仅要收集 `rule.factor`，还要收集 `rule.compare_to`（若存在）。遗漏会导致被比较的因子值未加载，filter 始终失败 → 空仓。
 - **FilterRuleValue 前端接口**: 定义在 `StrategyConfigForm.vue`（非共享 types 文件）。修改 FilterRule schema 时需同步更新：接口定义、表单模板、`initFilter()`、`buildConfig()`、校验逻辑，以及 `StrategyDetailPage.vue` 的只读展示。
-- **后台任务状态流转**: `research_run` 状态链：pending → running → success/failed。`RunService.mark_running()` 在 bg 函数开始时调用，`mark_success(run_id, metrics)` / `mark_failed(run_id, error_message)` 在结束时调用。进程重启后 `recover_stuck_runs_on_startup()` 自动恢复卡死任务。
+- **后台任务状态流转**: `research_run` 状态链：pending → running → success/failed。任务通过 `get_job_queue().enqueue(...)` 入队 `background_job`，由 worker 认领执行；处理器内 `RunService.mark_running()` / `mark_success` / `mark_failed` 维护 run 状态。进程重启后 `recover_stuck_runs_on_startup()` 与 `get_job_queue().recover_stuck_jobs()` 分别恢复卡死的 run 与 job。
 - **数据刷新按类型拆分**: `IngestService` 提供 `refresh_etf_data()`、`refresh_index_data()`、`refresh_macro_data()` 三个公共方法，各有独立 run 生命周期。对应 API 端点：`POST /runs/etf-refresh`、`/runs/index-refresh`、`/runs/macro-refresh`。各数据页面（ETF/指数/宏观）有自己的"刷新数据"按钮，RunsPage 纯做监控。
-- **Run detail API**: `GET /runs/{run_id}` 返回 `ResearchRunDetail`（含 metrics、duration_seconds），`GET /runs/{run_id}/items` 返回 `ResearchRunItemSchema` 逐条明细，`POST /runs/{run_id}/retry` 重试失败任务（创建新 run 并提交到线程池）。
+- **Run detail API**: `GET /runs/{run_id}` 返回 `ResearchRunDetail`（含 metrics、duration_seconds），`GET /runs/{run_id}/items` 返回 `ResearchRunItemSchema` 逐条明细，`POST /runs/{run_id}/retry` 重试失败任务（创建新 run 并入队对应后台任务）。
 
 ## Coding Standards
 
@@ -267,7 +268,7 @@ Key rules (details in the doc):
 - **`get_default_factor_registry()` vs `build_default_factor_registry()`**: 进程级单例通过 `get_default_factor_registry()` 获取（首次构建后缓存），避免 `BacktestService` 每请求重建。只有 `cli.py` 和 `registry.py` 内部使用 `build_default_factor_registry()`。
 - **`BatchFactorComputer` Protocol**: 定义在 `factors/base.py`，回测因子预计算时优先调用 `compute_batch()`（一次遍历 bar 数据覆盖所有日期）。已在 momentum.py（return_5d/20d/60d/120d）实现。新增回测频繁使用的因子时建议实现此协议。
 - **`validate_config` 是 `@staticmethod`**: `StrategyConfigService.validate_config()` 不依赖 DB 会话，直接静态调用无需实例化服务。
-- **AI 分析双调度器**: 数据摄取+因子计算在 `schedule_time`（默认 17:30）执行，AI 舆情分析在 `ai_schedule_time`（默认 23:30）独立执行。两个调度器通过 `main.py` lifespan 分别启动，互不影响。`ai_analysis_enabled=False` 时 AI 调度器不启动。
+- **AI 分析双调度器**: 数据摄取在 `schedule_time`（默认 17:30）执行、AI 舆情分析在 `ai_schedule_time`（默认 23:30）执行；两个调度器均为纯定时器，只入队任务。摄取完成后由 `handle_daily_ingest` 自动入队当日 `factor_computation`。`ai_analysis_enabled=False` 时 AI 调度器不启动。
 - **AI 因子在策略引擎中的行为**: AI 因子仅在已有 `daily_sentiment_aggregate` 数据的交易日有效。缺失数据时返回 `FactorValue(numeric=None)`，评分引擎默认 `missing_factor_strategy="ignore"` 会静默跳过。不要在 filter 规则中使用 AI 因子（None 会导致 filter 失败=资产被排除）。AI 因子专用 transform 函数：`sentiment_score`（[-1,1]→[0,100]）、`attention_score`（裁剪到 [0,100]）。
 - **关键词标签可配置化**: `keyword_tag_config` 表存储关键词→资产标签映射，替代硬编码的 `classifier._KEYWORD_TAG_MAP`。`TagClassifier._classify_via_keyword()` 优先使用 DB 映射，回退到静态默认值。CRUD 端点: `GET/POST/PUT/DELETE /keyword-tags`。
 - **市场综合研判**: `market_synthesis` 表存储每日 AI 生成的市场概况（200-300 字中文研判）。在 `AIFactorService.run_full_pipeline()` 步骤 7 自动生成，LLM 不可用时静默跳过。API: `GET /ai-factors/synthesis/{date}`。

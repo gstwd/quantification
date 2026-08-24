@@ -17,10 +17,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
-from quant_etf_api.api.executor import get_bg_executor
 from quant_etf_api.config.settings import Settings, get_settings
 from quant_etf_api.infra.ai.client import AIClient
-from quant_etf_api.infra.db.base import SessionLocal
+from quant_etf_api.infra.job_queue.queue import get_job_queue
 from quant_etf_api.infra.db.models.core import ResearchRunModel
 from quant_etf_api.infra.db.repositories.news_item import (
     AISentimentResultRepository,
@@ -38,40 +37,6 @@ from quant_etf_api.services.run_service import RunService
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai-factors", tags=["AI 因子"])
-
-
-# ---------------------------------------------------------------------------
-# 后台任务函数
-# ---------------------------------------------------------------------------
-
-
-def _run_ai_analysis_bg(run_id: str) -> None:
-    """在独立 Session 中执行 AI 分析，避免与请求 Session 冲突。
-
-    Args:
-        run_id: 运行记录 ID。
-    """
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        from quant_etf_api.ai_factors.service import AIFactorService
-
-        settings = get_settings()
-        client = AIClient.from_settings(settings)
-        today = date.today()
-        service = AIFactorService(db, client)
-        stats = service.run_full_pipeline(
-            target_date=today,
-        )
-        RunService(db).mark_success(run_id, metrics=stats)
-    except Exception as e:
-        logger.exception("AI 分析任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(
-            run_id,
-            f"AI 分析异常: {type(e).__name__}: {e!s}",
-        )
-    finally:
-        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +84,7 @@ def trigger_analyze(
     """触发完整 AI 分析链路（新闻采集 → AI 分析 → 聚合）。
 
     该接口为异步模式：创建运行记录后立即返回 run_id，
-    实际分析在后台线程池中执行。通过 GET /runs/{run_id} 查询进度。
+    实际分析通过后台任务队列执行。通过 GET /runs/{run_id} 查询进度。
 
     同一交易日同时只允许一个 running 任务：若已有 pending/running 记录，
     返回 rejected 并提示已有 run_id。
@@ -149,9 +114,13 @@ def trigger_analyze(
     if not valid:
         return AIAnalysisRunResponse(status="failed", error=error)
 
-    # 创建运行记录并提交后台执行
+    # 创建运行记录并入队后台执行
     summary = RunService(db).create_run("ai_analysis", None, today)
-    get_bg_executor().submit(_run_ai_analysis_bg, summary.run_id)
+    get_job_queue().enqueue(
+        "ai_analysis",
+        {"run_id": summary.run_id},
+        job_key=f"ai_analysis:{today}",
+    )
 
     return AIAnalysisRunResponse(
         status="accepted",

@@ -30,7 +30,7 @@ from quant_etf_api.infra.db.models.core import (
     IndexValuationModel,
     MacroIndicatorModel,
 )
-from quant_etf_api.infra.db.base import SessionLocal, utcnow
+from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.schemas.backtest import (
@@ -1007,52 +1007,61 @@ class BacktestService:
             logger.warning("get_comparison_daily DB query failed", exc_info=True)
             return ComparisonDailyResponse(a_daily=[], b_daily=[])
 
-    def run_comparison(self, comparison_id: str) -> None:
-        """并行执行两个子回测，完成后汇总对比指标。
+    def launch_comparison(self, comparison_id: str) -> tuple[str, str] | None:
+        """标记对比回测为运行中，返回两个子回测 ID。
 
-        使用 ThreadPoolExecutor(max_workers=2) 并行运行，
-        每个子回测使用独立的 DB Session 避免冲突。
+        由 comparison 任务处理器调用：对比任务不再等待子回测完成，
+        而是由子回测完成后的 finalize_comparison_if_ready 触发汇总，
+        避免嵌套线程池与父任务空等占用 worker。
+
+        Args:
+            comparison_id: 对比回测 ID。
+
+        Returns:
+            (backtest_a_id, backtest_b_id)；对比记录不存在时返回 None。
+        """
+        comp = self._backtest_repo.find_comparison_by_id(comparison_id)
+        if comp is None:
+            logger.error("launch_comparison: comparison_id %s not found", comparison_id)
+            return None
+
+        comp.status = "running"
+        comp.started_at = utcnow()
+        self._db.commit()
+        return comp.backtest_a_id, comp.backtest_b_id
+
+    def finalize_comparison_if_ready(self, comparison_id: str) -> None:
+        """子回测完成后尝试汇总对比结果，两个子回测均终态时执行。
+
+        单个子回测完成即调用本方法；若另一个子回测仍在执行则直接返回，
+        待其完成后再次触发。汇总逻辑与旧的 run_comparison 保持一致。
 
         Args:
             comparison_id: 对比回测 ID。
         """
-        from concurrent.futures import ThreadPoolExecutor
-
         comp = self._backtest_repo.find_comparison_by_id(comparison_id)
         if comp is None:
-            logger.error("run_comparison: comparison_id %s not found", comparison_id)
+            return
+        bt_a = self._backtest_repo.find_by_id(comp.backtest_a_id)
+        bt_b = self._backtest_repo.find_by_id(comp.backtest_b_id)
+        if bt_a is None or bt_b is None:
             return
 
-        # 标记为运行中
-        comp.status = "running"
-        comp.started_at = utcnow()
-        self._db.commit()
+        statuses = [bt_a.status, bt_b.status]
+        if any(s not in ("success", "failed") for s in statuses):
+            # 仍有子回测未完成，等待另一个子回测完成时再次触发
+            return
 
         errors: dict[str, str] = {}
-
-        def _run_one(bt_id: str, label: str) -> None:
-            """在独立 Session 中执行单个子回测。"""
-            db = SessionLocal()
-            try:
-                BacktestService(db).run_backtest(bt_id)
-            except Exception as exc:
-                errors[label] = str(exc)
-            finally:
-                db.close()
-
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="comp-bt") as pool:
-            f_a = pool.submit(_run_one, comp.backtest_a_id, "a")
-            f_b = pool.submit(_run_one, comp.backtest_b_id, "b")
-            f_a.result()
-            f_b.result()
-
-        # 刷新 comparison 行（子回测在独立 session 中更新，需重新查询）
-        self._db.refresh(comp)
+        if bt_a.status == "failed":
+            errors["a"] = bt_a.error_message or "策略A回测失败"
+        if bt_b.status == "failed":
+            errors["b"] = bt_b.error_message or "策略B回测失败"
 
         if len(errors) == 2:
             self._backtest_repo.mark_comparison_failed(
                 comparison_id,
-                f"策略A: {errors.get('a', '未知错误')}; 策略B: {errors.get('b', '未知错误')}",
+                f"策略A: {errors['a']}; 策略B: {errors['b']}",
             )
         elif len(errors) == 1:
             self._backtest_repo.mark_comparison_partial(comparison_id, str(errors))

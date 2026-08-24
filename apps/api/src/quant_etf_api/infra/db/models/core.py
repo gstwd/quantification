@@ -1021,3 +1021,67 @@ class KeywordTagConfigModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow, comment="更新时间（UTC）"
     )
+
+
+class BackgroundJobModel(Base):
+    """后台任务队列表。
+
+    所有后台任务（数据摄取、因子计算、回测、对比回测、AI 分析、补数等）
+    统一通过本表入队，由固定 worker 线程池认领执行。
+    job_key 在 pending/running 状态下唯一，用于幂等去重。
+    """
+
+    __tablename__ = "background_job"
+    __table_args__ = (
+        Index(
+            "uq_background_job_active_key",
+            "job_key",
+            unique=True,
+            postgresql_where=sa.text("status IN ('pending', 'running')"),
+        ),
+    )
+
+    job_id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, comment="任务唯一 ID，UUID 格式"
+    )
+    job_type: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="任务类型：daily_ingest/backtest/data_fill 等"
+    )
+    job_key: Mapped[str | None] = mapped_column(
+        String(256), comment="去重键，pending/running 状态下唯一"
+    )
+    payload: Mapped[dict | None] = mapped_column(JSON, comment="任务参数，JSON 格式")
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default="pending",
+        server_default=sa.text("'pending'"),
+        comment="任务状态：pending=待执行，running=执行中，success=成功，failed=失败",
+    )
+    priority: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=sa.text("0"),
+        comment="优先级（越大越先执行）",
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=sa.text("0"),
+        comment="已尝试次数",
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=sa.text("1"),
+        comment="最大尝试次数",
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, comment="失败时的错误信息")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, server_default=sa.func.now(), comment="创建时间（UTC）"
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="开始执行时间（UTC）"
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="完成时间（UTC）"
+    )

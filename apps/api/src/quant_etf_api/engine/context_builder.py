@@ -40,7 +40,8 @@ class ContextBuilder:
         Args:
             db: SQLAlchemy 同步 Session。
             factor_provider: 因子供应器，未提供时自动创建。
-            registry: 因子注册表。提供时支持实时模式的因子按需补算。
+            registry: 因子注册表，供回测模式的因子预计算使用。
+                实时模式不再按需重算因子，缺失时改为入队异步计算任务。
         """
         self._db = db
         self._registry = registry
@@ -165,7 +166,8 @@ class ContextBuilder:
             config, effective_date, index_codes
         )
 
-        # 按需补算：策略依赖的因子值缺失时自动触发 FactorService 计算
+        # 缺失检测：策略依赖的因子值缺失时入队异步因子计算，
+        # 不再在请求线程内同步重算并 commit（写路径移出实时查询链路）
         # 检查分三层：
         # 1. 因子 ID 是否完全不存在（整个因子从未计算过）
         # 2. 部分资产的因子值缺失（调度器计算时部分指数数据未就绪导致跳过）
@@ -189,7 +191,7 @@ class ContextBuilder:
                     affected_codes = {c for c, _ in missing_pairs}
                     affected_fids = {f for _, f in missing_pairs}
                     logger.info(
-                        "部分资产因子值缺失，触发按需补算: trade_date=%s "
+                        "部分资产因子值缺失，入队异步补算: trade_date=%s "
                         "affected_codes=%s affected_factors=%s",
                         effective_date,
                         affected_codes,
@@ -209,7 +211,7 @@ class ContextBuilder:
                 if null_pairs:
                     null_fids = {f for _, f in null_pairs}
                     logger.info(
-                        "部分因子值为 NULL，触发按需补算: trade_date=%s "
+                        "部分因子值为 NULL，入队异步补算: trade_date=%s "
                         "affected_factors=%s",
                         effective_date,
                         null_fids,
@@ -218,28 +220,17 @@ class ContextBuilder:
 
             if missing:
                 logger.info(
-                    "因子数据缺失，触发按需计算: trade_date=%s missing=%s",
+                    "因子数据缺失，入队异步计算: trade_date=%s missing=%s",
                     effective_date,
                     missing[:5],
                 )
-                from quant_etf_api.factors.service import FactorService
+                from quant_etf_api.infra.job_queue.queue import get_job_queue
 
-                try:
-                    fs = FactorService(self._db, self._registry)
-                    fs.sync_factor_definitions()  # 确保 factor_definition 表已同步
-                    fs.compute_and_store(effective_date)
-                    self._db.commit()
-                    asset_factors = self._factor_provider.load_asset_factors(
-                        config, effective_date, index_codes
-                    )
-                    logger.info(
-                        "按需因子计算完成: trade_date=%s factor_count=%d",
-                        effective_date,
-                        len(asset_factors),
-                    )
-                except Exception:
-                    logger.warning("按需因子计算失败", exc_info=True)
-                    self._db.rollback()
+                get_job_queue().enqueue(
+                    "factor_computation",
+                    {"trade_date": effective_date.isoformat()},
+                    job_key=f"factor_computation:{effective_date}",
+                )
 
         # 补充原始行情数据（change_pct、close_price 不是因子，是原始字段）
         for code in index_codes:

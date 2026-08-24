@@ -6,8 +6,8 @@ from datetime import date, datetime, time
 
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.infra.db.base import SessionLocal
+from quant_etf_api.infra.job_queue.queue import get_job_queue
 from quant_etf_api.infra.trading_calendar import TradingCalendar
-from quant_etf_api.services.ingest_service import IngestService
 from quant_etf_api.services.run_service import RunService
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,8 @@ class DailyIngestScheduler:
     """日频数据自动调度器。
 
     使用 daemon 线程 + Event 循环，在预定的时间点触发每日数据摄取。
-    任务在独立 Session 中执行，与请求 Session 完全隔离。
+    调度线程仅作为定时器：将摄取任务入队后立即返回，
+    实际执行由后台任务队列的固定 worker 完成。
     """
 
     def __init__(self, target_time: time | None = None) -> None:
@@ -67,7 +68,7 @@ class DailyIngestScheduler:
         return (target - now).total_seconds()
 
     def _execute_daily_ingest(self) -> None:
-        """执行一次每日数据摄取（与手动触发走同一链路）。"""
+        """触发一次每日数据摄取任务（与手动触发走同一入队链路）。"""
         db = SessionLocal()
         try:
             today = date.today()
@@ -75,32 +76,14 @@ class DailyIngestScheduler:
                 logger.info("调度器: 非交易日跳过 %s", today)
                 return
             summary = RunService(db).create_run("daily_ingest", None, today)
-            IngestService(db).run_daily_ingest(summary.run_id)
-            logger.info("调度器: 日频入库完成 run_id=%s", summary.run_id)
-
-            # 摄取完成后触发因子计算，失败不影响已完成的摄取
-            try:
-                from quant_etf_api.factors.service import FactorService  # noqa: PLC0415
-                from quant_etf_api.main import factor_registry  # noqa: PLC0415
-
-                run_svc = RunService(db)
-                factor_run = run_svc.create_run("factor_computation", None, today)
-                try:
-                    result = FactorService(db, factor_registry).compute_and_store(today)
-                    run_svc.mark_success(factor_run.run_id)
-                    logger.info(
-                        "调度器: 因子计算完成 run_id=%s result=%s",
-                        factor_run.run_id,
-                        result,
-                    )
-                except Exception as exc:
-                    run_svc.mark_failed(factor_run.run_id, str(exc))
-                    logger.exception("调度器: 因子计算失败，不影响摄取结果")
-            except Exception:
-                logger.exception("调度器: 因子计算初始化失败，不影响摄取结果")
-
+            get_job_queue().enqueue(
+                "daily_ingest",
+                {"run_id": summary.run_id},
+                job_key="daily_ingest",
+            )
+            logger.info("调度器: 日频入库任务已入队 run_id=%s", summary.run_id)
         except Exception:
-            logger.exception("调度器: 日频入库失败")
+            logger.exception("调度器: 日频入库任务入队失败")
         finally:
             db.close()
 
@@ -132,7 +115,8 @@ class AIAnalysisScheduler:
 
     独立于数据摄取调度器，在每天 ai_schedule_time（默认 23:30）
     自动执行 AI 分析链路（新闻采集 → AI 情绪分析 → 聚合 → 市场研判）。
-    使用独立线程 + Event 循环，与数据摄取调度器互不影响。
+    使用独立线程 + Event 循环，与数据摄取调度器互不影响；
+    调度线程仅将 ai_analysis 任务入队，实际执行在后台任务队列。
     """
 
     def __init__(self, target_time: time | None = None) -> None:
@@ -190,7 +174,7 @@ class AIAnalysisScheduler:
         return (target - now).total_seconds()
 
     def _execute_ai_analysis(self) -> None:
-        """执行一次 AI 舆情分析（独立链路，不含数据摄取和因子计算）。"""
+        """触发一次 AI 舆情分析任务（入队后立即返回，独立于数据摄取链路）。"""
         db = SessionLocal()
         try:
             today = date.today()
@@ -203,7 +187,6 @@ class AIAnalysisScheduler:
                 logger.info("AI 调度器: ai_analysis_enabled=False，跳过")
                 return
 
-            from quant_etf_api.ai_factors.service import AIFactorService  # noqa: PLC0415
             from quant_etf_api.infra.ai.client import AIClient  # noqa: PLC0415
 
             ai_client = AIClient.from_settings(settings)
@@ -214,22 +197,14 @@ class AIAnalysisScheduler:
 
             run_svc = RunService(db)
             ai_run = run_svc.create_run("ai_analysis", None, today)
-            try:
-                stats = AIFactorService(db, ai_client).run_full_pipeline(
-                    target_date=today,
-                )
-                run_svc.mark_success(ai_run.run_id, metrics=stats)
-                logger.info(
-                    "AI 调度器: AI 分析完成 run_id=%s stats=%s",
-                    ai_run.run_id,
-                    stats,
-                )
-            except Exception as exc:
-                run_svc.mark_failed(ai_run.run_id, str(exc))
-                logger.exception("AI 调度器: AI 分析失败")
-
+            get_job_queue().enqueue(
+                "ai_analysis",
+                {"run_id": ai_run.run_id},
+                job_key=f"ai_analysis:{today}",
+            )
+            logger.info("AI 调度器: AI 分析任务已入队 run_id=%s", ai_run.run_id)
         except Exception:
-            logger.exception("AI 调度器: AI 分析初始化失败")
+            logger.exception("AI 调度器: AI 分析任务入队失败")
         finally:
             db.close()
 

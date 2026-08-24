@@ -6,8 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
-from quant_etf_api.api.executor import get_bg_executor
-from quant_etf_api.infra.db.base import SessionLocal
+from quant_etf_api.infra.job_queue.queue import get_job_queue
 from quant_etf_api.schemas.backtest import (
     BacktestComparisonCreateRequest,
     BacktestComparisonDetail,
@@ -25,20 +24,11 @@ from quant_etf_api.services.backtest_service import BacktestService
 router = APIRouter(tags=["backtests"])
 
 
-def _run_backtest_bg(backtest_id: str) -> None:
-    """在独立 Session 中执行回测，避免与请求 Session 冲突。"""
-    db = SessionLocal()
-    try:
-        BacktestService(db).run_backtest(backtest_id)
-    finally:
-        db.close()
-
-
 @router.post("/backtests", response_model=BacktestSummary, status_code=202)
 def create_backtest(req: BacktestCreateRequest, db: Session = Depends(get_db)) -> BacktestSummary:
-    """创建回测任务并在后台线程中异步执行，立即返回 pending 状态。"""
+    """创建回测任务并入队异步执行，立即返回 pending 状态。"""
     summary = BacktestService(db).create_backtest(req)
-    get_bg_executor().submit(_run_backtest_bg, summary.backtest_id)
+    get_job_queue().enqueue("backtest", {"backtest_id": summary.backtest_id})
     return summary
 
 
@@ -58,15 +48,6 @@ def list_backtests(
 # 否则 /backtests/comparisons 会被 {backtest_id} 捕获并返回 404。
 
 
-def _run_comparison_bg(comparison_id: str) -> None:
-    """在独立 Session 中执行对比回测，避免与请求 Session 冲突。"""
-    db = SessionLocal()
-    try:
-        BacktestService(db).run_comparison(comparison_id)
-    finally:
-        db.close()
-
-
 @router.post(
     "/backtests/comparisons",
     response_model=BacktestComparisonSummary,
@@ -76,9 +57,9 @@ def create_comparison(
     req: BacktestComparisonCreateRequest,
     db: Session = Depends(get_db),
 ) -> BacktestComparisonSummary:
-    """创建策略对比回测，生成两个子回测并在后台并行执行。"""
+    """创建策略对比回测，入队对比任务（由队列派发两个子回测）。"""
     summary = BacktestService(db).create_comparison(req)
-    get_bg_executor().submit(_run_comparison_bg, summary.comparison_id)
+    get_job_queue().enqueue("comparison", {"comparison_id": summary.comparison_id})
     return summary
 
 

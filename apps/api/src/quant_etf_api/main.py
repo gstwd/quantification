@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import logging
-import threading
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import date
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +24,7 @@ from quant_etf_api.api.routers import (
 from quant_etf_api.config.logging_config import setup_logging
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.factors.registry import FactorRegistry, get_default_factor_registry
+from quant_etf_api.infra.job_queue.queue import get_job_queue
 from quant_etf_api.infra.scheduler import get_ai_scheduler, get_scheduler
 
 logger = logging.getLogger(__name__)
@@ -36,64 +35,36 @@ settings = get_settings()
 factor_registry: FactorRegistry = get_default_factor_registry()
 
 
-def _trigger_startup_fill() -> None:
-    """在后台启动一次数据缺口补全，不阻塞服务器启动。"""
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.services.ingest_service import IngestService
-    from quant_etf_api.services.run_service import RunService
-
-    def _bg() -> None:
-        db = SessionLocal()
-        try:
-            summary = RunService(db).create_run("startup_fill", None, date.today())
-            IngestService(db).run_startup_fill(summary.run_id)
-        except Exception:
-            logger.warning("启动补全失败", exc_info=True)
-        finally:
-            db.close()
-
-    threading.Thread(target=_bg, daemon=True, name="startup-fill").start()
-
-
-def _warm_trading_calendar() -> None:
-    """启动时预热交易日历缓存。
-
-    在后台线程中触发 TradingCalendar 初始化，确保首次请求时缓存已命中，
-    避免请求线程进入 _load_from_akshare() 慢速路径。
-    即使预热失败，_get_cached_trading_days() 的线程锁仍能防止并发崩溃，
-    且降级方案（周末判断）可保证功能正常。
-    """
-    from quant_etf_api.infra.trading_calendar import TradingCalendar
-
-    def _bg() -> None:
-        try:
-            TradingCalendar().refresh()
-            logger.info("交易日历缓存预热完成")
-        except Exception:
-            logger.warning("交易日历缓存预热失败（将降级为周末判断）", exc_info=True)
-
-    threading.Thread(target=_bg, daemon=True, name="warm-calendar").start()
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 启动时恢复卡死的运行记录
     runs.recover_stuck_runs_on_startup()
-    _warm_trading_calendar()  # 预热交易日历缓存，防止首个请求触发 mini_racer 并发崩溃
+    # 启动后台任务队列：先恢复卡死任务，再启动 worker
+    job_queue = get_job_queue()
+    try:
+        job_queue.recover_stuck_jobs()
+    except Exception:
+        # 恢复失败（如 background_job 表尚未迁移）不应阻止服务启动
+        logger.warning("后台任务队列恢复失败，服务继续启动", exc_info=True)
+    job_queue.start()
     if settings.schedule_enabled:
         get_scheduler().start()
     if settings.ai_analysis_enabled:
         get_ai_scheduler().start()
-    if settings.startup_fill_enabled:
-        _trigger_startup_fill()
+    # 启动补全与日历预热均为尽力而为：入队失败（如数据库未迁移）不阻塞启动
+    try:
+        if settings.startup_fill_enabled:
+            job_queue.enqueue("startup_fill", {}, job_key="startup_fill")
+        # 预热交易日历缓存，防止首个请求触发慢速加载/并发崩溃
+        job_queue.enqueue("warm_calendar", {}, job_key="warm_calendar")
+    except Exception:
+        logger.warning("启动补全/日历预热任务入队失败，服务继续启动", exc_info=True)
     yield
     get_scheduler().stop()
     if settings.ai_analysis_enabled:
         get_ai_scheduler().stop()
-    # 关闭共享后台任务线程池
-    from quant_etf_api.api.executor import get_bg_executor
-
-    get_bg_executor().shutdown(wait=False, cancel_futures=True)
+    # 停止后台任务队列
+    job_queue.stop()
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)

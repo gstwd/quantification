@@ -10,11 +10,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
-from quant_etf_api.api.executor import get_bg_executor
 from quant_etf_api.infra.db.base import SessionLocal
+from quant_etf_api.infra.job_queue.queue import get_job_queue
 from quant_etf_api.schemas.pagination import PaginatedResponse
 from quant_etf_api.schemas.run import ResearchRunDetail, ResearchRunItemSchema, ResearchRunSummary
-from quant_etf_api.services.ingest_service import IngestService
 from quant_etf_api.services.run_service import RunService
 
 logger = logging.getLogger(__name__)
@@ -22,118 +21,52 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["runs"])
 
 
-def _run_ingest_bg(run_id: str) -> None:
-    """在独立 Session 中执行数据摄取，避免与请求 Session 冲突。"""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        IngestService(db).run_daily_ingest(run_id)
-    except Exception as e:
-        logger.exception("数据摄取任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"数据摄取异常: {type(e).__name__}: {e!s}")
-    finally:
-        db.close()
+def _enqueue_for_run(
+    run_type: str,
+    run_id: str,
+    strategy_id: str | None,
+    params: dict[str, Any] | None,
+    trade_date: date,
+) -> bool:
+    """按运行类型将任务入队，返回是否支持该类型。
 
+    Args:
+        run_type: 运行类型（与 research_run.run_type 对齐）。
+        run_id: 运行记录 ID。
+        strategy_id: 关联策略 ID，仅 strategy_run 有值。
+        params: 运行参数。
+        trade_date: 运行对应交易日，用于 AI 任务去重键。
 
-def _run_strategy_bg(strategy_id: str, run_id: str, params: dict[str, Any] | None) -> None:
-    """在独立 Session 中执行策略信号计算。"""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        from quant_etf_api.services.strategy_config_service import StrategyConfigService
-        from quant_etf_api.services.strategy_execution_service import StrategyExecutionService
-
-        config_svc = StrategyConfigService(db)
-        config = config_svc.get_parsed_config(strategy_id)
-        if config is None:
-            RunService(db).mark_failed(run_id, f"未找到策略配置: {strategy_id}")
-            return
-        StrategyExecutionService(db).execute(config, date.today(), run_id, params)
-    except Exception as e:
-        logger.exception("策略执行任务异常: run_id=%s strategy_id=%s", run_id, strategy_id)
-        RunService(db).mark_failed(run_id, f"策略执行异常: {type(e).__name__}: {e!s}")
-    finally:
-        db.close()
-
-
-def _run_cold_start_bg(run_id: str) -> None:
-    """在独立 Session 中执行冷启动数据拉取。"""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        IngestService(db).run_cold_start(run_id)
-    except Exception as e:
-        logger.exception("冷启动任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"冷启动异常: {type(e).__name__}: {e!s}")
-    finally:
-        db.close()
-
-
-def _run_startup_fill_bg(run_id: str) -> None:
-    """在独立 Session 中执行启动补全，仅补全有数据缺口的 ETF 和指数。"""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        IngestService(db).run_startup_fill(run_id)
-    except Exception as e:
-        logger.exception("启动补全任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"启动补全异常: {type(e).__name__}: {e!s}")
-    finally:
-        db.close()
-
-
-def _run_universe_refresh_bg(run_id: str) -> None:
-    """在独立 Session 中执行 ETF 池元数据刷新，避免与请求 Session 冲突。"""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        from quant_etf_api.services.universe_service import UniverseService
-
-        UniverseService(db).refresh_all(run_id)
-    except Exception as e:
-        logger.exception("ETF 池刷新任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"ETF 池刷新异常: {type(e).__name__}: {e!s}")
-    finally:
-        db.close()
-
-
-def _run_etf_refresh_bg(run_id: str) -> None:
-    """在独立 Session 中刷新 ETF 日线和份额数据。"""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        IngestService(db).refresh_etf_data(run_id)
-    except Exception as e:
-        logger.exception("ETF 数据刷新任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"ETF 数据刷新异常: {type(e).__name__}: {e!s}")
-    finally:
-        db.close()
-
-
-def _run_index_refresh_bg(run_id: str) -> None:
-    """在独立 Session 中刷新指数日线和估值数据。"""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        IngestService(db).refresh_index_data(run_id)
-    except Exception as e:
-        logger.exception("指数数据刷新任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"指数数据刷新异常: {type(e).__name__}: {e!s}")
-    finally:
-        db.close()
-
-
-def _run_macro_refresh_bg(run_id: str) -> None:
-    """在独立 Session 中刷新宏观指标数据。"""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        IngestService(db).refresh_macro_data(run_id)
-    except Exception as e:
-        logger.exception("宏观数据刷新任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"宏观数据刷新异常: {type(e).__name__}: {e!s}")
-    finally:
-        db.close()
+    Returns:
+        True 表示已入队；False 表示不支持的运行类型。
+    """
+    queue = get_job_queue()
+    if run_type == "daily_ingest":
+        queue.enqueue("daily_ingest", {"run_id": run_id}, job_key="daily_ingest")
+    elif run_type == "strategy_run":
+        if not strategy_id:
+            return False
+        queue.enqueue(
+            "strategy_run",
+            {"strategy_id": strategy_id, "run_id": run_id, "params": params},
+        )
+    elif run_type == "cold_start":
+        queue.enqueue("cold_start", {"run_id": run_id})
+    elif run_type == "universe_refresh":
+        queue.enqueue("universe_refresh", {"run_id": run_id})
+    elif run_type == "etf_refresh":
+        queue.enqueue("etf_refresh", {"run_id": run_id})
+    elif run_type == "index_refresh":
+        queue.enqueue("index_refresh", {"run_id": run_id})
+    elif run_type == "macro_refresh":
+        queue.enqueue("macro_refresh", {"run_id": run_id})
+    elif run_type == "startup_fill":
+        queue.enqueue("startup_fill", {"run_id": run_id})
+    elif run_type == "ai_analysis":
+        queue.enqueue("ai_analysis", {"run_id": run_id}, job_key=f"ai_analysis:{trade_date}")
+    else:
+        return False
+    return True
 
 
 def recover_stuck_runs_on_startup() -> None:
@@ -185,41 +118,41 @@ def get_run_items(run_id: str, db: Session = Depends(get_db)) -> list[ResearchRu
 
 @router.post("/runs/universe-refresh")
 def refresh_universe(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发 ETF 池元数据刷新，后台线程执行。"""
+    """触发 ETF 池元数据刷新，入队后台任务执行。"""
     summary = RunService(db).create_run("universe_refresh", None, date.today())
-    get_bg_executor().submit(_run_universe_refresh_bg, summary.run_id)
+    _enqueue_for_run("universe_refresh", summary.run_id, None, None, summary.trade_date or date.today())
     return {"status": "accepted", "run_type": "universe_refresh", "run_id": summary.run_id}
 
 
 @router.post("/runs/daily-ingest")
 def daily_ingest(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发增量日频数据摄取（ETF + 指数 + 宏观），后台线程执行。"""
+    """触发增量日频数据摄取（ETF + 指数 + 宏观），入队后台任务执行。"""
     summary = RunService(db).create_run("daily_ingest", None, date.today())
-    get_bg_executor().submit(_run_ingest_bg, summary.run_id)
+    _enqueue_for_run("daily_ingest", summary.run_id, None, None, summary.trade_date or date.today())
     return {"status": "accepted", "run_type": "daily_ingest", "run_id": summary.run_id}
 
 
 @router.post("/runs/etf-refresh")
 def etf_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发 ETF 日线和份额数据刷新，后台线程执行。"""
+    """触发 ETF 日线和份额数据刷新，入队后台任务执行。"""
     summary = RunService(db).create_run("etf_refresh", None, date.today())
-    get_bg_executor().submit(_run_etf_refresh_bg, summary.run_id)
+    _enqueue_for_run("etf_refresh", summary.run_id, None, None, summary.trade_date or date.today())
     return {"status": "accepted", "run_type": "etf_refresh", "run_id": summary.run_id}
 
 
 @router.post("/runs/index-refresh")
 def index_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发指数日线和估值数据刷新，后台线程执行。"""
+    """触发指数日线和估值数据刷新，入队后台任务执行。"""
     summary = RunService(db).create_run("index_refresh", None, date.today())
-    get_bg_executor().submit(_run_index_refresh_bg, summary.run_id)
+    _enqueue_for_run("index_refresh", summary.run_id, None, None, summary.trade_date or date.today())
     return {"status": "accepted", "run_type": "index_refresh", "run_id": summary.run_id}
 
 
 @router.post("/runs/macro-refresh")
 def macro_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发宏观指标数据刷新，后台线程执行。"""
+    """触发宏观指标数据刷新，入队后台任务执行。"""
     summary = RunService(db).create_run("macro_refresh", None, date.today())
-    get_bg_executor().submit(_run_macro_refresh_bg, summary.run_id)
+    _enqueue_for_run("macro_refresh", summary.run_id, None, None, summary.trade_date or date.today())
     return {"status": "accepted", "run_type": "macro_refresh", "run_id": summary.run_id}
 
 
@@ -227,15 +160,15 @@ def macro_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
 def cold_start(db: Session = Depends(get_db)) -> dict[str, str]:
     """触发冷启动：拉取全部 ETF 和指数从成立至今的全量历史日线数据。"""
     summary = RunService(db).create_run("cold_start", None, date.today())
-    get_bg_executor().submit(_run_cold_start_bg, summary.run_id)
+    _enqueue_for_run("cold_start", summary.run_id, None, None, summary.trade_date or date.today())
     return {"status": "accepted", "run_type": "cold_start", "run_id": summary.run_id}
 
 
 @router.post("/runs/strategies/{strategy_id}/run")
 def run_strategy(strategy_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发指定策略的信号计算任务，后台线程执行并写入 index_signal 表。"""
+    """触发指定策略的信号计算任务，入队后台任务执行并写入 index_signal 表。"""
     summary = RunService(db).create_run("strategy_run", strategy_id, date.today())
-    get_bg_executor().submit(_run_strategy_bg, strategy_id, summary.run_id, None)
+    _enqueue_for_run("strategy_run", summary.run_id, strategy_id, None, summary.trade_date or date.today())
     return {"status": "accepted", "strategy_id": strategy_id, "run_id": summary.run_id}
 
 
@@ -251,36 +184,15 @@ def retry_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
             status_code=400, detail=f"只能重试已完成的运行记录，当前状态: {detail.status}"
         )
 
-    # 创建新的 run 并提交到线程池
+    # 创建新的 run 并入队对应后台任务
     new_summary = svc.create_run(
         detail.run_type, detail.strategy_id, detail.trade_date or date.today()
     )
 
-    if detail.run_type == "daily_ingest":
-        get_bg_executor().submit(_run_ingest_bg, new_summary.run_id)
-    elif detail.run_type == "strategy_run":
-        if detail.strategy_id is None:
-            raise HTTPException(status_code=400, detail="策略运行记录缺少 strategy_id")
-        get_bg_executor().submit(
-            _run_strategy_bg, detail.strategy_id, new_summary.run_id, detail.params
-        )
-    elif detail.run_type == "cold_start":
-        get_bg_executor().submit(_run_cold_start_bg, new_summary.run_id)
-    elif detail.run_type == "universe_refresh":
-        get_bg_executor().submit(_run_universe_refresh_bg, new_summary.run_id)
-    elif detail.run_type == "etf_refresh":
-        get_bg_executor().submit(_run_etf_refresh_bg, new_summary.run_id)
-    elif detail.run_type == "index_refresh":
-        get_bg_executor().submit(_run_index_refresh_bg, new_summary.run_id)
-    elif detail.run_type == "macro_refresh":
-        get_bg_executor().submit(_run_macro_refresh_bg, new_summary.run_id)
-    elif detail.run_type == "startup_fill":
-        get_bg_executor().submit(_run_startup_fill_bg, new_summary.run_id)
-    elif detail.run_type == "ai_analysis":
-        from quant_etf_api.api.routers.ai_factors import _run_ai_analysis_bg  # noqa: PLC0415
-
-        get_bg_executor().submit(_run_ai_analysis_bg, new_summary.run_id, "")
-    else:
+    trade_date = new_summary.trade_date or date.today()
+    if not _enqueue_for_run(
+        detail.run_type, new_summary.run_id, detail.strategy_id, detail.params, trade_date
+    ):
         raise HTTPException(status_code=400, detail=f"不支持重试的运行类型: {detail.run_type}")
 
     return {"status": "accepted", "run_type": detail.run_type, "run_id": new_summary.run_id}
