@@ -171,6 +171,7 @@ import { fetchBenchmarkIndexes } from '../api/market_data'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
 import { useBacktestStore } from '../stores/backtests'
+import { usePolling } from '../composables/usePolling'
 
 /** 获取指标描述的快捷方法 */
 function metricHelp(key: string): string {
@@ -184,7 +185,11 @@ const equityChartEl = ref<HTMLElement | null>(null)
 const drawdownChartEl = ref<HTMLElement | null>(null)
 const positionsChartEl = ref<HTMLElement | null>(null)
 const timingChartEl = ref<HTMLElement | null>(null)
-const polling = ref(false)
+/** 轮询回测执行状态，组件卸载时自动停止 */
+const { polling, start: startPolling } = usePolling({
+  fetcher: () => store.refreshOne(props.backtestId),
+  isDone: (detail) => detail.status !== 'pending' && detail.status !== 'running',
+})
 /** 指数代码 → 指数名称 映射表 */
 const indexNameMap = ref<Record<string, string>>({})
 
@@ -521,9 +526,7 @@ onMounted(async () => {
     loadIndexNames(),
   ])
   if (store.current?.status === 'pending' || store.current?.status === 'running') {
-    polling.value = true
-    await store.pollUntilDone(props.backtestId)
-    polling.value = false
+    await startPolling()
   }
   if (store.current?.status === 'success') {
     await Promise.all([

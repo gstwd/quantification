@@ -160,6 +160,7 @@ import { RouterLink } from 'vue-router'
 
 import { useBacktestStore } from '../stores/backtests'
 import { useStrategyStore } from '../stores/strategies'
+import { usePolling } from '../composables/usePolling'
 
 const props = defineProps<{ comparisonId: string }>()
 const store = useBacktestStore()
@@ -168,7 +169,11 @@ const strategyStore = useStrategyStore()
 const equityChartEl = ref<HTMLElement | null>(null)
 const ddChartEl = ref<HTMLElement | null>(null)
 const excessChartEl = ref<HTMLElement | null>(null)
-const polling = ref(false)
+/** 轮询对比回测执行状态，组件卸载时自动停止 */
+const { polling, start: startPolling } = usePolling({
+  fetcher: () => store.refreshOneComparison(props.comparisonId),
+  isDone: (detail) => detail.status !== 'pending' && detail.status !== 'running',
+})
 
 let equityChartInst: any = null
 let ddChartInst: any = null
@@ -629,14 +634,12 @@ onMounted(async () => {
 
   const status = store.currentComparison?.status
   if (status === 'pending' || status === 'running') {
-    polling.value = true
-    store.pollComparisonUntilDone(props.comparisonId).then(async () => {
-      polling.value = false
-      if (store.currentComparison?.status === 'success') {
-        await store.loadComparisonDaily(props.comparisonId)
-        initCharts()
-      }
-    })
+    await startPolling()
+    // 轮询结束后加载每日结果（success/partial 均可能有数据）
+    if (store.currentComparison?.status === 'success' || store.currentComparison?.status === 'partial') {
+      await store.loadComparisonDaily(props.comparisonId)
+      initCharts()
+    }
   } else if (status === 'success' || status === 'partial') {
     await store.loadComparisonDaily(props.comparisonId)
     initCharts()

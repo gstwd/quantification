@@ -190,6 +190,7 @@ Key migrations:
 - **API layer** (`src/api/`): 8 files — `client.ts` (Axios 实例) + 7 API wrapper modules (`etfs.ts`, `strategies.ts`, `signals.ts`, `backtests.ts`, `runs.ts`, `market_data.ts`, `factors.ts`); all return typed `PaginatedResponse<T>` (`{ items, total, offset, limit }`)
 - **Read-only data pages** (index/macro): Fetch data **inline** via `ref()` + `onMounted`, no Pinia store — lighter pattern for static data views
 - Charts use ECharts 5 (dynamic `import('echarts')`, `watch` with `flush: 'post'`, `dispose()` in `onUnmounted`)
+- **长任务状态轮询统一使用 `composables/usePolling.ts`**: 自动绑定组件生命周期（卸载即停止），禁止在 store/页面里再手写 `setInterval` 轮询循环。store 只提供单次刷新 action（如 `refreshOne`），由页面通过 `usePolling` 驱动。
 
 ## Current State
 

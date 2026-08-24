@@ -115,10 +115,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { fetchRunDetail, fetchRunItems, fetchRuns, retryRun } from '../api/runs'
 import type { ResearchRunDetail, ResearchRunItem, ResearchRunSummary } from '../types/api'
+import { usePolling } from '../composables/usePolling'
 
 const runs = ref<ResearchRunSummary[]>([])
 const total = ref(0)
@@ -134,12 +135,34 @@ const detailCache = ref<Record<string, ResearchRunDetail>>({})
 const itemDetails = ref<Record<string, ResearchRunItem[]>>({})
 const durationCache = ref<Record<string, number | null>>({})
 
-// 轮询相关
-let pollTimer: ReturnType<typeof setInterval> | null = null
-const polling = ref(false)
-
 /** 是否有正在执行的任务 */
 const hasActiveRuns = computed(() => runs.value.some((r) => r.status === 'pending' || r.status === 'running'))
+
+/** 统一轮询：每 3 秒刷新列表与展开详情，无活动任务或组件卸载时自动停止 */
+const { polling, start: startPolling } = usePolling({
+  intervalMs: 3000,
+  // 挂载时已立即加载过列表，首次轮询等待一个间隔，避免重复请求和加载闪烁
+  immediate: false,
+  fetcher: async () => {
+    refreshing.value = true
+    try {
+      await load(currentOffset.value)
+      // 更新展开项的详情
+      if (expandedId.value && detailCache.value[expandedId.value]) {
+        try {
+          const detail = await fetchRunDetail(expandedId.value)
+          detailCache.value[expandedId.value] = detail
+          durationCache.value[detail.run_id] = detail.duration_seconds ?? null
+        } catch {
+          // 静默失败
+        }
+      }
+    } finally {
+      refreshing.value = false
+    }
+  },
+  isDone: () => !hasActiveRuns.value,
+})
 
 /** 状态标签 */
 function statusLabel(status: string): string {
@@ -239,52 +262,11 @@ async function load(offset = 0) {
   }
 }
 
-/** 启动轮询 */
-function startPolling() {
-  if (pollTimer) return
-  polling.value = true
-  pollTimer = setInterval(async () => {
-    if (!hasActiveRuns.value) {
-      stopPolling()
-      return
-    }
-    refreshing.value = true
-    try {
-      await load(currentOffset.value)
-      // 更新展开项的详情
-      if (expandedId.value && detailCache.value[expandedId.value]) {
-        try {
-          const detail = await fetchRunDetail(expandedId.value)
-          detailCache.value[expandedId.value] = detail
-          durationCache.value[detail.run_id] = detail.duration_seconds ?? null
-        } catch {
-          // 静默失败
-        }
-      }
-    } finally {
-      refreshing.value = false
-    }
-  }, 3000)
-}
-
-/** 停止轮询 */
-function stopPolling() {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
-  polling.value = false
-}
-
 onMounted(async () => {
   await load()
   if (hasActiveRuns.value) {
     startPolling()
   }
-})
-
-onUnmounted(() => {
-  stopPolling()
 })
 </script>
 

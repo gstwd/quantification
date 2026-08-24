@@ -63,6 +63,15 @@ export const useBacktestStore = defineStore('backtests', {
     async loadIndexResults(backtestId: string, indexCode?: string) {
       this.indexResults = await fetchBacktestIndexResults(backtestId, indexCode)
     },
+    /** 拉取单个回测详情并同步到 current 与 items（轮询由 usePolling 驱动） */
+    async refreshOne(backtestId: string): Promise<BacktestDetail> {
+      const detail = await fetchBacktest(backtestId)
+      // 每次轮询都更新 current，确保进度条等 UI 实时刷新
+      this.current = detail
+      const idx = this.items.findIndex((i) => i.backtest_id === backtestId)
+      if (idx !== -1) this.items[idx] = detail
+      return detail
+    },
     async submit(req: BacktestCreateRequest): Promise<BacktestSummary> {
       this.submitting = true
       try {
@@ -72,29 +81,6 @@ export const useBacktestStore = defineStore('backtests', {
       } finally {
         this.submitting = false
       }
-    },
-    /** 每 2 秒轮询一次，直到回测状态不再是 pending 或 running */
-    async pollUntilDone(backtestId: string): Promise<void> {
-      const poll = (): Promise<void> =>
-        new Promise((resolve) => {
-          const timer = setInterval(async () => {
-            try {
-              const detail = await fetchBacktest(backtestId)
-              // 每次轮询都更新 current，确保进度条等 UI 实时刷新
-              this.current = detail
-              const idx = this.items.findIndex((i) => i.backtest_id === backtestId)
-              if (idx !== -1) this.items[idx] = detail
-              if (detail.status !== 'pending' && detail.status !== 'running') {
-                clearInterval(timer)
-                resolve()
-              }
-            } catch {
-              clearInterval(timer)
-              resolve()
-            }
-          }, 2000)
-        })
-      await poll()
     },
 
     // ── 策略对比回测 ──
@@ -119,6 +105,17 @@ export const useBacktestStore = defineStore('backtests', {
       }
     },
 
+    /** 拉取单个对比回测详情并同步到 currentComparison 与 comparisons（轮询由 usePolling 驱动） */
+    async refreshOneComparison(comparisonId: string): Promise<ComparisonDetail> {
+      const detail = await fetchComparison(comparisonId)
+      this.currentComparison = detail
+      const idx = this.comparisons.findIndex(
+        (c) => c.comparison_id === comparisonId,
+      )
+      if (idx !== -1) this.comparisons[idx] = detail
+      return detail
+    },
+
     async loadComparisonDaily(comparisonId: string) {
       this.comparisonDaily = await fetchComparisonDaily(comparisonId)
     },
@@ -134,31 +131,6 @@ export const useBacktestStore = defineStore('backtests', {
       } finally {
         this.submitting = false
       }
-    },
-
-    /** 每 2 秒轮询一次，直到对比回测状态不再是 pending 或 running */
-    async pollComparisonUntilDone(comparisonId: string): Promise<void> {
-      const poll = (): Promise<void> =>
-        new Promise((resolve) => {
-          const timer = setInterval(async () => {
-            try {
-              const detail = await fetchComparison(comparisonId)
-              this.currentComparison = detail
-              const idx = this.comparisons.findIndex(
-                (c) => c.comparison_id === comparisonId,
-              )
-              if (idx !== -1) this.comparisons[idx] = detail
-              if (detail.status !== 'pending' && detail.status !== 'running') {
-                clearInterval(timer)
-                resolve()
-              }
-            } catch {
-              clearInterval(timer)
-              resolve()
-            }
-          }, 2000)
-        })
-      await poll()
     },
   },
 })
