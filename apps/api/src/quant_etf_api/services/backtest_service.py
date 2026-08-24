@@ -255,7 +255,13 @@ class BacktestService:
             self._db.rollback()
             logger.exception("run_backtest failed for %s", backtest_id)
             try:
-                self._backtest_repo.mark_failed(backtest_id, str(exc))
+                # 分段提交后，回滚只丢弃当前未提交分段；
+                # 在失败信息中带上已保存的部分结果截止日期，便于用户判断进度
+                message = str(exc)
+                partial_date = self._backtest_repo.find_latest_daily_date(backtest_id)
+                if partial_date is not None:
+                    message = f"{message}；已保存部分结果至 {partial_date}"
+                self._backtest_repo.mark_failed(backtest_id, message)
             except Exception:
                 self._db.rollback()
 
@@ -487,9 +493,13 @@ class BacktestService:
                     self._backtest_repo.update_progress(backtest_id, new_progress)
                     last_progress = new_progress
 
-            # 每 100 天 flush 一次，释放内存中的 ORM 对象
+            # 每 100 天 checkpoint 提交一次：
+            # - 释放事务大小，避免长区间回测的单一巨大事务
+            # - 中途失败时已提交的分段结果保留，前端可查看部分权益曲线
+            # - progress 裸 SQL 更新随本次 commit 一起对其它连接可见
             if (i + 1) % 100 == 0:
                 self._db.flush()
+                self._db.commit()
                 daily_results.clear()  # 释放 ORM 对象，metric_accumulator 已保留关键数据
 
         self._db.flush()

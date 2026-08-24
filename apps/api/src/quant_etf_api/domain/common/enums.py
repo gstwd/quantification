@@ -19,6 +19,7 @@ class RunStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
+    SKIPPED = "skipped"
     FAILED = "failed"
 
 

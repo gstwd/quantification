@@ -1114,6 +1114,35 @@ class IngestService:
     # 全量日频摄取（后台线程入口）
     # ==================================================================
 
+    def _try_acquire_ingest_lock(self, run_id: str) -> bool:
+        """尝试获取摄取互斥锁，失败时将运行记录标记为 skipped。
+
+        daily_ingest 与三个手动刷新入口共享同一把进程内互斥锁，
+        保证同一时刻只有一条摄取流水线在写数据。
+
+        Args:
+            run_id: 运行记录 ID。
+
+        Returns:
+            True 表示成功获取锁，可继续执行；False 表示已有摄取任务在运行。
+        """
+        if _daily_ingest_lock.acquire(blocking=False):
+            return True
+        run = (
+            self._db.query(ResearchRunModel)
+            .filter(ResearchRunModel.run_id == run_id)
+            .first()
+        )
+        if run is not None:
+            run.status = "skipped"
+            run.finished_at = utcnow()
+            run.metrics = {
+                "reason": "concurrent_skip",
+                "message": "另一个摄取任务正在运行，跳过本次执行",
+            }
+            self._db.commit()
+        return False
+
     def run_daily_ingest(self, run_id: str) -> None:
         """执行日频数据全量摄取任务（后台线程入口）。
 
@@ -1122,19 +1151,11 @@ class IngestService:
         2. 所有基准指数的日线和估值
         3. 宏观指标（CPI/PMI/LPR）
 
-        完成后更新 research_run 状态为 success/failed。
+        完成后更新 research_run 状态为 success/skipped/failed
+        （并发冲突或非交易日时标记为 skipped，语义上表示"未执行"）。
         """
         # 非阻塞并发控制：如果已有 ingest 正在运行，跳过本次执行
-        if not _daily_ingest_lock.acquire(blocking=False):
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is not None:
-                run.status = "success"
-                run.finished_at = utcnow()
-                run.metrics = {
-                    "reason": "concurrent_skip",
-                    "message": "另一个摄任务正在运行，跳过本次执行",
-                }
-                self._db.commit()
+        if not self._try_acquire_ingest_lock(run_id):
             return
         try:
             start_time = utcnow()
@@ -1151,7 +1172,7 @@ class IngestService:
             cal = TradingCalendar()
 
             if not cal.is_trading_day(today):
-                run.status = "success"
+                run.status = "skipped"
                 run.finished_at = utcnow()
                 run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
                 self._db.commit()
@@ -1243,6 +1264,8 @@ class IngestService:
         Args:
             run_id: 运行记录 ID。
         """
+        if not self._try_acquire_ingest_lock(run_id):
+            return
         start_time = utcnow()
         try:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
@@ -1257,7 +1280,7 @@ class IngestService:
             today = date.today()
             cal = TradingCalendar()
             if not cal.is_trading_day(today):
-                run.status = "success"
+                run.status = "skipped"
                 run.finished_at = utcnow()
                 run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
                 self._db.commit()
@@ -1301,6 +1324,8 @@ class IngestService:
             except Exception:
                 logger.warning("更新失败状态时出错", exc_info=True)
                 self._db.rollback()
+        finally:
+            _daily_ingest_lock.release()
 
     def refresh_index_data(self, run_id: str) -> None:
         """刷新所有基准指数的日线和估值数据（后台线程入口）。
@@ -1308,6 +1333,8 @@ class IngestService:
         Args:
             run_id: 运行记录 ID。
         """
+        if not self._try_acquire_ingest_lock(run_id):
+            return
         start_time = utcnow()
         try:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
@@ -1322,7 +1349,7 @@ class IngestService:
             today = date.today()
             cal = TradingCalendar()
             if not cal.is_trading_day(today):
-                run.status = "success"
+                run.status = "skipped"
                 run.finished_at = utcnow()
                 run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
                 self._db.commit()
@@ -1377,6 +1404,8 @@ class IngestService:
             except Exception:
                 logger.warning("更新失败状态时出错", exc_info=True)
                 self._db.rollback()
+        finally:
+            _daily_ingest_lock.release()
 
     def refresh_macro_data(self, run_id: str) -> None:
         """刷新宏观指标数据（后台线程入口）。
@@ -1386,6 +1415,8 @@ class IngestService:
         Args:
             run_id: 运行记录 ID。
         """
+        if not self._try_acquire_ingest_lock(run_id):
+            return
         start_time = utcnow()
         try:
             run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
@@ -1400,7 +1431,7 @@ class IngestService:
             today = date.today()
             cal = TradingCalendar()
             if not cal.is_trading_day(today):
-                run.status = "success"
+                run.status = "skipped"
                 run.finished_at = utcnow()
                 run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
                 self._db.commit()
@@ -1436,6 +1467,8 @@ class IngestService:
             except Exception:
                 logger.warning("更新失败状态时出错", exc_info=True)
                 self._db.rollback()
+        finally:
+            _daily_ingest_lock.release()
 
     def run_cold_start(self, run_id: str) -> None:
         """冷启动：拉取全部 ETF 和指数的全量历史数据（后台线程入口）。

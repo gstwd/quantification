@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import (
@@ -97,6 +98,24 @@ class BacktestRepository(BaseRepository):
         except Exception:
             # 静默失败：进度写入不是关键路径，不应打断回测主循环
             pass
+
+    def find_latest_daily_date(self, backtest_id: str) -> date | None:
+        """查询回测已保存的最新每日结果日期。
+
+        回测按 checkpoint 分段提交后，中途失败时用此方法定位
+        已持久化的部分结果截止日期，写入失败信息便于用户判断进度。
+
+        Args:
+            backtest_id: 回测标识。
+
+        Returns:
+            最新已提交的每日结果日期，无结果时返回 None。
+        """
+        return (
+            self._db.query(func.max(BacktestDailyResultModel.trade_date))
+            .filter(BacktestDailyResultModel.backtest_id == backtest_id)
+            .scalar()
+        )
 
     def mark_success(self, backtest_id: str, metrics: dict[str, Any] | None = None) -> None:
         """将回测标记为成功。"""

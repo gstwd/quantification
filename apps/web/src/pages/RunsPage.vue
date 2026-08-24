@@ -147,6 +147,7 @@ function statusLabel(status: string): string {
     pending: '待执行',
     running: '执行中',
     success: '成功',
+    skipped: '已跳过',
     failed: '失败',
     completed: '完成',
   }
