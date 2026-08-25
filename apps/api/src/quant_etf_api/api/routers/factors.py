@@ -25,6 +25,7 @@ from quant_etf_api.schemas.factor import (
     ICSummary,
 )
 from quant_etf_api.schemas.signal import FactorRow
+from quant_etf_api.services.factor_admin_service import FactorAdminService
 
 router = APIRouter(tags=["factors"])
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ def init_factor_definitions(
     Returns:
         同步统计：new / updated / deactivated。
     """
-    svc = FactorService(db, registry)
+    svc = FactorAdminService(db, registry)
     try:
         return svc.sync_factor_definitions()
     except Exception:

@@ -1,6 +1,7 @@
 """评分模块：计算资产综合得分和择时得分。
 
-内置 5 个变换函数，从旧的 timing.py / rotation.py 精确迁移。
+变换函数已迁移至 engine/transforms.py（独立注册表），
+本模块保留 _TRANSFORM_REGISTRY / get_transform 的导入以兼容既有引用。
 """
 
 from __future__ import annotations
@@ -17,168 +18,11 @@ from quant_etf_api.engine.pipeline_detail import (
 
 logger = logging.getLogger(__name__)
 
-# ── 变换函数注册表 ────────────────────────────────────────────────────────
-
-
-def _invert_percentile(value: float) -> float:
-    """百分位反转：百分位越低（越便宜）得分越高。"""
-    return 100.0 - value
-
-
-def _momentum_score(value: float) -> float:
-    """收益率映射为动量得分（0-100）。
-
-    精确复用旧 rotation.py 的分段线性映射逻辑。
-    """
-    if value > 15:
-        return 95.0
-    if value > 10:
-        return 85.0
-    if value > 5:
-        return 70.0
-    if value > 2:
-        return 60.0
-    if value > 0:
-        return 50.0
-    if value > -2:
-        return 40.0
-    if value > -5:
-        return 30.0
-    if value > -10:
-        return 20.0
-    return 10.0
-
-
-def _volume_score(value: float) -> float:
-    """量比映射为量能得分（0-100）。
-
-    精确复用旧 timing.py 的分段线性映射逻辑。
-    """
-    if value < 0.3:
-        return 10.0
-    if value < 0.5:
-        return 20.0
-    if value < 0.8:
-        return 35.0
-    if value < 1.0:
-        return 50.0
-    if value < 1.3:
-        return 70.0
-    if value < 1.5:
-        return 80.0
-    if value < 2.0:
-        return 85.0
-    if value < 3.0:
-        return 70.0
-    return 50.0
-
-
-def _trend_score(value: float) -> float:
-    """价格相对 MA60 偏离度映射为趋势得分（0-100）。
-
-    精确复用旧 timing.py 的线性映射逻辑。
-    value 为偏离百分比：(price - ma60) / ma60 * 100。
-    """
-    if value <= -10:
-        return 0.0
-    if value >= 10:
-        return 100.0
-    return round(50 + value * 5, 1)
-
-
-def _clamp_0_100(value: float) -> float:
-    """通用裁剪：限制在 0-100 范围内。"""
-    return max(0.0, min(100.0, value))
-
-
-def _erp_score(value: float) -> float:
-    """ERP 映射为得分（0-100）。
-
-    ERP 越高表示股票相对债券越有吸引力。
-    分段线性映射：>5→95, >3→80, >2→65, >1→50, >0→35, <=0→15。
-    """
-    if value > 5:
-        return 95.0
-    if value > 3:
-        return 80.0
-    if value > 2:
-        return 65.0
-    if value > 1:
-        return 50.0
-    if value > 0:
-        return 35.0
-    return 15.0
-
-
-def _drawdown_score(value: float) -> float:
-    """回撤幅度映射为得分（0-100）。
-
-    value 为负数（如 -12.5 表示回撤 12.5%），回撤越小得分越高。
-    分段线性映射：0→100, -5→80, -10→60, -15→40, -20→20, <=-25→5。
-    """
-    if value >= 0:
-        return 100.0
-    if value >= -5:
-        return 80.0 + (value + 5) / 5 * 20  # -5→80, 0→100
-    if value >= -10:
-        return 60.0 + (value + 10) / 5 * 20  # -10→60, -5→80
-    if value >= -15:
-        return 40.0 + (value + 15) / 5 * 20  # -15→40, -10→60
-    if value >= -20:
-        return 20.0 + (value + 20) / 5 * 20  # -20→20, -15→40
-    if value >= -25:
-        return 5.0 + (value + 25) / 5 * 15  # -25→5, -20→20
-    return 5.0
-
-
-def _sentiment_score(value: float) -> float:
-    """AI情绪分映射为得分 [0, 100]。
-
-    输入值域 [-1.0, 1.0]（正=利好，负=利空），输出 [0, 100]。
-    线性映射：-1.0→0, 0→50, 1.0→100，中性情绪得 50 分。
-    适合与 ai_sentiment_1d / ai_sentiment_5d 配合使用。
-    """
-    return round(max(0.0, min(100.0, (value + 1.0) * 50.0)), 1)
-
-
-def _attention_score(value: float) -> float:
-    """AI关注度分映射为得分 [0, 100]。
-
-    输入值域 [0, ~200]（关注度无硬上限），输出 [0, 100]。
-    直接裁剪到 [0, 100]，不缩放 — 高关注度本身即是高权重信号。
-    适合与 ai_attention_1d / ai_attention_5d / ai_topic_momentum 配合使用。
-    """
-    return round(max(0.0, min(100.0, value)), 1)
-
-
-_TRANSFORM_REGISTRY: dict[str, Any] = {
-    "invert_percentile": _invert_percentile,
-    "momentum_score": _momentum_score,
-    "volume_score": _volume_score,
-    "trend_score": _trend_score,
-    "clamp_0_100": _clamp_0_100,
-    "erp_score": _erp_score,
-    "drawdown_score": _drawdown_score,
-    "sentiment_score": _sentiment_score,
-    "attention_score": _attention_score,
-}
-
-
-def get_transform(name: str) -> Any:
-    """获取变换函数。
-
-    Args:
-        name: 变换函数名称。
-
-    Returns:
-        变换函数。
-
-    Raises:
-        KeyError: 未知的变换函数名称。
-    """
-    if name not in _TRANSFORM_REGISTRY:
-        raise KeyError(f"未知的变换函数: {name}，可用: {list(_TRANSFORM_REGISTRY.keys())}")
-    return _TRANSFORM_REGISTRY[name]
+# 兼容转发：变换注册表与查询函数来自 engine.transforms（独立扩展点）
+from quant_etf_api.engine.transforms import (  # noqa: F401, E402
+    _TRANSFORM_REGISTRY,
+    get_transform,
+)
 
 
 # ── Protocol ──────────────────────────────────────────────────────────────

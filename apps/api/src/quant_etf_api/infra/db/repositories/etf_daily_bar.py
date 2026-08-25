@@ -92,3 +92,20 @@ class EtfDailyBarRepository(BaseRepository):
             .all()
         )
         return [r.trade_date for r in rows]
+
+    def find_by_date_range(
+        self,
+        start: date,
+        end: date,
+        etf_codes: list[str] | None = None,
+    ) -> list[EtfDailyBarModel]:
+        """按日期范围查询全部 ETF 日线（供数据质量检查等场景）。"""
+        query = self._db.query(EtfDailyBarModel).filter(
+            and_(
+                EtfDailyBarModel.trade_date >= start,
+                EtfDailyBarModel.trade_date <= end,
+            )
+        )
+        if etf_codes:
+            query = query.filter(EtfDailyBarModel.etf_code.in_(etf_codes))
+        return query.all()

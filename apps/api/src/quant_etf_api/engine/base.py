@@ -28,6 +28,8 @@ class EngineContext:
         asset_factors: 每资产的因子值，key=(etf_code, factor_id)。
         market_factors: 市场级因子值（用于择时），key=factor_id。
         asset_metadata: 资产元数据，key=etf_code。
+        index_valuation: 指数估值映射，key=index_code，value=含 pe/pb 百分位等字段的字典。
+            类型化替代 extra["index_valuation"]，避免无类型逃生舱。
         extra: 扩展字段（原始 K 线数据等）。
     """
 
@@ -36,6 +38,7 @@ class EngineContext:
     asset_factors: dict[tuple[str, str], float | None] = field(default_factory=dict)
     market_factors: dict[str, float | None] = field(default_factory=dict)
     asset_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
+    index_valuation: dict[str, dict[str, float | None]] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
     # 持仓状态（回测/实时模式下由调用方填充，用于止损止盈和再平衡）
     current_positions: dict[str, float] = field(default_factory=dict)

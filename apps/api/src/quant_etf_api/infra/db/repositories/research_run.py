@@ -97,3 +97,51 @@ class ResearchRunRepository(BaseRepository):
         run.finished_at = utcnow()
         run.error_message = error_message[:1000]
         self._db.commit()
+
+    def mark_skipped(self, run_id: str, metrics: dict[str, Any] | None = None) -> None:
+        """将运行标记为跳过（未执行）并记录原因，自动 commit。
+
+        skipped 表示"未执行"而非失败：并发冲突、非交易日等场景
+        不应伪装成 success 或 failed，语义上对应 P7 的跳过状态。
+
+        Args:
+            run_id: 运行记录 ID。
+            metrics: 跳过原因等指标。
+        """
+        if self._db.is_active is False:
+            self._db.rollback()
+        run = self.find_by_id(run_id)
+        if run is None:
+            return
+        run.status = "skipped"
+        run.finished_at = utcnow()
+        if metrics:
+            run.metrics = metrics
+        self._db.commit()
+
+    def add_item(
+        self,
+        run_id: str,
+        etf_code: str,
+        status: str,
+        message: str | None = None,
+        metrics: dict[str, Any] | None = None,
+    ) -> None:
+        """写入一条运行子项明细并立即提交。
+
+        Args:
+            run_id: 运行记录 ID。
+            etf_code: 关联的 ETF/指数代码。
+            status: 子项状态：success/skipped/failed。
+            message: 子项消息。
+            metrics: 子项指标。
+        """
+        item = ResearchRunItemModel(
+            run_id=run_id,
+            etf_code=etf_code,
+            status=status,
+            message=message or None,
+            metrics=metrics,
+        )
+        self._db.add(item)
+        self._db.commit()

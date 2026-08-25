@@ -8,9 +8,9 @@ import sys
 
 from quant_etf_api.config.logging_config import setup_logging
 from quant_etf_api.factors.registry import build_default_factor_registry
-from quant_etf_api.factors.service import FactorService
 from quant_etf_api.infra.db.base import SessionLocal
-from quant_etf_api.infra.db.models.core import BenchmarkIndexModel
+from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
+from quant_etf_api.services.factor_admin_service import FactorAdminService
 from quant_etf_api.services.index_service import IndexService
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ def init_factors() -> None:
     db = SessionLocal()
     try:
         registry = build_default_factor_registry()
-        svc = FactorService(db, registry)
+        svc = FactorAdminService(db, registry)
         result = svc.sync_factor_definitions()
         print(
             f"因子定义同步完成: 新增={result['new']} 更新={result['updated']} 停用={result['deactivated']}"
@@ -63,11 +63,12 @@ def init_indexes() -> None:
     db = SessionLocal()
     try:
         svc = IndexService(db)
+        index_repo = BenchmarkIndexRepository(db)
         added = 0
         updated = 0
         for code, name in _DEFAULT_INDEXES:
             try:
-                existing = db.get(BenchmarkIndexModel, code)
+                existing = index_repo.find_by_code(code)
                 if existing is None:
                     svc.ensure_index_exists(code, name_cn=name)
                     added += 1

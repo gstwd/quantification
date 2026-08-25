@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+# 引擎配置 schema 版本：配置模型演进时递增并做兼容迁移检测（7.4#3）
+SUPPORTED_SCHEMA_VERSIONS = {"1"}
+
 
 class TimingThresholds(BaseModel):
     """择时 regime 判定阈值。
@@ -176,6 +179,7 @@ class StrategyConfig(BaseModel):
         strategy_id: 策略唯一标识。
         display_name: 策略中文名称。
         version: 版本号。
+        schema_version: 引擎配置 schema 版本，用于配置模型演进时的兼容检测。
         description: 策略描述。
         frequency: 运行频率。
         timing: 择时配置，None 表示无择时。
@@ -190,6 +194,7 @@ class StrategyConfig(BaseModel):
     strategy_id: str
     display_name: str
     version: str = "1.0.0"
+    schema_version: str = "1"
     description: str = ""
     frequency: str = "daily"
     index_codes: list[str] = Field(

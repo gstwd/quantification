@@ -15,6 +15,38 @@ from typing import Any
 
 
 @dataclass
+class UniverseAsset:
+    """资产宇宙项（领域模型）。
+
+    系统实际运行于指数（A 股宽基/行业指数），本模型以 asset_code 承载
+    指数代码，还原领域语义；to_engine_dict() 提供与引擎层的兼容映射
+    （引擎历史字段 etf_code 与领域字段 index_code 值相同）。
+
+    Attributes:
+        asset_code: 资产代码（指数代码），如 000300。
+        name_cn: 资产中文名称。
+        category: 资产分类，如 broad_index。
+    """
+
+    asset_code: str
+    name_cn: str
+    category: str = "broad_index"
+
+    def to_engine_dict(self) -> dict[str, str]:
+        """转换为引擎层 universe 字典（兼容 etf_code 历史字段）。
+
+        Returns:
+            含 etf_code/index_code/name_cn/category 的字典。
+        """
+        return {
+            "etf_code": self.asset_code,
+            "index_code": self.asset_code,
+            "name_cn": self.name_cn,
+            "category": self.category,
+        }
+
+
+@dataclass
 class StrategyContextData:
     """策略执行上下文，由服务层构建后传入策略引擎。
 

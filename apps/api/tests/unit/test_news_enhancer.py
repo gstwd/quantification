@@ -1,6 +1,5 @@
 """NewsEnhancer 单元测试。"""
 
-import pytest
 
 from quant_etf_api.ai_factors.base import RawNewsItem
 from quant_etf_api.infra.news_sources.base import NewsSearchResult

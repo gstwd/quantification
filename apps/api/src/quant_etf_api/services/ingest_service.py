@@ -21,17 +21,24 @@ from quant_etf_api.infra.db.models.core import (
     IndexDailyBarModel,
     IndexValuationModel,
     MacroIndicatorModel,
-    ResearchRunItemModel,
-    ResearchRunModel,
 )
+from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
+from quant_etf_api.infra.db.repositories.etf_daily_bar import EtfDailyBarRepository
+from quant_etf_api.infra.db.repositories.etf_daily_share import EtfDailyShareRepository
 from quant_etf_api.infra.db.repositories.etf_universe import EtfUniverseRepository
+from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
+from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
+from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
+from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.schemas.market_data import (
     BenchmarkIndex,
     DailyBar,
+    IndexSummary,
     IndexValuation,
     MacroIndicatorSchema,
     ShareSnapshot,
 )
+from quant_etf_api.services.run_service import RunService
 
 logger = logging.getLogger(__name__)
 
@@ -123,11 +130,35 @@ class IngestService:
 
     提供 ETF 行情 / 份额 / 指数日线 / 指数估值 / 宏观指标的数据拉取、
     幂等写入和读穿透缓存，供 API 路由和定时调度器使用。
+    读取统一走仓库；运行记录生命周期委托 RunService；
+    摄取完成后自动执行数据质量检测（data_quality 接入数据闭环）。
     """
 
-    def __init__(self, db: Session, universe_repo: EtfUniverseRepository | None = None) -> None:
+    def __init__(
+        self,
+        db: Session,
+        universe_repo: EtfUniverseRepository | None = None,
+        run_svc: RunService | None = None,
+        run_repo: ResearchRunRepository | None = None,
+    ) -> None:
+        """初始化数据摄取服务。
+
+        Args:
+            db: SQLAlchemy 同步 Session。
+            universe_repo: ETF 池仓库，未提供时自动创建。
+            run_svc: 运行记录服务（生命周期状态流转），未提供时自动创建。
+            run_repo: 运行记录仓库（子项明细写入），未提供时自动创建。
+        """
         self._db = db
         self._universe_repo = universe_repo or EtfUniverseRepository(db)
+        self._run_repo = run_repo or ResearchRunRepository(db)
+        self._run_svc = run_svc or RunService(db, run_repo=self._run_repo)
+        self._etf_bar_repo = EtfDailyBarRepository(db)
+        self._share_repo = EtfDailyShareRepository(db)
+        self._index_bar_repo = IndexDailyBarRepository(db)
+        self._valuation_repo = IndexValuationRepository(db)
+        self._macro_repo = MacroIndicatorRepository(db)
+        self._index_repo = BenchmarkIndexRepository(db)
 
     def _enqueue_data_fill(self, resource: str, code: str | None = None) -> None:
         """查询未命中时入队后台补数任务，不在请求线程同步抓取。
@@ -244,11 +275,7 @@ class IngestService:
             API 返回的最新交易日日期字符串；无数据时返回空字符串
         """
         today = date.today()
-        max_date: date | None = (
-            self._db.query(func.max(EtfDailyBarModel.trade_date))
-            .filter(EtfDailyBarModel.etf_code == etf_code)
-            .scalar()
-        )
+        max_date: date | None = self._etf_bar_repo.get_latest_date(etf_code)
 
         # DB 已有当日或更新的数据，无需拉取
         if max_date is not None and max_date >= today:
@@ -257,11 +284,7 @@ class IngestService:
         # 无历史数据，走全量拉取
         if max_date is None:
             self._fetch_and_upsert_bars_full_history(etf_code)
-            refreshed: date | None = (
-                self._db.query(func.max(EtfDailyBarModel.trade_date))
-                .filter(EtfDailyBarModel.etf_code == etf_code)
-                .scalar()
-            )
+            refreshed: date | None = self._etf_bar_repo.get_latest_date(etf_code)
             return str(refreshed) if refreshed else ""
 
         # 有历史数据，拉取 max_date 到今日的缺口数据
@@ -306,19 +329,10 @@ class IngestService:
         start_date: date | None,
         end_date: date | None,
     ) -> list[EtfDailyBarModel]:
-        """构建 ETF 日线查询（日期范围模式或 limit 模式）。"""
-        q = self._db.query(EtfDailyBarModel).filter(EtfDailyBarModel.etf_code == etf_code)
+        """构建 ETF 日线查询（日期范围模式或 limit 模式），读取走仓库。"""
         if start_date and end_date:
-            return (
-                q.filter(
-                    EtfDailyBarModel.trade_date >= start_date,
-                    EtfDailyBarModel.trade_date <= end_date,
-                )
-                .order_by(EtfDailyBarModel.trade_date.asc())
-                .all()
-            )
-        rows = q.order_by(EtfDailyBarModel.trade_date.desc()).limit(limit).all()
-        return list(reversed(rows))
+            return self._etf_bar_repo.find_by_code_date_range(etf_code, start_date, end_date)
+        return self._etf_bar_repo.find_by_code_limit(etf_code, limit)
 
     def get_daily_bars(
         self,
@@ -376,23 +390,11 @@ class IngestService:
         self._db.commit()
 
         # 计算与前一日份额的差值
-        prev = (
-            self._db.query(EtfDailyShareModel)
-            .filter(
-                EtfDailyShareModel.etf_code == etf_code,
-                EtfDailyShareModel.trade_date < trade_date,
-            )
-            .order_by(EtfDailyShareModel.trade_date.desc())
-            .first()
-        )
+        prev = self._share_repo.find_latest_before(etf_code, trade_date)
         if prev is not None and prev.shares_total is not None and snapshot.shares_total > 0:
             delta = round(snapshot.shares_total - prev.shares_total, 2)
             delta_pct = round(delta / prev.shares_total * 100, 2) if prev.shares_total > 0 else None
-            row = (
-                self._db.query(EtfDailyShareModel)
-                .filter_by(etf_code=etf_code, trade_date=trade_date)
-                .first()
-            )
+            row = self._share_repo.find_by_code_date(etf_code, trade_date)
             if row is not None:
                 row.shares_delta = delta
                 row.shares_delta_pct = delta_pct
@@ -405,19 +407,10 @@ class IngestService:
         start_date: date | None,
         end_date: date | None,
     ) -> list[EtfDailyShareModel]:
-        """构建 ETF 份额查询（日期范围模式或 limit 模式）。"""
-        q = self._db.query(EtfDailyShareModel).filter(EtfDailyShareModel.etf_code == etf_code)
+        """构建 ETF 份额查询（日期范围模式或 limit 模式），读取走仓库。"""
         if start_date and end_date:
-            return (
-                q.filter(
-                    EtfDailyShareModel.trade_date >= start_date,
-                    EtfDailyShareModel.trade_date <= end_date,
-                )
-                .order_by(EtfDailyShareModel.trade_date.asc())
-                .all()
-            )
-        rows = q.order_by(EtfDailyShareModel.trade_date.desc()).limit(limit).all()
-        return list(reversed(rows))
+            return self._share_repo.find_by_code_date_range(etf_code, start_date, end_date)
+        return self._share_repo.find_by_code_limit(etf_code, limit)
 
     def get_share_history(
         self,
@@ -457,11 +450,7 @@ class IngestService:
         """
         if incremental:
             # 查询该指数最新数据日期
-            latest = (
-                self._db.query(func.max(IndexDailyBarModel.trade_date))
-                .filter(IndexDailyBarModel.index_code == index_code)
-                .scalar()
-            )
+            latest = self._index_bar_repo.get_latest_date(index_code)
             if latest is not None:
                 # 已有数据，仅做增量（AkShare 客户端当前不支持增量，仍拉全量后过滤）
                 pass
@@ -507,12 +496,7 @@ class IngestService:
 
     def get_benchmark_indexes(self) -> list[BenchmarkIndex]:
         """返回所有活跃的基准指数（从种子表读取，已停用的不返回）。"""
-        rows = (
-            self._db.query(BenchmarkIndexModel)
-            .filter(BenchmarkIndexModel.is_active.is_(True))
-            .order_by(BenchmarkIndexModel.index_code)
-            .all()
-        )
+        rows = self._index_repo.find_active()
         return [BenchmarkIndex(index_code=r.index_code, index_name=r.name_cn) for r in rows]
 
     def get_index_summaries(self) -> list["IndexSummary"]:
@@ -525,8 +509,6 @@ class IngestService:
         Returns:
             指数汇总列表，按 index_code 升序排列。
         """
-        from quant_etf_api.schemas.market_data import IndexSummary
-
         # 子查询：每个指数的最新 bar 日期
         latest_bar_dates = (
             self._db.query(
@@ -608,19 +590,10 @@ class IngestService:
         start_date: date | None,
         end_date: date | None,
     ) -> list[IndexDailyBarModel]:
-        """构建指数日线查询（日期范围模式或 limit 模式）。"""
-        q = self._db.query(IndexDailyBarModel).filter(IndexDailyBarModel.index_code == index_code)
+        """构建指数日线查询（日期范围模式或 limit 模式），读取走仓库。"""
         if start_date and end_date:
-            return (
-                q.filter(
-                    IndexDailyBarModel.trade_date >= start_date,
-                    IndexDailyBarModel.trade_date <= end_date,
-                )
-                .order_by(IndexDailyBarModel.trade_date.asc())
-                .all()
-            )
-        rows = q.order_by(IndexDailyBarModel.trade_date.desc()).limit(limit).all()
-        return list(reversed(rows))
+            return self._index_bar_repo.find_by_code_date_range(index_code, start_date, end_date)
+        return self._index_bar_repo.find_by_code_limit(index_code, limit)
 
     def get_index_daily_bars(
         self,
@@ -696,19 +669,10 @@ class IngestService:
         start_date: date | None,
         end_date: date | None,
     ) -> list[IndexValuationModel]:
-        """构建指数估值查询（日期范围模式或 limit 模式）。"""
-        q = self._db.query(IndexValuationModel).filter(IndexValuationModel.index_code == index_code)
+        """构建指数估值查询（日期范围模式或 limit 模式），读取走仓库。"""
         if start_date and end_date:
-            return (
-                q.filter(
-                    IndexValuationModel.trade_date >= start_date,
-                    IndexValuationModel.trade_date <= end_date,
-                )
-                .order_by(IndexValuationModel.trade_date.asc())
-                .all()
-            )
-        rows = q.order_by(IndexValuationModel.trade_date.desc()).limit(limit).all()
-        return list(reversed(rows))
+            return self._valuation_repo.find_by_code_date_range(index_code, start_date, end_date)
+        return self._valuation_repo.find_by_code_limit(index_code, limit)
 
     def get_index_valuation(
         self,
@@ -740,28 +704,12 @@ class IngestService:
     # ==================================================================
 
     def get_etf_date_range(self, etf_code: str) -> tuple[date | None, date | None]:
-        """查询 ETF 日线数据的最早和最晚日期。"""
-        row = (
-            self._db.query(
-                func.min(EtfDailyBarModel.trade_date),
-                func.max(EtfDailyBarModel.trade_date),
-            )
-            .filter(EtfDailyBarModel.etf_code == etf_code)
-            .one()
-        )
-        return row[0], row[1]
+        """查询 ETF 日线数据的最早和最晚日期（读取走仓库）。"""
+        return self._etf_bar_repo.get_date_range(etf_code)
 
     def get_index_date_range(self, index_code: str) -> tuple[date | None, date | None]:
-        """查询指数日线数据的最早和最晚日期。"""
-        row = (
-            self._db.query(
-                func.min(IndexDailyBarModel.trade_date),
-                func.max(IndexDailyBarModel.trade_date),
-            )
-            .filter(IndexDailyBarModel.index_code == index_code)
-            .one()
-        )
-        return row[0], row[1]
+        """查询指数日线数据的最早和最晚日期（读取走仓库）。"""
+        return self._index_bar_repo.get_date_range(index_code)
 
     # ==================================================================
     # 宏观指标（AkShare）
@@ -807,13 +755,7 @@ class IngestService:
         未命中时入队后台补数任务，不再在请求线程同步抓取外部 API。
         """
         try:
-            rows = (
-                self._db.query(MacroIndicatorModel)
-                .filter(MacroIndicatorModel.indicator_code == indicator_code)
-                .order_by(MacroIndicatorModel.period.desc())
-                .limit(limit)
-                .all()
-            )
+            rows = self._macro_repo.find_by_code_limit(indicator_code, limit)
             if rows:
                 return [_macro_row_to_schema(r) for r in reversed(rows)]
             self._enqueue_data_fill("macro")
@@ -849,11 +791,7 @@ class IngestService:
         bar_missing = []
         bar_latest: date | None = None
         for etf in etfs:
-            max_d = (
-                self._db.query(func.max(EtfDailyBarModel.trade_date))
-                .filter(EtfDailyBarModel.etf_code == etf.etf_code)
-                .scalar()
-            )
+            max_d = self._etf_bar_repo.get_latest_date(etf.etf_code)
             if max_d is None:
                 bar_missing.append(
                     {
@@ -889,11 +827,7 @@ class IngestService:
         share_missing = []
         share_latest: date | None = None
         for etf in etfs:
-            max_d = (
-                self._db.query(func.max(EtfDailyShareModel.trade_date))
-                .filter(EtfDailyShareModel.etf_code == etf.etf_code)
-                .scalar()
-            )
+            max_d = self._share_repo.get_latest_date(etf.etf_code)
             if max_d is None:
                 share_missing.append(
                     {
@@ -925,16 +859,12 @@ class IngestService:
         }
 
         # --- 指数日线 ---
-        indexes = self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
+        indexes = self._index_repo.find_all()
         idx_bar_stale = []
         idx_bar_missing = []
         idx_bar_latest: date | None = None
         for idx in indexes:
-            max_d = (
-                self._db.query(func.max(IndexDailyBarModel.trade_date))
-                .filter(IndexDailyBarModel.index_code == idx.index_code)
-                .scalar()
-            )
+            max_d = self._index_bar_repo.get_latest_date(idx.index_code)
             if max_d is None:
                 idx_bar_missing.append(
                     {
@@ -970,11 +900,7 @@ class IngestService:
         idx_val_missing = []
         idx_val_latest: date | None = None
         for idx in indexes:
-            max_d = (
-                self._db.query(func.max(IndexValuationModel.trade_date))
-                .filter(IndexValuationModel.index_code == idx.index_code)
-                .scalar()
-            )
+            max_d = self._valuation_repo.get_latest_date(idx.index_code)
             if max_d is None:
                 idx_val_missing.append(
                     {
@@ -1096,14 +1022,12 @@ class IngestService:
                 logger.warning("ETF %s 数据摄取失败: %s", etf_code, e)
 
             try:
-                item = ResearchRunItemModel(
+                self._run_repo.add_item(
                     run_id=run_id,
                     etf_code=etf_code,
                     status=item_status,
                     message=item_message or None,
                 )
-                self._db.add(item)
-                self._db.commit()
             except Exception:
                 self._db.rollback()
                 logger.warning("写入 ResearchRunItem 失败: %s", etf_code, exc_info=True)
@@ -1128,20 +1052,61 @@ class IngestService:
         """
         if _daily_ingest_lock.acquire(blocking=False):
             return True
-        run = (
-            self._db.query(ResearchRunModel)
-            .filter(ResearchRunModel.run_id == run_id)
-            .first()
-        )
-        if run is not None:
-            run.status = "skipped"
-            run.finished_at = utcnow()
-            run.metrics = {
+        self._run_svc.mark_skipped(
+            run_id,
+            metrics={
                 "reason": "concurrent_skip",
                 "message": "另一个摄取任务正在运行，跳过本次执行",
-            }
-            self._db.commit()
+            },
+        )
         return False
+
+    def _run_quality_checks(self, trade_date: date) -> dict[str, Any]:
+        """对当日摄取结果执行数据质量检测并返回统计（接入数据闭环）。
+
+        检测项：日线异常（涨跌幅/零量/收盘价）、估值异常（负值/百分位越界）、
+        连续性缺口。异常仅记录日志并计入运行指标，不中断摄取流程。
+
+        Args:
+            trade_date: 需要检测的交易日。
+
+        Returns:
+            quality 统计字典：{scope: 异常数量}。
+        """
+        from quant_etf_api.services.data_quality import (
+            check_continuity,
+            check_daily_bar_anomalies,
+            check_valuation_anomalies,
+        )
+
+        stats: dict[str, Any] = {}
+        try:
+            etf_bars = self._etf_bar_repo.find_by_date_range(trade_date, trade_date)
+            stats["etf_bar_anomalies"] = len(check_daily_bar_anomalies(etf_bars))
+            stats["etf_bar_gaps"] = len(check_continuity(etf_bars))
+        except Exception:
+            logger.warning("ETF 日线质量检测失败", exc_info=True)
+            stats["etf_bar_anomalies"] = 0
+            stats["etf_bar_gaps"] = 0
+
+        try:
+            index_bars = self._index_bar_repo.find_by_date_range(trade_date, trade_date)
+            stats["index_bar_anomalies"] = len(check_daily_bar_anomalies(index_bars))
+            stats["index_bar_gaps"] = len(check_continuity(index_bars))
+        except Exception:
+            logger.warning("指数日线质量检测失败", exc_info=True)
+            stats["index_bar_anomalies"] = 0
+            stats["index_bar_gaps"] = 0
+
+        try:
+            valuation_rows = self._valuation_repo.find_by_date_range(trade_date, trade_date)
+            stats["valuation_anomalies"] = len(check_valuation_anomalies(valuation_rows))
+        except Exception:
+            logger.warning("估值质量检测失败", exc_info=True)
+            stats["valuation_anomalies"] = 0
+
+        logger.info("数据质量检测完成: trade_date=%s stats=%s", trade_date, stats)
+        return stats
 
     def run_daily_ingest(self, run_id: str) -> None:
         """执行日频数据全量摄取任务（后台线程入口）。
@@ -1159,23 +1124,16 @@ class IngestService:
             return
         try:
             start_time = utcnow()
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                logger.error("run_daily_ingest: run_id %s 不存在", run_id)
-                return
-
-            run.status = "running"
-            run.started_at = start_time
-            self._db.commit()
+            self._run_svc.mark_running(run_id)
 
             today = date.today()
             cal = TradingCalendar()
 
             if not cal.is_trading_day(today):
-                run.status = "skipped"
-                run.finished_at = utcnow()
-                run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
-                self._db.commit()
+                self._run_svc.mark_skipped(
+                    run_id,
+                    metrics={"reason": "holiday", "message": "非交易日，跳过数据摄取"},
+                )
                 return
 
             # ------------------------------ 1. ETF 行情 + 份额 ------------------------------
@@ -1209,46 +1167,34 @@ class IngestService:
             except Exception as e:
                 logger.warning("宏观指标拉取失败: %s", e)
 
+            # 数据质量检测接入摄取闭环：异常记录日志并计入运行指标
+            quality = self._run_quality_checks(today)
+
             # ------------------------------ 汇总 ------------------------------
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                return
-            run.status = "success"
-            run.finished_at = utcnow()
-            run.metrics = {
-                "etf": {
-                    "total": len(etfs),
-                    "success": etf_success,
-                    "failed": etf_failed,
-                    "skipped": etf_skipped,
+            self._run_svc.mark_success(
+                run_id,
+                metrics={
+                    "etf": {
+                        "total": len(etfs),
+                        "success": etf_success,
+                        "failed": etf_failed,
+                        "skipped": etf_skipped,
+                    },
+                    "index": {
+                        "total": len(indexes),
+                        "bar_records": index_bar_count,
+                        "valuation_records": index_valuation_count,
+                    },
+                    "macro": {"records": macro_count},
+                    "quality": quality,
+                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
                 },
-                "index": {
-                    "total": len(indexes),
-                    "bar_records": index_bar_count,
-                    "valuation_records": index_valuation_count,
-                },
-                "macro": {"records": macro_count},
-                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-            }
-            self._db.commit()
+            )
 
         except Exception as e:
             self._db.rollback()
             logger.warning("run_daily_ingest 整体失败: %s", e, exc_info=True)
-            try:
-                run = (
-                    self._db.query(ResearchRunModel)
-                    .filter(ResearchRunModel.run_id == run_id)
-                    .first()
-                )
-                if run is not None:
-                    run.status = "failed"
-                    run.finished_at = utcnow()
-                    run.error_message = str(e)[:1000]
-                    self._db.commit()
-            except Exception:
-                logger.warning("更新失败状态时出错", exc_info=True)
-                self._db.rollback()
+            self._run_svc.mark_failed(run_id, str(e)[:1000])
         finally:
             _daily_ingest_lock.release()
 
@@ -1268,22 +1214,15 @@ class IngestService:
             return
         start_time = utcnow()
         try:
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                logger.error("refresh_etf_data: run_id %s 不存在", run_id)
-                return
-
-            run.status = "running"
-            run.started_at = start_time
-            self._db.commit()
+            self._run_svc.mark_running(run_id)
 
             today = date.today()
             cal = TradingCalendar()
             if not cal.is_trading_day(today):
-                run.status = "skipped"
-                run.finished_at = utcnow()
-                run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
-                self._db.commit()
+                self._run_svc.mark_skipped(
+                    run_id,
+                    metrics={"reason": "holiday", "message": "非交易日，跳过数据摄取"},
+                )
                 return
 
             etfs = self._universe_repo.find_all_active()
@@ -1291,39 +1230,25 @@ class IngestService:
                 run_id, etfs, today
             )
 
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                return
-            run.status = "success"
-            run.finished_at = utcnow()
-            run.metrics = {
-                "etf": {
-                    "total": len(etfs),
-                    "success": etf_success,
-                    "failed": etf_failed,
-                    "skipped": etf_skipped,
+            quality = self._run_quality_checks(today)
+            self._run_svc.mark_success(
+                run_id,
+                metrics={
+                    "etf": {
+                        "total": len(etfs),
+                        "success": etf_success,
+                        "failed": etf_failed,
+                        "skipped": etf_skipped,
+                    },
+                    "quality": quality,
+                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
                 },
-                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-            }
-            self._db.commit()
+            )
 
         except Exception as e:
             self._db.rollback()
             logger.warning("refresh_etf_data 整体失败: %s", e, exc_info=True)
-            try:
-                run = (
-                    self._db.query(ResearchRunModel)
-                    .filter(ResearchRunModel.run_id == run_id)
-                    .first()
-                )
-                if run is not None:
-                    run.status = "failed"
-                    run.finished_at = utcnow()
-                    run.error_message = str(e)[:1000]
-                    self._db.commit()
-            except Exception:
-                logger.warning("更新失败状态时出错", exc_info=True)
-                self._db.rollback()
+            self._run_svc.mark_failed(run_id, str(e)[:1000])
         finally:
             _daily_ingest_lock.release()
 
@@ -1337,27 +1262,18 @@ class IngestService:
             return
         start_time = utcnow()
         try:
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                logger.error("refresh_index_data: run_id %s 不存在", run_id)
-                return
-
-            run.status = "running"
-            run.started_at = start_time
-            self._db.commit()
+            self._run_svc.mark_running(run_id)
 
             today = date.today()
             cal = TradingCalendar()
             if not cal.is_trading_day(today):
-                run.status = "skipped"
-                run.finished_at = utcnow()
-                run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
-                self._db.commit()
+                self._run_svc.mark_skipped(
+                    run_id,
+                    metrics={"reason": "holiday", "message": "非交易日，跳过数据摄取"},
+                )
                 return
 
-            indexes = (
-                self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
-            )
+            indexes = self._index_repo.find_all()
             index_bar_count = 0
             index_valuation_count = 0
 
@@ -1372,38 +1288,24 @@ class IngestService:
                 except Exception as e:
                     logger.warning("指数 %s 估值拉取失败: %s", idx.index_code, e)
 
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                return
-            run.status = "success"
-            run.finished_at = utcnow()
-            run.metrics = {
-                "index": {
-                    "total": len(indexes),
-                    "bar_records": index_bar_count,
-                    "valuation_records": index_valuation_count,
+            quality = self._run_quality_checks(today)
+            self._run_svc.mark_success(
+                run_id,
+                metrics={
+                    "index": {
+                        "total": len(indexes),
+                        "bar_records": index_bar_count,
+                        "valuation_records": index_valuation_count,
+                    },
+                    "quality": quality,
+                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
                 },
-                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-            }
-            self._db.commit()
+            )
 
         except Exception as e:
             self._db.rollback()
             logger.warning("refresh_index_data 整体失败: %s", e, exc_info=True)
-            try:
-                run = (
-                    self._db.query(ResearchRunModel)
-                    .filter(ResearchRunModel.run_id == run_id)
-                    .first()
-                )
-                if run is not None:
-                    run.status = "failed"
-                    run.finished_at = utcnow()
-                    run.error_message = str(e)[:1000]
-                    self._db.commit()
-            except Exception:
-                logger.warning("更新失败状态时出错", exc_info=True)
-                self._db.rollback()
+            self._run_svc.mark_failed(run_id, str(e)[:1000])
         finally:
             _daily_ingest_lock.release()
 
@@ -1419,54 +1321,31 @@ class IngestService:
             return
         start_time = utcnow()
         try:
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                logger.error("refresh_macro_data: run_id %s 不存在", run_id)
-                return
-
-            run.status = "running"
-            run.started_at = start_time
-            self._db.commit()
+            self._run_svc.mark_running(run_id)
 
             today = date.today()
             cal = TradingCalendar()
             if not cal.is_trading_day(today):
-                run.status = "skipped"
-                run.finished_at = utcnow()
-                run.metrics = {"reason": "holiday", "message": "非交易日，跳过数据摄取"}
-                self._db.commit()
+                self._run_svc.mark_skipped(
+                    run_id,
+                    metrics={"reason": "holiday", "message": "非交易日，跳过数据摄取"},
+                )
                 return
 
             macro_count = self._fetch_and_upsert_macro()
 
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                return
-            run.status = "success"
-            run.finished_at = utcnow()
-            run.metrics = {
-                "macro": {"records": macro_count},
-                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-            }
-            self._db.commit()
+            self._run_svc.mark_success(
+                run_id,
+                metrics={
+                    "macro": {"records": macro_count},
+                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
+                },
+            )
 
         except Exception as e:
             self._db.rollback()
             logger.warning("refresh_macro_data 整体失败: %s", e, exc_info=True)
-            try:
-                run = (
-                    self._db.query(ResearchRunModel)
-                    .filter(ResearchRunModel.run_id == run_id)
-                    .first()
-                )
-                if run is not None:
-                    run.status = "failed"
-                    run.finished_at = utcnow()
-                    run.error_message = str(e)[:1000]
-                    self._db.commit()
-            except Exception:
-                logger.warning("更新失败状态时出错", exc_info=True)
-                self._db.rollback()
+            self._run_svc.mark_failed(run_id, str(e)[:1000])
         finally:
             _daily_ingest_lock.release()
 
@@ -1481,14 +1360,7 @@ class IngestService:
         """
         start_time = utcnow()
         try:
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                logger.error("run_cold_start: run_id %s 不存在", run_id)
-                return
-
-            run.status = "running"
-            run.started_at = start_time
-            self._db.commit()
+            self._run_svc.mark_running(run_id)
 
             # 1. 全量 ETF 历史日线
             etfs = self._universe_repo.find_all_active()
@@ -1501,13 +1373,11 @@ class IngestService:
                 try:
                     n = self._fetch_and_upsert_bars_full_history(etf_code)
                     etf_bar_count += n
-                    self._db.add(
-                        ResearchRunItemModel(
-                            run_id=run_id,
-                            etf_code=etf_code,
-                            status="success",
-                            message=f"写入 {n} 条日线",
-                        )
+                    self._run_repo.add_item(
+                        run_id=run_id,
+                        etf_code=etf_code,
+                        status="success",
+                        message=f"写入 {n} 条日线",
                     )
                 except Exception as e:
                     etf_failed_count += 1
@@ -1546,44 +1416,28 @@ class IngestService:
                 logger.warning("宏观指标拉取失败: %s", e)
 
             # 汇总
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                return
-            run.status = "success"
-            run.finished_at = utcnow()
-            run.metrics = {
-                "etf": {
-                    "total": len(etfs),
-                    "bar_records": etf_bar_count,
-                    "failed": etf_failed_count,
+            self._run_svc.mark_success(
+                run_id,
+                metrics={
+                    "etf": {
+                        "total": len(etfs),
+                        "bar_records": etf_bar_count,
+                        "failed": etf_failed_count,
+                    },
+                    "index": {
+                        "total": len(indexes),
+                        "bar_records": index_bar_count,
+                        "valuation_records": index_valuation_count,
+                    },
+                    "macro": {"records": macro_count},
+                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
                 },
-                "index": {
-                    "total": len(indexes),
-                    "bar_records": index_bar_count,
-                    "valuation_records": index_valuation_count,
-                },
-                "macro": {"records": macro_count},
-                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-            }
-            self._db.commit()
+            )
 
         except Exception as e:
             self._db.rollback()
             logger.warning("run_cold_start 整体失败: %s", e, exc_info=True)
-            try:
-                run = (
-                    self._db.query(ResearchRunModel)
-                    .filter(ResearchRunModel.run_id == run_id)
-                    .first()
-                )
-                if run is not None:
-                    run.status = "failed"
-                    run.finished_at = utcnow()
-                    run.error_message = str(e)[:1000]
-                    self._db.commit()
-            except Exception:
-                logger.warning("更新失败状态时出错", exc_info=True)
-                self._db.rollback()
+            self._run_svc.mark_failed(run_id, str(e)[:1000])
 
     def run_startup_fill(self, run_id: str) -> None:
         """启动补全：检查所有 ETF 和指数的数据缺口并按需补全（系统启动时自动调用）。
@@ -1596,14 +1450,7 @@ class IngestService:
         stale_threshold = date.today() - timedelta(days=5)
 
         try:
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                logger.error("run_startup_fill: run_id %s 不存在", run_id)
-                return
-
-            run.status = "running"
-            run.started_at = start_time
-            self._db.commit()
+            self._run_svc.mark_running(run_id)
 
             # 1. ETF 日线增量补全（已是最新则跳过）
             etfs = self._universe_repo.find_all_active()
@@ -1625,18 +1472,12 @@ class IngestService:
                     logger.warning("ETF %s 启动补全失败: %s", etf_code, e)
 
             # 2. 指数日线 + 估值（超过 5 天未更新才重新拉取）
-            indexes = (
-                self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
-            )
+            indexes = self._index_repo.find_all()
             index_bar_count = 0
             index_val_count = 0
 
             for idx in indexes:
-                idx_max = (
-                    self._db.query(func.max(IndexDailyBarModel.trade_date))
-                    .filter(IndexDailyBarModel.index_code == idx.index_code)
-                    .scalar()
-                )
+                idx_max = self._index_bar_repo.get_latest_date(idx.index_code)
                 if idx_max is None or idx_max <= stale_threshold:
                     try:
                         index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code)
@@ -1649,9 +1490,7 @@ class IngestService:
                         logger.warning("指数 %s 估值补全失败: %s", idx.index_code, e)
 
             # 3. 宏观指标（超过 5 天未入库才重新拉取）
-            macro_latest_ingest: datetime | None = self._db.query(
-                func.max(MacroIndicatorModel.ingested_at)
-            ).scalar()
+            macro_latest_ingest: datetime | None = self._macro_repo.find_latest_ingested_at()
             # DateTime 列返回 naive datetime，去掉 tzinfo 后再比较
             macro_stale_threshold = utcnow() - timedelta(days=5)
             macro_count = 0
@@ -1661,41 +1500,25 @@ class IngestService:
                 except Exception as e:
                     logger.warning("宏观指标补全失败: %s", e)
 
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                return
-            run.status = "success"
-            run.finished_at = utcnow()
-            run.metrics = {
-                "etf": {
-                    "total": len(etfs),
-                    "filled": etf_filled,
-                    "skipped": etf_skipped,
-                    "failed": etf_failed,
+            self._run_svc.mark_success(
+                run_id,
+                metrics={
+                    "etf": {
+                        "total": len(etfs),
+                        "filled": etf_filled,
+                        "skipped": etf_skipped,
+                        "failed": etf_failed,
+                    },
+                    "index": {
+                        "bar_records": index_bar_count,
+                        "valuation_records": index_val_count,
+                    },
+                    "macro": {"records": macro_count},
+                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
                 },
-                "index": {
-                    "bar_records": index_bar_count,
-                    "valuation_records": index_val_count,
-                },
-                "macro": {"records": macro_count},
-                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-            }
-            self._db.commit()
+            )
 
         except Exception as e:
             self._db.rollback()
             logger.warning("run_startup_fill 整体失败: %s", e, exc_info=True)
-            try:
-                run = (
-                    self._db.query(ResearchRunModel)
-                    .filter(ResearchRunModel.run_id == run_id)
-                    .first()
-                )
-                if run is not None:
-                    run.status = "failed"
-                    run.finished_at = utcnow()
-                    run.error_message = str(e)[:1000]
-                    self._db.commit()
-            except Exception:
-                logger.warning("更新失败状态时出错", exc_info=True)
-                self._db.rollback()
+            self._run_svc.mark_failed(run_id, str(e)[:1000])

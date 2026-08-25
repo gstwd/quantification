@@ -16,11 +16,13 @@ from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.engine.config import ScoreConfig, TimingConfig, TimingThresholds
 from quant_etf_api.engine.score import (
     DefaultScoreCalculator,
-    _clamp_0_100,
-    _invert_percentile,
-    _momentum_score,
-    _trend_score,
-    _volume_score,
+)
+from quant_etf_api.engine.transforms import (
+    clamp_0_100,
+    invert_percentile,
+    momentum_score,
+    trend_score,
+    volume_score,
 )
 
 
@@ -47,47 +49,47 @@ class TestTransformFunctions:
 
     def test_invert_percentile(self) -> None:
         """百分位反转：100 - value。"""
-        assert _invert_percentile(30.0) == 70.0
-        assert _invert_percentile(80.0) == 20.0
-        assert _invert_percentile(50.0) == 50.0
+        assert invert_percentile(30.0) == 70.0
+        assert invert_percentile(80.0) == 20.0
+        assert invert_percentile(50.0) == 50.0
 
     def test_momentum_score(self) -> None:
         """收益率映射为动量得分。"""
-        assert _momentum_score(20.0) == 95.0
-        assert _momentum_score(12.0) == 85.0
-        assert _momentum_score(7.0) == 70.0
-        assert _momentum_score(3.0) == 60.0
-        assert _momentum_score(1.0) == 50.0
-        assert _momentum_score(-1.0) == 40.0
-        assert _momentum_score(-3.0) == 30.0
-        assert _momentum_score(-7.0) == 20.0
-        assert _momentum_score(-15.0) == 10.0
+        assert momentum_score(20.0) == 95.0
+        assert momentum_score(12.0) == 85.0
+        assert momentum_score(7.0) == 70.0
+        assert momentum_score(3.0) == 60.0
+        assert momentum_score(1.0) == 50.0
+        assert momentum_score(-1.0) == 40.0
+        assert momentum_score(-3.0) == 30.0
+        assert momentum_score(-7.0) == 20.0
+        assert momentum_score(-15.0) == 10.0
 
     def test_volume_score(self) -> None:
         """量比映射为量能得分。"""
-        assert _volume_score(0.2) == 10.0
-        assert _volume_score(0.4) == 20.0
-        assert _volume_score(0.6) == 35.0
-        assert _volume_score(0.9) == 50.0
-        assert _volume_score(1.1) == 70.0
-        assert _volume_score(1.4) == 80.0
-        assert _volume_score(1.8) == 85.0
-        assert _volume_score(2.5) == 70.0
-        assert _volume_score(5.0) == 50.0
+        assert volume_score(0.2) == 10.0
+        assert volume_score(0.4) == 20.0
+        assert volume_score(0.6) == 35.0
+        assert volume_score(0.9) == 50.0
+        assert volume_score(1.1) == 70.0
+        assert volume_score(1.4) == 80.0
+        assert volume_score(1.8) == 85.0
+        assert volume_score(2.5) == 70.0
+        assert volume_score(5.0) == 50.0
 
     def test_trend_score(self) -> None:
         """MA偏离度映射为趋势得分。"""
-        assert _trend_score(-15.0) == 0.0
-        assert _trend_score(15.0) == 100.0
-        assert _trend_score(0.0) == 50.0
-        assert _trend_score(5.0) == 75.0
-        assert _trend_score(-5.0) == 25.0
+        assert trend_score(-15.0) == 0.0
+        assert trend_score(15.0) == 100.0
+        assert trend_score(0.0) == 50.0
+        assert trend_score(5.0) == 75.0
+        assert trend_score(-5.0) == 25.0
 
     def test_clamp_0_100(self) -> None:
         """通用裁剪。"""
-        assert _clamp_0_100(150.0) == 100.0
-        assert _clamp_0_100(-50.0) == 0.0
-        assert _clamp_0_100(50.0) == 50.0
+        assert clamp_0_100(150.0) == 100.0
+        assert clamp_0_100(-50.0) == 0.0
+        assert clamp_0_100(50.0) == 50.0
 
 
 class TestDefaultScoreCalculator:

@@ -2,9 +2,24 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Protocol, runtime_checkable
+
+
+class MissingReason(str, Enum):
+    """因子值缺失原因（三态语义，对应层间协作问题 C2）。
+
+    引擎层区分三种缺失，避免全部退化为 None 后无法判断根因：
+    - FACTOR_UNKNOWN：因子 ID 未注册（配置错误，校验期应快速失败）
+    - NOT_COMPUTED：因子已注册但当日未计算（调度缺失，可补算）
+    - INSUFFICIENT_DATA：因子已计算但数值为 NULL（基础行情不足）
+    """
+
+    FACTOR_UNKNOWN = "factor_unknown"
+    NOT_COMPUTED = "not_computed"
+    INSUFFICIENT_DATA = "insufficient_data"
 
 
 @dataclass
@@ -60,12 +75,14 @@ class FactorValue:
         numeric: 数值型因子结果，None 表示数据不足无法计算。
         text: 文本型因子结果（枚举类因子使用）。
         payload: 计算中间过程数据，用于调试和解释。
+        missing_reason: 缺失原因（三态语义），numeric 为 None 时由加载侧填充。
     """
 
     factor_id: str
     numeric: float | None = None
     text: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
+    missing_reason: MissingReason | None = None
 
 
 @runtime_checkable

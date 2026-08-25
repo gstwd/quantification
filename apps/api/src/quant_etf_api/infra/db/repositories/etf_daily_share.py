@@ -60,3 +60,41 @@ class EtfDailyShareRepository(BaseRepository):
             .filter(EtfDailyShareModel.etf_code == code)
             .scalar()
         )
+
+    def find_by_code_date_range(
+        self, code: str, start: date, end: date
+    ) -> list[EtfDailyShareModel]:
+        """按 ETF 代码和日期范围查询份额（升序）。"""
+        return (
+            self._db.query(EtfDailyShareModel)
+            .filter(
+                EtfDailyShareModel.etf_code == code,
+                EtfDailyShareModel.trade_date >= start,
+                EtfDailyShareModel.trade_date <= end,
+            )
+            .order_by(EtfDailyShareModel.trade_date.asc())
+            .all()
+        )
+
+    def find_by_code_date(self, code: str, trade_date: date) -> EtfDailyShareModel | None:
+        """按 ETF 代码和交易日查询单条份额记录。"""
+        return (
+            self._db.query(EtfDailyShareModel)
+            .filter(
+                EtfDailyShareModel.etf_code == code,
+                EtfDailyShareModel.trade_date == trade_date,
+            )
+            .first()
+        )
+
+    def find_latest_before(self, code: str, trade_date: date) -> EtfDailyShareModel | None:
+        """查询指定日期之前最近一条份额记录（用于计算 delta）。"""
+        return (
+            self._db.query(EtfDailyShareModel)
+            .filter(
+                EtfDailyShareModel.etf_code == code,
+                EtfDailyShareModel.trade_date < trade_date,
+            )
+            .order_by(EtfDailyShareModel.trade_date.desc())
+            .first()
+        )

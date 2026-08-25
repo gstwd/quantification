@@ -188,6 +188,21 @@ class RunService:
         except Exception:
             logger.warning("mark_failed 更新失败", exc_info=True)
 
+    def mark_skipped(self, run_id: str, metrics: dict | None = None) -> None:
+        """将指定运行标记为跳过（未执行）状态。
+
+        并发冲突、非交易日等场景使用 skipped 而非 success，
+        语义上表示"本次未执行"，避免伪装成成功（对应 P7）。
+
+        Args:
+            run_id: 运行 ID。
+            metrics: 跳过原因等指标。
+        """
+        try:
+            self._run_repo.mark_skipped(run_id, metrics)
+        except Exception:
+            logger.warning("mark_skipped 更新失败", exc_info=True)
+
     def recover_stuck_runs(self) -> int:
         """恢复卡在 pending/running 状态的运行记录。
 

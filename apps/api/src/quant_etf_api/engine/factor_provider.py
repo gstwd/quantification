@@ -4,6 +4,9 @@
 1. 从 StrategyConfig 中提取所有需要的因子 ID 列表。
 2. 实时模式：从 index_factor_value 表加载预计算因子值。
 3. 回测模式：利用预加载的 K 线数据，通过 FactorComputer 批量计算所有因子。
+4. 三态缺失语义：load_asset_factor_records 保留 FactorValue 的
+   missing_reason（因子未计算/数据不足/因子不存在），引擎层仍使用
+   扁平浮点字典以保持性能，服务层可基于记录做精确的补算决策。
 """
 
 from __future__ import annotations
@@ -15,7 +18,12 @@ from typing import Any, TYPE_CHECKING
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
-from quant_etf_api.factors.base import BatchFactorComputer, FactorContext
+from quant_etf_api.factors.base import (
+    BatchFactorComputer,
+    FactorContext,
+    FactorValue,
+    MissingReason,
+)
 
 if TYPE_CHECKING:
     from quant_etf_api.engine.config import StrategyConfig
@@ -120,6 +128,73 @@ class FactorProvider:
             return {}
 
         return self._query_factor_values(factor_ids, trade_date, index_codes)
+
+    def load_asset_factor_records(
+        self,
+        config: "StrategyConfig",
+        trade_date: date,
+        index_codes: list[str],
+    ) -> dict[tuple[str, str], FactorValue]:
+        """加载资产因子记录（保留缺失语义），供服务层诊断与补算决策。
+
+        与 load_asset_factors 的区别：返回值保留 FactorValue 的
+        missing_reason / payload / text，可区分"因子未计算 / 数据不足 / 因子不存在"。
+        引擎执行路径仍使用 load_asset_factors 的扁平字典以保持性能。
+
+        Args:
+            config: 策略配置，用于推导需要的因子 ID 列表。
+            trade_date: 交易日。
+            index_codes: 指数代码列表。
+
+        Returns:
+            key=(index_code, factor_id), value=带缺失语义的 FactorValue。
+        """
+        if self._db is None:
+            return {}
+
+        factor_ids = self.collect_required_factor_ids(config)
+        if not factor_ids:
+            return {}
+
+        rows = self._query_factor_rows(factor_ids, trade_date, index_codes)
+        records: dict[tuple[str, str], FactorValue] = {}
+        for r in rows:
+            records[(r.index_code, r.factor_id)] = FactorValue(
+                factor_id=r.factor_id,
+                numeric=r.factor_value_numeric,
+                text=r.factor_value_text,
+                payload=r.factor_payload or {},
+                missing_reason=(
+                    MissingReason.INSUFFICIENT_DATA if r.factor_value_numeric is None else None
+                ),
+            )
+        return records
+
+    def classify_missing(
+        self,
+        factor_id: str,
+        index_codes: list[str],
+        records: dict[tuple[str, str], FactorValue],
+    ) -> MissingReason | None:
+        """按三态语义分类单个因子的缺失原因。
+
+        Args:
+            factor_id: 因子标识。
+            index_codes: 指数代码列表。
+            records: load_asset_factor_records 的返回值。
+
+        Returns:
+            缺失原因；因子对全部指数均可用时返回 None。
+        """
+        if self._registry is not None and self._registry.get(factor_id) is None:
+            return MissingReason.FACTOR_UNKNOWN
+
+        present = [p for p in ((c, factor_id) for c in index_codes) if p in records]
+        if not present:
+            return MissingReason.NOT_COMPUTED
+        if any(records[p].numeric is None for p in present):
+            return MissingReason.INSUFFICIENT_DATA
+        return None
 
     def load_market_factors(
         self,
@@ -311,3 +386,34 @@ class FactorProvider:
             .all()
         )
         return {(r.index_code, r.factor_id): r.factor_value_numeric for r in rows}
+
+    def _query_factor_rows(
+        self,
+        factor_ids: list[str],
+        trade_date: date,
+        index_codes: list[str],
+    ) -> list[Any]:
+        """查询 index_factor_value 原始行（仅独立因子值，strategy_id IS NULL）。
+
+        Args:
+            factor_ids: 因子 ID 列表。
+            trade_date: 交易日。
+            index_codes: 指数代码列表。
+
+        Returns:
+            IndexFactorValueModel 行列表。
+        """
+        from quant_etf_api.infra.db.models.core import IndexFactorValueModel
+
+        return (
+            self._db.query(IndexFactorValueModel)
+            .filter(
+                and_(
+                    IndexFactorValueModel.factor_id.in_(factor_ids),
+                    IndexFactorValueModel.trade_date == trade_date,
+                    IndexFactorValueModel.index_code.in_(index_codes),
+                    IndexFactorValueModel.strategy_id.is_(None),
+                )
+            )
+            .all()
+        )

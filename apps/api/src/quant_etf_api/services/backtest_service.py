@@ -11,10 +11,19 @@ from datetime import date, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from quant_etf_api.domain.common.signal_level import determine_signal_level
+from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
+from quant_etf_api.domain.portfolio.returns import (
+    compute_allocation_return,
+    get_index_return,
+)
+from quant_etf_api.domain.portfolio.turnover import compute_turnover
+from quant_etf_api.domain.portfolio.universe import (
+    build_universe_items,
+    filter_universe_rows,
+)
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.engine.rebalance import DefaultRebalanceScheduler
 from quant_etf_api.engine.context_builder import ContextBuilder
@@ -25,14 +34,13 @@ from quant_etf_api.infra.db.models.core import (
     BacktestDailyResultModel,
     BacktestIndexResultModel,
     BacktestRunModel,
-    BenchmarkIndexModel,
-    IndexDailyBarModel,
-    IndexValuationModel,
-    MacroIndicatorModel,
 )
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
+from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
+from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
+from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
 from quant_etf_api.schemas.backtest import (
     BacktestComparisonCreateRequest,
     BacktestComparisonDetail,
@@ -239,9 +247,8 @@ class BacktestService:
                 logger.error("run_backtest: backtest_id %s not found", backtest_id)
                 return
 
-            row.status = "running"
-            row.started_at = utcnow()
-            self._db.commit()
+            # 状态流转统一走仓库（与 RunService 模式一致，避免绕过 repository）
+            self._backtest_repo.mark_running(backtest_id)
 
             # 加载策略配置
             config_svc = StrategyConfigService(self._db)
@@ -324,11 +331,11 @@ class BacktestService:
                 all_bars, benchmark_index_code, trading_dates
             )
 
+        # ORM 行列表：用于 checkpoint 提交后释放对象引用
         daily_results: list[BacktestDailyResultModel] = []
-        # 轻量累积器：保存计算汇总指标所需的字段，避免长区间回测内存溢出
-        metric_accumulator: list[tuple[float, int]] = []
-        cumulative = 1.0
-        peak = 1.0
+        # 账户累积器：累计净值/回撤等账务状态由领域对象跟踪，
+        # 主循环只负责生成当日持仓与收益（执行与绩效关注点分离）
+        accumulator = BacktestDayAccumulator()
         prev_positions: dict[str, float] = {}
         last_rebalance_date: date | None = None
         # T+1 执行模式：T 日调仓生成的待执行仓位，T+1 日生效
@@ -346,9 +353,7 @@ class BacktestService:
         if config.index_codes:
             strategy_codes = set(config.index_codes)
             codes = [c for c in codes if c in strategy_codes]
-        cached_universe = [
-            {"etf_code": code, "name_cn": code, "category": "broad_index"} for code in codes
-        ]
+        cached_universe = build_universe_items([{"index_code": c, "name_cn": c} for c in codes])
         cached_metadata = {code: {"name_cn": code, "category": "broad_index"} for code in codes}
 
         for i, trade_date in enumerate(trading_dates):
@@ -395,7 +400,7 @@ class BacktestService:
                     # 换手率基于新旧目标仓位计算
                     turnover = 0.0
                     if prev_positions and new_target:
-                        turnover = self._compute_turnover(prev_positions, new_target)
+                        turnover = compute_turnover(prev_positions, new_target)
                 else:
                     # 非调仓日：如有待执行仓位，今日生效
                     if pending_positions is not None:
@@ -422,26 +427,24 @@ class BacktestService:
                 # 换手率（仅在调仓日计算）
                 turnover = 0.0
                 if prev_positions and should_rebalance:
-                    turnover = self._compute_turnover(prev_positions, positions)
+                    turnover = compute_turnover(prev_positions, positions)
                 pending_positions = None  # same_day 模式不使用 pending
 
             # 计算组合收益（使用当天实际持仓）
             if positions:
-                portfolio_return = self._compute_allocation_return(
+                portfolio_return = compute_allocation_return(
                     positions, trade_date, next_date, all_bars
                 )
             else:
                 portfolio_return = 0.0
 
-            # 更新累计和回撤
-            cumulative *= 1 + portfolio_return / 100
-            cumulative_return_pct = (cumulative - 1) * 100
-            peak = max(peak, cumulative)
-            drawdown = (cumulative / peak - 1) * 100
-
             # 持仓统计
             high_cnt = mid_cnt = low_cnt = 0
             has_positions = bool(positions)
+            # 更新累计净值、峰值与回撤（领域对象记账）
+            accumulator.apply_day(portfolio_return, has_positions)
+            cumulative_return_pct = accumulator.cumulative_return_pct
+            drawdown = accumulator.drawdown_pct
 
             # 基准收益
             benchmark_ret = benchmark_returns[i] if i < len(benchmark_returns) else None
@@ -462,9 +465,8 @@ class BacktestService:
                 benchmark_return=round(benchmark_ret, 4) if benchmark_ret is not None else None,
                 turnover=round(turnover, 4) if turnover > 0 else None,
             )
-            self._db.add(daily_row)
+            self._backtest_repo.add_daily_result(daily_row)
             daily_results.append(daily_row)
-            metric_accumulator.append((portfolio_return, 1 if has_positions else 0))
 
             # 写入指数结果并获取信号计数
             high_cnt, mid_cnt, low_cnt, day_pos_count, day_pos_positive = self._write_index_results(
@@ -500,13 +502,13 @@ class BacktestService:
             if (i + 1) % 100 == 0:
                 self._db.flush()
                 self._db.commit()
-                daily_results.clear()  # 释放 ORM 对象，metric_accumulator 已保留关键数据
+                daily_results.clear()  # 释放 ORM 对象，账户累积器已保留关键数据
 
         self._db.flush()
 
-        # 计算汇总指标（使用轻量累积器和内存中的信号准确率，避免依赖已 flush 的 ORM 对象）
+        # 计算汇总指标（使用账户累积器与内存中的信号准确率，避免依赖已 flush 的 ORM 对象）
         metrics = self._compute_summary_metrics(
-            metric_accumulator,
+            accumulator,
             benchmark_returns,
             total_in_pos_count=total_in_pos_count,
             total_in_pos_positive=total_in_pos_positive,
@@ -590,7 +592,7 @@ class BacktestService:
                 if idx_ret is not None and idx_ret > 0:
                     in_pos_positive += 1
 
-            self._db.add(
+            self._backtest_repo.add_index_result(
                 BacktestIndexResultModel(
                     backtest_id=backtest_id,
                     trade_date=trade_date,
@@ -614,15 +616,8 @@ class BacktestService:
         next_date: date | None,
         all_bars: dict,
     ) -> float:
-        """按仓位分配方案计算指数组合 T+1 收益。"""
-        if next_date is None or not positions:
-            return 0.0
-        total_return = 0.0
-        for code, weight in positions.items():
-            ret = self._get_index_return(code, trade_date, next_date, all_bars)
-            if ret is not None:
-                total_return += weight * ret
-        return round(total_return, 4)
+        """按仓位分配方案计算指数组合 T+1 收益（委托领域函数）。"""
+        return compute_allocation_return(positions, trade_date, next_date, all_bars)
 
     # ── 交易成本 ───────────────────────────────────────────────────────────
 
@@ -631,7 +626,7 @@ class BacktestService:
         prev_positions: dict[str, float],
         curr_positions: dict[str, float],
     ) -> float:
-        """计算换手率（两日仓位变动的绝对值之和 / 2）。
+        """计算换手率（委托领域函数）。
 
         Args:
             prev_positions: 前日仓位权重。
@@ -640,13 +635,7 @@ class BacktestService:
         Returns:
             换手率，0-1。
         """
-        all_codes = set(prev_positions.keys()) | set(curr_positions.keys())
-        turnover = 0.0
-        for code in all_codes:
-            prev_w = prev_positions.get(code, 0.0)
-            curr_w = curr_positions.get(code, 0.0)
-            turnover += abs(curr_w - prev_w)
-        return turnover / 2.0
+        return compute_turnover(prev_positions, curr_positions)
 
     # ── 调仓检查 ───────────────────────────────────────────────────────────
 
@@ -679,7 +668,7 @@ class BacktestService:
 
     def _compute_summary_metrics(
         self,
-        metric_accumulator: list[tuple[float, int]],
+        accumulator: BacktestDayAccumulator,
         benchmark_returns: list[float],
         total_in_pos_count: int = 0,
         total_in_pos_positive: int = 0,
@@ -687,12 +676,12 @@ class BacktestService:
         """计算回测汇总绩效指标，集成专业指标和基准对比。
 
         Args:
-            metric_accumulator: 轻量累积器，每项为 (portfolio_return, has_positions)。
+            accumulator: 账户累积器（每日收益 + 有持仓收益）。
             benchmark_returns: 基准日收益率序列。
             total_in_pos_count: 持仓指数总次数（主循环累积）。
             total_in_pos_positive: 持仓指数正收益总次数（主循环累积）。
         """
-        if not metric_accumulator:
+        if not accumulator.daily_returns:
             return BacktestMetrics(
                 cumulative_return_pct=0.0,
                 max_drawdown_pct=0.0,
@@ -703,8 +692,8 @@ class BacktestService:
                 active_days=0,
             ).model_dump()
 
-        daily_rets = [r[0] for r in metric_accumulator]
-        active_rets = [r[0] for r in metric_accumulator if r[1] > 0]
+        daily_rets = accumulator.daily_returns
+        active_rets = accumulator.active_returns
 
         # 专业指标
         perf = compute_performance_metrics(
@@ -733,7 +722,7 @@ class BacktestService:
             sharpe_ratio=perf.sharpe_ratio,
             win_rate_pct=perf.win_rate_pct,
             signal_accuracy_pct=signal_accuracy_pct,
-            total_trading_days=len(metric_accumulator),
+            total_trading_days=len(accumulator.daily_returns),
             active_days=len(active_rets),
             annualized_return_pct=perf.annualized_return_pct,
             sortino_ratio=perf.sortino_ratio,
@@ -753,37 +742,17 @@ class BacktestService:
         """根据 universe_filter 查询回测指数列表。
 
         仅返回活跃指数（is_active=True），排除已退市/停发的指数，
-        避免回测中的幸存者偏差。
+        避免回测中的幸存者偏差。读取走仓库，过滤走领域纯函数。
         """
-        base_query = self._db.query(BenchmarkIndexModel).filter(
-            BenchmarkIndexModel.is_active.is_(True)
-        )
-        if universe_filter.get("mode") == "subset":
-            codes = universe_filter.get("index_codes", [])
-            if codes:
-                rows = base_query.filter(BenchmarkIndexModel.index_code.in_(codes)).all()
-                return [{"index_code": r.index_code, "name_cn": r.name_cn} for r in rows]
-        rows = base_query.all()
-        return [{"index_code": r.index_code, "name_cn": r.name_cn} for r in rows]
+        rows = BenchmarkIndexRepository(self._db).find_active()
+        rows = filter_universe_rows(rows, universe_filter)
+        return build_universe_items(rows)
 
     def _get_index_trading_dates(
         self, start: date, end: date, index_codes: list[str]
     ) -> list[date]:
-        """从 index_daily_bar 中提取区间内的交易日列表。"""
-        rows = (
-            self._db.query(IndexDailyBarModel.trade_date)
-            .filter(
-                and_(
-                    IndexDailyBarModel.trade_date >= start,
-                    IndexDailyBarModel.trade_date <= end,
-                    IndexDailyBarModel.index_code.in_(index_codes),
-                )
-            )
-            .distinct()
-            .order_by(IndexDailyBarModel.trade_date.asc())
-            .all()
-        )
-        return [r.trade_date for r in rows]
+        """从 index_daily_bar 中提取区间内的交易日列表（读取走仓库）。"""
+        return self._index_bar_repo.find_trading_dates(start, end, index_codes)
 
     def _load_all_index_bars(
         self, trading_dates: list[date], index_codes: list[str]
@@ -799,21 +768,12 @@ class BacktestService:
     def _load_all_valuation(
         self, trading_dates: list[date], index_codes: list[str]
     ) -> dict[tuple[str, date], Any]:
-        """批量加载指数估值数据，按 index_codes 过滤。"""
+        """批量加载指数估值数据，按 index_codes 过滤（读取走仓库）。"""
         if not trading_dates:
             return {}
-        rows = (
-            self._db.query(IndexValuationModel)
-            .filter(
-                and_(
-                    IndexValuationModel.trade_date >= trading_dates[0],
-                    IndexValuationModel.trade_date <= trading_dates[-1],
-                    IndexValuationModel.index_code.in_(index_codes),
-                )
-            )
-            .all()
+        return IndexValuationRepository(self._db).find_range(
+            trading_dates[0], trading_dates[-1], index_codes
         )
-        return {(r.index_code, r.trade_date): r for r in rows}
 
     def _load_all_macro(self) -> dict[str, dict[str, float]]:
         """加载全部宏观指标数据（LPR 等），用于因子计算。
@@ -821,14 +781,7 @@ class BacktestService:
         Returns:
             key=indicator_code, value={period: value} 的字典。
         """
-        rows = self._db.query(MacroIndicatorModel).all()
-        result: dict[str, dict[str, float]] = {}
-        for row in rows:
-            code = row.indicator_code
-            if code not in result:
-                result[code] = {}
-            result[code][row.period] = row.value
-        return result
+        return MacroIndicatorRepository(self._db).find_all_as_map()
 
     def _get_index_return(
         self,
@@ -837,18 +790,8 @@ class BacktestService:
         next_date: date,
         all_bars: dict,
     ) -> float | None:
-        """获取指数 T+1 日收益率（%）。"""
-        today_bar = all_bars.get((index_code, trade_date))
-        next_bar = all_bars.get((index_code, next_date))
-        if today_bar is None or next_bar is None:
-            return None
-        if (
-            today_bar.close_price is None
-            or next_bar.close_price is None
-            or today_bar.close_price == 0
-        ):
-            return None
-        return round((next_bar.close_price / today_bar.close_price - 1) * 100, 4)
+        """获取指数 T+1 日收益率（%）（委托领域函数）。"""
+        return get_index_return(index_code, trade_date, next_date, all_bars)
 
     # ── Schema 转换辅助 ────────────────────────────────────────────────────
 

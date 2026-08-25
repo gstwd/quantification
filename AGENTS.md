@@ -95,7 +95,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 
 - **`api/routers/`** — 10 route groups: `health`, `system`, `etfs`, `indexes`, `market_data`, `strategies`, `signals`, `factors`, `runs`, `backtests`
 - **`api/middleware.py`** — `RequestIdMiddleware`：为每个请求注入唯一 request_id，写入响应头和日志 ContextVar
-- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. New services: `metrics.py`（专业绩效指标，含 VaR/CVaR/连续亏损天数）、`benchmark.py`（基准收益计算）、`index_service.py`、`universe_service.py`、`data_quality.py`（日线/估值异常检测 + 连续性缺口检测）.
+- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. New services: `metrics.py`（专业绩效指标，含 VaR/CVaR/连续亏损天数）、`benchmark.py`（基准收益计算）、`index_service.py`、`universe_service.py`、`data_quality.py`（日线/估值异常检测 + 连续性缺口检测）、`factor_admin_service.py`（因子定义同步，与 FactorService 计算编排分离）、`strategy_decision_service.py`（统一策略执行入口：加载配置→校验→构建上下文→补算触发→引擎执行→可选持久化）.
 - **`engine/`** — **策略引擎核心**：组件化、配置驱动的策略执行管线（11 个文件）：
   - `config.py` — Pydantic 配置模型（含 `TimingConfig`、`ScoreConfig`、`FilterConfig`、`RankConfig`、`PortfolioConfig`、`RiskConfig`、`RebalanceConfig`）
   - `base.py` — `EngineContext`、`EngineResult` 数据结构
@@ -108,7 +108,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
   - `orchestrator.py` — `StrategyEngine` 编排器（管线入口）
   - `factor_provider.py` — `FactorProvider`：桥接因子层与引擎层，实时模式从 DB 加载预计算因子，回测模式批量预计算
   - `context_builder.py` — `ContextBuilder`：统一的引擎上下文构建器，同时支持实时和回测两种模式
-- **`infra/db/`** — SQLAlchemy 2 ORM models (`infra/db/models/core.py` has 22 tables) + 11 repository files (`infra/db/repositories/`). Repositories own all DB queries; services delegate to them for read operations, own only write logic.
+- **`infra/db/`** — SQLAlchemy 2 ORM models (`infra/db/models/core.py` has 22 tables) + repository files (`infra/db/repositories/`). Repositories own all DB queries; services delegate to them for read operations, own only write logic. 后续补充仓库：`index_valuation.py`、`macro_indicator.py`、`index_signal.py`；`index_factor_value` 的 builtin 因子与策略回填两类写入统一走 `IndexFactorValueRepository` 写入门禁（C4）.
 - **`infra/clients/`** — 4 data source clients, all inherit from `base.py`:
   - `akshare_fund.py` (ETF K-line via Sina + shares/AUM via fund_etf_spot_em), `exchange_reference.py` (exchange ref)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
@@ -117,8 +117,9 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - **`infra/job_queue/`** — **统一后台任务队列**：`background_job` 表（迁移 0023）+ `JobRepository`（`FOR UPDATE SKIP LOCKED` 认领）+ `JobQueue`（固定 worker 线程池，`settings.job_queue_workers` 默认 4）+ `handlers.py`（`JOB_HANDLERS` 分发表）。所有后台任务（摄取/因子/回测/对比/AI/启动补全/日历预热/GET 补数）统一 `enqueue(job_type, payload, job_key=...)`，支持 `job_key` 幂等去重与 `max_attempts` 重试。进程重启后 `recover_stuck_jobs()` 将 running 任务标记失败。
 - **`infra/scheduler/`** — `DailyIngestScheduler` / `AIAnalysisScheduler`: daemon `Thread` + `Event` 定时器，仅负责在预定时间将任务入队（`job_key="daily_ingest"` / `ai_analysis:{date}`），实际执行在任务队列 worker 中，调度线程不做任何同步外部调用。
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
-  - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）
-  - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, AllocationPlan dataclasses)
+  - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）、`trading_calendar.py`（`TradingCalendarLike` 协议 + 周末兜底实现）
+  - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, UniverseAsset dataclasses)、`rebalance.py`（纯调仓规则，engine/rebalance.py 为兼容转发层）
+  - `portfolio/` — `turnover.py`（换手率）、`returns.py`（T+1 收益）、`accounting.py`（`BacktestDayAccumulator` 累计/回撤记账）、`universe.py`（universe 构建与 subset 过滤）
   - `etf/`、`market_data/`、`research/` — 预留包目录
 - **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `normalization.py` (zscore/rank/minmax/winsorize/MAD 横截面标准化), `builtins/` (18 built-in computers: volume×1, momentum×3, volatility×1, valuation×2, ma×4, atr×1, donchian×2, rsi×1). **所有因子基于指数数据计算**（`index_factor_value` 表）。**架构原则：因子层只使用指数数据，不使用 ETF 特有数据（份额/AUM/折溢价等）**。
 - **`config/`** — Pydantic settings loaded from `.env`
@@ -161,6 +162,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - **实时模式**：从 DB 加载全量指数数据、K 线（90 天回望）、估值、因子值
 - **回测模式**：使用预加载数据和预计算因子值构建上下文
 - 通过 `FactorProvider` 加载因子值，消除硬编码因子计算
+- **只读约束（C3）**：`ContextBuilder` 不产生任何写操作；`detect_missing_factors()` 只读返回三态缺失原因（`MissingReason`：FACTOR_UNKNOWN/NOT_COMPUTED/INSUFFICIENT_DATA），补算入队由 `StrategyDecisionService.ensure_live_factors` 在服务层触发
 - `services/context_builder.py` 是向后兼容 shim，re-export 自 engine 版本
 
 ### Database schema (25 tables, migrations 0001–0023)

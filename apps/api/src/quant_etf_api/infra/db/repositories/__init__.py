@@ -7,6 +7,10 @@ from quant_etf_api.infra.db.repositories.etf_daily_bar import EtfDailyBarReposit
 from quant_etf_api.infra.db.repositories.etf_daily_share import EtfDailyShareRepository
 from quant_etf_api.infra.db.repositories.etf_universe import EtfUniverseRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
+from quant_etf_api.infra.db.repositories.index_factor_value import IndexFactorValueRepository
+from quant_etf_api.infra.db.repositories.index_signal import IndexSignalRepository
+from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
+from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 
 __all__ = [
@@ -17,5 +21,9 @@ __all__ = [
     "EtfDailyShareRepository",
     "EtfUniverseRepository",
     "IndexDailyBarRepository",
+    "IndexFactorValueRepository",
+    "IndexSignalRepository",
+    "IndexValuationRepository",
+    "MacroIndicatorRepository",
     "ResearchRunRepository",
 ]

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 from datetime import date, datetime
 
 from sqlalchemy.orm import Session
@@ -11,15 +10,12 @@ from quant_etf_api.infra.clients.akshare_fund import (
     map_fund_type_to_category,
 )
 from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
-from quant_etf_api.infra.db.base import SessionLocal, utcnow
-from quant_etf_api.infra.db.models.core import (
-    EtfUniverseModel,
-    ResearchRunItemModel,
-    ResearchRunModel,
-)
+from quant_etf_api.infra.db.base import utcnow
+from quant_etf_api.infra.db.models.core import EtfUniverseModel
 from quant_etf_api.infra.db.repositories.etf_universe import EtfUniverseRepository
 from quant_etf_api.schemas.etf import EtfCreateRequest, EtfDetail
 from quant_etf_api.services.index_service import IndexService
+from quant_etf_api.services.run_service import RunService
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +64,22 @@ def _row_to_detail(row: EtfUniverseModel) -> EtfDetail:
 
 
 class UniverseService:
-    def __init__(self, db: Session, universe_repo: EtfUniverseRepository | None = None) -> None:
+    def __init__(
+        self,
+        db: Session,
+        universe_repo: EtfUniverseRepository | None = None,
+        run_svc: RunService | None = None,
+    ) -> None:
+        """初始化 ETF 池服务。
+
+        Args:
+            db: SQLAlchemy 同步 Session。
+            universe_repo: ETF 池仓库，未提供时自动创建。
+            run_svc: 运行记录服务，未提供时自动创建。
+        """
         self._db = db
         self._universe_repo = universe_repo or EtfUniverseRepository(db)
+        self._run_svc = run_svc or RunService(db)
 
     def list_etfs(self, offset: int = 0, limit: int = 50) -> tuple[list[EtfDetail], int]:
         """分页查询活跃 ETF 列表。
@@ -183,21 +192,17 @@ class UniverseService:
                         "自动关联跟踪指数 %s 失败", row.tracking_index_code, exc_info=True
                     )
 
-            # 后台拉取该 ETF 从成立至今的全量历史日线，不阻塞 HTTP 响应
+            # 后台拉取该 ETF 从成立至今的全量历史日线：统一走任务队列，
+            # 不再裸启 daemon 线程（与 P2 的统一后台任务模型保持一致）
             etf_code_for_bg = req.etf_code
+            from quant_etf_api.infra.job_queue.queue import get_job_queue
 
-            def _fetch_history_bg() -> None:
-                from quant_etf_api.services.ingest_service import IngestService
-
-                db = SessionLocal()
-                try:
-                    IngestService(db)._fetch_and_upsert_bars_full_history(etf_code_for_bg)
-                except Exception:
-                    logger.warning("后台拉取 %s 全量历史日线失败", etf_code_for_bg, exc_info=True)
-                finally:
-                    db.close()
-
-            threading.Thread(target=_fetch_history_bg, daemon=True).start()
+            get_job_queue().enqueue(
+                "data_fill",
+                {"resource": "bars", "code": etf_code_for_bg},
+                job_key=f"bars:{etf_code_for_bg}",
+                max_attempts=2,
+            )
 
             return _row_to_detail(row)
         except ValueError:
@@ -229,27 +234,12 @@ class UniverseService:
         """
         start_time = utcnow()
         try:
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                logger.error("refresh_all: run_id %s 不存在", run_id)
-                return
+            self._run_svc.mark_running(run_id)
 
-            run.status = "running"
-            run.started_at = start_time
-            self._db.commit()
-
-            etfs = (
-                self._db.query(EtfUniverseModel)
-                .filter(EtfUniverseModel.is_active.is_(True))
-                .order_by(EtfUniverseModel.etf_code)
-                .all()
-            )
+            etfs = self._universe_repo.find_all_active()
 
             if not etfs:
-                run.status = "success"
-                run.finished_at = utcnow()
-                run.metrics = {"total": 0, "message": "无活跃 ETF"}
-                self._db.commit()
+                self._run_svc.mark_success(run_id, metrics={"total": 0, "message": "无活跃 ETF"})
                 return
 
             updated_count = 0
@@ -322,46 +312,32 @@ class UniverseService:
                     logger.warning("ETF %s 元数据刷新失败: %s", etf_code, e)
 
                 try:
-                    item = ResearchRunItemModel(
+                    from quant_etf_api.infra.db.repositories.research_run import (
+                        ResearchRunRepository,
+                    )
+
+                    ResearchRunRepository(self._db).add_item(
                         run_id=run_id,
                         etf_code=etf_code,
                         status=item_status,
                         message=item_message or None,
                     )
-                    self._db.add(item)
-                    self._db.commit()
                 except Exception:
                     self._db.rollback()
                     logger.warning("写入 ResearchRunItem 失败: %s", etf_code, exc_info=True)
 
-            run = self._db.query(ResearchRunModel).filter(ResearchRunModel.run_id == run_id).first()
-            if run is None:
-                return
-            run.status = "success"
-            run.finished_at = utcnow()
-            run.metrics = {
-                "total": len(etfs),
-                "updated": updated_count,
-                "unchanged": unchanged_count,
-                "failed": failed_count,
-                "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-            }
-            self._db.commit()
+            self._run_svc.mark_success(
+                run_id,
+                metrics={
+                    "total": len(etfs),
+                    "updated": updated_count,
+                    "unchanged": unchanged_count,
+                    "failed": failed_count,
+                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
+                },
+            )
 
         except Exception as e:
             self._db.rollback()
             logger.warning("refresh_all 整体失败: %s", e, exc_info=True)
-            try:
-                run = (
-                    self._db.query(ResearchRunModel)
-                    .filter(ResearchRunModel.run_id == run_id)
-                    .first()
-                )
-                if run is not None:
-                    run.status = "failed"
-                    run.finished_at = utcnow()
-                    run.error_message = str(e)[:1000]
-                    self._db.commit()
-            except Exception:
-                logger.warning("更新失败状态时出错", exc_info=True)
-                self._db.rollback()
+            self._run_svc.mark_failed(run_id, str(e)[:1000])

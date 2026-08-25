@@ -5,6 +5,8 @@
 - 因子来源：通过 FactorProvider 加载预计算值，不再硬编码计算
 - 因子集：由 StrategyConfig 推导，实时和回测完全一致
 - 方法统一：build() 替代 build_live_context() + build_backtest_context()
+- 只读职责：本模块不产生任何写操作；因子缺失检测由
+  detect_missing_factors() 只读返回，补算入队由服务层决定
 """
 
 from __future__ import annotations
@@ -15,9 +17,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from quant_etf_api.domain.portfolio.universe import build_universe_items
 from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.engine.factor_provider import FactorProvider
+from quant_etf_api.factors.base import MissingReason
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +31,7 @@ class ContextBuilder:
 
     通过 FactorProvider 加载预计算因子值，消除硬编码因子计算。
     实时和回测模式共用 build() 入口，由参数区分模式。
+    本类保持只读：因子缺失时仅返回缺失原因，不触发任何计算/入队。
     """
 
     def __init__(
@@ -41,7 +46,7 @@ class ContextBuilder:
             db: SQLAlchemy 同步 Session。
             factor_provider: 因子供应器，未提供时自动创建。
             registry: 因子注册表，供回测模式的因子预计算使用。
-                实时模式不再按需重算因子，缺失时改为入队异步计算任务。
+                实时模式不再按需重算因子，缺失时由服务层入队异步任务。
         """
         self._db = db
         self._registry = registry
@@ -91,6 +96,62 @@ class ContextBuilder:
             )
         return self._build_live(config, trade_date)
 
+    def detect_missing_factors(
+        self,
+        config: StrategyConfig,
+        index_codes: list[str],
+        asset_factors: dict[tuple[str, str], float | None],
+    ) -> dict[str, str]:
+        """只读检测策略依赖因子的缺失情况，返回三态缺失原因。
+
+        三种缺失语义（对应 C2 的因子契约升级）：
+        - FACTOR_UNKNOWN：因子未注册（配置引用未知因子，校验期应已拦截）
+        - NOT_COMPUTED：因子已注册但当日完全未计算（无任何资产的值）
+        - INSUFFICIENT_DATA：因子已计算但值为 NULL（行情数据不足）
+
+        本方法不产生任何写操作，补算决策由服务层基于返回值作出。
+
+        Args:
+            config: 策略配置。
+            index_codes: 指数代码列表。
+            asset_factors: 已加载的平铺因子值字典。
+
+        Returns:
+            {factor_id: MissingReason} 映射，仅包含缺失的因子。
+        """
+        if self._registry is None:
+            return {}
+
+        required_ids = self._factor_provider.collect_required_factor_ids(config)
+        if not required_ids or not index_codes:
+            return {}
+
+        registry_ids = {spec.factor_id for spec in self._registry.specs()}
+        missing: dict[str, str] = {}
+
+        for factor_id in required_ids:
+            if factor_id not in registry_ids:
+                # 未知因子：配置校验应已拦截，这里仅记录语义，不触发补算
+                missing[factor_id] = MissingReason.FACTOR_UNKNOWN.value
+                continue
+
+            pairs = [(c, factor_id) for c in index_codes]
+            present = [p for p in pairs if p in asset_factors]
+            if not present:
+                # 整个因子从未计算过（任何资产都没有该因子行）
+                missing[factor_id] = MissingReason.NOT_COMPUTED.value
+                continue
+            if any(asset_factors.get(p) is None for p in pairs):
+                # 因子行存在但数值为 NULL（行情数据未就绪导致）
+                missing[factor_id] = MissingReason.INSUFFICIENT_DATA.value
+
+        if missing:
+            logger.info(
+                "因子缺失检测: missing=%s",
+                {k: v for k, v in missing.items()},
+            )
+        return missing
+
     # ==================================================================
     # 实时模式
     # ==================================================================
@@ -100,32 +161,26 @@ class ContextBuilder:
 
         自动将 trade_date 回退到有数据的最近交易日，
         避免当天未收盘时查询不到任何数据。
+        数据加载统一走仓库，与回测模式共用同一套过滤条件。
         """
-        from quant_etf_api.infra.db.models.core import (
-            BenchmarkIndexModel,
-            IndexDailyBarModel,
-            IndexValuationModel,
-        )
+        from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
+        from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
+        from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
+
+        index_bar_repo = IndexDailyBarRepository(self._db)
+        valuation_repo = IndexValuationRepository(self._db)
 
         # 解析有效交易日：取 DB 中不超过 trade_date 的最大交易日
         effective_date = self._resolve_effective_date(trade_date)
 
         # 获取全量活跃指数（排除已退市/停发的指数，避免幸存者偏差）
-        indexes = (
-            self._db.query(BenchmarkIndexModel)
-            .filter(BenchmarkIndexModel.is_active.is_(True))
-            .all()
-        )
+        indexes = BenchmarkIndexRepository(self._db).find_active()
         index_codes = [idx.index_code for idx in indexes]
 
         # 应用 index_codes 过滤
         index_codes = self._filter_by_scope(indexes, config.index_codes)
 
-        universe = [
-            {"etf_code": idx.index_code, "name_cn": idx.name_cn, "category": "broad_index"}
-            for idx in indexes
-            if idx.index_code in index_codes
-        ]
+        universe = build_universe_items(indexes, index_codes)
         asset_metadata = {
             idx.index_code: {"name_cn": idx.name_cn, "category": "broad_index"}
             for idx in indexes
@@ -134,103 +189,20 @@ class ContextBuilder:
 
         # 加载日线（90 天回望，基于有效交易日）
         lookback = effective_date - timedelta(days=90)
-        bars = (
-            self._db.query(IndexDailyBarModel)
-            .filter(
-                IndexDailyBarModel.trade_date >= lookback,
-                IndexDailyBarModel.trade_date <= effective_date,
-                IndexDailyBarModel.index_code.in_(index_codes),
-            )
-            .all()
-        )
-        local_bars: dict[tuple[str, date], Any] = {(r.index_code, r.trade_date): r for r in bars}
+        local_bars = index_bar_repo.find_all_date_range(lookback, effective_date, index_codes)
 
-        # 加载估值（基于有效交易日范围）
-        val_rows = (
-            self._db.query(IndexValuationModel)
-            .filter(
-                IndexValuationModel.trade_date >= lookback,
-                IndexValuationModel.trade_date <= effective_date,
-            )
-            .all()
-        )
-        index_valuation: dict[str, dict[str, Any]] = {}
-        for r in val_rows:
-            index_valuation[r.index_code] = {
-                "pe_percentile": r.pe_percentile,
-                "pb_percentile": r.pb_percentile,
-            }
+        # 加载估值（按 index_codes 过滤，避免全量加载后内存过滤）
+        val_rows = valuation_repo.find_range(lookback, effective_date, index_codes)
+        index_valuation: dict[str, dict[str, float | None]] = {}
+        for (code, _), r in val_rows.items():
+            index_valuation.setdefault(code, {})
+            index_valuation[code]["pe_percentile"] = r.pe_percentile
+            index_valuation[code]["pb_percentile"] = r.pb_percentile
 
         # 通过 FactorProvider 加载因子值（基于有效交易日）
         asset_factors = self._factor_provider.load_asset_factors(
             config, effective_date, index_codes
         )
-
-        # 缺失检测：策略依赖的因子值缺失时入队异步因子计算，
-        # 不再在请求线程内同步重算并 commit（写路径移出实时查询链路）
-        # 检查分三层：
-        # 1. 因子 ID 是否完全不存在（整个因子从未计算过）
-        # 2. 部分资产的因子值缺失（调度器计算时部分指数数据未就绪导致跳过）
-        # 3. 因子行存在但值为 NULL（调度器计算时行情数据未完全就绪）
-        if self._registry is not None:
-            factor_ids = self._factor_provider.collect_required_factor_ids(config)
-            loaded_ids = {fid for (_, fid) in asset_factors}
-            missing = [fid for fid in factor_ids if fid not in loaded_ids]
-
-            # 检查是否存在部分资产因子值缺失（因子 ID 存在但非全量覆盖）
-            if not missing and factor_ids and index_codes:
-                expected_pairs = len(index_codes) * len(factor_ids)
-                if len(asset_factors) < expected_pairs:
-                    # 找出缺失的 (code, factor_id) 组合
-                    missing_pairs = [
-                        (c, f)
-                        for c in index_codes
-                        for f in factor_ids
-                        if (c, f) not in asset_factors
-                    ]
-                    affected_codes = {c for c, _ in missing_pairs}
-                    affected_fids = {f for _, f in missing_pairs}
-                    logger.info(
-                        "部分资产因子值缺失，入队异步补算: trade_date=%s "
-                        "affected_codes=%s affected_factors=%s",
-                        effective_date,
-                        affected_codes,
-                        affected_fids,
-                    )
-                    missing = list(affected_fids)
-
-            # 检查因子值是否为 NULL（行存在但无实际数值，
-            # 常见于调度器在行情数据就绪前计算导致）
-            if not missing and factor_ids and index_codes:
-                null_pairs = [
-                    (c, f)
-                    for c in index_codes
-                    for f in factor_ids
-                    if (c, f) in asset_factors and asset_factors[(c, f)] is None
-                ]
-                if null_pairs:
-                    null_fids = {f for _, f in null_pairs}
-                    logger.info(
-                        "部分因子值为 NULL，入队异步补算: trade_date=%s "
-                        "affected_factors=%s",
-                        effective_date,
-                        null_fids,
-                    )
-                    missing = list(null_fids)
-
-            if missing:
-                logger.info(
-                    "因子数据缺失，入队异步计算: trade_date=%s missing=%s",
-                    effective_date,
-                    missing[:5],
-                )
-                from quant_etf_api.infra.job_queue.queue import get_job_queue
-
-                get_job_queue().enqueue(
-                    "factor_computation",
-                    {"trade_date": effective_date.isoformat()},
-                    job_key=f"factor_computation:{effective_date}",
-                )
 
         # 补充原始行情数据（change_pct、close_price 不是因子，是原始字段）
         for code in index_codes:
@@ -272,6 +244,8 @@ class ContextBuilder:
             asset_factors=asset_factors,
             market_factors=market_factors,
             asset_metadata=asset_metadata,
+            index_valuation=index_valuation,
+            # 兼容保留：新代码请使用类型化字段 index_valuation
             extra={"index_valuation": index_valuation},
         )
 
@@ -306,9 +280,7 @@ class ContextBuilder:
         if cached_universe is not None:
             universe = cached_universe
         else:
-            universe = [
-                {"etf_code": code, "name_cn": code, "category": "broad_index"} for code in codes
-            ]
+            universe = build_universe_items([{"index_code": c, "name_cn": c} for c in codes])
         if cached_metadata is not None:
             asset_metadata = cached_metadata
         else:
@@ -356,6 +328,7 @@ class ContextBuilder:
             asset_factors=asset_factors,
             market_factors=market_factors,
             asset_metadata=asset_metadata,
+            index_valuation={},
             extra={},
         )
 
@@ -367,7 +340,7 @@ class ContextBuilder:
         """将有数据的最新交易日作为有效交易日。
 
         查询 index_daily_bar 表中不超过 trade_date 的最大交易日，
-        确保后续因子查询能命中数据。
+        确保后续因子查询能命中数据。查询走 IndexDailyBarRepository。
 
         Args:
             trade_date: 请求的交易日（可能是当天，但数据尚未就绪）。
@@ -375,18 +348,12 @@ class ContextBuilder:
         Returns:
             有数据的最新交易日。如果 DB 为空则原样返回 trade_date。
         """
-        from quant_etf_api.infra.db.models.core import IndexDailyBarModel
+        from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 
-        result = (
-            self._db.query(IndexDailyBarModel.trade_date)
-            .filter(IndexDailyBarModel.trade_date <= trade_date)
-            .order_by(IndexDailyBarModel.trade_date.desc())
-            .limit(1)
-            .first()
-        )
-        if result is not None and result[0] < trade_date:
-            logger.info("trade_date=%s 无数据，回退到最近交易日=%s", trade_date, result[0])
-            return result[0]
+        latest = IndexDailyBarRepository(self._db).find_latest_trade_date_before(trade_date)
+        if latest is not None and latest < trade_date:
+            logger.info("trade_date=%s 无数据，回退到最近交易日=%s", trade_date, latest)
+            return latest
         return trade_date
 
     @staticmethod

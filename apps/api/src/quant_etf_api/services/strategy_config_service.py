@@ -7,9 +7,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from quant_etf_api.engine.config import StrategyConfig
+from quant_etf_api.engine.config import SUPPORTED_SCHEMA_VERSIONS, StrategyConfig
 from quant_etf_api.engine.factor_provider import FactorProvider
-from quant_etf_api.engine.score import _TRANSFORM_REGISTRY
+from quant_etf_api.engine.transforms import list_transform_names
 from quant_etf_api.factors.registry import get_default_factor_registry
 from quant_etf_api.infra.db.models.core import StrategyConfigModel
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
@@ -93,13 +93,17 @@ class StrategyConfigService:
         if not validation.valid:
             raise ValueError(f"配置校验失败: {'; '.join(validation.errors)}")
 
+        # 归一化：config_json 未显式声明 schema_version 时写入默认 v1
+        config_json = dict(req.config_json)
+        config_json.setdefault("schema_version", "1")
+
         model = StrategyConfigModel(
             strategy_id=req.strategy_id,
             display_name=req.display_name,
             version=req.version,
             description=req.description,
             frequency=req.frequency,
-            config_json=req.config_json,
+            config_json=config_json,
             status="active",
         )
         self._repo.upsert(model)
@@ -125,6 +129,9 @@ class StrategyConfigService:
             validation = self.validate_config(req.config_json)
             if not validation.valid:
                 raise ValueError(f"配置校验失败: {'; '.join(validation.errors)}")
+            # 归一化：保留已显式声明的 schema_version，缺失时写入默认 v1
+            req.config_json = dict(req.config_json)
+            req.config_json.setdefault("schema_version", "1")
 
         if req.display_name is not None:
             existing.display_name = req.display_name
@@ -170,6 +177,8 @@ class StrategyConfigService:
             validation_input = {
                 "strategy_id": "_validate_",
                 "display_name": "_validate_",
+                # 旧配置无 schema_version 字段时按 v1 校验（默认兼容）
+                "schema_version": config_json.get("schema_version", "1"),
                 **config_json,
             }
             config = StrategyConfig(**validation_input)
@@ -220,6 +229,11 @@ class StrategyConfigService:
             errors.append("display_name 不能为空")
         if not config.score.factors:
             errors.append("score.factors 不能为空")
+        if config.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+            errors.append(
+                f"不支持的配置 schema_version '{config.schema_version}'，"
+                f"可用: {sorted(SUPPORTED_SCHEMA_VERSIONS)}"
+            )
 
         # 择时代理指数校验
         if config.timing and not config.timing.proxy_index_codes:
@@ -289,17 +303,13 @@ class StrategyConfigService:
 
         # 因子定义属于 factor_definition 表，必须使用 FactorDefinitionRepository
         # 查询启用集合（StrategyConfigRepository 不负责因子元数据）
-        active_ids = {
-            row.factor_id for row in FactorDefinitionRepository(self._db).find_active()
-        }
+        active_ids = {row.factor_id for row in FactorDefinitionRepository(self._db).find_active()}
         registry_ids = {spec.factor_id for spec in get_default_factor_registry().specs()}
 
         errors: list[str] = []
         for factor_id in required_ids:
             if factor_id not in registry_ids:
-                errors.append(
-                    f"未知因子 '{factor_id}'：请检查拼写（可用因子见 GET /factors）"
-                )
+                errors.append(f"未知因子 '{factor_id}'：请检查拼写（可用因子见 GET /factors）")
             elif factor_id not in active_ids:
                 errors.append(
                     f"因子 '{factor_id}' 已停用或未同步："
@@ -331,10 +341,10 @@ class StrategyConfigService:
 
         errors: list[str] = []
         for factor_id, transform_name in transforms.items():
-            if transform_name and transform_name not in _TRANSFORM_REGISTRY:
+            if transform_name and transform_name not in list_transform_names():
                 errors.append(
                     f"未知变换函数 '{transform_name}'（用于因子 {factor_id}），"
-                    f"可用: {sorted(_TRANSFORM_REGISTRY)}"
+                    f"可用: {list_transform_names()}"
                 )
         return errors
 

@@ -32,6 +32,7 @@ from quant_etf_api.schemas.backtest import BacktestCreateRequest
 from quant_etf_api.schemas.strategy import StrategyValidationResult
 from quant_etf_api.services.backtest_service import BacktestService
 from quant_etf_api.services.strategy_config_service import StrategyConfigService
+from quant_etf_api.services.strategy_decision_service import StrategyDecisionService
 from quant_etf_api.services.strategy_service import StrategyService
 
 
@@ -73,9 +74,7 @@ def _valid_config_json() -> dict:
             "factors": {"return_20d": 1.0, "ma_20d": 0.5, "pe_percentile": 0.8},
             "transforms": {"pe_percentile": "invert_percentile"},
         },
-        "filters": {
-            "rules": [{"factor": "return_20d", "op": "gt", "value": 0.0}]
-        },
+        "filters": {"rules": [{"factor": "return_20d", "op": "gt", "value": 0.0}]},
         "rank": {"momentum_factor": "return_20d", "valuation_factor": "pe_percentile"},
         "timing": {"factors": {"return_60d": 1.0}, "proxy_index_codes": ["000300"]},
         "portfolio": {"method": "equal_weight"},
@@ -152,9 +151,7 @@ class TestValidateConfig:
     def test_unknown_compare_to_rejected(self) -> None:
         """过滤规则 compare_to 引用未知因子时快速失败。"""
         cfg = _valid_config_json()
-        cfg["filters"] = {
-            "rules": [{"factor": "return_20d", "op": "gt", "compare_to": "ma_999d"}]
-        }
+        cfg["filters"] = {"rules": [{"factor": "return_20d", "op": "gt", "compare_to": "ma_999d"}]}
         result = _make_service().validate_config(cfg)
         assert not result.valid
         assert any("未知因子 'ma_999d'" in e for e in result.errors)
@@ -171,9 +168,7 @@ class TestValidateConfig:
         """regime 条件化配置中引用未知因子时快速失败。"""
         cfg = _valid_config_json()
         cfg["regime_rules"] = {
-            "defensive": {
-                "score": {"factors": {"return_5d": 1.0, "ghost_factor": 0.5}}
-            }
+            "defensive": {"score": {"factors": {"return_5d": 1.0, "ghost_factor": 0.5}}}
         }
         result = _make_service().validate_config(cfg)
         assert not result.valid
@@ -184,9 +179,7 @@ class TestValidateConfig:
         active_ids = _registry_ids() - {"return_20d"}
         result = _make_service(active_ids=active_ids).validate_config(_valid_config_json())
         assert not result.valid
-        assert any(
-            "return_20d" in e and "已停用或未同步" in e for e in result.errors
-        )
+        assert any("return_20d" in e and "已停用或未同步" in e for e in result.errors)
 
     def test_unknown_transform_rejected(self) -> None:
         """未知变换函数名被提前拦截，避免运行时 KeyError。"""
@@ -253,10 +246,12 @@ class TestRuntimeGuards:
             mock.patch.object(
                 StrategyConfigRepository, "find_starred", return_value=[row_a, row_b]
             ),
+            mock.patch.object(StrategyConfigService, "get_parsed_config", return_value=cfg),
             mock.patch.object(
-                StrategyConfigService, "get_parsed_config", return_value=cfg
+                StrategyDecisionService,
+                "run_allocation",
+                side_effect=_fake_run_allocation,
             ),
-            mock.patch.object(StrategyService, "run_allocation", side_effect=_fake_run_allocation),
         ):
             summary = svc.get_starred_summary(trade_date=date(2025, 1, 15))
 

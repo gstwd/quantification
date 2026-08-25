@@ -7,7 +7,6 @@ Bocha（博查）搜索 API，专注于中文金融新闻搜索优化。
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 
 import requests

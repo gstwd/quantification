@@ -132,6 +132,37 @@ class BacktestRepository(BaseRepository):
             run.metrics = metrics
         self._db.commit()
 
+    def mark_running(self, backtest_id: str) -> None:
+        """将回测标记为执行中状态。
+
+        Args:
+            backtest_id: 回测标识。
+        """
+        if self._db.is_active is False:
+            self._db.rollback()
+        run = self.find_by_id(backtest_id)
+        if run is None:
+            return
+        run.status = "running"
+        run.started_at = utcnow()
+        self._db.commit()
+
+    def add_daily_result(self, row: BacktestDailyResultModel) -> None:
+        """登记一条每日组合结果（不提交，由主循环 checkpoint 统一提交）。
+
+        Args:
+            row: 每日结果 ORM 行。
+        """
+        self._db.add(row)
+
+    def add_index_result(self, row: BacktestIndexResultModel) -> None:
+        """登记一条指数级信号/收益结果（不提交，由主循环 checkpoint 统一提交）。
+
+        Args:
+            row: 指数结果 ORM 行。
+        """
+        self._db.add(row)
+
     def mark_failed(self, backtest_id: str, error_message: str) -> None:
         """将回测标记为失败。"""
         # 如果 session 处于 pending rollback 状态，先回滚以恢复可用状态

@@ -1,6 +1,5 @@
 """NewsSourceManager 单元测试。"""
 
-import pytest
 
 from quant_etf_api.infra.news_sources.base import (
     BaseNewsSearchProvider,

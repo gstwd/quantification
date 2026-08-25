@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from sqlalchemy import and_, func, text
+from sqlalchemy import and_, func
 from sqlalchemy.dialects.postgresql import JSONB
 
 from quant_etf_api.infra.db.models.core import (

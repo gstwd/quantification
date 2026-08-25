@@ -10,6 +10,7 @@ from quant_etf_api.domain.strategies.models import (
     StrategyContextData,
     StrategyResult,
     TimingSignal,
+    UniverseAsset,
 )
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "StrategyContextData",
     "StrategyResult",
     "TimingSignal",
+    "UniverseAsset",
 ]

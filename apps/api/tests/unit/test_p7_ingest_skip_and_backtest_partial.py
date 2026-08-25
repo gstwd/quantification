@@ -19,6 +19,7 @@ from quant_etf_api.engine.config import (
     ScoreConfig,
     StrategyConfig,
 )
+from quant_etf_api.infra.db.models.core import ResearchRunModel
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
 from quant_etf_api.services.backtest_service import BacktestService
 from quant_etf_api.services.ingest_service import IngestService, _daily_ingest_lock
@@ -44,28 +45,27 @@ class TestIngestSkippedSemantics:
     def test_daily_ingest_concurrent_skip_marks_skipped(self) -> None:
         """并发冲突时 daily_ingest 标记为 skipped 而非 success。"""
         db = mock.MagicMock()
-        mock_run = db.query.return_value.filter.return_value.first.return_value
         assert _daily_ingest_lock.acquire(blocking=False)
         try:
             _make_service(db).run_daily_ingest("r1")
         finally:
             _daily_ingest_lock.release()
 
-        assert mock_run.status == "skipped"
-        assert mock_run.metrics["reason"] == "concurrent_skip"
+        # 状态流转走 RunService/ResearchRunRepository（db.get 返回运行行）
+        run = db.get(ResearchRunModel, "r1")
+        assert run.status == "skipped"
+        assert run.metrics["reason"] == "concurrent_skip"
         db.commit.assert_called()
 
     def test_daily_ingest_holiday_marks_skipped(self) -> None:
         """非交易日时 daily_ingest 标记为 skipped。"""
         db = mock.MagicMock()
-        mock_run = db.query.return_value.filter.return_value.first.return_value
-        with mock.patch(
-            "quant_etf_api.services.ingest_service.TradingCalendar", _FakeCalendar
-        ):
+        with mock.patch("quant_etf_api.services.ingest_service.TradingCalendar", _FakeCalendar):
             _make_service(db).run_daily_ingest("r1")
 
-        assert mock_run.status == "skipped"
-        assert mock_run.metrics["reason"] == "holiday"
+        run = db.get(ResearchRunModel, "r1")
+        assert run.status == "skipped"
+        assert run.metrics["reason"] == "holiday"
 
     @pytest.mark.parametrize(
         "method",
@@ -74,15 +74,15 @@ class TestIngestSkippedSemantics:
     def test_refresh_concurrent_skip_marks_skipped(self, method: str) -> None:
         """三个手动刷新入口在并发冲突时标记为 skipped。"""
         db = mock.MagicMock()
-        mock_run = db.query.return_value.filter.return_value.first.return_value
         assert _daily_ingest_lock.acquire(blocking=False)
         try:
             getattr(_make_service(db), method)("r1")
         finally:
             _daily_ingest_lock.release()
 
-        assert mock_run.status == "skipped"
-        assert mock_run.metrics["reason"] == "concurrent_skip"
+        run = db.get(ResearchRunModel, "r1")
+        assert run.status == "skipped"
+        assert run.metrics["reason"] == "concurrent_skip"
 
     @pytest.mark.parametrize(
         "method",
@@ -91,14 +91,12 @@ class TestIngestSkippedSemantics:
     def test_refresh_holiday_marks_skipped(self, method: str) -> None:
         """三个手动刷新入口在非交易日时标记为 skipped。"""
         db = mock.MagicMock()
-        mock_run = db.query.return_value.filter.return_value.first.return_value
-        with mock.patch(
-            "quant_etf_api.services.ingest_service.TradingCalendar", _FakeCalendar
-        ):
+        with mock.patch("quant_etf_api.services.ingest_service.TradingCalendar", _FakeCalendar):
             getattr(_make_service(db), method)("r1")
 
-        assert mock_run.status == "skipped"
-        assert mock_run.metrics["reason"] == "holiday"
+        run = db.get(ResearchRunModel, "r1")
+        assert run.status == "skipped"
+        assert run.metrics["reason"] == "holiday"
 
 
 class TestBacktestPartialResults:

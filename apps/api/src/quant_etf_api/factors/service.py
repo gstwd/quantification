@@ -1,11 +1,13 @@
 """因子计算编排与持久化（基于指数数据）。
 
 负责以下职责：
-1. 将 FactorRegistry 中的 FactorSpec 与 factor_definition 表双向同步（幂等）
-2. 批量加载 90 天回望的指数上下文数据
-3. 对全量指数 × 全量已启用因子调用 compute()
-4. 使用 PostgreSQL partial index ON CONFLICT upsert 写入 index_factor_value
-5. 提供横截面和时间序列查询，支持按需自动计算缺失数据
+1. 批量加载 90 天回望的指数上下文数据
+2. 对全量指数 × 全量已启用因子调用 compute()
+3. 使用 PostgreSQL partial index ON CONFLICT upsert 写入 index_factor_value
+4. 提供横截面和时间序列查询，支持按需自动计算缺失数据
+
+元数据同步（sync_factor_definitions）已迁移至 services/factor_admin_service.py，
+因子值写入统一走 IndexFactorValueRepository 写入门禁。
 """
 
 from __future__ import annotations
@@ -15,21 +17,19 @@ from datetime import date, timedelta
 from typing import Any, TYPE_CHECKING
 
 from sqlalchemy import and_
-from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from quant_etf_api.factors.base import FactorContext
 from quant_etf_api.infra.db.models.core import (
     BenchmarkIndexModel,
     DailySentimentAggregateModel,
-    FactorDefinitionModel,
-    IndexDailyBarModel,
     IndexFactorValueModel,
-    IndexValuationModel,
-    MacroIndicatorModel,
 )
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
+from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.infra.db.repositories.index_factor_value import IndexFactorValueRepository
+from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
+from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
 from quant_etf_api.schemas.factor import CrossSectionRow
 from quant_etf_api.schemas.signal import FactorRow
 
@@ -84,72 +84,6 @@ class FactorService:
     # ==================================================================
     # 公开接口
     # ==================================================================
-
-    def sync_factor_definitions(self) -> dict[str, int]:
-        """将注册表中的 FactorSpec 同步到 factor_definition 表（幂等）。
-
-        同步策略：
-        - 代码中有、DB 中没有 → INSERT（新因子）
-        - 代码和 DB 都有 → 仅更新 version、required_data（代码管控字段）
-        - DB 中有、代码中没有 → 设为 is_active=False（保留历史数据关联）
-
-        Returns:
-            同步统计字典：new / updated / deactivated。
-        """
-        specs = {s.factor_id: s for s in self._registry.specs()}
-        existing = {d.factor_id: d for d in self._repo.find_all()}
-
-        new_count = 0
-        update_count = 0
-        deactivate_count = 0
-
-        for factor_id, spec in specs.items():
-            if factor_id not in existing:
-                self._db.add(
-                    FactorDefinitionModel(
-                        factor_id=spec.factor_id,
-                        name=spec.name,
-                        category=spec.category,
-                        version=spec.version,
-                        description=spec.description,
-                        required_data=spec.required_data,
-                        owner_plugin=None,
-                        is_active=True,
-                    )
-                )
-                new_count += 1
-            else:
-                row = existing[factor_id]
-                changed = False
-                if row.version != spec.version:
-                    row.version = spec.version
-                    changed = True
-                if row.required_data != spec.required_data:
-                    row.required_data = spec.required_data
-                    changed = True
-                if changed:
-                    update_count += 1
-
-        for factor_id, row in existing.items():
-            if factor_id not in specs and row.is_active:
-                row.is_active = False
-                deactivate_count += 1
-
-        if new_count or update_count or deactivate_count:
-            try:
-                self._db.commit()
-                logger.info(
-                    "因子定义同步完成: 新增=%d 更新=%d 停用=%d",
-                    new_count,
-                    update_count,
-                    deactivate_count,
-                )
-            except Exception:
-                self._db.rollback()
-                logger.warning("因子定义同步失败", exc_info=True)
-                raise
-
-        return {"new": new_count, "updated": update_count, "deactivated": deactivate_count}
 
     def compute_and_store(self, trade_date: date) -> dict[str, Any]:
         """计算指定交易日全量指数 × 全量已启用因子并写入 DB。
@@ -208,7 +142,7 @@ class FactorService:
                         exc_info=True,
                     )
 
-        upsert_count = self._bulk_upsert(rows_to_upsert)
+        upsert_count = self._index_repo.bulk_upsert_builtin(rows_to_upsert)
         logger.info(
             "因子计算完成: trade_date=%s index=%d factor=%d upsert=%d errors=%d",
             trade_date,
@@ -340,40 +274,22 @@ class FactorService:
         lookback_start = trade_date - timedelta(days=lookback_days)
 
         # 加载指数日线
-        index_bar_rows = (
-            self._db.query(IndexDailyBarModel)
-            .filter(
-                and_(
-                    IndexDailyBarModel.trade_date >= lookback_start,
-                    IndexDailyBarModel.trade_date <= trade_date,
-                    IndexDailyBarModel.index_code.in_(index_codes),
-                )
-            )
-            .all()
+        index_bar_rows = IndexDailyBarRepository(self._db).find_by_date_range(
+            lookback_start, trade_date, index_codes
         )
 
         # 加载指数估值数据（全回望窗口，供 erp_percentile 等派生因子访问历史分布）
         valuation_rows = (
-            (
-                self._db.query(IndexValuationModel)
-                .filter(
-                    and_(
-                        IndexValuationModel.trade_date >= lookback_start,
-                        IndexValuationModel.trade_date <= trade_date,
-                        IndexValuationModel.index_code.in_(index_codes),
-                    )
-                )
-                .all()
+            IndexValuationRepository(self._db).find_by_date_range(
+                lookback_start, trade_date, index_codes
             )
             if index_codes
             else []
         )
 
         # 加载宏观指标数据（LPR 等），取每个指标代码的全部历史记录
-        macro_rows = (
-            self._db.query(MacroIndicatorModel)
-            .filter(MacroIndicatorModel.indicator_code.in_(["lpr1y", "lpr5y", "cpi", "pmi"]))
-            .all()
+        macro_rows = MacroIndicatorRepository(self._db).find_by_codes(
+            ["lpr1y", "lpr5y", "cpi", "pmi"]
         )
         macro_indicators: dict[str, dict[str, float]] = {}
         for row in macro_rows:
@@ -388,37 +304,6 @@ class FactorService:
             macro_indicators=macro_indicators,
             ai_sentiment=_load_ai_sentiment(self._db, lookback_start, trade_date),
         )
-
-    def _bulk_upsert(self, rows: list[dict[str, Any]]) -> int:
-        """批量 upsert index_factor_value，使用 partial unique index 处理 NULL strategy_id。
-
-        Args:
-            rows: 待写入的字典列表。
-
-        Returns:
-            实际写入（insert + update）的记录数，异常时返回 0。
-        """
-        if not rows:
-            return 0
-
-        stmt = insert(IndexFactorValueModel).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["trade_date", "index_code", "factor_id"],
-            index_where=IndexFactorValueModel.strategy_id.is_(None),
-            set_={
-                "factor_value_numeric": stmt.excluded.factor_value_numeric,
-                "factor_value_text": stmt.excluded.factor_value_text,
-                "factor_payload": stmt.excluded.factor_payload,
-            },
-        )
-        try:
-            result = self._db.execute(stmt)
-            self._db.commit()
-            return result.rowcount
-        except Exception:
-            self._db.rollback()
-            logger.error("_bulk_upsert 失败，已回滚", exc_info=True)
-            return 0
 
 
 def _load_ai_sentiment(

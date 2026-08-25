@@ -7,12 +7,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from quant_etf_api.infra.news_sources.base import (
     BaseNewsSearchProvider,
     NewsSearchResponse,
-    NewsSearchResult,
 )
 
 logger = logging.getLogger(__name__)

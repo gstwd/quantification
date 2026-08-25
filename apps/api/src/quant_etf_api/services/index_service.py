@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
 from quant_etf_api.infra.db.models.core import BenchmarkIndexModel
+from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.schemas.market_data import BenchmarkIndex
 
 logger = logging.getLogger(__name__)
@@ -15,7 +16,13 @@ class IndexService:
     """基准指数管理服务，提供指数的增删查功能。"""
 
     def __init__(self, db: Session) -> None:
+        """初始化指数管理服务。
+
+        Args:
+            db: SQLAlchemy 同步 Session。
+        """
         self._db = db
+        self._repo = BenchmarkIndexRepository(db)
 
     def list_indexes(self) -> list[BenchmarkIndex]:
         """列出所有活跃的基准指数。
@@ -23,12 +30,7 @@ class IndexService:
         Returns:
             按代码升序排列的活跃基准指数列表（已停用的不会返回）
         """
-        rows = (
-            self._db.query(BenchmarkIndexModel)
-            .filter(BenchmarkIndexModel.is_active.is_(True))
-            .order_by(BenchmarkIndexModel.index_code)
-            .all()
-        )
+        rows = self._repo.find_active()
         return [BenchmarkIndex(index_code=r.index_code, index_name=r.name_cn) for r in rows]
 
     def add_index(self, index_code: str, name_cn: str | None = None) -> BenchmarkIndex:
@@ -49,7 +51,7 @@ class IndexService:
         Raises:
             ValueError: 指数已处于活跃状态、代码无效或无法获取名称
         """
-        existing = self._db.get(BenchmarkIndexModel, index_code)
+        existing = self._repo.find_by_code(index_code)
         if existing and existing.is_active:
             raise ValueError(f"指数 {index_code} 已存在")
 
@@ -107,7 +109,7 @@ class IndexService:
         Raises:
             ValueError: 指数不存在或已停用
         """
-        row = self._db.get(BenchmarkIndexModel, index_code)
+        row = self._repo.find_by_code(index_code)
         if not row:
             raise ValueError(f"指数 {index_code} 不存在")
         if not row.is_active:
@@ -130,7 +132,7 @@ class IndexService:
             index_code: 指数代码
             name_cn: 中文名称兜底值
         """
-        existing = self._db.get(BenchmarkIndexModel, index_code)
+        existing = self._repo.find_by_code(index_code)
         if existing and existing.is_active:
             return
         if existing and not existing.is_active:

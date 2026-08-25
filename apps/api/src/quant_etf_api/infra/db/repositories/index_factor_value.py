@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import delete, func
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.db.models.core import (
@@ -217,3 +219,69 @@ class IndexFactorValueRepository(BaseRepository):
             .all()
         }
         return sorted(bar_codes - factor_codes)
+
+    # ==================================================================
+    # 写入门禁（C4：收敛 index_factor_value 的两个写入方）
+    # ==================================================================
+
+    def bulk_upsert_builtin(self, rows: list[dict[str, Any]]) -> int:
+        """批量 upsert 独立因子值（strategy_id=NULL）。
+
+        因子层（FactorService）的唯一写入入口，使用 partial unique index
+        处理 PostgreSQL 的 NULL 唯一性语义。
+
+        Args:
+            rows: 待写入的字典列表。
+
+        Returns:
+            实际写入（insert + update）的记录数，异常时返回 0。
+        """
+        if not rows:
+            return 0
+        stmt = insert(IndexFactorValueModel).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["trade_date", "index_code", "factor_id"],
+            index_where=IndexFactorValueModel.strategy_id.is_(None),
+            set_={
+                "factor_value_numeric": stmt.excluded.factor_value_numeric,
+                "factor_value_text": stmt.excluded.factor_value_text,
+                "factor_payload": stmt.excluded.factor_payload,
+            },
+        )
+        try:
+            result = self._db.execute(stmt)
+            self._db.commit()
+            return result.rowcount
+        except Exception:
+            self._db.rollback()
+            return 0
+
+    def delete_strategy_values(self, strategy_id: str, trade_date: date) -> None:
+        """删除指定策略在指定交易日的回填因子值（strategy_id=策略ID）。
+
+        策略执行前先清空旧值，确保配置修改后不残留旧数据。
+
+        Args:
+            strategy_id: 策略 ID。
+            trade_date: 交易日。
+        """
+        self._db.execute(
+            delete(IndexFactorValueModel).where(
+                IndexFactorValueModel.strategy_id == strategy_id,
+                IndexFactorValueModel.trade_date == trade_date,
+            )
+        )
+
+    def bulk_insert_strategy_values(self, rows: list[dict[str, Any]]) -> None:
+        """批量插入策略回填因子值（strategy_id=策略ID）。
+
+        策略层（StrategyExecutionService）的唯一写入入口；
+        与 bulk_upsert_builtin 语义不同：builtin 为因子层计算结果，
+        本方法为策略运行期的评分快照，两者通过 strategy_id 区分。
+
+        Args:
+            rows: 因子值行字典列表（必须含 strategy_id）。
+        """
+        if not rows:
+            return
+        self._db.execute(insert(IndexFactorValueModel).values(rows))
