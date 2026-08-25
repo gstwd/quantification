@@ -47,22 +47,23 @@ class _FakeRow:
         self.factor_id = factor_id
 
 
-class _FakeFactorRepo:
-    """FactorDefinitionRepository 的替身，find_active 返回指定因子集。"""
-
-    def __init__(self, active_ids: set[str]) -> None:
-        self._active_ids = set(active_ids)
-
-    def find_active(self) -> list[_FakeRow]:
-        """返回 active 因子行列表。"""
-        return [_FakeRow(fid) for fid in self._active_ids]
-
-
 def _make_service(active_ids: set[str] | None = None) -> StrategyConfigService:
-    """构造注入假因子仓库的策略配置服务。"""
-    svc = StrategyConfigService(db=None)  # type: ignore[arg-type]
-    svc._repo = _FakeFactorRepo(active_ids if active_ids is not None else _registry_ids())  # type: ignore[assignment]
-    return svc
+    """构造策略配置服务，使因子查询返回指定因子集。
+
+    使用 MagicMock 会话驱动真实的 FactorDefinitionRepository.find_active()
+    查询链，确保测试覆盖真实仓库代码路径（而非替身方法）。
+
+    Args:
+        active_ids: 应视为已启用的因子 ID 集合，缺省为全部注册因子。
+
+    Returns:
+        已注入假因子查询结果的 StrategyConfigService。
+    """
+    db = mock.MagicMock()
+    db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [
+        _FakeRow(fid) for fid in (active_ids if active_ids is not None else _registry_ids())
+    ]
+    return StrategyConfigService(db=db)
 
 
 def _valid_config_json() -> dict:

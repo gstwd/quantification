@@ -12,6 +12,7 @@ from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.score import _TRANSFORM_REGISTRY
 from quant_etf_api.factors.registry import get_default_factor_registry
 from quant_etf_api.infra.db.models.core import StrategyConfigModel
+from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
 from quant_etf_api.infra.db.repositories.strategy_config import StrategyConfigRepository
 from quant_etf_api.schemas.strategy import (
     StrategyConfigCreate,
@@ -286,7 +287,11 @@ class StrategyConfigService:
         if not required_ids:
             return []
 
-        active_ids = {row.factor_id for row in self._repo.find_active()}
+        # 因子定义属于 factor_definition 表，必须使用 FactorDefinitionRepository
+        # 查询启用集合（StrategyConfigRepository 不负责因子元数据）
+        active_ids = {
+            row.factor_id for row in FactorDefinitionRepository(self._db).find_active()
+        }
         registry_ids = {spec.factor_id for spec in get_default_factor_registry().specs()}
 
         errors: list[str] = []
