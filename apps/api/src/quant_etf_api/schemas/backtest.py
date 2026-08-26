@@ -3,9 +3,27 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from quant_etf_api.schemas.types import UtcDatetime
+
+
+class BacktestWarning(BaseModel):
+    """回测/运行过程中需要透传给前端的结构化提示。
+
+    Attributes:
+        level: 级别，info=信息, warning=警告, error=错误。
+        code: 稳定错误码（如 WARMUP / MISSING_FACTOR / DATA_GAP / PARTIAL_RESULT）。
+        message: 人类可读的中文说明。
+        trade_date: 关联的交易日，全局性警告为 None。
+        index_code: 关联的指数代码，全局性警告为 None。
+    """
+
+    level: Literal["info", "warning", "error"]
+    code: str
+    message: str
+    trade_date: date | None = None
+    index_code: str | None = None
 
 
 class BacktestCreateRequest(BaseModel):
@@ -79,6 +97,7 @@ class BacktestDetail(BacktestSummary):
 
     universe_filter: dict[str, Any]
     params: dict[str, Any] | None = None
+    warnings: list[BacktestWarning] = Field(default_factory=list)
 
 
 class BacktestDailyResult(BaseModel):

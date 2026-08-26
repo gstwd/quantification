@@ -246,10 +246,16 @@ class StrategyConfigService:
 
         # 过滤规则校验
         valid_ops = {"gt", "lt", "gte", "lte", "eq", "neq", "between"}
+        valid_missing_strategies = {"pass", "fail", "exclude"}
         if config.filters:
             for rule in config.filters.rules:
                 if rule.op not in valid_ops:
                     errors.append(f"过滤规则操作符 '{rule.op}' 不合法，可用: {valid_ops}")
+                if rule.missing_strategy not in valid_missing_strategies:
+                    errors.append(
+                        f"过滤规则 missing_strategy '{rule.missing_strategy}' 不合法，"
+                        f"可用: {sorted(valid_missing_strategies)}"
+                    )
                 # 跨因子比较校验：compare_to 与 value 二选一
                 has_value = rule.value is not None
                 has_compare = bool(rule.compare_to)

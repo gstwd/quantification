@@ -233,6 +233,17 @@
             <option value="between">区间 (between)</option>
           </select>
 
+          <select
+            :value="rule.missing_strategy ?? 'fail'"
+            class="fp-select fr-missing"
+            title="因子值缺失时的处理方式"
+            @change="updateFilterRule(i, 'missing_strategy', ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="fail">缺失:不满足</option>
+            <option value="pass">缺失:通过</option>
+            <option value="exclude">缺失:排除</option>
+          </select>
+
           <!-- between 模式：双值输入 -->
           <template v-if="rule.op === 'between'">
             <input
@@ -619,6 +630,7 @@ interface FilterRuleValue {
   op: string
   value: number | number[]
   compare_to?: string
+  missing_strategy?: string
 }
 
 const props = defineProps<{
@@ -789,11 +801,12 @@ function initFilter(): void {
     op: r.op as string || 'gt',
     value: r.value as number | number[],
     compare_to: r.compare_to as string | undefined,
+    missing_strategy: r.missing_strategy as string | undefined,
   }))
 }
 
 function addFilterRule(): void {
-  filterRules.value.push({ factor: '', op: 'gt', value: 0, compare_to: undefined })
+  filterRules.value.push({ factor: '', op: 'gt', value: 0, compare_to: undefined, missing_strategy: 'fail' })
 }
 
 function updateFilterRule(i: number, key: string, value: unknown): void {
@@ -985,6 +998,9 @@ function buildConfig(): Record<string, unknown> {
           rule.compare_to = r.compare_to
         } else {
           rule.value = r.value
+        }
+        if (r.missing_strategy && r.missing_strategy !== 'fail') {
+          rule.missing_strategy = r.missing_strategy
         }
         return rule
       }),
@@ -1276,6 +1292,7 @@ watch(() => props.modelValue, () => {
 }
 .fr-factor { flex: 1.5; }
 .fr-op { flex: 1; }
+.fr-missing { flex: 0.9; }
 .fr-mode { flex: 0.8; }
 .fr-value { width: 90px; }
 .fr-sep { color: var(--text-muted); font-size: 12px; }

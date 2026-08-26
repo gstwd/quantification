@@ -117,8 +117,19 @@ class BacktestRepository(BaseRepository):
             .scalar()
         )
 
-    def mark_success(self, backtest_id: str, metrics: dict[str, Any] | None = None) -> None:
-        """将回测标记为成功。"""
+    def mark_success(
+        self,
+        backtest_id: str,
+        metrics: dict[str, Any] | None = None,
+        warnings: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """将回测标记为成功，可附带结构化提示。
+
+        Args:
+            backtest_id: 回测标识。
+            metrics: 汇总绩效指标。
+            warnings: 执行过程中的结构化提示列表（BacktestWarning 的 dict 形式）。
+        """
         # 如果 session 处于 pending rollback 状态，先回滚以恢复可用状态
         if self._db.is_active is False:
             self._db.rollback()
@@ -130,6 +141,8 @@ class BacktestRepository(BaseRepository):
         run.progress = 100
         if metrics:
             run.metrics = metrics
+        if warnings is not None:
+            run.warnings = warnings
         self._db.commit()
 
     def mark_running(self, backtest_id: str) -> None:
@@ -163,8 +176,19 @@ class BacktestRepository(BaseRepository):
         """
         self._db.add(row)
 
-    def mark_failed(self, backtest_id: str, error_message: str) -> None:
-        """将回测标记为失败。"""
+    def mark_failed(
+        self,
+        backtest_id: str,
+        error_message: str,
+        warnings: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """将回测标记为失败，可附带结构化提示。
+
+        Args:
+            backtest_id: 回测标识。
+            error_message: 失败原因。
+            warnings: 执行过程中的结构化提示列表（如 PARTIAL_RESULT）。
+        """
         # 如果 session 处于 pending rollback 状态，先回滚以恢复可用状态
         if self._db.is_active is False:
             self._db.rollback()
@@ -174,6 +198,8 @@ class BacktestRepository(BaseRepository):
         run.status = "failed"
         run.finished_at = utcnow()
         run.error_message = error_message[:1000]
+        if warnings is not None:
+            run.warnings = warnings
         self._db.commit()
 
     # ── 对比回测查询与状态更新 ────────────────────────────────────────────

@@ -7,6 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from quant_etf_api.schemas.backtest import BacktestWarning
+
 
 class StrategySummary(BaseModel):
     """策略摘要，用于列表展示。
@@ -95,6 +97,7 @@ class AllocationResponse(BaseModel):
         plan: 仓位分配方案，含 positions、total_exposure、cash_ratio、reasoning。
         data_date: 本次决策所用因子数据的交易日，用于展示数据新鲜度。
         pipeline_detail: 管线调试详情，含评分分解、过滤明细、择时因子等中间数据。
+        warnings: 执行过程中检测到的提示（如因子缺失），无则空列表。
     """
 
     timing: dict[str, Any]
@@ -102,6 +105,7 @@ class AllocationResponse(BaseModel):
     plan: dict[str, Any]
     data_date: date | None = None
     pipeline_detail: dict[str, Any] | None = None
+    warnings: list[BacktestWarning] = Field(default_factory=list)
 
 
 class StarredStrategyItem(BaseModel):

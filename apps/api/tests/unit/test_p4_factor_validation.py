@@ -197,6 +197,35 @@ class TestValidateConfig:
         assert not result.valid
         assert any("操作符" in e for e in result.errors)
 
+    def test_invalid_missing_strategy_rejected(self) -> None:
+        """过滤规则 missing_strategy 非法值时校验失败。"""
+        cfg = _valid_config_json()
+        cfg["filters"] = {
+            "rules": [
+                {"factor": "return_20d", "op": "gt", "value": 0.0, "missing_strategy": "skip"}
+            ]
+        }
+        result = _make_service().validate_config(cfg)
+        assert not result.valid
+        assert any("missing_strategy" in e for e in result.errors)
+
+    def test_valid_missing_strategy_values_accepted(self) -> None:
+        """missing_strategy 三个合法值（pass/fail/exclude）均通过校验。"""
+        for strategy in ("pass", "fail", "exclude"):
+            cfg = _valid_config_json()
+            cfg["filters"] = {
+                "rules": [
+                    {
+                        "factor": "return_20d",
+                        "op": "gt",
+                        "value": 0.0,
+                        "missing_strategy": strategy,
+                    }
+                ]
+            }
+            result = _make_service().validate_config(cfg)
+            assert result.valid, f"missing_strategy={strategy} 应通过校验: {result.errors}"
+
 
 class TestRuntimeGuards:
     """运行期兜底：快速失败与聚合接口降级。"""

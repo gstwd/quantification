@@ -109,6 +109,12 @@ class DefaultFilterEngine:
             passed = self._evaluate_asset(code, config, context, use_and, rule_results)
             if passed:
                 result[code] = score
+            logger.debug(
+                "[pipeline] 过滤明细: %s passed=%s rules=%s",
+                code,
+                passed,
+                [(r.factor, r.op, r.passed, r.missing) for r in rule_results],
+            )
 
             if debug is not None:
                 name_cn = (
@@ -123,7 +129,9 @@ class DefaultFilterEngine:
                     if failed_rules:
                         parts = []
                         for r in failed_rules:
-                            if isinstance(r.threshold, str):
+                            if r.missing:
+                                parts.append(f"{r.factor} 因子缺失({r.missing_strategy})")
+                            elif isinstance(r.threshold, str):
                                 parts.append(
                                     f"{r.factor}({r.factor_value}) {r.op} {r.threshold}"
                                     f"({r.compare_value})"
@@ -164,12 +172,20 @@ class DefaultFilterEngine:
             if rule.compare_to is not None:
                 # 跨因子比较模式
                 compare_value = context.asset_factors.get((code, rule.compare_to))
-                rule_passed = _check_rule(factor_value, rule.op, compare_value)
                 threshold = rule.compare_to
+                missing = factor_value is None or compare_value is None
             else:
-                # 固定阈值模式（原有逻辑）
-                rule_passed = _check_rule(factor_value, rule.op, rule.value)
                 threshold = rule.value
+                missing = factor_value is None or threshold is None
+
+            # 缺失判定：因子值或参照值为 None 时按 missing_strategy 处理。
+            # pass=规则视为通过，fail/exclude=规则不满足（exclude 在语义上
+            # 标记"因子缺失导致的排除"，与普通规则不满足区分，便于调试定位）。
+            if missing:
+                rule_passed = rule.missing_strategy == "pass"
+            else:
+                compare_target = compare_value if rule.compare_to is not None else rule.value
+                rule_passed = _check_rule(factor_value, rule.op, compare_target)
 
             if rule_results is not None:
                 rule_results.append(
@@ -181,6 +197,8 @@ class DefaultFilterEngine:
                         factor_value=factor_value,
                         compare_value=compare_value,
                         passed=rule_passed,
+                        missing=missing,
+                        missing_strategy=rule.missing_strategy,
                     )
                 )
 

@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from quant_etf_api.infra.db.base import Base, utcnow
@@ -484,6 +485,11 @@ class BacktestRunModel(Base):
     error_message: Mapped[str | None] = mapped_column(Text, comment="失败时的错误信息")
     metrics: Mapped[dict | None] = mapped_column(
         JSON, comment="汇总绩效指标，完成后写入，包含累计收益、最大回撤、夏普比率等"
+    )
+    warnings: Mapped[list | None] = mapped_column(
+        JSONB,
+        comment="回测执行过程中的结构化提示（level/code/message/trade_date/index_code），"
+        "如预热期、因子缺失、数据缺口、部分结果等",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, comment="回测创建时间（UTC）"

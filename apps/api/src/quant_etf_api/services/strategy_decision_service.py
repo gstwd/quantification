@@ -17,6 +17,7 @@ checkpoint 语义特殊，保留自己的主循环，但共享 ContextBuilder �
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import asdict
 from datetime import date
 from typing import Any
@@ -32,6 +33,7 @@ from quant_etf_api.infra.db.repositories.index_factor_value import IndexFactorVa
 from quant_etf_api.infra.db.repositories.index_signal import IndexSignalRepository
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.infra.trading_calendar import TradingCalendar
+from quant_etf_api.schemas.backtest import BacktestWarning
 from quant_etf_api.schemas.strategy import (
     AllocationResponse,
     StarredStrategyItem,
@@ -232,10 +234,46 @@ class StrategyDecisionService:
         if not validation.valid:
             raise ValueError(f"策略 {strategy_id} 配置校验失败: {'; '.join(validation.errors)}")
 
+        start = time.perf_counter()
+        logger.info("[strategy] 实时分配启动: strategy=%s trade_date=%s", strategy_id, trade_date)
         context = self.build_live_context(config, trade_date)
         # 缺失因子触发异步补算（只读检测，不阻塞本次返回）
         self.ensure_live_factors(config, context)
         result = self.run(config, context)
+
+        # 构建结构化警告：未知因子已被配置校验拦截，这里只透传可执行的
+        # NOT_COMPUTED / INSUFFICIENT_DATA，避免"看起来正常但结果为空"的静默问题。
+        index_codes = [u["index_code"] for u in context.universe]
+        missing = self._context_builder.detect_missing_factors(
+            config, index_codes, context.asset_factors
+        )
+        warnings: list[BacktestWarning] = []
+        for fid, reason in missing.items():
+            if reason in (MissingReason.NOT_COMPUTED.value, MissingReason.INSUFFICIENT_DATA.value):
+                label = "当日未计算" if reason == MissingReason.NOT_COMPUTED.value else "数据不足"
+                warnings.append(
+                    BacktestWarning(
+                        level="warning",
+                        code="MISSING_FACTOR",
+                        message=f"因子 {fid} 缺失（{label}），本次决策中该因子按缺失处理",
+                        trade_date=context.trade_date,
+                    )
+                )
+        if missing:
+            logger.warning(
+                "[strategy] 因子缺失: strategy=%s missing=%s",
+                strategy_id,
+                missing,
+            )
+
+        elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
+        logger.info(
+            "[strategy] 实时分配完成: strategy=%s date=%s 资产=%s 耗时=%sms",
+            strategy_id,
+            context.trade_date,
+            len(result.rankings),
+            elapsed_ms,
+        )
 
         return AllocationResponse(
             timing=asdict(result.timing) if result.timing else {},
@@ -248,6 +286,7 @@ class StrategyDecisionService:
             },
             data_date=context.trade_date,
             pipeline_detail=asdict(result.pipeline_detail) if result.pipeline_detail else None,
+            warnings=warnings,
         )
 
     # ==================================================================

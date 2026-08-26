@@ -71,12 +71,16 @@ class FilterRule(BaseModel):
         op: 比较操作符：gt / lt / gte / lte / eq / neq / between。
         value: 比较值（固定阈值），between 时为 [min, max]。与 compare_to 二选一。
         compare_to: 被比较的因子 ID，用于跨因子比较（如 ma_5d > ma_20d）。与 value 二选一。
+        missing_strategy: 因子值缺失时的处理策略。
+            fail=规则不满足（默认，与历史行为一致）, pass=规则视为通过,
+            exclude=明确排除该资产（语义上与 fail 区分，便于调试定位）。
     """
 
     factor: str
     op: str
     value: float | list[float] | None = None
     compare_to: str | None = None
+    missing_strategy: str = "fail"
 
 
 class FilterConfig(BaseModel):

@@ -282,3 +282,138 @@ class TestDefaultFilterEngine:
 
         assert "A" in result
         assert "B" not in result
+
+
+class TestFilterMissingStrategy:
+    """B6：过滤规则因子缺失时的 missing_strategy 行为。"""
+
+    def test_default_is_fail(self) -> None:
+        """默认 missing_strategy=fail，缺失资产被过滤，与历史行为一致。"""
+        engine = DefaultFilterEngine()
+        config = FilterConfig(
+            logic="AND",
+            rules=[FilterRule(factor="pe_percentile", op="gt", value=30.0)],
+        )
+        assets = {"A": 80.0, "B": 60.0}
+        context = _make_context(
+            asset_factors={
+                ("A", "pe_percentile"): 50.0,
+                # B 无估值因子值
+            },
+        )
+
+        result = engine.filter(config, assets, context)
+
+        assert "A" in result
+        assert "B" not in result
+
+    def test_missing_strategy_pass_keeps_asset(self) -> None:
+        """missing_strategy=pass：因子缺失时规则视为通过，资产保留。"""
+        engine = DefaultFilterEngine()
+        config = FilterConfig(
+            logic="AND",
+            rules=[
+                FilterRule(
+                    factor="pe_percentile",
+                    op="gt",
+                    value=30.0,
+                    missing_strategy="pass",
+                )
+            ],
+        )
+        assets = {"A": 80.0, "B": 60.0}
+        context = _make_context(
+            asset_factors={
+                ("A", "pe_percentile"): 50.0,
+                # B 无估值因子值，按 pass 处理
+            },
+        )
+
+        result = engine.filter(config, assets, context)
+
+        assert result == assets
+
+    def test_missing_strategy_exclude_marks_debug(self) -> None:
+        """missing_strategy=exclude：缺失资产被排除，且调试明细标记 missing。"""
+        engine = DefaultFilterEngine()
+        config = FilterConfig(
+            logic="AND",
+            rules=[
+                FilterRule(
+                    factor="pe_percentile",
+                    op="gt",
+                    value=30.0,
+                    missing_strategy="exclude",
+                )
+            ],
+        )
+        assets = {"A": 80.0, "B": 60.0}
+        context = _make_context(
+            asset_factors={
+                ("A", "pe_percentile"): 50.0,
+                # B 无估值因子值，按 exclude 排除
+            },
+        )
+        debug: list = []
+
+        result = engine.filter(config, assets, context, debug=debug)
+
+        assert "A" in result
+        assert "B" not in result
+        by_code = {d.etf_code: d for d in debug}
+        assert by_code["B"].passed is False
+        assert by_code["B"].fail_reason == "pe_percentile 因子缺失(exclude)"
+        assert by_code["B"].rule_results[0].missing is True
+        assert by_code["B"].rule_results[0].missing_strategy == "exclude"
+
+    def test_missing_strategy_pass_with_or_logic(self) -> None:
+        """OR 逻辑下 pass 规则缺失时视为满足，资产可被保留。"""
+        engine = DefaultFilterEngine()
+        config = FilterConfig(
+            logic="OR",
+            rules=[
+                FilterRule(factor="a", op="gt", value=80.0),
+                FilterRule(factor="b", op="gt", value=80.0, missing_strategy="pass"),
+            ],
+        )
+        assets = {"A": 80.0, "B": 60.0}
+        context = _make_context(
+            asset_factors={
+                ("A", "a"): 40.0,
+                ("A", "b"): 40.0,  # 两条都不满足
+                ("B", "a"): 40.0,  # b 缺失但 missing_strategy=pass → 满足
+            },
+        )
+
+        result = engine.filter(config, assets, context)
+
+        assert "A" not in result
+        assert "B" in result
+
+    def test_cross_factor_missing_with_pass(self) -> None:
+        """跨因子比较：compare_to 参照值缺失时按 missing_strategy 处理。"""
+        engine = DefaultFilterEngine()
+        config = FilterConfig(
+            logic="AND",
+            rules=[
+                FilterRule(
+                    factor="ma_5d",
+                    op="gt",
+                    compare_to="ma_20d",
+                    missing_strategy="pass",
+                )
+            ],
+        )
+        assets = {"A": 80.0, "B": 60.0}
+        context = _make_context(
+            asset_factors={
+                ("A", "ma_5d"): 5100.0,
+                ("A", "ma_20d"): 5050.0,  # 正常金叉
+                ("B", "ma_5d"): 5100.0,  # B 缺少 ma_20d → pass
+            },
+        )
+
+        result = engine.filter(config, assets, context)
+
+        assert "A" in result
+        assert "B" in result

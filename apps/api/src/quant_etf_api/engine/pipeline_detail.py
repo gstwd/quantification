@@ -66,6 +66,8 @@ class FilterRuleResult:
         factor_value: 因子实际值，None 表示无数据。
         compare_value: 跨因子比较时的参照因子值，非跨因子比较时为 None。
         passed: 是否通过该条规则。
+        missing: 因子值（或 compare_to 参照值）是否缺失。
+        missing_strategy: 缺失时的处理策略（pass/fail/exclude）。
     """
 
     rule_index: int
@@ -75,6 +77,8 @@ class FilterRuleResult:
     factor_value: float | None = None
     compare_value: float | None = None
     passed: bool = False
+    missing: bool = False
+    missing_strategy: str = "fail"
 
 
 @dataclass

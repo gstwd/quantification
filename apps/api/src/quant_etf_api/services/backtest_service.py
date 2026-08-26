@@ -54,6 +54,7 @@ from quant_etf_api.schemas.backtest import (
     BacktestIndexResult,
     BacktestMetrics,
     BacktestSummary,
+    BacktestWarning,
     ComparisonDailyPoint,
     ComparisonDailyResponse,
     ComparisonMetrics,
@@ -271,7 +272,25 @@ class BacktestService:
                 partial_date = self._backtest_repo.find_latest_daily_date(backtest_id)
                 if partial_date is not None:
                     message = f"{message}；已保存部分结果至 {partial_date}"
-                self._backtest_repo.mark_failed(backtest_id, message)
+                    logger.warning(
+                        "[backtest] 部分结果: backtest_id=%s 已保存部分结果至 %s",
+                        backtest_id,
+                        partial_date,
+                    )
+                fail_warnings: list[BacktestWarning] = []
+                if partial_date is not None:
+                    fail_warnings.append(
+                        BacktestWarning(
+                            level="error",
+                            code="PARTIAL_RESULT",
+                            message=f"回测中途失败，已保存部分结果至 {partial_date}",
+                        )
+                    )
+                self._backtest_repo.mark_failed(
+                    backtest_id,
+                    message,
+                    warnings=[w.model_dump() for w in fail_warnings],
+                )
             except Exception:
                 self._db.rollback()
 
@@ -329,6 +348,12 @@ class BacktestService:
         run_params["_lookback_days"] = lookback_days
         run_params["_warmup_trading_days"] = warmup_trading_days
         row.params = run_params
+        if warmup_trading_days > 0:
+            logger.warning(
+                "[backtest] 因子预热期: backtest_id=%s 前 %s 个交易日长周期因子可能数据不足",
+                backtest_id,
+                warmup_trading_days,
+            )
 
         # 基准配置
         params = row.params or {}
@@ -346,6 +371,20 @@ class BacktestService:
             benchmark_returns = compute_buy_hold_benchmark(
                 all_bars, benchmark_index_code, trading_dates
             )
+
+        logger.info(
+            "[backtest] 回测启动: backtest_id=%s strategy=%s 区间=%s~%s 标的=%d "
+            "回望=%s天 预热=%s个交易日 执行模型=%s 基准=%s",
+            backtest_id,
+            row.strategy_id,
+            trading_dates[0],
+            trading_dates[-1],
+            len(index_codes),
+            lookback_days,
+            warmup_trading_days,
+            execution_model,
+            benchmark_index_code if enable_benchmark else "禁用",
+        )
 
         # ORM 行列表：用于 checkpoint 提交后释放对象引用
         daily_results: list[BacktestDailyResultModel] = []
@@ -503,6 +542,20 @@ class BacktestService:
             total_in_pos_count += day_pos_count
             total_in_pos_positive += day_pos_positive
 
+            logger.debug(
+                "[backtest] 日结果: backtest_id=%s date=%s regime=%s exposure=%s "
+                "持仓=%s 收益=%s%% 高/中/低=%s/%s/%s",
+                backtest_id,
+                trade_date,
+                result.timing.regime if result.timing else None,
+                day_total_exposure,
+                {k: round(v, 4) for k, v in positions.items()},
+                round(portfolio_return, 4),
+                high_cnt,
+                mid_cnt,
+                low_cnt,
+            )
+
             prev_positions = positions
 
             # 每 10% 交易日更新一次进度（最少 1 天触发）
@@ -511,6 +564,19 @@ class BacktestService:
                 if new_progress - last_progress >= 10:
                     self._backtest_repo.update_progress(backtest_id, new_progress)
                     last_progress = new_progress
+                    logger.info(
+                        "[backtest] 进度: backtest_id=%s %s/%s (%s%%) date=%s "
+                        "累计收益=%s%% 高/中/低=%s/%s/%s",
+                        backtest_id,
+                        i + 1,
+                        total_dates,
+                        new_progress,
+                        trade_date,
+                        round(cumulative_return_pct, 2),
+                        high_cnt,
+                        mid_cnt,
+                        low_cnt,
+                    )
 
             # 每 100 天 checkpoint 提交一次：
             # - 释放事务大小，避免长区间回测的单一巨大事务
@@ -530,7 +596,62 @@ class BacktestService:
             total_in_pos_count=total_in_pos_count,
             total_in_pos_positive=total_in_pos_positive,
         )
-        self._backtest_repo.mark_success(backtest_id, metrics)
+        # 收集结构化警告：预热期 / 因子缺失 / 数据缺口 / 基准缺失，
+        # 随成功状态一并持久化，前端轮询时按 key 去重弹窗。
+        run_warnings: list[BacktestWarning] = []
+        if warmup_trading_days > 0:
+            run_warnings.append(
+                BacktestWarning(
+                    level="warning",
+                    code="WARMUP",
+                    message=(
+                        f"回测前 {warmup_trading_days} 个交易日长周期因子数据不足"
+                        "（预热期），前段信号与绩效参考价值有限"
+                    ),
+                )
+            )
+        run_warnings.extend(
+            self._collect_missing_factor_warnings(
+                precomputed,
+                trading_dates,
+                factor_index_codes,
+                FactorProvider.collect_required_factor_ids(config),
+            )
+        )
+        run_warnings.extend(
+            self._collect_data_gap_warnings(trading_dates, index_codes, all_bars)
+        )
+        if enable_benchmark:
+            bench_missing = [
+                d for d in trading_dates if (benchmark_index_code, d) not in all_bars
+            ]
+            if bench_missing:
+                run_warnings.append(
+                    BacktestWarning(
+                        level="warning",
+                        code="BENCHMARK_MISSING",
+                        message=(
+                            f"基准指数 {benchmark_index_code} 有 {len(bench_missing)} 个交易日"
+                            f"缺行情数据（{bench_missing[0]}~{bench_missing[-1]}），基准对比存在缺口"
+                        ),
+                        index_code=benchmark_index_code,
+                    )
+                )
+        logger.info(
+            "[backtest] 回测完成: backtest_id=%s 累计收益=%s%% 最大回撤=%s%% 夏普=%s "
+            "胜率=%s%% 信号准确率=%s%%",
+            backtest_id,
+            metrics.cumulative_return_pct,
+            metrics.max_drawdown_pct,
+            metrics.sharpe_ratio,
+            metrics.win_rate_pct,
+            metrics.signal_accuracy_pct,
+        )
+        self._backtest_repo.mark_success(
+            backtest_id,
+            metrics,
+            warnings=[w.model_dump() for w in run_warnings],
+        )
 
     # ── 数据准备 ───────────────────────────────────────────────────────────
 
@@ -808,6 +929,90 @@ class BacktestService:
         """
         return MacroIndicatorRepository(self._db).find_all_as_map()
 
+    def _collect_missing_factor_warnings(
+        self,
+        precomputed: dict[date, dict[tuple[str, str], float | None]],
+        trading_dates: list[date],
+        index_codes: list[str],
+        factor_ids: list[str],
+    ) -> list[BacktestWarning]:
+        """按因子聚合回测区间内的缺失情况，生成 MISSING_FACTOR 警告。
+
+        Args:
+            precomputed: 预计算因子值，date → (index_code, factor_id) → 数值。
+            trading_dates: 回测交易日列表。
+            index_codes: 参与因子计算的指数代码列表（含择时代理指数）。
+            factor_ids: 策略实际引用的因子 ID 列表。
+
+        Returns:
+            结构化警告列表，最多 5 条（按因子），避免刷屏。
+        """
+        warnings: list[BacktestWarning] = []
+        for factor_id in factor_ids:
+            missing_days = 0
+            affected_codes: set[str] = set()
+            first_missing: date | None = None
+            last_missing: date | None = None
+            for trade_date in trading_dates:
+                day_values = precomputed.get(trade_date, {})
+                missing_codes = [
+                    code for code in index_codes if day_values.get((code, factor_id)) is None
+                ]
+                if missing_codes:
+                    missing_days += 1
+                    affected_codes.update(missing_codes)
+                    if first_missing is None:
+                        first_missing = trade_date
+                    last_missing = trade_date
+            if missing_days > 0:
+                warnings.append(
+                    BacktestWarning(
+                        level="warning",
+                        code="MISSING_FACTOR",
+                        message=(
+                            f"因子 {factor_id} 在 {missing_days} 个交易日存在缺失"
+                            f"（{first_missing}~{last_missing}，"
+                            f"涉及指数 {sorted(affected_codes)[:5]}{' 等' if len(affected_codes) > 5 else ''}）"
+                        ),
+                    )
+                )
+        return warnings[:5]
+
+    def _collect_data_gap_warnings(
+        self,
+        trading_dates: list[date],
+        index_codes: list[str],
+        all_bars: dict,
+    ) -> list[BacktestWarning]:
+        """按指数统计回测区间内缺行情数据的交易日，生成 DATA_GAP 警告。
+
+        仅透传提示，不修正组合收益（B10 的数值修复另行跟踪）。
+
+        Args:
+            trading_dates: 回测交易日列表。
+            index_codes: 回测标的指数代码列表。
+            all_bars: 预加载行情，key=(index_code, trade_date)。
+
+        Returns:
+            结构化警告列表，最多 5 条（按指数）。
+        """
+        warnings: list[BacktestWarning] = []
+        for code in index_codes:
+            missing = [d for d in trading_dates if (code, d) not in all_bars]
+            if missing:
+                warnings.append(
+                    BacktestWarning(
+                        level="warning",
+                        code="DATA_GAP",
+                        message=(
+                            f"指数 {code} 在回测区间内有 {len(missing)} 个交易日缺行情数据"
+                            f"（{missing[0]}~{missing[-1]}），相关日期的因子与收益按缺失处理"
+                        ),
+                        index_code=code,
+                    )
+                )
+        return warnings[:5]
+
     def _estimate_warmup_trading_days(
         self,
         precomputed: dict[date, dict[tuple[str, str], float | None]],
@@ -880,12 +1085,17 @@ class BacktestService:
         )
 
     def _row_to_detail(self, row: BacktestRunModel) -> BacktestDetail:
-        """将 ORM 行转换为 BacktestDetail。"""
+        """将 ORM 行转换为 BacktestDetail（含结构化警告）。"""
         summary = self._row_to_summary(row)
+        try:
+            warnings = [BacktestWarning(**w) for w in (row.warnings or [])]
+        except Exception:
+            warnings = []
         return BacktestDetail(
             **summary.model_dump(),
             universe_filter=row.universe_filter or {"mode": "all"},
             params=row.params,
+            warnings=warnings,
         )
 
     # ── 策略对比回测 ────────────────────────────────────────────────────
