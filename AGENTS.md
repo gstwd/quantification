@@ -274,7 +274,6 @@ Key rules (details in the doc):
 - **`BatchFactorComputer` Protocol**: 定义在 `factors/base.py`，回测因子预计算时优先调用 `compute_batch()`（一次遍历 bar 数据覆盖所有日期）。已在 momentum.py（return_5d/20d/60d/120d）实现。新增回测频繁使用的因子时建议实现此协议。
 - **配置校验含因子 ID 校验（P4）**: `StrategyConfigService.validate_config()` / `validate_parsed()` 依赖 DB 会话（查询 `factor_definition` active 集）与进程级因子注册表，不再是无状态静态方法。未知因子、停用/未同步因子、未知变换函数均进入 errors 快速失败。`run_allocation` 与 `create_backtest`/`create_comparison` 在运行期复用该校验（422），星标摘要聚合接口跳过坏策略并记日志。
 - **AI 分析双调度器**: 数据摄取在 `schedule_time`（默认 17:30）执行、AI 舆情分析在 `ai_schedule_time`（默认 23:30）执行；两个调度器均为纯定时器，只入队任务。摄取完成后由 `handle_daily_ingest` 自动入队当日 `factor_computation`。`ai_analysis_enabled=False` 时 AI 调度器不启动。
-- **AI 因子在策略引擎中的行为**: AI 因子仅在已有 `daily_sentiment_aggregate` 数据的交易日有效。缺失数据时返回 `FactorValue(numeric=None)`，评分引擎默认 `missing_factor_strategy="ignore"` 会静默跳过。不要在 filter 规则中使用 AI 因子（None 会导致 filter 失败=资产被排除）。AI 因子专用 transform 函数：`sentiment_score`（[-1,1]→[0,100]）、`attention_score`（裁剪到 [0,100]）。
+- **AI 因子（已删除）**: 6 个 AI 因子（ai_sentiment_1d/5d/divergence、ai_attention_1d/5d、ai_topic_momentum）已从策略引擎移除（AI 情绪分析功能不完善）。策略配置引用这些因子会被校验拒绝。AI 舆情分析（新闻采集/情绪聚合/市场研判）作为独立展示功能保留。
 - **关键词标签可配置化**: `keyword_tag_config` 表存储关键词→资产标签映射，替代硬编码的 `classifier._KEYWORD_TAG_MAP`。`TagClassifier._classify_via_keyword()` 优先使用 DB 映射，回退到静态默认值。CRUD 端点: `GET/POST/PUT/DELETE /keyword-tags`。
 - **市场综合研判**: `market_synthesis` 表存储每日 AI 生成的市场概况（200-300 字中文研判）。在 `AIFactorService.run_full_pipeline()` 步骤 7 自动生成，LLM 不可用时静默跳过。API: `GET /ai-factors/synthesis/{date}`。
-- **AI 因子注册**: 6 个 AI 因子（sentiment_1d/5d/divergence, attention_1d/5d, topic_momentum）通过 `register_ai_factors()` 在 `build_default_factor_registry()` 中注册，可像内置因子一样在策略配置中引用。

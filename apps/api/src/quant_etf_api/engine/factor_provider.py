@@ -243,7 +243,6 @@ class FactorProvider:
         all_bars: dict[tuple[str, date], Any],
         all_valuation: dict[tuple[str, date], Any],
         all_macro: dict[str, dict[str, float]] | None = None,
-        all_sentiment: dict[tuple[str, date], Any] | None = None,
     ) -> dict[date, dict[tuple[str, str], float | None]]:
         """回测模式：一次性计算所有因子值，避免逐日查库。
 
@@ -258,7 +257,6 @@ class FactorProvider:
             all_valuation: 预加载的估值数据，key=(index_code, trade_date)。
             all_macro: 预加载的宏观指标数据，key=indicator_code, value={period: value}。
                 逐点因子计算时按 period <= trade_date 做时点过滤，避免前视偏差。
-            all_sentiment: 预加载的 AI 情绪聚合数据，key=(asset_tag, date)。
 
         Returns:
             三维映射：date → (index_code, factor_id) → factor_value。
@@ -290,7 +288,6 @@ class FactorProvider:
                 index_bars=all_bars,
                 index_valuation=all_valuation or {},
                 macro_indicators=all_macro or {},
-                ai_sentiment=all_sentiment or {},
             )
             for code in index_codes:
                 for computer in batch_computers:
@@ -321,11 +318,6 @@ class FactorProvider:
                     # 宏数据按 period <= trade_date 做时点过滤，
                     # 避免回测历史日期使用未来才公布的 LPR 等宏观数据
                     macro_indicators=macro_indicators_as_of(all_macro, trade_date),
-                    ai_sentiment={
-                        (tag, dt): val
-                        for (tag, dt), val in (all_sentiment or {}).items()
-                        if dt <= trade_date
-                    },
                 )
                 for code in index_codes:
                     for computer in point_computers:

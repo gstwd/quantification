@@ -165,26 +165,6 @@ def drawdown_score(value: float) -> float:
     return 5.0
 
 
-def sentiment_score(value: float) -> float:
-    """AI情绪分映射为得分 [0, 100]。
-
-    输入值域 [-1.0, 1.0]（正=利好，负=利空），输出 [0, 100]。
-    线性映射：-1.0→0, 0→50, 1.0→100，中性情绪得 50 分。
-    适合与 ai_sentiment_1d / ai_sentiment_5d 配合使用。
-    """
-    return round(max(0.0, min(100.0, (value + 1.0) * 50.0)), 1)
-
-
-def attention_score(value: float) -> float:
-    """AI关注度分映射为得分 [0, 100]。
-
-    输入值域 [0, ~200]（关注度无硬上限），输出 [0, 100]。
-    直接裁剪到 [0, 100]，不缩放 — 高关注度本身即是高权重信号。
-    适合与 ai_attention_1d / ai_attention_5d / ai_topic_momentum 配合使用。
-    """
-    return round(max(0.0, min(100.0, value)), 1)
-
-
 # 内置变换函数注册（启动即注册，供配置校验与引擎执行使用）
 _BUILTIN_TRANSFORMS: dict[str, Callable[[float], float]] = {
     "invert_percentile": invert_percentile,
@@ -194,8 +174,6 @@ _BUILTIN_TRANSFORMS: dict[str, Callable[[float], float]] = {
     "clamp_0_100": clamp_0_100,
     "erp_score": erp_score,
     "drawdown_score": drawdown_score,
-    "sentiment_score": sentiment_score,
-    "attention_score": attention_score,
 }
 
 for _name, _fn in _BUILTIN_TRANSFORMS.items():

@@ -42,8 +42,6 @@ class FactorCategory(StrEnum):
     VOLATILITY = "volatility"
     FLOW = "flow"
     VALUATION = "valuation"
-    SENTIMENT = "sentiment"
-    ATTENTION = "attention"
     FUNDAMENTAL = "fundamental"
 
 

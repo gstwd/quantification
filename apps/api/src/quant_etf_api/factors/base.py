@@ -57,13 +57,11 @@ class FactorContext:
         index_bars: 指数日线映射，key=(index_code, date)。
         index_valuation: 指数估值映射，key=(index_code, date)，含 pe_percentile/pb_percentile。
         macro_indicators: 宏观指标映射，key=indicator_code，value={period_date: value}。
-        ai_sentiment: AI 情绪聚合数据映射，key=(asset_tag, date)，value=DailySentimentAggregate ORM 行。
     """
 
     index_bars: dict[tuple[str, date], Any] = field(default_factory=dict)
     index_valuation: dict[tuple[str, date], Any] = field(default_factory=dict)
     macro_indicators: dict[str, dict[str, float]] = field(default_factory=dict)
-    ai_sentiment: dict[tuple[str, date], Any] = field(default_factory=dict)
 
 
 @dataclass
