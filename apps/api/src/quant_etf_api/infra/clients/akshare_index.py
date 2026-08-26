@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
@@ -38,6 +39,35 @@ class IndexValuation:
     pb: float | None
     pb_percentile: float | None
     dividend_yield: float | None
+    source: str = "akshare"
+
+
+def _calc_percentile(data: list[tuple[date, float]]) -> dict[date, float]:
+    """按统一口径计算每个交易日的历史百分位（含当日）。
+
+    百分位 = rank / (n - 1) * 100：
+    - 样本为截至当日（含当日）的全部有效值，不使用未来数据（无前视偏差）；
+    - rank 为 0-based 排名（≤ 当日值的数量 - 1，并列值计入自身），
+      当日为历史最高时 = 100，最低时 = 0；
+    - 首个交易日（n == 1）无历史可比，返回 50.0 作为中性占位。
+
+    Args:
+        data: 按日期升序排列的 (date, value) 列表。
+
+    Returns:
+        {date: 百分位} 映射，仅包含 data 中出现的日期。
+    """
+    sorted_values: list[float] = []
+    result: dict[date, float] = {}
+    for d, val in data:
+        bisect.insort(sorted_values, val)
+        n = len(sorted_values)
+        if n <= 1:
+            result[d] = 50.0
+            continue
+        rank = bisect.bisect_right(sorted_values, val) - 1
+        result[d] = round(rank / (n - 1) * 100, 2)
+    return result
 
 
 # 从 index_code 到 legulegu PE/PB 所需中文名的映射
@@ -537,14 +567,6 @@ class AkShareIndexClient(BaseDataClient):
             pe_values.sort(key=lambda x: x[0])
 
             # 计算历史百分位
-            def _calc_percentile(data: list[tuple[date, float]]) -> dict[date, float]:
-                result: dict[date, float] = {}
-                for i, (d, val) in enumerate(data):
-                    count_less = sum(1 for _, prev_val in data[:i] if prev_val < val)
-                    percentile = round(count_less / i * 100, 2) if i > 0 else 50.0
-                    result[d] = percentile
-                return result
-
             pe_percentile_map = _calc_percentile(pe_values)
 
             results: list[IndexValuation] = []
@@ -557,6 +579,7 @@ class AkShareIndexClient(BaseDataClient):
                         pb=None,
                         pb_percentile=None,
                         dividend_yield=None,
+                        source="csindex",
                     )
                 )
 
@@ -654,16 +677,6 @@ class AkShareIndexClient(BaseDataClient):
         pb_values.sort(key=lambda x: x[0])
 
         # 计算历史百分位：对于每个交易日，统计之前所有交易日中值小于当前值的比例
-        def _calc_percentile(data: list[tuple[date, float]]) -> dict[date, float]:
-            """计算每个交易日的历史百分位。"""
-            result: dict[date, float] = {}
-            for i, (d, val) in enumerate(data):
-                # 统计前 i 个交易日中值小于当前值的数量
-                count_less = sum(1 for _, prev_val in data[:i] if prev_val < val)
-                percentile = round(count_less / i * 100, 2) if i > 0 else 50.0
-                result[d] = percentile
-            return result
-
         pe_percentile_map = _calc_percentile(pe_values)
         pb_percentile_map = _calc_percentile(pb_values)
 
@@ -683,6 +696,7 @@ class AkShareIndexClient(BaseDataClient):
                     pb=pb_val,
                     pb_percentile=pb_percentile_map.get(d),
                     dividend_yield=None,  # legulegu 源无股息率
+                    source="legulegu",
                 )
             )
 

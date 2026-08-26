@@ -12,6 +12,7 @@ from quant_etf_api.infra.clients.akshare_index import (
     AkShareIndexClient,
     IndexDailyBar,
     IndexValuation,
+    _calc_percentile,
 )
 
 
@@ -36,6 +37,55 @@ class TestSourceName:
 
     def test_source_name(self, client: AkShareIndexClient) -> None:
         assert client.source_name == "akshare_index"
+
+
+class TestCalcPercentile:
+    """统一百分位算法（B8）纯逻辑测试。"""
+
+    @staticmethod
+    def _series(values: list[float]) -> list[tuple]:
+        """构造 (date, value) 序列，日期从 2025-01-01 起递增。"""
+        from datetime import date, timedelta
+
+        start = date(2025, 1, 1)
+        return [(start + timedelta(days=i), v) for i, v in enumerate(values)]
+
+    def test_first_day_neutral(self) -> None:
+        """首日无历史可比，返回中性占位 50.0。"""
+        data = self._series([3.5])
+        assert _calc_percentile(data) == {data[0][0]: 50.0}
+
+    def test_max_reaches_100(self) -> None:
+        """单调上升时最高值百分位可达 100。"""
+        data = self._series([1.0, 2.0, 3.0, 4.0])
+        result = _calc_percentile(data)
+        assert result[data[-1][0]] == 100.0
+
+    def test_min_is_0(self) -> None:
+        """单调下降时最低值百分位为 0。"""
+        data = self._series([4.0, 3.0, 2.0, 1.0])
+        result = _calc_percentile(data)
+        assert result[data[-1][0]] == 0.0
+
+    def test_ties_max_still_reaches_100(self) -> None:
+        """并列最高值也计入自身，最高值百分位仍可达 100。"""
+        data = self._series([1.0, 2.0, 2.0])
+        result = _calc_percentile(data)
+        assert result[data[-1][0]] == 100.0
+
+    def test_expanding_window_no_lookahead(self) -> None:
+        """百分位只使用截至当日的数据，不使用未来数据。"""
+        data = self._series([1.0, 3.0, 2.0])
+        result = _calc_percentile(data)
+        # 第 3 日值 2.0：样本为 [1,3,2]，rank=1 → 1/2*100 = 50
+        assert result[data[2][0]] == 50.0
+
+    def test_fractional_percentile(self) -> None:
+        """非极值返回保留两位小数的百分位。"""
+        data = self._series([2.0, 4.0, 1.0, 3.0])
+        result = _calc_percentile(data)
+        # 值 3.0（第 4 日）：样本 [2,4,1,3]，rank=2 → 2/3*100 = 66.67
+        assert result[data[3][0]] == 66.67
 
 
 class TestIndexDaily:

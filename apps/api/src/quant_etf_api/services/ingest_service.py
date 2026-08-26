@@ -646,7 +646,7 @@ class IngestService:
                 "pb": v.pb,
                 "pb_percentile": v.pb_percentile,
                 "dividend_yield": v.dividend_yield,
-                "source": "akshare",
+                "source": v.source,
                 "ingested_at": utcnow(),
             }
             for v in valuations
