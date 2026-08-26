@@ -1,7 +1,9 @@
 """回测引擎服务，负责创建、执行和查询回测任务。
 
 重构后使用统一的 _run_backtest_loop 替代 signal/allocation 双模式分支。
-集成 FactorProvider、专业绩效指标、基准对比和交易成本模型。
+集成 FactorProvider、专业绩效指标和基准对比。
+回测收益按毛收益口径输出：系统当前阶段不考虑实盘交易与交易成本，
+仅研究策略理想效果。
 """
 
 from __future__ import annotations
@@ -284,11 +286,10 @@ class BacktestService:
         1. 准备数据（标的、交易日、行情、估值，回望窗口按因子 lookback 推导）
         2. 预计算全区间因子值
         3. 逐日执行引擎管线
-        4. 按仓位/排名计算组合收益
+        4. 按仓位/排名计算组合收益（毛收益，不扣除交易成本）
         5. 计算基准收益（如启用）
-        6. 扣除交易成本
-        7. 写入每日结果和指数结果
-        8. 计算汇总绩效指标
+        6. 写入每日结果和指数结果
+        7. 计算汇总绩效指标
         """
         universe, index_codes, trading_dates, all_bars, all_valuation, all_macro = (
             self._prepare_backtest_data(row)
@@ -630,24 +631,6 @@ class BacktestService:
     ) -> float:
         """按仓位分配方案计算指数组合 T+1 收益（委托领域函数）。"""
         return compute_allocation_return(positions, trade_date, next_date, all_bars)
-
-    # ── 交易成本 ───────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _compute_turnover(
-        prev_positions: dict[str, float],
-        curr_positions: dict[str, float],
-    ) -> float:
-        """计算换手率（委托领域函数）。
-
-        Args:
-            prev_positions: 前日仓位权重。
-            curr_positions: 当日目标仓位权重。
-
-        Returns:
-            换手率，0-1。
-        """
-        return compute_turnover(prev_positions, curr_positions)
 
     # ── 调仓检查 ───────────────────────────────────────────────────────────
 

@@ -111,7 +111,7 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
     },
     turnover: {
       label: '换手率',
-      description: '当日持仓权重变化的绝对值之和的一半。<br>衡量调仓的幅度，换手率越高交易越频繁。<br>当日换手率 = 25% 表示约四分之一的仓位发生了调整。<br>配合交易成本评估策略的实际可执行性。',
+      description: '当日持仓权重变化的绝对值之和的一半。<br>衡量调仓的幅度，换手率越高交易越频繁。<br>当日换手率 = 25% 表示约四分之一的仓位发生了调整。',
       formula: 'Σ|当日权重 - 前日权重| / 2',
     },
   },

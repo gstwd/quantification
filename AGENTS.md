@@ -202,7 +202,7 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: E
 
 **因子系统**: 18 个内置因子（7 基础 + 4 均线 ma_5d/10d/20d/60d + atr_14d + donchian_20d_high/low + rsi_14d），通过 `FactorRegistry` 注册，`FactorService` 编排计算和持久化。所有因子基于指数数据计算（`index_factor_value` 表）。`FactorSpec` 增加 `lookback_days` 字段，`FactorService._load_context()` 动态使用所有因子的最大 lookback。`FactorContext` 增加 `macro_indicators` 字段。`normalization.py` 提供 zscore/rank/minmax/winsorize/MAD 横截面标准化。`evaluation.py` 提供 IC/IR 分析和因子相关性矩阵。
 
-**Backtesting**: `BacktestService` 使用统一 `_run_backtest_loop`。集成 `FactorProvider` 预计算因子、`ContextBuilder` 构建上下文、专业绩效指标（`metrics.py`）、基准对比（`benchmark.py`）、交易成本模型（佣金+滑点）。支持调仓频率控制和换手率计算。回测仅支持配置模式（策略需配置 portfolio 模块）。
+**Backtesting**: `BacktestService` 使用统一 `_run_backtest_loop`。集成 `FactorProvider` 预计算因子、`ContextBuilder` 构建上下文、专业绩效指标（`metrics.py`）、基准对比（`benchmark.py`）。回测收益为**毛收益**：系统当前阶段不考虑实盘交易与交易成本，仅研究策略理想效果。支持调仓频率控制和换手率计算。回测仅支持配置模式（策略需配置 portfolio 模块）。
 
 **Asset allocation API**: `GET /strategies/{strategy_id}/allocation` runs the full decision pipeline and returns timing signal, asset rankings, and allocation plan.
 
