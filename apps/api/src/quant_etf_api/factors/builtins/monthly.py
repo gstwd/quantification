@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from datetime import date
 from typing import NamedTuple
@@ -28,6 +29,21 @@ class MonthlyBar(NamedTuple):
     close: float
 
 
+def _is_price_missing(value: float | None) -> bool:
+    """判断价格字段是否缺失（None 或 NaN）。
+
+    PostgreSQL float 列允许存储 NaN，NaN 参与 max/min 会污染月线极值，
+    统一按"缺失"处理，与 B10 缺口语义一致。
+
+    Args:
+        value: 价格或 None。
+
+    Returns:
+        value 为 None 或 float 且为 NaN 时返回 True。
+    """
+    return value is None or (isinstance(value, float) and math.isnan(value))
+
+
 def _aggregate_monthly_bars(
     index_code: str,
     trade_date: date,
@@ -37,6 +53,9 @@ def _aggregate_monthly_bars(
     """从日线 OHLC 聚合月线 OHLC 数据。
 
     按年月分组，取每组首个交易日开盘价、最高/最低价、最后交易日收盘价。
+    OHLC 四价任一缺失（None/NaN）的日线直接跳过，避免空 high/low 记为 0
+    污染月线极值；若某月首个/末个交易日被跳过，则开盘/收盘取该月首个/末个
+    数据完整的交易日（B14）。
     只返回 trade_date 所在月及之前 lookback_months 个月的数据。
 
     Args:
@@ -55,11 +74,16 @@ def _aggregate_monthly_bars(
     for (code, dt), bar in ctx.index_bars.items():
         if code != index_code or dt > trade_date:
             continue
-        if bar.open_price is None or bar.close_price is None:
+        if (
+            _is_price_missing(bar.open_price)
+            or _is_price_missing(bar.high_price)
+            or _is_price_missing(bar.low_price)
+            or _is_price_missing(bar.close_price)
+        ):
             continue
         ym = f"{dt.year:04d}-{dt.month:02d}"
         bars_by_month[ym].append(
-            (dt, bar.open_price, bar.high_price or 0.0, bar.low_price or 0.0, bar.close_price)
+            (dt, bar.open_price, bar.high_price, bar.low_price, bar.close_price)
         )
 
     if not bars_by_month:
