@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from datetime import date
 
+import pytest
+
 from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.engine.config import (
     PortfolioConfig,
@@ -170,6 +172,40 @@ class TestStrategyEngine:
         # 单资产仓位不超过 30%
         for weight in result.positions.values():
             assert weight <= 0.30
+
+    @pytest.mark.parametrize(
+        "scoring_mode",
+        ["absolute", "rank", "zscore"],
+    )
+    def test_all_missing_asset_not_selected(self, scoring_mode: str) -> None:
+        """B7：全缺失资产在三种评分模式下均不进入排名与组合。"""
+        engine = StrategyEngine()
+        config = StrategyConfig(
+            strategy_id="test_b7",
+            display_name="B7 测试策略",
+            score=ScoreConfig(
+                factors={"momentum": 1.0},
+                scoring_mode=scoring_mode,
+            ),
+            rank=RankConfig(sort_by="score", order="desc", bottom_n=1),
+            portfolio=PortfolioConfig(method="equal_weight"),
+        )
+        context = _make_context(
+            asset_factors={
+                ("510300", "momentum"): 80.0,
+                ("510500", "momentum"): 70.0,
+                ("159915", "momentum"): None,  # 全部缺失
+            },
+        )
+
+        result = engine.run(config, context)
+
+        ranked_codes = [r.etf_code for r in result.rankings]
+        assert "159915" not in result.scores
+        assert "159915" not in ranked_codes
+        assert "159915" not in result.positions
+        # bottom_n=1 应选中有效资产中得分最低者，而非缺失资产
+        assert ranked_codes == ["510500"]
 
     def test_strategy_results_compatibility(self) -> None:
         """兼容旧接口的 StrategyResult 列表。"""

@@ -15,6 +15,7 @@ from datetime import date
 from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.engine.config import ScoreConfig, TimingConfig, TimingThresholds
 from quant_etf_api.engine.score import (
+    CrossSectionScorer,
     DefaultScoreCalculator,
 )
 from quant_etf_api.engine.transforms import (
@@ -226,6 +227,118 @@ class TestDefaultScoreCalculator:
 
         assert scores["510300"] == 100.0
         assert scores["510500"] == 0.0
+
+
+class TestCrossSectionScorer:
+    """横截面评分器测试（B7：全缺失资产排除语义与 absolute 一致）。"""
+
+    def test_rank_excludes_all_missing_asset(self) -> None:
+        """rank 模式：全部因子缺失的资产不进入得分池。"""
+        calc = CrossSectionScorer()
+        config = ScoreConfig(
+            factors={"a": 0.6, "b": 0.4},
+            scoring_mode="rank",
+        )
+        context = _make_context(
+            asset_factors={
+                ("510300", "a"): 80.0,
+                ("510300", "b"): 60.0,
+                ("510500", "a"): None,  # 全部缺失
+                ("510500", "b"): None,
+            },
+        )
+
+        scores = calc.calculate(config, context)
+
+        assert "510500" not in scores
+        assert "510300" in scores
+
+    def test_zscore_excludes_all_missing_asset(self) -> None:
+        """zscore 模式：全部因子缺失的资产不进入得分池。"""
+        calc = CrossSectionScorer()
+        config = ScoreConfig(
+            factors={"a": 0.6, "b": 0.4},
+            scoring_mode="zscore",
+        )
+        context = _make_context(
+            asset_factors={
+                ("510300", "a"): 80.0,
+                ("510300", "b"): 60.0,
+                ("510500", "a"): None,  # 全部缺失
+                ("510500", "b"): None,
+            },
+        )
+
+        scores = calc.calculate(config, context)
+
+        assert "510500" not in scores
+        assert "510300" in scores
+
+    def test_zero_strategy_keeps_all_missing_asset(self) -> None:
+        """zero 策略：全部因子缺失仍按 0 参与评分，排除语义不生效。"""
+        calc = CrossSectionScorer()
+        config = ScoreConfig(
+            factors={"a": 0.6, "b": 0.4},
+            scoring_mode="rank",
+            missing_factor_strategy="zero",
+        )
+        context = _make_context(
+            asset_factors={
+                ("510300", "a"): 80.0,
+                ("510300", "b"): 60.0,
+                ("510500", "a"): None,  # 全部缺失，按 0 处理
+                ("510500", "b"): None,
+            },
+        )
+
+        scores = calc.calculate(config, context)
+
+        assert "510500" in scores
+        # 未排除：正常参与排名，因 raw=0 得到最低排名分
+        assert scores["510500"] < scores["510300"]
+
+    def test_ignore_partial_missing_keeps_asset(self) -> None:
+        """ignore 策略：部分因子缺失时资产仍参与评分。"""
+        calc = CrossSectionScorer()
+        config = ScoreConfig(
+            factors={"a": 0.6, "b": 0.4},
+            scoring_mode="rank",
+        )
+        context = _make_context(
+            asset_factors={
+                ("510300", "a"): 80.0,
+                ("510300", "b"): None,  # 部分缺失
+                ("510500", "a"): 50.0,
+                ("510500", "b"): 60.0,
+            },
+        )
+
+        scores = calc.calculate(config, context)
+
+        assert "510300" in scores
+        assert "510500" in scores
+
+    def test_debug_marks_all_missing_excluded(self) -> None:
+        """调试信息：全缺失资产标记 excluded 并给出原因。"""
+        calc = CrossSectionScorer()
+        config = ScoreConfig(
+            factors={"a": 1.0},
+            scoring_mode="rank",
+        )
+        context = _make_context(
+            asset_factors={
+                ("510300", "a"): 80.0,
+                ("510500", "a"): None,  # 全部缺失
+            },
+        )
+
+        debug: list = []
+        calc.calculate(config, context, debug=debug)
+
+        missing = next(d for d in debug if d.etf_code == "510500")
+        assert missing.excluded is True
+        assert missing.exclude_reason == "因子数据全部缺失"
+        assert missing.raw_score is None
 
 
 class TestTimingCalculation:

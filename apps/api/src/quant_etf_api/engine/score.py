@@ -392,10 +392,24 @@ class CrossSectionScorer:
                     )
                 continue
 
-            if total_weight > 0:
-                raw_score = weighted_sum / total_weight
-            else:
-                raw_score = 0.0
+            if total_weight <= 0:
+                # 所有因子缺失（ignore 策略）时与 absolute 模式一致：视为排除，
+                # 避免假 0 分污染横截面排名/标准化分布，防止被 bottom_n 反向选入
+                if debug is not None:
+                    debug.append(
+                        AssetScoreDetail(
+                            etf_code=code,
+                            name_cn=name_cn,
+                            raw_score=None,
+                            final_score=None,
+                            factors=breakdown,
+                            excluded=True,
+                            exclude_reason="因子数据全部缺失",
+                        )
+                    )
+                continue
+
+            raw_score = weighted_sum / total_weight
             raw_scores[code] = raw_score
 
             if debug is not None:
