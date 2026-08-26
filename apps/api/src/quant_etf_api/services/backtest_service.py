@@ -19,6 +19,7 @@ from quant_etf_api.domain.common.signal_level import determine_signal_level
 from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
 from quant_etf_api.domain.portfolio.returns import (
     compute_allocation_return,
+    compute_rebalance_day_return,
     get_index_return,
 )
 from quant_etf_api.domain.portfolio.turnover import compute_turnover
@@ -140,10 +141,9 @@ class BacktestService:
             )
 
         params = dict(req.params) if req.params else {}
-        # 保存基准配置和执行模型到 params，供执行时读取
+        # 保存基准配置到 params，供执行时读取
         params["_enable_benchmark"] = req.enable_benchmark
         params["_benchmark_index_code"] = req.benchmark_index_code
-        params["_execution_model"] = req.execution_model
 
         try:
             row = BacktestRunModel(
@@ -359,7 +359,6 @@ class BacktestService:
         params = row.params or {}
         enable_benchmark = params.get("_enable_benchmark", True)
         benchmark_index_code = params.get("_benchmark_index_code", "000300")
-        execution_model = params.get("_execution_model", "next_day")
 
         # 基准日收益率序列
         benchmark_returns: list[float] = []
@@ -374,7 +373,7 @@ class BacktestService:
 
         logger.info(
             "[backtest] 回测启动: backtest_id=%s strategy=%s 区间=%s~%s 标的=%d "
-            "回望=%s天 预热=%s个交易日 执行模型=%s 基准=%s",
+            "回望=%s天 预热=%s个交易日 执行模型=T+1开盘 基准=%s",
             backtest_id,
             row.strategy_id,
             trading_dates[0],
@@ -382,7 +381,6 @@ class BacktestService:
             len(index_codes),
             lookback_days,
             warmup_trading_days,
-            execution_model,
             benchmark_index_code if enable_benchmark else "禁用",
         )
 
@@ -393,8 +391,6 @@ class BacktestService:
         accumulator = BacktestDayAccumulator()
         prev_positions: dict[str, float] = {}
         last_rebalance_date: date | None = None
-        # T+1 执行模式：T 日调仓生成的待执行仓位，T+1 日生效
-        pending_positions: dict[str, float] | None = None
         # 进度跟踪：每完成约 10% 交易日写一次进度
         last_progress = 0
         total_dates = len(trading_dates)
@@ -434,64 +430,31 @@ class BacktestService:
 
             next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
 
-            # 确定持仓（支持两种执行模式）
-            if execution_model == "next_day":
-                # T+1 执行模式：调仓日生成新仓位，下一交易日开盘执行。
-                # 当天沿用旧仓位计算收益，新仓位记入 pending，T+1 生效。
-                # 仓位变化图表将在 T+1 日显示变化，贴近实盘 T+1 制度。
-                if should_rebalance:
-                    # 调仓日：沿用旧仓位，新仓位待下一交易日执行
-                    new_target = dict(result.positions) if result.positions else {}
-                    if pending_positions is not None:
-                        # 上一期待执行仓位今日生效（连续调仓日场景）
-                        positions = pending_positions
-                    else:
-                        positions = dict(prev_positions)
-                    pending_positions = new_target if new_target else None
-                    # total_exposure/cash_ratio 基于当天实际持仓计算，与 positions 一致
-                    day_total_exposure = round(sum(positions.values()), 4)
-                    day_cash_ratio = round(1.0 - day_total_exposure, 4)
-                    last_rebalance_date = trade_date
-                    # 换手率基于新旧目标仓位计算
-                    turnover = 0.0
-                    if prev_positions and new_target:
-                        turnover = compute_turnover(prev_positions, new_target)
-                else:
-                    # 非调仓日：如有待执行仓位，今日生效
-                    if pending_positions is not None:
-                        positions = pending_positions
-                        pending_positions = None
-                    else:
-                        positions = dict(prev_positions)
-                    day_total_exposure = round(sum(positions.values()), 4)
-                    day_cash_ratio = round(1.0 - day_total_exposure, 4)
-                    turnover = 0.0
-            else:
-                # same_day 模式：T 日信号 T 日收盘执行（原逻辑，学术回测简化）
-                if should_rebalance:
-                    positions = dict(result.positions) if result.positions else {}
-                    day_total_exposure = result.total_exposure
-                    day_cash_ratio = result.cash_ratio
-                    last_rebalance_date = trade_date
-                else:
-                    # 非调仓日沿用上次持仓，total_exposure/cash_ratio 由实际持仓推导
-                    positions = dict(prev_positions)
-                    day_total_exposure = round(sum(positions.values()), 4)
-                    day_cash_ratio = round(1.0 - day_total_exposure, 4)
-
-                # 换手率（仅在调仓日计算）
+            # 确定持仓与收益（T+1 开盘执行模型：T 日收盘出信号，T+1 日开盘成交，无滑点）
+            if should_rebalance:
+                # 调仓日：旧仓位持有至 T+1 开盘（隔夜段），新仓位自 T+1 开盘买入（日内段），
+                # 当日收益 = 旧仓位 × [close_T, open_{T+1}] + 新仓位 × [open_{T+1}, close_{T+1}]
+                new_positions = dict(result.positions) if result.positions else {}
+                portfolio_return = compute_rebalance_day_return(
+                    prev_positions, new_positions, trade_date, next_date, all_bars
+                )
+                positions = new_positions
+                day_total_exposure = round(sum(positions.values()), 4)
+                day_cash_ratio = round(1.0 - day_total_exposure, 4)
+                # 换手率基于新旧目标仓位计算
                 turnover = 0.0
-                if prev_positions and should_rebalance:
-                    turnover = compute_turnover(prev_positions, positions)
-                pending_positions = None  # same_day 模式不使用 pending
-
-            # 计算组合收益（使用当天实际持仓）
-            if positions:
+                if prev_positions and new_positions:
+                    turnover = compute_turnover(prev_positions, new_positions)
+                last_rebalance_date = trade_date
+            else:
+                # 非调仓日：沿用上次持仓，按收盘对收盘计算收益
+                positions = dict(prev_positions)
+                day_total_exposure = round(sum(positions.values()), 4)
+                day_cash_ratio = round(1.0 - day_total_exposure, 4)
+                turnover = 0.0
                 portfolio_return = compute_allocation_return(
                     positions, trade_date, next_date, all_bars
                 )
-            else:
-                portfolio_return = 0.0
 
             # 持仓统计
             high_cnt = mid_cnt = low_cnt = 0
@@ -1143,7 +1106,6 @@ class BacktestService:
                 index_codes=req.a_index_codes,
                 enable_benchmark=req.enable_benchmark,
                 benchmark_index_code=req.benchmark_index_code,
-                execution_model=req.execution_model,
             )
         )
 
@@ -1158,7 +1120,6 @@ class BacktestService:
                 index_codes=req.b_index_codes,
                 enable_benchmark=req.enable_benchmark,
                 benchmark_index_code=req.benchmark_index_code,
-                execution_model=req.execution_model,
             )
         )
 

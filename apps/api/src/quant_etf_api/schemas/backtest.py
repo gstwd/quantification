@@ -38,8 +38,6 @@ class BacktestCreateRequest(BaseModel):
         params: 策略参数透传。
         enable_benchmark: 是否启用基准对比。
         benchmark_index_code: 基准指数代码，默认沪深300。
-        execution_model: 执行模型。"next_day"=T日信号T+1日开盘执行（默认，贴近实盘），
-            "same_day"=T日信号T日收盘执行（旧行为，学术回测简化）。
     """
 
     strategy_id: str
@@ -50,7 +48,6 @@ class BacktestCreateRequest(BaseModel):
     params: dict[str, Any] | None = None
     enable_benchmark: bool = True
     benchmark_index_code: str = "000300"
-    execution_model: Literal["same_day", "next_day"] = "next_day"
 
 
 class BacktestMetrics(BaseModel):
@@ -167,8 +164,6 @@ class BacktestComparisonCreateRequest(BaseModel):
         enable_benchmark: 是否启用基准对比。
         benchmark_index_code: 基准指数代码，默认沪深300。
         name: 可选的对比名称。
-        execution_model: 两个策略共享的执行模型。"next_day"=T+1开盘执行（默认），
-            "same_day"=T日收盘执行。对比回测要求两个策略使用相同的执行模型。
     """
 
     strategy_a_id: str
@@ -180,7 +175,6 @@ class BacktestComparisonCreateRequest(BaseModel):
     enable_benchmark: bool = True
     benchmark_index_code: str = "000300"
     name: str | None = None
-    execution_model: Literal["same_day", "next_day"] = "next_day"
 
 
 class ComparisonMetrics(BaseModel):

@@ -17,6 +17,7 @@ import pytest
 from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
 from quant_etf_api.domain.portfolio.returns import (
     compute_allocation_return,
+    compute_rebalance_day_return,
     get_index_return,
 )
 from quant_etf_api.domain.portfolio.turnover import compute_turnover
@@ -91,6 +92,79 @@ class TestTurnoverAndReturns:
             {"a": 0.5, "b": 0.5}, date(2025, 1, 15), date(2025, 1, 16), bars
         )
         assert ret == 5.0
+
+    def test_compute_rebalance_day_return_split(self) -> None:
+        """调仓日收益拆分为旧仓位隔夜段 + 新仓位日内段。"""
+        bars = {
+            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
+            ("a", date(2025, 1, 16)): SimpleNamespace(
+                open_price=102.0, close_price=104.0
+            ),
+        }
+        # 旧仓位 100% 持有 a：隔夜段 = 102/100 - 1 = 2%
+        # 新仓位 100% 持有 a：日内段 = 104/102 - 1 ≈ 1.9608%
+        # 合计 = 3.9608%（函数四舍五入到 4 位小数）
+        ret = compute_rebalance_day_return(
+            {"a": 1.0},
+            {"a": 1.0},
+            date(2025, 1, 15),
+            date(2025, 1, 16),
+            bars,
+        )
+        assert ret == pytest.approx(3.9608)
+
+    def test_compute_rebalance_day_return_old_sells_new_buys(self) -> None:
+        """调仓换仓：旧仓位吃隔夜，新仓位吃日内。"""
+        bars = {
+            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
+            ("a", date(2025, 1, 16)): SimpleNamespace(
+                open_price=101.0, close_price=102.0
+            ),
+            ("b", date(2025, 1, 15)): SimpleNamespace(close_price=200.0),
+            ("b", date(2025, 1, 16)): SimpleNamespace(
+                open_price=210.0, close_price=200.0
+            ),
+        }
+        # 旧仓位 a：隔夜 101/100 - 1 = 1%
+        # 新仓位 b：日内 200/210 - 1 ≈ -4.7619%
+        ret = compute_rebalance_day_return(
+            {"a": 1.0},
+            {"b": 1.0},
+            date(2025, 1, 15),
+            date(2025, 1, 16),
+            bars,
+        )
+        # 函数四舍五入到 4 位小数：-3.761904... → -3.7619
+        assert ret == pytest.approx(-3.7619)
+
+    def test_compute_rebalance_day_return_no_next_date(self) -> None:
+        """最后一个交易日无下一交易日，返回 0。"""
+        bars = {
+            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
+        }
+        ret = compute_rebalance_day_return(
+            {"a": 1.0},
+            {"a": 1.0},
+            date(2025, 1, 15),
+            None,
+            bars,
+        )
+        assert ret == 0.0
+
+    def test_compute_rebalance_day_return_missing_bar_skipped(self) -> None:
+        """行情缺失时该仓位收益按 0 处理（与缺口语义一致）。"""
+        bars = {
+            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
+            # b 缺下一交易日数据
+        }
+        ret = compute_rebalance_day_return(
+            {"b": 1.0},
+            {"b": 1.0},
+            date(2025, 1, 15),
+            date(2025, 1, 16),
+            bars,
+        )
+        assert ret == 0.0
 
 
 class TestBacktestDayAccumulator:
