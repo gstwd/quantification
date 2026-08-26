@@ -865,6 +865,7 @@ class BacktestService:
         perf = compute_performance_metrics(
             daily_rets,
             benchmark_returns=benchmark_returns if benchmark_returns else None,
+            active_returns=active_rets,
         )
 
         # 信号准确率（从主循环累积的内存计数器获取，无需 DB 查询）

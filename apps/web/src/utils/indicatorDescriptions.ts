@@ -43,12 +43,12 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
     },
     sharpe_ratio: {
       label: '夏普比率',
-      description: '衡量每承担一单位总风险所获得的超额收益。<br>最常用的风险调整后收益指标。<br>> 1.0 为良好，> 2.0 为优秀，> 3.0 为顶级。<br>无风险利率简化为 0。',
+      description: '衡量每承担一单位总风险所获得的超额收益。<br>最常用的风险调整后收益指标。<br>> 1.0 为良好，> 2.0 为优秀，> 3.0 为顶级。<br>无风险利率简化为 0。<br>口径：全期（含空仓 0 收益日），与年化/回撤一致，避免持仓期口径虚高。',
       formula: '(日均收益 / 日收益标准差) × √252',
     },
     sortino_ratio: {
       label: '索提诺比率',
-      description: '夏普比率的改进版，仅考虑下行风险（负收益波动）。<br>相比夏普，它不会惩罚向上的波动（正收益的波动被认为是好的）。<br>用于评估策略在不利情况下的风险调整收益。<br>> 1.5 为良好，> 2.5 为优秀。',
+      description: '夏普比率的改进版，仅考虑下行风险（负收益波动）。<br>相比夏普，它不会惩罚向上的波动（正收益的波动被认为是好的）。<br>用于评估策略在不利情况下的风险调整收益。<br>> 1.5 为良好，> 2.5 为优秀。<br>口径：全期（含空仓 0 收益日），与夏普一致。',
       formula: '(日均收益 / 下行标准差) × √252',
     },
     calmar_ratio: {
@@ -58,8 +58,8 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
     },
     win_rate_pct: {
       label: '胜率',
-      description: '策略产生正收益的交易日占总交易日的比例（%）。<br>胜率 > 50% 表示多数交易日盈利。<br>但高胜率不等于高收益——还需结合盈亏比综合评估。',
-      formula: '正收益天数 / 总交易日数 × 100',
+      description: '策略持仓日中产生正收益的比例（%）。<br>空仓日（收益 0）不计入分母，避免被当作"失败日"稀释胜率。<br>胜率 > 50% 表示多数持仓日盈利。<br>但高胜率不等于高收益——还需结合盈亏比综合评估。',
+      formula: '正收益持仓日 / 持仓日 × 100',
     },
     signal_accuracy_pct: {
       label: '信号准确率',

@@ -54,13 +54,21 @@ def compute_performance_metrics(
     daily_returns: list[float],
     benchmark_returns: list[float] | None = None,
     trading_days_per_year: int = 252,
+    active_returns: list[float] | None = None,
 ) -> PerformanceMetrics:
     """从日收益率序列计算全部绩效指标。
+
+    指标口径（B11 明确）：
+    - 全期口径（含空仓 0 收益日）：累计/年化收益、回撤、夏普、索提诺、
+      卡玛、Alpha/Beta/信息比率——衡量策略整体（含择时空仓）的真实风险收益；
+    - 持仓期口径（仅持仓日）：胜率、持仓日——空仓日不是"失败日"，不计入胜率分母。
 
     Args:
         daily_returns: 策略日收益率列表（%）。
         benchmark_returns: 基准日收益率列表（%），需与 daily_returns 长度一致。
         trading_days_per_year: 年化系数，默认 252。
+        active_returns: 持仓日收益率列表（%）。提供时胜率基于该序列计算；
+            None 时回退到 daily_returns（兼容仅传全期序列的调用方）。
 
     Returns:
         PerformanceMetrics 实例。
@@ -85,7 +93,9 @@ def compute_performance_metrics(
     sharpe = _calc_sharpe_ratio(daily_returns, trading_days_per_year)
     sortino = _calc_sortino_ratio(daily_returns, trading_days_per_year)
     calmar = _calc_calmar_ratio(annualized_return_pct, max_drawdown_pct)
-    win_rate_pct = _calc_win_rate(daily_returns)
+    # 胜率使用持仓期口径：空仓 0 收益日不参与分母（B11）
+    win_returns = active_returns if active_returns else daily_returns
+    win_rate_pct = _calc_win_rate(win_returns)
     profit_loss_ratio = _calc_profit_loss_ratio(daily_returns)
 
     var_95, cvar_95 = _calc_var_cvar(daily_returns)
@@ -164,7 +174,12 @@ def _calc_max_drawdown_details(daily_returns: list[float]) -> tuple[float, int]:
 
 
 def _calc_sharpe_ratio(daily_returns: list[float], trading_days: int) -> float:
-    """计算年化夏普比率。"""
+    """计算年化夏普比率（全期口径，含空仓 0 收益日）。
+
+    含空仓日会同时压低日均收益与日波动，是全期策略的真实风险收益度量；
+    若只看持仓日会系统性虚高夏普（约 √(持仓日占比) 倍），且与年化/回撤等
+    全期指标口径割裂，故 B11 明确保留全期口径。
+    """
     if len(daily_returns) < 2:
         return 0.0
     mean_r = sum(daily_returns) / len(daily_returns)
@@ -176,7 +191,10 @@ def _calc_sharpe_ratio(daily_returns: list[float], trading_days: int) -> float:
 
 
 def _calc_sortino_ratio(daily_returns: list[float], trading_days: int) -> float:
-    """计算年化索提诺比率（仅用下行标准差）。"""
+    """计算年化索提诺比率（全期口径，含空仓 0 收益日）。
+
+    口径与夏普一致：全期序列计算下行标准差，衡量策略整体的下行风险调整收益。
+    """
     if len(daily_returns) < 2:
         return 0.0
     mean_r = sum(daily_returns) / len(daily_returns)
@@ -197,7 +215,11 @@ def _calc_calmar_ratio(annualized_return_pct: float, max_drawdown_pct: float) ->
 
 
 def _calc_win_rate(daily_returns: list[float]) -> float:
-    """计算胜率（正收益日占比，%）。"""
+    """计算胜率（正收益日占比，%）。
+
+    B11 起由调用方传入持仓日收益序列，空仓 0 收益日不再计入分母；
+    传入全期序列时退化为全期口径（兼容旧调用）。
+    """
     if not daily_returns:
         return 0.0
     return sum(1 for r in daily_returns if r > 0) / len(daily_returns) * 100
