@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date
 from typing import Any, TYPE_CHECKING
 
@@ -274,6 +275,8 @@ class FactorProvider:
             logger.warning("回测因子预计算：无匹配的因子计算器，factor_ids=%s", factor_ids)
             return {}
 
+        start = time.perf_counter()
+
         # 将 computers 分为批量和逐点两组
         batch_computers = [c for c in computers if isinstance(c, BatchFactorComputer)]
         point_computers = [c for c in computers if not isinstance(c, BatchFactorComputer)]
@@ -334,12 +337,19 @@ class FactorProvider:
                             )
                             result[trade_date][(code, computer.spec.factor_id)] = None
 
+        total_cells = len(dates) * len(index_codes) * len(factor_ids)
+        filled = sum(
+            1 for day_values in result.values() for value in day_values.values() if value is not None
+        )
+        elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
+        coverage = round(filled / total_cells * 100, 2) if total_cells else 0.0
         logger.info(
-            "回测因子预计算完成: dates=%d index=%d batch_factors=%d point_factors=%d",
+            "[factor] 回测因子预计算完成: dates=%d index=%d factors=%d 覆盖率=%.2f%% 耗时=%sms",
             len(dates),
             len(index_codes),
-            len(batch_computers),
-            len(point_computers),
+            len(factor_ids),
+            coverage,
+            elapsed_ms,
         )
         return result
 

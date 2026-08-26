@@ -7,6 +7,7 @@ StrategyEngine 是策略执行的核心入口，接收 StrategyConfig 和 Engine
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from quant_etf_api.domain.common.signal_level import determine_signal_level
@@ -73,10 +74,21 @@ class StrategyEngine:
         Returns:
             统一的引擎执行结果。
         """
+        stage_start = time.perf_counter()
+        strategy_tag = f"strategy={config.strategy_id} date={context.trade_date}"
+
         # 1. 择时评估（可选）
         timing = None
         if config.timing:
             timing = self._run_timing(config, context)
+            logger.info(
+                "[pipeline] 择时完成: %s regime=%s confidence=%s",
+                strategy_tag,
+                timing.regime,
+                timing.confidence,
+            )
+        else:
+            logger.info("[pipeline] 择时完成: %s regime=none（未配置择时）", strategy_tag)
 
         # 1.5 regime 条件化配置覆盖
         effective = self._resolve_regime_config(config, timing)
@@ -87,14 +99,34 @@ class StrategyEngine:
             scores = CrossSectionScorer().calculate(effective.score, context, debug=scoring_debug)
         else:
             scores = self._score.calculate(effective.score, context, debug=scoring_debug)
+        scored_before_filter = len(scores)
+        logger.info(
+            "[pipeline] 评分完成: %s mode=%s 有效资产=%s",
+            strategy_tag,
+            effective.score.scoring_mode,
+            scored_before_filter,
+        )
 
         # 3. 过滤（可选）
         filter_debug: list[Any] = []
         if effective.filters:
             scores = self._filter.filter(effective.filters, scores, context, debug=filter_debug)
+            logger.info(
+                "[pipeline] 过滤完成: %s %s → %s（排除 %s 个）",
+                strategy_tag,
+                scored_before_filter,
+                len(scores),
+                scored_before_filter - len(scores),
+            )
 
         # 4. 排名
         rankings = self._rank.rank(effective.rank, scores, context)
+        logger.info(
+            "[pipeline] 排名完成: %s 排名资产=%s top=%s",
+            strategy_tag,
+            len(rankings),
+            [r.etf_code for r in rankings[:5]],
+        )
 
         # 5. 仓位分配（必选）
         positions: dict[str, float] = {}
@@ -103,13 +135,46 @@ class StrategyEngine:
         if effective.portfolio:
             allocator = build_allocator(effective.portfolio.method)
             positions = allocator.allocate(effective.portfolio, rankings, timing)
+            pre_risk_positions = dict(positions)
 
             # 6. 风控裁剪（可选）
             if effective.risk:
                 positions = self._risk.apply_constraints(effective.risk, positions)
+                changed = {
+                    code
+                    for code in set(pre_risk_positions) | set(positions)
+                    if abs(pre_risk_positions.get(code, 0.0) - positions.get(code, 0.0)) > 1e-9
+                }
+                if changed:
+                    logger.info(
+                        "[pipeline] 风控裁剪: %s 调整 %s 个仓位 %s",
+                        strategy_tag,
+                        len(changed),
+                        sorted(changed)[:5],
+                    )
+                    logger.debug(
+                        "[pipeline] 风控明细: %s %s",
+                        strategy_tag,
+                        {k: (round(pre_risk_positions.get(k, 0.0), 4), round(v, 4)) for k, v in positions.items()},
+                    )
 
             total_exposure = round(sum(positions.values()), 4)
             cash_ratio = round(1.0 - total_exposure, 4)
+            logger.info(
+                "[pipeline] 组合构建: %s method=%s 持仓数=%s total_exposure=%s cash_ratio=%s",
+                strategy_tag,
+                effective.portfolio.method,
+                len(positions),
+                total_exposure,
+                cash_ratio,
+            )
+            logger.debug(
+                "[pipeline] 仓位明细: %s positions=%s",
+                strategy_tag,
+                {k: round(v, 4) for k, v in positions.items()},
+            )
+        else:
+            logger.info("[pipeline] 组合构建: %s 信号模式（无 portfolio 配置）", strategy_tag)
 
         # 7. 构建兼容旧接口的 StrategyResult 列表（回测模式下跳过以提升性能）
         strategy_results: list[StrategyResult] = []
@@ -121,6 +186,15 @@ class StrategyEngine:
         # 8. 构建管线调试详情
         pipeline_detail = self._build_pipeline_detail(
             effective, scoring_debug, filter_debug, timing
+        )
+
+        elapsed_ms = round((time.perf_counter() - stage_start) * 1000, 2)
+        logger.info(
+            "[pipeline] 管线完成: %s 耗时=%sms 最终资产=%s 排名=%s",
+            strategy_tag,
+            elapsed_ms,
+            len(scores),
+            len(rankings),
         )
 
         return EngineResult(

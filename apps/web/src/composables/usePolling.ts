@@ -20,6 +20,8 @@ export interface UsePollingOptions<T> {
   onData?: (data: T) => void
   /** 连续请求失败多少次后停止轮询，默认 5；0 表示失败不停止 */
   maxConsecutiveErrors?: number
+  /** 连续失败达到阈值、轮询停止时的回调（用于弹一次错误提示） */
+  onMaxErrors?: () => void
 }
 
 /**
@@ -40,6 +42,7 @@ export function usePolling<T>(options: UsePollingOptions<T>) {
     immediate = true,
     onData,
     maxConsecutiveErrors = 5,
+    onMaxErrors,
   } = options
 
   /** 是否正在轮询 */
@@ -83,6 +86,7 @@ export function usePolling<T>(options: UsePollingOptions<T>) {
       consecutiveErrors += 1
       if (maxConsecutiveErrors > 0 && consecutiveErrors >= maxConsecutiveErrors) {
         stop()
+        onMaxErrors?.()
       }
     } finally {
       inFlight = false

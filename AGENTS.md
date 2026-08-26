@@ -242,7 +242,9 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: E
 - **index_signal 表** (migration 0010): 与 `etf_signal` 结构对齐，但以 `index_code` 替代 `etf_code`，用于存储基于指数的策略信号。
 - **信号等级判定常量**: 定义在 `domain/common/constants.py`（`SIGNAL_THRESHOLD_HIGH=70`、`SIGNAL_THRESHOLD_MID=50`），引擎和回测服务统一引用，避免硬编码散落。
 - **`backtest_index_result.signal_score` / `target_weight`** (migration 0024): 回测信号口径与实时一致 —— `signal_score` 为综合得分（0-100），`target_weight` 为信号目标仓位权重（0-1，与实时 `payload.target_weight` 同义）；原 `original_score` 列已删除（语义与新 `signal_score` 重复）。
+- **`backtest_run.warnings`** (migration 0025): 回测执行期收集的结构化提示（`BacktestWarning`：level/code/message/trade_date/index_code），覆盖 `WARMUP`（预热期）/ `MISSING_FACTOR`（因子缺失）/ `DATA_GAP`（行情断档）/ `BENCHMARK_MISSING` / `PARTIAL_RESULT`（失败部分结果）；`BacktestDetail.warnings` 返回给前端，轮询时按 key 去重弹提示。
 - **FilterRule.compare_to**: 过滤器支持跨因子比较（如 `ma_5d > ma_20d`）。`compare_to` 与 `value` 二选一，不能同时设置。`between` 操作符不支持 `compare_to`。
+- **FilterRule.missing_strategy** (B6): 过滤规则因子值（或 compare_to 参照值）为 `None` 时的处理策略，取值 `pass` / `fail` / `exclude`，默认 `fail`（与历史行为一致，仅显式化）。`FilterRuleResult` 带 `missing` / `missing_strategy` 调试字段；非法值在配置校验期（P4）报 422。前端需同步 `StrategyConfigForm.vue` 的 `FilterRuleValue` 接口与 `StrategyDetailPage.vue` 只读展示。
 - **FactorProvider.collect_required_factor_ids() 必须收集 compare_to**: 遍历 filter rules 时不仅要收集 `rule.factor`，还要收集 `rule.compare_to`（若存在）。遗漏会导致被比较的因子值未加载，filter 始终失败 → 空仓。
 - **FilterRuleValue 前端接口**: 定义在 `StrategyConfigForm.vue`（非共享 types 文件）。修改 FilterRule schema 时需同步更新：接口定义、表单模板、`initFilter()`、`buildConfig()`、校验逻辑，以及 `StrategyDetailPage.vue` 的只读展示。
 - **后台任务状态流转**: `research_run` 状态链：pending → running → success/skipped/failed。`skipped` 表示"未执行"：daily_ingest 与三个手动刷新共享同一把摄取互斥锁，并发冲突或非交易日时标记 skipped（metrics.reason=concurrent_skip/holiday）。任务通过 `get_job_queue().enqueue(...)` 入队 `background_job`，由 worker 认领执行；处理器内 `RunService.mark_running()` / `mark_success` / `mark_failed` 维护 run 状态。进程重启后 `recover_stuck_runs_on_startup()` 与 `get_job_queue().recover_stuck_jobs()` 分别恢复卡死的 run 与 job。
@@ -277,3 +279,4 @@ Key rules (details in the doc):
 - **AI 因子（已删除）**: 6 个 AI 因子（ai_sentiment_1d/5d/divergence、ai_attention_1d/5d、ai_topic_momentum）已从策略引擎移除（AI 情绪分析功能不完善）。策略配置引用这些因子会被校验拒绝。AI 舆情分析（新闻采集/情绪聚合/市场研判）作为独立展示功能保留。
 - **关键词标签可配置化**: `keyword_tag_config` 表存储关键词→资产标签映射，替代硬编码的 `classifier._KEYWORD_TAG_MAP`。`TagClassifier._classify_via_keyword()` 优先使用 DB 映射，回退到静态默认值。CRUD 端点: `GET/POST/PUT/DELETE /keyword-tags`。
 - **市场综合研判**: `market_synthesis` 表存储每日 AI 生成的市场概况（200-300 字中文研判）。在 `AIFactorService.run_full_pipeline()` 步骤 7 自动生成，LLM 不可用时静默跳过。API: `GET /ai-factors/synthesis/{date}`。
+- **前端 Toast 弹窗体系**: 自研零依赖（`stores/toast.ts` + `components/ToastHost.vue`），三态 info/warning/error，带 key 会话内去重。`api/client.ts` 拦截器只对主动操作（POST/PUT/PATCH/DELETE）自动弹错误，GET 保持页面内联状态；单请求可用配置 `{ toast: false }` 关闭（如 AI 舆情页已有自有提示）。`usePolling` 支持 `onMaxErrors` 回调（连续失败停止时弹一次），回测轮询按 warnings key 去重弹提示；`useRunSkipToast` 监听用户触发的运行任务，skipped（holiday/concurrent）时弹信息/警告。

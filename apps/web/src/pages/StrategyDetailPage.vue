@@ -144,6 +144,9 @@
                 <span class="config-val mono">
                   {{ rule.factor }} {{ rule.op }}
                   {{ rule.compare_to ? rule.compare_to : rule.value }}
+                  <span v-if="rule.missing_strategy && rule.missing_strategy !== 'fail'">
+                    （缺失:{{ rule.missing_strategy === 'pass' ? '通过' : '排除' }}）
+                  </span>
                 </span>
               </div>
             </div>
@@ -622,6 +625,7 @@ import { fetchIndexDailyBars } from '../api/market_data'
 import { runAllocation } from '../api/strategies'
 import StrategyConfigForm from '../components/StrategyConfigForm.vue'
 import { useStrategyStore } from '../stores/strategies'
+import { toast } from '../stores/toast'
 import type { AllocationResponse, DailyBar } from '../types/api'
 
 const props = defineProps<{ strategyId: string }>()
@@ -673,7 +677,7 @@ const configJson = computed(() => store.current?.config_json ?? {})
 const indexCodesList = computed(() => store.current?.index_codes ?? [])
 const scoreConfig = computed(() => configJson.value.score as { factors?: Record<string, number>; transforms?: Record<string, string>; missing_factor_strategy?: string; scoring_mode?: string } | undefined)
 const timingConfig = computed(() => configJson.value.timing as { factors?: Record<string, number>; transforms?: Record<string, string>; thresholds?: { offensive?: number; defensive?: number }; proxy_index_codes?: string[] } | undefined)
-const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string }> } | undefined)
+const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string; missing_strategy?: string }> } | undefined)
 const rankConfig = computed(() => configJson.value.rank as { sort_by?: string; order?: string; top_n?: number; bottom_n?: number } | undefined)
 const portfolioConfig = computed(() => configJson.value.portfolio as { method?: string; timing_exposure?: Record<string, number>; default_exposure?: number } | undefined)
 const riskConfig = computed(() => configJson.value.risk as { max_asset_weight?: number; max_portfolio_exposure?: number; min_cash_ratio?: number } | undefined)
@@ -774,12 +778,23 @@ function formatThreshold(t: unknown): string {
 }
 
 /** 运行决策管线（支持指定交易日） */
+/** 已弹过的 allocation 警告 key（同一警告只提示一次） */
+const seenAllocationWarningKeys = new Set<string>()
 async function handleRunAllocation(): Promise<void> {
   allocating.value = true
   runError.value = ''
   try {
     const dateParam = selectedDate.value || undefined
     allocation.value = await runAllocation(props.strategyId, dateParam)
+    // 实时决策中的缺失因子警告随响应返回，按级别弹一次提示
+    for (const w of allocation.value.warnings ?? []) {
+      const key = `alloc:${w.code}:${w.trade_date ?? ''}:${w.index_code ?? ''}`
+      if (seenAllocationWarningKeys.has(key)) continue
+      seenAllocationWarningKeys.add(key)
+      if (w.level === 'error') toast.error(w.message, { key })
+      else if (w.level === 'warning') toast.warning(w.message, { key })
+      else toast.info(w.message, { key })
+    }
     // 决策完成后加载标的K线数据
     await loadKlineData()
   } catch (e) {

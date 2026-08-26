@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -108,11 +109,23 @@ class FactorService:
 
         rows_to_upsert: list[dict] = []
         errors = 0
+        missing_count = 0
+        start = time.perf_counter()
 
         for idx in indexes:
             for computer in computers:
                 try:
                     fv = computer.compute(idx.index_code, trade_date, ctx)
+                    if fv.numeric is None:
+                        missing_count += 1
+                    logger.debug(
+                        "[factor] %s %s %s value=%s payload=%s",
+                        trade_date,
+                        idx.index_code,
+                        fv.factor_id,
+                        fv.numeric,
+                        fv.payload,
+                    )
                     rows_to_upsert.append(
                         {
                             "trade_date": trade_date,
@@ -134,13 +147,16 @@ class FactorService:
                     )
 
         upsert_count = self._index_repo.bulk_upsert_builtin(rows_to_upsert)
+        elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
         logger.info(
-            "因子计算完成: trade_date=%s index=%d factor=%d upsert=%d errors=%d",
+            "[factor] 因子计算完成: trade_date=%s index=%d factor=%d upsert=%d missing=%d errors=%d 耗时=%sms",
             trade_date,
             len(indexes),
             len(computers),
             upsert_count,
+            missing_count,
             errors,
+            elapsed_ms,
         )
 
         return {

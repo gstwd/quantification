@@ -120,6 +120,7 @@ import { computed, onMounted, ref } from 'vue'
 import { fetchRunDetail, fetchRunItems, fetchRuns, retryRun } from '../api/runs'
 import type { ResearchRunDetail, ResearchRunItem, ResearchRunSummary } from '../types/api'
 import { usePolling } from '../composables/usePolling'
+import { notifySkippedRun } from '../composables/useRunSkipToast'
 
 const runs = ref<ResearchRunSummary[]>([])
 const total = ref(0)
@@ -213,7 +214,8 @@ function flattenMetrics(metrics: Record<string, unknown> | null | undefined): Re
 async function handleRetry(runId: string) {
   retryingId.value = runId
   try {
-    await retryRun(runId)
+    const res = await retryRun(runId)
+    notifySkippedRun(res.run_id)
     await load(currentOffset.value)
     startPolling()
   } finally {

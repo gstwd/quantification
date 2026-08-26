@@ -16,7 +16,7 @@ export async function triggerCollect(
   const { data } = await apiClient.post<AIAnalysisRunResponse>(
     '/ai-factors/collect',
     null,
-    { params: platformIds ? { platform_ids: platformIds } : {} },
+    { params: platformIds ? { platform_ids: platformIds } : {}, toast: false },
   )
   return data
 }
@@ -34,7 +34,7 @@ export async function triggerAnalyze(
   const { data } = await apiClient.post<AIAnalysisRunResponse>(
     '/ai-factors/analyze',
     null,
-    { params },
+    { params, toast: false },
   )
   return data
 }

@@ -466,6 +466,7 @@ import { fetchStarredSummary } from '../api/strategies'
 import { useStrategyStore } from '../stores/strategies'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
+import { notifySkippedRun } from '../composables/useRunSkipToast'
 
 /** 获取因子指标描述的快捷方法 */
 function fh(key: string): string {
@@ -704,7 +705,8 @@ async function loadQuality() {
 async function triggerColdStartFn() {
   triggeringColdStart.value = true
   try {
-    await triggerColdStart()
+    const res = await triggerColdStart()
+    notifySkippedRun(res.run_id)
     await Promise.all([loadStatus(), loadQuality()])
   } catch (e) {
     error.value = e instanceof Error ? e.message : '触发历史回补失败'
@@ -717,7 +719,8 @@ async function triggerColdStartFn() {
 async function triggerIngest() {
   triggering.value = true
   try {
-    await triggerDailyIngest()
+    const res = await triggerDailyIngest()
+    notifySkippedRun(res.run_id)
     await Promise.all([loadStatus(), loadQuality()])
   } catch (e) {
     error.value = e instanceof Error ? e.message : '触发摄取失败'

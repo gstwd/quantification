@@ -92,6 +92,18 @@ class DefaultScoreCalculator:
             score = self._score_single_asset(code, config, context, breakdown)
             if score is not None:
                 scores[code] = score
+                logger.debug(
+                    "[pipeline] 评分明细: %s score=%s factors=%s",
+                    code,
+                    round(score, 2),
+                    {b.factor_id: b.status for b in breakdown},
+                )
+            else:
+                logger.debug(
+                    "[pipeline] 评分明细: %s score=none（资产被排除）factors=%s",
+                    code,
+                    {b.factor_id: b.status for b in breakdown},
+                )
             if debug is not None:
                 # 回填 contribution
                 total_abs = sum(abs(b.weight) for b in breakdown if b.status == "ok")

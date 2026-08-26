@@ -227,6 +227,8 @@ export interface BacktestSummary {
 export interface BacktestDetail extends BacktestSummary {
   universe_filter: Record<string, unknown>
   params: Record<string, unknown> | null
+  /** 回测执行过程中的结构化提示（预热期/因子缺失/数据缺口/部分结果等） */
+  warnings?: BacktestWarning[]
 }
 
 export interface BacktestDailyResult {
@@ -245,6 +247,18 @@ export interface BacktestDailyResult {
   benchmark_return?: number | null
   /** 当日换手率（0-1） */
   turnover?: number | null
+}
+
+/** 回测执行过程中的结构化提示级别 */
+export type BacktestWarningLevel = 'info' | 'warning' | 'error'
+
+/** 回测执行过程中的结构化提示（预热期/因子缺失/数据缺口/部分结果等） */
+export interface BacktestWarning {
+  level: BacktestWarningLevel
+  code: string
+  message: string
+  trade_date?: string | null
+  index_code?: string | null
 }
 
 export interface BacktestIndexResult {
@@ -531,10 +545,18 @@ export interface AssetFilterDetail {
 }
 
 /** 管线调试完整详情 */
+/** 择时因子明细（pipeline_detail.timing_detail 的值） */
+export interface TimingFactorDetail {
+  raw?: number | string | null
+  transformed?: number | string | null
+  weight?: number | null
+  status?: string
+}
+
 export interface PipelineDetail {
   scoring: AssetScoreDetail[]
   filter_results: AssetFilterDetail[] | null
-  timing_detail: Record<string, unknown> | null
+  timing_detail: Record<string, TimingFactorDetail> | null
   cross_section_stats: Record<string, unknown> | null
 }
 
@@ -571,6 +593,8 @@ export interface AllocationResponse {
   data_date?: string | null
   /** 管线调试详情，含评分分解、过滤明细、择时因子等中间数据 */
   pipeline_detail?: PipelineDetail | null
+  /** 执行过程中的结构化提示（如因子缺失） */
+  warnings?: BacktestWarning[]
 }
 
 /** 星标策略执行摘要中的单个策略项 */

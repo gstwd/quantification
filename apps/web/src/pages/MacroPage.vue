@@ -54,6 +54,7 @@ import { fetchMacroIndicator } from '../api/market_data'
 import type { MacroIndicator } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
+import { notifySkippedRun } from '../composables/useRunSkipToast'
 
 /** 获取宏观指标描述的快捷方法 */
 function macroHelp(key: string): string {
@@ -85,6 +86,7 @@ async function handleRefreshData() {
   refreshMsg.value = ''
   try {
     const res = await triggerMacroRefresh()
+    notifySkippedRun(res.run_id)
     await loadData()
     refreshMsg.value = `宏观数据刷新完成 (${res.run_id.slice(0, 8)}…)`
     refreshOk.value = true

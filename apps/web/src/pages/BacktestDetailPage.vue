@@ -27,6 +27,15 @@
         </span>
       </div>
 
+      <!-- 结构化警告（预热期/因子缺失/数据缺口/部分结果等） -->
+      <div v-if="warnings.length > 0" class="warnings-section">
+        <div class="section-label">执行提示</div>
+        <div v-for="(w, i) in warnings" :key="i" class="warning-item" :class="'warning-' + w.level">
+          <span class="warning-badge">{{ warningLevelLabel(w.level) }}</span>
+          <span class="warning-message">{{ w.message }}</span>
+        </div>
+      </div>
+
       <!-- 汇总指标卡片 -->
       <div v-if="store.current.metrics" class="metrics-section">
         <div class="section-label">核心绩效</div>
@@ -172,6 +181,8 @@ import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
 import { useBacktestStore } from '../stores/backtests'
 import { usePolling } from '../composables/usePolling'
+import { toast } from '../stores/toast'
+import type { BacktestWarning } from '../types/api'
 
 /** 获取指标描述的快捷方法 */
 function metricHelp(key: string): string {
@@ -186,9 +197,15 @@ const drawdownChartEl = ref<HTMLElement | null>(null)
 const positionsChartEl = ref<HTMLElement | null>(null)
 const timingChartEl = ref<HTMLElement | null>(null)
 /** 轮询回测执行状态，组件卸载时自动停止 */
+/** 已弹过的警告 key，轮询期间同一警告只弹一次 */
+const seenWarningKeys = new Set<string>()
 const { polling, start: startPolling } = usePolling({
   fetcher: () => store.refreshOne(props.backtestId),
   isDone: (detail) => detail.status !== 'pending' && detail.status !== 'running',
+  onData: (detail) => notifyWarnings(detail.warnings ?? []),
+  onMaxErrors: () => toast.error('回测状态刷新失败，请检查后端服务是否可用', {
+    key: `backtest-poll:${props.backtestId}`,
+  }),
 })
 /** 指数代码 → 指数名称 映射表 */
 const indexNameMap = ref<Record<string, string>>({})
@@ -205,6 +222,26 @@ let timingChart: any = null
 function statusLabel(status: string): string {
   const map: Record<string, string> = { pending: '待执行', running: '执行中', success: '成功', failed: '失败' }
   return map[status] ?? status
+}
+
+/** 结构化警告列表（内联展示） */
+const warnings = computed(() => store.current?.warnings ?? [])
+
+function warningLevelLabel(level: BacktestWarning['level']): string {
+  const map: Record<BacktestWarning['level'], string> = { info: '信息', warning: '警告', error: '错误' }
+  return map[level]
+}
+
+/** 轮询到新警告时按级别弹一次提示（按 key 去重） */
+function notifyWarnings(list: BacktestWarning[]): void {
+  for (const w of list) {
+    const key = `${w.level}:${w.code}:${w.trade_date ?? ''}:${w.index_code ?? ''}`
+    if (seenWarningKeys.has(key)) continue
+    seenWarningKeys.add(key)
+    if (w.level === 'error') toast.error(w.message, { key })
+    else if (w.level === 'warning') toast.warning(w.message, { key })
+    else toast.info(w.message, { key })
+  }
 }
 
 function formatPct(v: number): string {
@@ -525,6 +562,8 @@ onMounted(async () => {
     store.loadOne(props.backtestId),
     loadIndexNames(),
   ])
+  // 已完成回测打开页面时也展示一次警告（无轮询）
+  notifyWarnings(store.current?.warnings ?? [])
   if (store.current?.status === 'pending' || store.current?.status === 'running') {
     await startPolling()
   }
@@ -571,6 +610,36 @@ onUnmounted(() => {
 .polling-bar-bg { display: inline-block; width: 100px; height: 5px; background: rgba(59,130,246,0.15); border-radius: 3px; overflow: hidden; }
 .polling-bar-fill { display: block; height: 100%; background: #60a5fa; border-radius: 3px; transition: width 0.4s; }
 .polling-pct { font-size: 12px; }
+
+.warnings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 14px 0;
+}
+.warning-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.warning-item.warning-info { border-left: 3px solid var(--accent); }
+.warning-item.warning-warning { border-left: 3px solid var(--warning); }
+.warning-item.warning-error { border-left: 3px solid var(--danger); }
+.warning-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.warning-info .warning-badge { color: var(--accent); background: rgba(59,130,246,0.12); }
+.warning-warning .warning-badge { color: var(--warning); background: rgba(245,158,11,0.12); }
+.warning-error .warning-badge { color: var(--danger); background: rgba(239,68,68,0.12); }
+.warning-message { color: var(--text-muted); line-height: 1.5; }
 
 .section-label {
   font-size: 12px;
