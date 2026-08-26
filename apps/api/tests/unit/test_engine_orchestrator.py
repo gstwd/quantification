@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 
 from quant_etf_api.engine.base import EngineContext
@@ -194,3 +195,37 @@ class TestStrategyEngine:
             assert r.strategy_id == "test_compat"
             assert r.signal_level in ("HIGH", "MID", "LOW")
             assert 0 <= r.signal_score <= 100
+
+    def test_pipeline_logs_stage_summaries(self, caplog) -> None:
+        """引擎管线应输出 [pipeline] 阶段汇总日志（择时/评分/组合/完成）。"""
+        engine = StrategyEngine()
+        config = StrategyConfig(
+            strategy_id="test_log",
+            display_name="日志测试策略",
+            timing=TimingConfig(
+                factors={"pe_percentile": 1.0},
+                transforms={"pe_percentile": "invert_percentile"},
+            ),
+            score=ScoreConfig(factors={"momentum": 1.0}),
+            rank=RankConfig(sort_by="score", order="desc"),
+            portfolio=PortfolioConfig(method="equal_weight"),
+        )
+        context = _make_context(
+            asset_factors={
+                ("510300", "momentum"): 80.0,
+                ("510500", "momentum"): 70.0,
+                ("159915", "momentum"): 60.0,
+            },
+            market_factors={"pe_percentile": 20.0},
+        )
+
+        with caplog.at_level(logging.INFO, logger="quant_etf_api.engine.orchestrator"):
+            engine.run(config, context)
+
+        messages = [
+            r.message for r in caplog.records if r.name == "quant_etf_api.engine.orchestrator"
+        ]
+        assert any("[pipeline] 择时完成" in m for m in messages)
+        assert any("[pipeline] 评分完成" in m for m in messages)
+        assert any("[pipeline] 组合构建" in m for m in messages)
+        assert any("[pipeline] 管线完成" in m for m in messages)
