@@ -29,6 +29,7 @@ from quant_etf_api.engine.rebalance import DefaultRebalanceScheduler
 from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.orchestrator import StrategyEngine
+from quant_etf_api.factors.registry import max_lookback_days
 from quant_etf_api.infra.db.models.core import (
     BacktestComparisonModel,
     BacktestDailyResultModel,
@@ -60,9 +61,6 @@ from quant_etf_api.services.metrics import compute_performance_metrics
 from quant_etf_api.services.strategy_config_service import StrategyConfigService
 
 logger = logging.getLogger(__name__)
-
-# 默认交易日基准（cover_20d 等短窗口无需此值，仅用于需要大量回望的计算）
-_BACKTEST_LOOKBACK_DAYS = 90
 
 
 class BacktestService:
@@ -283,7 +281,7 @@ class BacktestService:
         """统一回测主循环，替代旧的 signal/allocation 双分支。
 
         流程：
-        1. 准备数据（标的、交易日、行情、估值）
+        1. 准备数据（标的、交易日、行情、估值，回望窗口按因子 lookback 推导）
         2. 预计算全区间因子值
         3. 逐日执行引擎管线
         4. 按仓位/排名计算组合收益
@@ -313,6 +311,20 @@ class BacktestService:
         precomputed = self._factor_provider.precompute_backtest_factors(
             config, trading_dates, factor_index_codes, all_bars, all_valuation, all_macro
         )
+
+        # 记录实际回望天数与因子预热期（"前 N 个交易日因子数据不足"提示），
+        # 写入回测 params 元数据，随 mark_success 一并持久化
+        lookback_days = self._get_lookback_days()
+        warmup_trading_days = self._estimate_warmup_trading_days(
+            precomputed,
+            trading_dates,
+            factor_index_codes,
+            FactorProvider.collect_required_factor_ids(config),
+        )
+        run_params = row.params or {}
+        run_params["_lookback_days"] = lookback_days
+        run_params["_warmup_trading_days"] = warmup_trading_days
+        row.params = run_params
 
         # 基准配置
         params = row.params or {}
@@ -754,13 +766,29 @@ class BacktestService:
         """从 index_daily_bar 中提取区间内的交易日列表（读取走仓库）。"""
         return self._index_bar_repo.find_trading_dates(start, end, index_codes)
 
+    def _get_lookback_days(self) -> int:
+        """按因子注册表推导回测回望自然日数，与实时模式口径一致。
+
+        回望窗口取注册表所有因子 lookback_days 的最大值，避免长周期因子
+        （return_120d / ma_60d / 估值百分位 / ERP 百分位等）在回测前段
+        因回望不足而全部为 None，导致前段结果失真。
+
+        Returns:
+            最大回望自然日数。
+        """
+        return max_lookback_days(self._registry)
+
     def _load_all_index_bars(
         self, trading_dates: list[date], index_codes: list[str]
     ) -> dict[tuple[str, date], Any]:
-        """批量加载回测区间及前 90 日的指数行情数据。"""
+        """批量加载回测区间及回望窗口的指数行情数据。
+
+        回望窗口由注册表最大因子 lookback_days 推导（默认兜底 90 天），
+        确保回测首日即可为长周期因子提供足够的行情历史。
+        """
         if not trading_dates:
             return {}
-        lookback_start = trading_dates[0] - timedelta(days=_BACKTEST_LOOKBACK_DAYS)
+        lookback_start = trading_dates[0] - timedelta(days=self._get_lookback_days())
         return self._index_bar_repo.find_all_date_range(
             lookback_start, trading_dates[-1], index_codes=index_codes
         )
@@ -768,11 +796,16 @@ class BacktestService:
     def _load_all_valuation(
         self, trading_dates: list[date], index_codes: list[str]
     ) -> dict[tuple[str, date], Any]:
-        """批量加载指数估值数据，按 index_codes 过滤（读取走仓库）。"""
+        """批量加载指数估值数据（含回望窗口），按 index_codes 过滤。
+
+        与行情数据使用相同回望窗口，供 erp_percentile / pe_percentile 等
+        需要历史分布计算的因子在回测首日即可取到完整历史。
+        """
         if not trading_dates:
             return {}
+        lookback_start = trading_dates[0] - timedelta(days=self._get_lookback_days())
         return IndexValuationRepository(self._db).find_range(
-            trading_dates[0], trading_dates[-1], index_codes
+            lookback_start, trading_dates[-1], index_codes
         )
 
     def _load_all_macro(self) -> dict[str, dict[str, float]]:
@@ -782,6 +815,43 @@ class BacktestService:
             key=indicator_code, value={period: value} 的字典。
         """
         return MacroIndicatorRepository(self._db).find_all_as_map()
+
+    def _estimate_warmup_trading_days(
+        self,
+        precomputed: dict[date, dict[tuple[str, str], float | None]],
+        trading_dates: list[date],
+        index_codes: list[str],
+        factor_ids: list[str],
+    ) -> int:
+        """估算回测前段因子数据不足的预热交易日数。
+
+        对策略实际需要的每个因子，找到首个"全部指数均有有效值"的交易日，
+        取各因子首次全覆盖日期的最大值作为预热期。从未达到全指数覆盖的
+        因子（如某指数无估值数据导致的永久缺失）不参与统计，避免把结构性
+        数据缺口误判为回望不足（后者由 B10 数据质量检查单独处理）。
+
+        Args:
+            precomputed: 预计算因子值，date → (index_code, factor_id) → 数值。
+            trading_dates: 回测交易日列表。
+            index_codes: 参与因子计算的指数代码列表（含择时代理指数）。
+            factor_ids: 策略实际引用的因子 ID 列表。
+
+        Returns:
+            前 N 个交易日中因子数据不足的天数；无预热期时返回 0。
+        """
+        if not factor_ids or not trading_dates:
+            return 0
+        warmup = 0
+        for factor_id in factor_ids:
+            first_full: int | None = None
+            for i, trade_date in enumerate(trading_dates):
+                day_values = precomputed.get(trade_date, {})
+                if all(day_values.get((code, factor_id)) is not None for code in index_codes):
+                    first_full = i
+                    break
+            if first_full is not None:
+                warmup = max(warmup, first_full)
+        return warmup
 
     def _get_index_return(
         self,

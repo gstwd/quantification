@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from quant_etf_api.factors.base import FactorComputer, FactorSpec
 
+# 默认回望自然日数（注册表为空或读取异常时兜底）
+_DEFAULT_LOOKBACK_DAYS = 90
+
 
 class FactorRegistry:
     """因子计算器注册表，以 factor_id 为 key 存储所有已注册的因子计算器。"""
@@ -140,3 +143,25 @@ def build_default_factor_registry() -> FactorRegistry:
     registry.register(MonthlyReturnComputer(period=3))
     registry.register(MonthlyStreakComputer())
     return registry
+
+
+def max_lookback_days(registry: FactorRegistry) -> int:
+    """从注册表中获取所有因子所需的最大回望自然日数。
+
+    实时模式（FactorService._load_context）与回测模式（BacktestService）
+    统一以此值为准，确保长周期因子（如 return_120d / ma_60d / 估值百分位 /
+    ERP 百分位）在计算窗口内能够取到足够的回望数据。
+
+    Args:
+        registry: 因子注册表。
+
+    Returns:
+        最大回望自然日数；注册表为空或读取异常时返回默认 90。
+    """
+    try:
+        return max(
+            (c.spec.lookback_days for c in registry.all()),
+            default=_DEFAULT_LOOKBACK_DAYS,
+        )
+    except Exception:
+        return _DEFAULT_LOOKBACK_DAYS

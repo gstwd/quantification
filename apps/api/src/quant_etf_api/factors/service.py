@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import logging
 from datetime import date, timedelta
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from quant_etf_api.factors.base import FactorContext
+from quant_etf_api.factors.registry import max_lookback_days
 from quant_etf_api.infra.db.models.core import (
     BenchmarkIndexModel,
     DailySentimentAggregateModel,
@@ -38,12 +39,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 默认回望自然日数（当注册表中无因子时使用）
-_DEFAULT_LOOKBACK_DAYS = 90
-
 
 def _get_max_lookback_days(registry: "FactorRegistry") -> int:
     """从注册表中获取所有因子所需的最大回望自然日数。
+
+    统一委托 factors.registry.max_lookback_days，保证实时与回测口径一致。
 
     Args:
         registry: 因子注册表。
@@ -51,14 +51,7 @@ def _get_max_lookback_days(registry: "FactorRegistry") -> int:
     Returns:
         最大回望自然日数。
     """
-    try:
-        max_days = max(
-            (c.spec.lookback_days for c in registry.all()),
-            default=_DEFAULT_LOOKBACK_DAYS,
-        )
-        return max_days
-    except Exception:
-        return _DEFAULT_LOOKBACK_DAYS
+    return max_lookback_days(registry)
 
 
 class FactorService:
