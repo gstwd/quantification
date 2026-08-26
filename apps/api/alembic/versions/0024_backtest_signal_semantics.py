@@ -5,7 +5,7 @@
 - 仓位权重单独存 target_weight 字段；
 - original_score 原为综合得分，语义与新的 signal_score 完全重复，删除。
 
-Revision ID: 0024_backtest_index_signal_semantics
+Revision ID: 0024_backtest_signal_semantics
 Revises: 0023_background_job
 Create Date: 2026-08-26
 """
@@ -15,7 +15,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0024_backtest_index_signal_semantics"
+revision = "0024_backtest_signal_semantics"
 down_revision = "0023_background_job"
 branch_labels = None
 depends_on = None
