@@ -24,8 +24,6 @@ class TestReadThroughEnqueue:
     @pytest.mark.parametrize(
         ("method_name", "args", "expected_key"),
         [
-            ("get_daily_bars", ("510300",), "bars:510300"),
-            ("get_share_history", ("510300",), "shares:510300"),
             ("get_index_daily_bars", ("000300",), "index_bars:000300"),
             ("get_index_valuation", ("000300",), "index_valuation:000300"),
             ("get_macro_indicators", ("cpi",), "macro"),

@@ -22,8 +22,7 @@ def build_universe_items(
 ) -> list[dict[str, Any]]:
     """将指数行转换为引擎 universe 列表。
 
-    引擎层以 "etf_code" 作为资产主键（历史兼容字段），
-    同时保留 "index_code" 以还原领域语义；两者值相同。
+    引擎层以 "index_code" 作为资产主键。
     所有 universe 构建统一走此函数，避免各层自行拼接。
 
     Args:
@@ -31,16 +30,16 @@ def build_universe_items(
         index_codes: 可选过滤，非空时仅保留这些指数。
 
     Returns:
-        universe 字典列表，每项含 etf_code/index_code/name_cn/category。
+        universe 字典列表，每项含 index_code/name_cn/category。
     """
     allowed = set(index_codes) if index_codes else None
     items: list[dict[str, Any]] = []
     for r in rows:
         if isinstance(r, dict):
-            code = r.get("index_code") or r.get("etf_code")
+            code = r.get("index_code")
             name = r.get("name_cn", code or "")
         else:
-            code = getattr(r, "index_code", None) or getattr(r, "etf_code", None)
+            code = getattr(r, "index_code", None)
             name = getattr(r, "name_cn", code or "")
         if not code:
             continue
@@ -48,7 +47,6 @@ def build_universe_items(
             continue
         items.append(
             {
-                "etf_code": code,
                 "index_code": code,
                 "name_cn": name,
                 "category": "broad_index",
@@ -78,7 +76,7 @@ def filter_universe_rows(
 
     def _code_of(r: Any) -> str:
         if isinstance(r, dict):
-            return r.get("index_code") or r.get("etf_code") or ""
-        return getattr(r, "index_code", None) or getattr(r, "etf_code", None) or ""
+            return r.get("index_code") or ""
+        return getattr(r, "index_code", None) or ""
 
     return [r for r in rows if _code_of(r) in codes]

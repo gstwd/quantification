@@ -318,9 +318,9 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(r, i) in allocation.rankings" :key="r.etf_code">
+                <tr v-for="(r, i) in allocation.rankings" :key="r.index_code">
                   <td>{{ i + 1 }}</td>
-                  <td class="mono">{{ r.etf_code }}</td>
+                  <td class="mono">{{ r.index_code }}</td>
                   <td>{{ r.name_cn }}</td>
                   <td class="mono">{{ r.score?.toFixed(1) }}</td>
                   <td>{{ r.category }}</td>
@@ -393,12 +393,12 @@
 
           <details
             v-for="asset in allocation.pipeline_detail.scoring"
-            :key="asset.etf_code"
+            :key="asset.index_code"
             class="debug-asset"
             :class="{ excluded: asset.excluded }"
           >
             <summary class="debug-asset-header">
-              <span class="debug-code mono">{{ asset.etf_code }}</span>
+              <span class="debug-code mono">{{ asset.index_code }}</span>
               <span class="debug-name">{{ asset.name_cn }}</span>
               <span v-if="asset.excluded" class="debug-excluded-tag">已排除</span>
               <span v-else-if="asset.final_score != null" class="debug-final-score">{{ asset.final_score.toFixed(1) }}</span>
@@ -461,12 +461,12 @@
 
             <details
               v-for="asset in allocation.pipeline_detail.filter_results"
-              :key="asset.etf_code"
+              :key="asset.index_code"
               class="debug-asset"
               :class="{ excluded: !asset.passed }"
             >
               <summary class="debug-asset-header">
-                <span class="debug-code mono">{{ asset.etf_code }}</span>
+                <span class="debug-code mono">{{ asset.index_code }}</span>
                 <span class="debug-name">{{ asset.name_cn }}</span>
                 <span v-if="asset.passed" class="debug-passed-tag">通过</span>
                 <span v-else class="debug-failed-tag">未通过</span>
@@ -542,17 +542,17 @@
         <h2 class="section-title">标的K线（决策日 {{ decisionDate }} 前后）</h2>
         <div v-if="chartsLoading" class="chart-placeholder">加载K线数据中...</div>
         <template v-else>
-          <div v-for="(item, i) in allocation.rankings" :key="item.etf_code" class="kline-card">
+          <div v-for="(item, i) in allocation.rankings" :key="item.index_code" class="kline-card">
             <div class="kline-header-bar">
               <span class="kline-rank">#{{ i + 1 }}</span>
-              <span class="kline-code mono">{{ item.etf_code }}</span>
+              <span class="kline-code mono">{{ item.index_code }}</span>
               <span class="kline-name">{{ item.name_cn }}</span>
               <span class="kline-score">得分 {{ (item.score ?? 0).toFixed(1) }}</span>
             </div>
-            <div v-if="!chartsData[item.etf_code] || chartsData[item.etf_code].length === 0" class="chart-placeholder chart-placeholder-sm">
+            <div v-if="!chartsData[item.index_code] || chartsData[item.index_code].length === 0" class="chart-placeholder chart-placeholder-sm">
               暂无K线数据
             </div>
-            <div v-else :ref="(el: unknown) => { if (el) setChartRef(item.etf_code, el as HTMLElement) }" class="kline-chart"></div>
+            <div v-else :ref="(el: unknown) => { if (el) setChartRef(item.index_code, el as HTMLElement) }" class="kline-chart"></div>
           </div>
         </template>
       </div>
@@ -815,7 +815,7 @@ async function loadKlineData(): Promise<void> {
   disposeCharts()
 
   const range = calcDateRange(decisionDate.value)
-  const codes = allocation.value.rankings.map(r => r.etf_code)
+  const codes = allocation.value.rankings.map(r => r.index_code)
   const results = await Promise.allSettled(
     codes.map(code =>
       fetchIndexDailyBars(code, { startDate: range.startDate, endDate: range.endDate }),

@@ -78,14 +78,14 @@
                       <table class="items-table">
                         <thead>
                           <tr>
-                            <th>ETF 代码</th>
+                            <th>指数代码</th>
                             <th>状态</th>
                             <th>说明</th>
                           </tr>
                         </thead>
                         <tbody>
                           <tr v-for="sub in itemDetails[item.run_id]" :key="sub.id">
-                            <td class="mono">{{ sub.etf_code }}</td>
+                            <td class="mono">{{ sub.index_code }}</td>
                             <td><span class="status-badge" :class="'status-' + sub.status">{{ sub.status }}</span></td>
                             <td class="text-muted">{{ sub.message ?? '—' }}</td>
                           </tr>

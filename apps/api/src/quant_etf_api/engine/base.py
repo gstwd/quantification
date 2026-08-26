@@ -24,10 +24,10 @@ class EngineContext:
 
     Attributes:
         trade_date: 交易日。
-        universe: 资产宇宙列表，每项含 etf_code、name_cn、category。
-        asset_factors: 每资产的因子值，key=(etf_code, factor_id)。
+        universe: 资产宇宙列表，每项含 index_code、name_cn、category。
+        asset_factors: 每资产的因子值，key=(index_code, factor_id)。
         market_factors: 市场级因子值（用于择时），key=factor_id。
-        asset_metadata: 资产元数据，key=etf_code。
+        asset_metadata: 资产元数据，key=index_code。
         index_valuation: 指数估值映射，key=index_code，value=含 pe/pb 百分位等字段的字典。
             类型化替代 extra["index_valuation"]，避免无类型逃生舱。
         extra: 扩展字段（原始 K 线数据等）。
@@ -54,9 +54,9 @@ class EngineResult:
         trade_date: 交易日。
         strategy_id: 策略标识。
         timing: 择时信号，无择时配置时为 None。
-        scores: 每资产综合得分，key=etf_code。
+        scores: 每资产综合得分，key=index_code。
         rankings: 资产排名列表（已排序）。
-        positions: 目标仓位权重，key=etf_code。信号模式下为空 dict。
+        positions: 目标仓位权重，key=index_code。信号模式下为空 dict。
         total_exposure: 总仓位比例。
         cash_ratio: 现金比例。
         strategy_results: 兼容旧接口的 StrategyResult 列表。

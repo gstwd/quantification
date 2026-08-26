@@ -69,10 +69,10 @@ class TestIngestSkippedSemantics:
 
     @pytest.mark.parametrize(
         "method",
-        ["refresh_etf_data", "refresh_index_data", "refresh_macro_data"],
+        ["refresh_index_data", "refresh_macro_data"],
     )
     def test_refresh_concurrent_skip_marks_skipped(self, method: str) -> None:
-        """三个手动刷新入口在并发冲突时标记为 skipped。"""
+        """两个手动刷新入口在并发冲突时标记为 skipped。"""
         db = mock.MagicMock()
         assert _daily_ingest_lock.acquire(blocking=False)
         try:
@@ -86,10 +86,10 @@ class TestIngestSkippedSemantics:
 
     @pytest.mark.parametrize(
         "method",
-        ["refresh_etf_data", "refresh_index_data", "refresh_macro_data"],
+        ["refresh_index_data", "refresh_macro_data"],
     )
     def test_refresh_holiday_marks_skipped(self, method: str) -> None:
-        """三个手动刷新入口在非交易日时标记为 skipped。"""
+        """两个手动刷新入口在非交易日时标记为 skipped。"""
         db = mock.MagicMock()
         with mock.patch("quant_etf_api.services.ingest_service.TradingCalendar", _FakeCalendar):
             getattr(_make_service(db), method)("r1")

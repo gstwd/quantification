@@ -4,7 +4,7 @@
 - 调仓调度器（纯领域实现，交易日历协议注入）
 - 换手率 / 组合收益（纯函数）
 - 回测账户累积器
-- universe 解析（兼容 etf_code 历史字段）
+- universe 解析（以 index_code 为资产主键）
 """
 
 from __future__ import annotations
@@ -255,12 +255,11 @@ class TestBacktestDayAccumulator:
 class TestUniverseDomain:
     """universe 解析与领域模型测试。"""
 
-    def test_build_universe_items_dual_keys(self) -> None:
-        """universe 项应同时携带 etf_code（引擎兼容）与 index_code（领域语义）。"""
+    def test_build_universe_items_index_key(self) -> None:
+        """universe 项应以 index_code 为资产主键。"""
         rows = [SimpleNamespace(index_code="000300", name_cn="沪深300")]
         items = build_universe_items(rows)
         assert items[0]["index_code"] == "000300"
-        assert items[0]["etf_code"] == "000300"
 
     def test_build_universe_items_filter(self) -> None:
         """按 index_codes 过滤。"""
@@ -281,8 +280,7 @@ class TestUniverseDomain:
         assert [r.index_code for r in filtered] == ["000905"]
 
     def test_universe_asset_to_engine_dict(self) -> None:
-        """UniverseAsset 领域模型转换为引擎兼容字典。"""
+        """UniverseAsset 领域模型转换为引擎字典。"""
         asset = UniverseAsset(asset_code="000300", name_cn="沪深300")
         d = asset.to_engine_dict()
-        assert d["etf_code"] == "000300"
         assert d["index_code"] == "000300"

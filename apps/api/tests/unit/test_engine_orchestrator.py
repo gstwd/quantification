@@ -35,9 +35,9 @@ def _make_context(
     return EngineContext(
         trade_date=date(2025, 1, 15),
         universe=[
-            {"etf_code": "510300", "name_cn": "沪深300ETF", "category": "broad_index"},
-            {"etf_code": "510500", "name_cn": "中证500ETF", "category": "broad_index"},
-            {"etf_code": "159915", "name_cn": "创业板ETF", "category": "broad_index"},
+            {"index_code": "000300", "name_cn": "沪深300", "category": "broad_index"},
+            {"index_code": "000905", "name_cn": "中证500", "category": "broad_index"},
+            {"index_code": "399006", "name_cn": "创业板", "category": "broad_index"},
         ],
         asset_factors=asset_factors or {},
         market_factors=market_factors or {},
@@ -61,12 +61,12 @@ class TestStrategyEngine:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "momentum"): 80.0,
-                ("510300", "valuation"): 60.0,
-                ("510500", "momentum"): 70.0,
-                ("510500", "valuation"): 50.0,
-                ("159915", "momentum"): 60.0,
-                ("159915", "valuation"): 40.0,
+                ("000300", "momentum"): 80.0,
+                ("000300", "valuation"): 60.0,
+                ("000905", "momentum"): 70.0,
+                ("000905", "valuation"): 50.0,
+                ("399006", "momentum"): 60.0,
+                ("399006", "valuation"): 40.0,
             },
         )
 
@@ -97,12 +97,12 @@ class TestStrategyEngine:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "momentum"): 80.0,
-                ("510300", "valuation"): 60.0,
-                ("510500", "momentum"): 70.0,
-                ("510500", "valuation"): 50.0,
-                ("159915", "momentum"): 60.0,
-                ("159915", "valuation"): 40.0,
+                ("000300", "momentum"): 80.0,
+                ("000300", "valuation"): 60.0,
+                ("000905", "momentum"): 70.0,
+                ("000905", "valuation"): 50.0,
+                ("399006", "momentum"): 60.0,
+                ("399006", "valuation"): 40.0,
             },
         )
 
@@ -135,9 +135,9 @@ class TestStrategyEngine:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "momentum"): 80.0,
-                ("510500", "momentum"): 70.0,
-                ("159915", "momentum"): 60.0,
+                ("000300", "momentum"): 80.0,
+                ("000905", "momentum"): 70.0,
+                ("399006", "momentum"): 60.0,
             },
             market_factors={"pe_percentile": 20.0, "pb_percentile": 25.0},
         )
@@ -161,9 +161,9 @@ class TestStrategyEngine:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "momentum"): 80.0,
-                ("510500", "momentum"): 70.0,
-                ("159915", "momentum"): 60.0,
+                ("000300", "momentum"): 80.0,
+                ("000905", "momentum"): 70.0,
+                ("399006", "momentum"): 60.0,
             },
         )
 
@@ -192,20 +192,20 @@ class TestStrategyEngine:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "momentum"): 80.0,
-                ("510500", "momentum"): 70.0,
-                ("159915", "momentum"): None,  # 全部缺失
+                ("000300", "momentum"): 80.0,
+                ("000905", "momentum"): 70.0,
+                ("399006", "momentum"): None,  # 全部缺失
             },
         )
 
         result = engine.run(config, context)
 
-        ranked_codes = [r.etf_code for r in result.rankings]
-        assert "159915" not in result.scores
-        assert "159915" not in ranked_codes
-        assert "159915" not in result.positions
+        ranked_codes = [r.index_code for r in result.rankings]
+        assert "399006" not in result.scores
+        assert "399006" not in ranked_codes
+        assert "399006" not in result.positions
         # bottom_n=1 应选中有效资产中得分最低者，而非缺失资产
-        assert ranked_codes == ["510500"]
+        assert ranked_codes == ["000905"]
 
     def test_strategy_results_compatibility(self) -> None:
         """兼容旧接口的 StrategyResult 列表。"""
@@ -218,9 +218,9 @@ class TestStrategyEngine:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "momentum"): 80.0,
-                ("510500", "momentum"): 70.0,
-                ("159915", "momentum"): 60.0,
+                ("000300", "momentum"): 80.0,
+                ("000905", "momentum"): 70.0,
+                ("399006", "momentum"): 60.0,
             },
         )
 
@@ -248,9 +248,9 @@ class TestStrategyEngine:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "momentum"): 80.0,
-                ("510500", "momentum"): 70.0,
-                ("159915", "momentum"): 60.0,
+                ("000300", "momentum"): 80.0,
+                ("000905", "momentum"): 70.0,
+                ("399006", "momentum"): 60.0,
             },
             market_factors={"pe_percentile": 20.0},
         )

@@ -125,7 +125,7 @@ class StrategyEngine:
             "[pipeline] 排名完成: %s 排名资产=%s top=%s",
             strategy_tag,
             len(rankings),
-            [r.etf_code for r in rankings[:5]],
+            [r.index_code for r in rankings[:5]],
         )
 
         # 5. 仓位分配（必选）
@@ -290,11 +290,11 @@ class StrategyEngine:
         cash_ratio: float,
     ) -> list[StrategyResult]:
         """构建兼容旧接口的 StrategyResult 列表。"""
-        rank_map = {r.etf_code: r for r in rankings}
+        rank_map = {r.index_code: r for r in rankings}
         results: list[StrategyResult] = []
 
         for item in context.universe:
-            code = item["etf_code"]
+            code = item["index_code"]
             score = scores.get(code, 0.0)
             ranking = rank_map.get(code)
             target_weight = positions.get(code, 0.0)
@@ -337,7 +337,7 @@ class StrategyEngine:
             results.append(
                 StrategyResult(
                     trade_date=context.trade_date,
-                    etf_code=code,
+                    index_code=code,
                     strategy_id=config.strategy_id,
                     signal_score=round(score, 2),
                     signal_level=level,

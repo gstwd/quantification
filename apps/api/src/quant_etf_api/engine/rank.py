@@ -39,7 +39,7 @@ class RankEngine(Protocol):
 
         Args:
             config: 排名配置。
-            assets: 资产得分，key=etf_code。
+            assets: 资产得分，key=index_code。
             context: 引擎上下文。
 
         Returns:
@@ -69,7 +69,7 @@ class DefaultRankEngine:
             category = _CATEGORY_LABELS.get(category_raw, category_raw)
             rankings.append(
                 AssetRanking(
-                    etf_code=code,
+                    index_code=code,
                     name_cn=meta.get("name_cn", code),
                     category=category,
                     score=score,
@@ -102,10 +102,10 @@ class DefaultRankEngine:
         with_momentum = [
             (i, r)
             for i, r in enumerate(rankings)
-            if context.asset_factors.get((r.etf_code, momentum_factor)) is not None
+            if context.asset_factors.get((r.index_code, momentum_factor)) is not None
         ]
         with_momentum.sort(
-            key=lambda x: context.asset_factors.get((x[1].etf_code, momentum_factor), 0),
+            key=lambda x: context.asset_factors.get((x[1].index_code, momentum_factor), 0),
             reverse=True,
         )
         for sub_rank, (idx, r) in enumerate(with_momentum, 1):
@@ -115,10 +115,10 @@ class DefaultRankEngine:
         with_valuation = [
             (i, r)
             for i, r in enumerate(rankings)
-            if context.asset_factors.get((r.etf_code, valuation_factor)) is not None
+            if context.asset_factors.get((r.index_code, valuation_factor)) is not None
         ]
         with_valuation.sort(
-            key=lambda x: 100 - (context.asset_factors.get((x[1].etf_code, valuation_factor)) or 0),
+            key=lambda x: 100 - (context.asset_factors.get((x[1].index_code, valuation_factor)) or 0),
             reverse=True,
         )
         for sub_rank, (idx, r) in enumerate(with_valuation, 1):

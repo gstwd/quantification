@@ -36,7 +36,7 @@ class AssetScoreDetail:
     """单个资产的评分明细。
 
     Attributes:
-        etf_code: 资产代码（指数代码）。
+        index_code: 资产代码（指数代码）。
         name_cn: 资产中文名称。
         raw_score: 横截面变换前的原始加权得分，None 表示被排除。
         final_score: 横截面变换后的最终得分（0-100），None 表示被排除。
@@ -45,7 +45,7 @@ class AssetScoreDetail:
         exclude_reason: 排除原因说明。
     """
 
-    etf_code: str
+    index_code: str
     name_cn: str
     raw_score: float | None = None
     final_score: float | None = None
@@ -86,14 +86,14 @@ class AssetFilterDetail:
     """单个资产的过滤明细。
 
     Attributes:
-        etf_code: 资产代码。
+        index_code: 资产代码。
         name_cn: 资产中文名称。
         passed: 是否通过全部过滤规则。
         rule_results: 各条规则的判定结果列表。
         fail_reason: 失败原因描述（AND 逻辑时为第一条未通过规则，OR 逻辑时为全部未通过）。
     """
 
-    etf_code: str
+    index_code: str
     name_cn: str
     passed: bool = True
     rule_results: list[FilterRuleResult] = field(default_factory=list)

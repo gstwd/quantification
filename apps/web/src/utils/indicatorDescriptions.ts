@@ -226,7 +226,7 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
     },
     close_price: {
       label: '最新收盘',
-      description: '指数/ETF 最新交易日的收盘价格。<br>K 线图以收盘价为主要参考线。',
+      description: '指数最新交易日的收盘点位。<br>K 线图以收盘价为主要参考线。',
     },
   },
 

@@ -126,7 +126,7 @@ class IndexService:
     def ensure_index_exists(self, index_code: str, name_cn: str | None = None) -> None:
         """确保活跃指数存在，不存在则自动创建，已停用则重新激活。
 
-        幂等操作，用于 ETF 添加时自动关联跟踪指数。
+        幂等操作，用于手动添加指数时自动登记。
 
         Args:
             index_code: 指数代码
@@ -142,7 +142,7 @@ class IndexService:
                 existing.name_cn = name_cn
             try:
                 self._db.commit()
-                logger.info("指数 %s 已重新激活（通过 ETF 关联）", index_code)
+                logger.info("指数 %s 已重新激活", index_code)
             except Exception:
                 self._db.rollback()
                 logger.warning("重新激活指数 %s 失败", index_code, exc_info=True)

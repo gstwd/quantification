@@ -70,7 +70,7 @@ def handle_strategy_run(payload: dict) -> None:
 
 
 def handle_cold_start(payload: dict) -> None:
-    """执行冷启动：拉取全部 ETF 和指数从成立至今的全量历史日线。"""
+    """执行冷启动：拉取全部指数从成立至今的全量历史日线。"""
     from quant_etf_api.infra.db.base import SessionLocal
     from quant_etf_api.services.ingest_service import IngestService
     from quant_etf_api.services.run_service import RunService
@@ -89,7 +89,7 @@ def handle_cold_start(payload: dict) -> None:
 
 
 def handle_startup_fill(payload: dict) -> None:
-    """执行启动补全：仅补全有数据缺口的 ETF 和指数。"""
+    """执行启动补全：仅补全有数据缺口的指数。"""
     from quant_etf_api.infra.db.base import SessionLocal
     from quant_etf_api.services.ingest_service import IngestService
     from quant_etf_api.services.run_service import RunService
@@ -108,44 +108,6 @@ def handle_startup_fill(payload: dict) -> None:
         logger.exception("启动补全任务异常")
         if run_id:
             RunService(db).mark_failed(run_id, f"启动补全异常: {type(e).__name__}: {e}")
-        raise
-    finally:
-        db.close()
-
-
-def handle_universe_refresh(payload: dict) -> None:
-    """执行 ETF 池元数据刷新。"""
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.services.run_service import RunService
-    from quant_etf_api.services.universe_service import UniverseService
-
-    run_id = payload.get("run_id") or ""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        UniverseService(db).refresh_all(run_id)
-    except Exception as e:
-        logger.exception("ETF 池刷新任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"ETF 池刷新异常: {type(e).__name__}: {e}")
-        raise
-    finally:
-        db.close()
-
-
-def handle_etf_refresh(payload: dict) -> None:
-    """刷新所有活跃 ETF 的日线和份额数据。"""
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.services.ingest_service import IngestService
-    from quant_etf_api.services.run_service import RunService
-
-    run_id = payload.get("run_id") or ""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        IngestService(db).refresh_etf_data(run_id)
-    except Exception as e:
-        logger.exception("ETF 数据刷新任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"ETF 数据刷新异常: {type(e).__name__}: {e}")
         raise
     finally:
         db.close()
@@ -326,8 +288,6 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "strategy_run": handle_strategy_run,
     "cold_start": handle_cold_start,
     "startup_fill": handle_startup_fill,
-    "universe_refresh": handle_universe_refresh,
-    "etf_refresh": handle_etf_refresh,
     "index_refresh": handle_index_refresh,
     "macro_refresh": handle_macro_refresh,
     "ai_analysis": handle_ai_analysis,

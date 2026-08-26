@@ -11,7 +11,6 @@ from quant_etf_api.api.middleware import RequestIdMiddleware
 from quant_etf_api.api.routers import (
     ai_factors,
     backtests,
-    etfs,
     factors,
     health,
     indexes,
@@ -79,7 +78,6 @@ app.add_middleware(
 
 app.include_router(health.router, prefix=settings.api_prefix)
 app.include_router(system.router, prefix=settings.api_prefix)
-app.include_router(etfs.router, prefix=settings.api_prefix)
 app.include_router(indexes.router, prefix=settings.api_prefix)
 app.include_router(market_data.router, prefix=settings.api_prefix)
 app.include_router(strategies.router, prefix=settings.api_prefix)

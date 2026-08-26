@@ -122,7 +122,7 @@ class ResearchRunRepository(BaseRepository):
     def add_item(
         self,
         run_id: str,
-        etf_code: str,
+        index_code: str,
         status: str,
         message: str | None = None,
         metrics: dict[str, Any] | None = None,
@@ -131,14 +131,14 @@ class ResearchRunRepository(BaseRepository):
 
         Args:
             run_id: 运行记录 ID。
-            etf_code: 关联的 ETF/指数代码。
+            index_code: 关联的指数代码。
             status: 子项状态：success/skipped/failed。
             message: 子项消息。
             metrics: 子项指标。
         """
         item = ResearchRunItemModel(
             run_id=run_id,
-            etf_code=etf_code,
+            index_code=index_code,
             status=status,
             message=message or None,
             metrics=metrics,

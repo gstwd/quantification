@@ -23,7 +23,7 @@
 **类：**
 ```python
 class IngestService:
-    """行情数据摄取服务，负责从外部接口拉取并持久化 ETF 日线和份额数据。
+    """行情数据摄取服务，负责从外部接口拉取并持久化指数日线、估值和宏观指标。
 
     首次请求时从外部 API 获取数据写入数据库，后续请求直接读库。
     使用 threading.Lock 防止并发冷启动时重复拉取。
@@ -32,13 +32,13 @@ class IngestService:
 
 **函数/方法（含 Args / Returns / Raises）：**
 ```python
-def fetch_daily_bars(self, code: str, start: date, end: date) -> list[DailyBar]:
-    """获取指定 ETF 的日线行情数据。
+def fetch_index_daily_bars(self, index_code: str, start: date, end: date) -> list[DailyBar]:
+    """获取指定指数的日线行情数据。
 
-    优先从数据库读取，若无数据则从腾讯行情接口拉取并持久化。
+    优先从数据库读取，若无数据则从 AkShare 指数接口拉取并持久化。
 
     Args:
-        code: ETF 代码，如 "510300"。
+        index_code: 指数代码，如 "000300"。
         start: 起始日期（含）。
         end: 结束日期（含）。
 
@@ -52,8 +52,8 @@ def fetch_daily_bars(self, code: str, start: date, end: date) -> list[DailyBar]:
 
 **行内注释**（说明"为什么"，而非"是什么"）：
 ```python
-# 剔除上市不足 60 个交易日的新 ETF，避免历史数据不足导致因子失真
-df = df[df["listing_days"] >= 60]
+# 剔除数据不足 60 个交易日的指数，避免历史数据不足导致因子失真
+df = df[df["bar_days"] >= 60]
 
 raw = resp.get("qfqday") or resp.get("day", [])  # 接口返回键名不稳定，兼容两种格式
 ```
@@ -69,19 +69,19 @@ raw = resp.get("qfqday") or resp.get("day", [])  # 接口返回键名不稳定�
 **服务层**：捕获具体异常，记录日志，向上抛出业务异常或返回 `None`：
 ```python
 try:
-    return self._db.query(EtfModel).filter_by(code=code).one()
+    return self._db.query(BenchmarkIndexModel).filter_by(index_code=index_code).one()
 except NoResultFound:
     return None
 except Exception:
-    logger.exception("查询 ETF %s 失败", code)
+    logger.exception("查询指数 %s 失败", index_code)
     raise
 ```
 
 **路由层**：将业务异常转换为 HTTPException，使用语义化状态码：
 ```python
-etf = service.get_etf(etf_code)
-if etf is None:
-    raise HTTPException(status_code=404, detail=f"ETF {etf_code} 不存在")
+index = service.get_index(index_code)
+if index is None:
+    raise HTTPException(status_code=404, detail=f"指数 {index_code} 不存在")
 ```
 
 - `404`：资源不存在
@@ -133,14 +133,14 @@ def test_volume_probability(volume: float, expected: float) -> None:
 ```vue
 <script setup lang="ts">
 /**
- * ETF 详情页面。
+ * 指数详情页面。
  *
- * 展示单只 ETF 的基本信息、日线行情图及信号历史。
- * 数据通过 useEtfStore 统一管理，组件不直接调用 API。
+ * 展示单只指数的基本信息、日线行情图及估值历史。
+ * 数据通过 useIndexStore 统一管理，组件不直接调用 API。
  */
 
-// 当前 ETF 代码，从路由参数中读取
-const etfCode = computed(() => route.params.code as string)
+// 当前指数代码，从路由参数中读取
+const indexCode = computed(() => route.params.indexCode as string)
 
 // 控制行情图加载状态，显示骨架屏
 const isLoading = ref(false)
@@ -161,14 +161,14 @@ function formatNavChartData(rawData: NavRecord[], benchmarkCode: string): EChart
 
 **Pinia Store**：
 ```typescript
-export const useEtfStore = defineStore('etf', () => {
-  // 已加载的 ETF 元数据缓存，避免重复请求
-  const cache = ref<Map<string, EtfDetail>>(new Map())
+export const useIndexStore = defineStore('index', () => {
+  // 已加载的指数元数据缓存，避免重复请求
+  const cache = ref<Map<string, IndexDetail>>(new Map())
 
   /**
-   * 加载单只 ETF 的完整详情，优先读取缓存。
+   * 加载单只指数的完整详情，优先读取缓存。
    *
-   * @param code - ETF 代码
+   * @param code - 指数代码
    */
   async function loadOne(code: string): Promise<void> {
 ```
@@ -183,8 +183,8 @@ export const useEtfStore = defineStore('etf', () => {
 
 **API 层**：不吞掉错误，让 store 决定如何处理：
 ```typescript
-export async function fetchEtfDetail(code: string): Promise<EtfDetail> {
-  const { data } = await apiClient.get<EtfDetail>(`/etfs/${code}`)
+export async function fetchIndexDetail(code: string): Promise<IndexDetail> {
+  const { data } = await apiClient.get<IndexDetail>(`/indexes/${code}`)
   return data
 }
 ```
@@ -197,7 +197,7 @@ async function loadOne(code: string): Promise<void> {
   isLoading.value = true
   error.value = null
   try {
-    detail.value = await fetchEtfDetail(code)
+    detail.value = await fetchIndexDetail(code)
   } catch (e) {
     // 将错误信息暴露给组件，而非静默失败
     error.value = e instanceof Error ? e.message : '加载失败，请稍后重试'
@@ -243,9 +243,9 @@ import { useRouter } from 'vue-router'
 import { defineStore } from 'pinia'
 
 // 3. 本项目 API / stores / types
-import { fetchEtfDetail } from '@/api/etfs'
+import { fetchIndexDetail } from '@/api/market_data'
 import { useSignalStore } from '@/stores/signals'
-import type { EtfDetail } from '@/types/api'
+import type { IndexDetail } from '@/types/api'
 ```
 
 ---

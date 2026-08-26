@@ -25,7 +25,7 @@ def _make_context(missing: dict[str, str] | None = None) -> SimpleNamespace:
     """构建带 universe/asset_factors 的伪上下文。"""
     return SimpleNamespace(
         trade_date=date(2025, 1, 15),
-        universe=[{"index_code": "000300", "etf_code": "000300", "name_cn": "沪深300"}],
+        universe=[{"index_code": "000300", "name_cn": "沪深300"}],
         asset_factors={("000300", "return_20d"): 3.0},
         _missing=missing or {},
     )
@@ -161,7 +161,7 @@ class TestRunAndPersist:
             strategy_results=[
                 SimpleNamespace(
                     trade_date=date(2025, 1, 15),
-                    etf_code="000300",
+                    index_code="000300",
                     strategy_id="s1",
                     signal_score=60.0,
                     signal_level="MID",

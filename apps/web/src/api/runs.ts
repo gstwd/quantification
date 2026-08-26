@@ -47,18 +47,8 @@ export async function fetchDataQuality(): Promise<DataQualityResponse> {
   return data
 }
 
-export async function triggerUniverseRefresh(): Promise<{ run_id: string }> {
-  const { data } = await apiClient.post<{ run_id: string }>('/runs/universe-refresh')
-  return data
-}
-
 export async function triggerDailyIngest(): Promise<{ run_id: string }> {
   const { data } = await apiClient.post<{ run_id: string }>('/runs/daily-ingest')
-  return data
-}
-
-export async function triggerEtfRefresh(): Promise<{ run_id: string }> {
-  const { data } = await apiClient.post<{ run_id: string }>('/runs/etf-refresh')
   return data
 }
 

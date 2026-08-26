@@ -52,10 +52,6 @@ def _enqueue_for_run(
         )
     elif run_type == "cold_start":
         queue.enqueue("cold_start", {"run_id": run_id})
-    elif run_type == "universe_refresh":
-        queue.enqueue("universe_refresh", {"run_id": run_id})
-    elif run_type == "etf_refresh":
-        queue.enqueue("etf_refresh", {"run_id": run_id})
     elif run_type == "index_refresh":
         queue.enqueue("index_refresh", {"run_id": run_id})
     elif run_type == "macro_refresh":
@@ -107,7 +103,7 @@ def get_run_detail(run_id: str, db: Session = Depends(get_db)) -> ResearchRunDet
 
 @router.get("/runs/{run_id}/items", response_model=list[ResearchRunItemSchema])
 def get_run_items(run_id: str, db: Session = Depends(get_db)) -> list[ResearchRunItemSchema]:
-    """获取运行的子项明细列表（逐 ETF 处理结果）。"""
+    """获取运行的子项明细列表（逐标的处理结果）。"""
     return RunService(db).get_run_items(run_id)
 
 
@@ -116,28 +112,12 @@ def get_run_items(run_id: str, db: Session = Depends(get_db)) -> list[ResearchRu
 # ---------------------------------------------------------------------------
 
 
-@router.post("/runs/universe-refresh")
-def refresh_universe(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发 ETF 池元数据刷新，入队后台任务执行。"""
-    summary = RunService(db).create_run("universe_refresh", None, date.today())
-    _enqueue_for_run("universe_refresh", summary.run_id, None, None, summary.trade_date or date.today())
-    return {"status": "accepted", "run_type": "universe_refresh", "run_id": summary.run_id}
-
-
 @router.post("/runs/daily-ingest")
 def daily_ingest(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发增量日频数据摄取（ETF + 指数 + 宏观），入队后台任务执行。"""
+    """触发增量日频数据摄取（指数 + 宏观），入队后台任务执行。"""
     summary = RunService(db).create_run("daily_ingest", None, date.today())
     _enqueue_for_run("daily_ingest", summary.run_id, None, None, summary.trade_date or date.today())
     return {"status": "accepted", "run_type": "daily_ingest", "run_id": summary.run_id}
-
-
-@router.post("/runs/etf-refresh")
-def etf_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发 ETF 日线和份额数据刷新，入队后台任务执行。"""
-    summary = RunService(db).create_run("etf_refresh", None, date.today())
-    _enqueue_for_run("etf_refresh", summary.run_id, None, None, summary.trade_date or date.today())
-    return {"status": "accepted", "run_type": "etf_refresh", "run_id": summary.run_id}
 
 
 @router.post("/runs/index-refresh")
@@ -158,7 +138,7 @@ def macro_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
 
 @router.post("/runs/cold-start")
 def cold_start(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发冷启动：拉取全部 ETF 和指数从成立至今的全量历史日线数据。"""
+    """触发冷启动：拉取全部指数从成立至今的全量历史日线数据。"""
     summary = RunService(db).create_run("cold_start", None, date.today())
     _enqueue_for_run("cold_start", summary.run_id, None, None, summary.trade_date or date.today())
     return {"status": "accepted", "run_type": "cold_start", "run_id": summary.run_id}

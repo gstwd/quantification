@@ -62,7 +62,7 @@
             指定指数子集
           </label>
         </div>
-        <div v-if="form.universe_mode === 'subset'" class="etf-checkboxes">
+        <div v-if="form.universe_mode === 'subset'" class="index-checkboxes">
           <label
             v-for="idx in indexes"
             :key="idx.index_code"
@@ -298,7 +298,7 @@ onMounted(async () => {
 }
 .radio-label input { accent-color: var(--accent); }
 
-.etf-checkboxes {
+.index-checkboxes {
   display: flex;
   flex-direction: column;
   gap: 6px;

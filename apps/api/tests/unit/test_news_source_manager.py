@@ -99,7 +99,6 @@ class TestNewsSearchBaseProvider:
 
     def test_is_available_without_keys(self):
         """api_keys 为空列表时应不可用。"""
-        provider = _MockNewsProvider(api_keys=[])
         # _MockNewsProvider 的 __init__ 中 api_keys or ["mock-key"] 会回退，
         # 所以在父类层面测试：空 key 列表不应通过 is_available
         # 直接使用 BaseNewsSearchProvider 子类验证

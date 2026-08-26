@@ -38,11 +38,11 @@ class ResearchRunDetail(BaseModel):
 
 
 class ResearchRunItemSchema(BaseModel):
-    """单条运行明细，对应一只 ETF 或一个子任务的处理结果。"""
+    """单条运行明细，对应一个指数标的或一个子任务的处理结果。"""
 
     id: int
     run_id: str
-    etf_code: str
+    index_code: str
     status: str
     message: str | None = None
     metrics: dict[str, Any] | None = None

@@ -1,7 +1,6 @@
 """K 线衍生指标计算函数（纯领域逻辑，无外部依赖）。
 
-函数参数统一使用 code（可以是 ETF 代码或指数代码），
-因为 EtfDailyBarModel 和 IndexDailyBarModel 字段结构相同。
+函数参数统一使用指数代码。
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ def calc_volume_ratio_20d(
     """计算 20 日量比：当日成交量 / 近 20 日平均成交量。
 
     Args:
-        code: 资产代码（ETF 或指数）。
+        code: 指数代码。
         trade_date: 目标交易日。
         all_bars: (code, date) → BarRow 的映射，BarRow 需有 .volume 属性。
 
@@ -45,7 +44,7 @@ def calc_volume_ratio_17d(
     """计算 17 日量比：当日成交量 / 近 17 日平均成交量。
 
     Args:
-        code: 资产代码（ETF 或指数）。
+        code: 指数代码。
         trade_date: 目标交易日。
         all_bars: (code, date) → BarRow 的映射，BarRow 需有 .volume 属性。
 
@@ -71,10 +70,10 @@ def calc_volume_ratio_17d(
 def calc_5d_return(code: str, trade_date: date, all_bars: dict[tuple[str, date], Any]) -> float:
     """计算近 5 日收益率（%）。
 
-    适用于 ETF 和指数，因为两者 K 线结构相同。
+    适用于指数 K 线数据。
 
     Args:
-        code: 资产代码（ETF 或指数）。
+        code: 指数代码。
         trade_date: 目标交易日。
         all_bars: (code, date) → BarRow 的映射，BarRow 需有 .close_price 属性。
 

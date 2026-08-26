@@ -125,11 +125,11 @@ class CorrelationResponse(BaseModel):
     Attributes:
         factor_ids: 因子标识列表（矩阵行列顺序）。
         matrix: 相关系数二维矩阵。
-        etf_count: 参与计算的 ETF 数量。
+        index_count: 参与计算的指数数量。
         trade_date: 数据日期。
     """
 
     factor_ids: list[str]
     matrix: list[list[float]]
-    etf_count: int
+    index_count: int
     trade_date: str

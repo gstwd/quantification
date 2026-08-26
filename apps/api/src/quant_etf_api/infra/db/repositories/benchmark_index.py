@@ -29,6 +29,18 @@ class BenchmarkIndexRepository(BaseRepository):
         """查询全部指数（含已停用），按代码升序。"""
         return self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
 
+    def count_active(self) -> int:
+        """统计活跃指数数量。
+
+        Returns:
+            活跃指数总数。
+        """
+        return (
+            self._db.query(BenchmarkIndexModel)
+            .filter(BenchmarkIndexModel.is_active == True)  # noqa: E712
+            .count()
+        )
+
     def find_by_code(self, index_code: str) -> BenchmarkIndexModel | None:
         """按主键查询单条指数记录。
 

@@ -7,13 +7,11 @@ from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.db.models.core import (
-    EtfDailyBarModel,
-    EtfDailyShareModel,
     IndexDailyBarModel,
     IndexValuationModel,
     MacroIndicatorModel,
 )
-from quant_etf_api.infra.db.repositories.etf_universe import EtfUniverseRepository
+from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.schemas.run import ResearchRunSummary
 from quant_etf_api.schemas.system import DataSourceSnapshot, SystemStatusResponse
@@ -31,11 +29,11 @@ class SystemService:
     def __init__(
         self,
         db: Session,
-        universe_repo: EtfUniverseRepository | None = None,
+        index_repo: BenchmarkIndexRepository | None = None,
         run_repo: ResearchRunRepository | None = None,
     ) -> None:
         self._db = db
-        self._universe_repo = universe_repo or EtfUniverseRepository(db)
+        self._index_repo = index_repo or BenchmarkIndexRepository(db)
         self._run_repo = run_repo or ResearchRunRepository(db)
 
     def _check_db_connection(self) -> bool:
@@ -47,12 +45,12 @@ class SystemService:
             logger.warning("数据库连接检测失败", exc_info=True)
             return False
 
-    def _get_active_etf_count(self) -> int:
-        """查询当前活跃 ETF 数量。"""
+    def _get_active_index_count(self) -> int:
+        """查询当前活跃指数数量。"""
         try:
-            return self._universe_repo.count_active()
+            return self._index_repo.count_active()
         except Exception:
-            logger.warning("活跃ETF数量查询失败", exc_info=True)
+            logger.warning("活跃指数数量查询失败", exc_info=True)
             return 0
 
     def _get_table_snapshot(
@@ -65,9 +63,9 @@ class SystemService:
         """查询单张数据表的统计快照。
 
         Args:
-            model: SQLAlchemy 模型类（如 EtfDailyBarModel）。
+            model: SQLAlchemy 模型类（如 IndexDailyBarModel）。
             source_name: 数据源展示名称（如 "新浪日线行情"）。
-            table_name: 数据库表名（如 "etf_daily_bar"）。
+            table_name: 数据库表名（如 "index_daily_bar"）。
             date_column: 用于获取最新日期的列名，默认 "trade_date"。
 
         Returns:
@@ -120,7 +118,7 @@ class SystemService:
     def status(self) -> SystemStatusResponse:
         """聚合系统运行状态快照。
 
-        并行收集各维度数据：数据库连接、ETF数量、各表快照、
+        并行收集各维度数据：数据库连接、指数数量、各表快照、
         最近运行记录。任一查询失败不影响其他查询结果，
         对应字段返回零值或空列表。
 
@@ -132,26 +130,16 @@ class SystemService:
         if not db_connected:
             # 数据库不可达时直接返回降级状态，不再尝试后续查询
             return SystemStatusResponse(
-                active_etf_count=0,
+                active_index_count=0,
                 latest_trade_date=None,
                 data_sources=[],
                 recent_runs=[],
                 db_connected=False,
             )
 
-        active_etf_count = self._get_active_etf_count()
+        active_index_count = self._get_active_index_count()
 
         data_sources = [
-            self._get_table_snapshot(
-                EtfDailyBarModel,
-                source_name="新浪日线行情",
-                table_name="etf_daily_bar",
-            ),
-            self._get_table_snapshot(
-                EtfDailyShareModel,
-                source_name="东方财富份额",
-                table_name="etf_daily_share",
-            ),
             self._get_table_snapshot(
                 IndexDailyBarModel,
                 source_name="指数日线行情",
@@ -180,7 +168,7 @@ class SystemService:
         recent_runs = self._get_recent_runs(limit=5)
 
         return SystemStatusResponse(
-            active_etf_count=active_etf_count,
+            active_index_count=active_index_count,
             latest_trade_date=latest_trade_date,
             data_sources=data_sources,
             recent_runs=recent_runs,

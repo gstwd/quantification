@@ -41,7 +41,7 @@ def check_daily_bar_anomalies(
     """检查日线数据中的异常值。
 
     检测项：
-    - 涨跌幅超过 ±15%（指数）/ ±11%（ETF）
+    - 涨跌幅超过 ±15%（指数）
     - 成交量为 0 但价格有变动
     - 收盘价 <= 0
 
@@ -53,21 +53,20 @@ def check_daily_bar_anomalies(
     """
     anomalies: list[Anomaly] = []
     for b in bars:
-        code = getattr(b, "code", getattr(b, "etf_code", getattr(b, "index_code", "?")))
+        code = getattr(b, "code", getattr(b, "index_code", "?"))
         td = str(getattr(b, "trade_date", "?"))
 
         # 涨跌幅异常
         change = getattr(b, "change_pct", None)
         if change is not None:
-            max_change = 15.0 if str(code).startswith(("0", "3", "5")) else 11.0
-            if abs(change) > max_change:
+            if abs(change) > 15.0:
                 anomalies.append(
                     Anomaly(
                         date=td,
                         code=code,
                         field="change_pct",
                         value=round(change, 2),
-                        expected=f"±{max_change}% 以内",
+                        expected="±15% 以内",
                         severity="error",
                     )
                 )
@@ -177,7 +176,7 @@ def check_continuity(
     # 按 code 分组
     by_code: dict[str, list[Any]] = {}
     for b in bars:
-        code = getattr(b, "code", getattr(b, "etf_code", getattr(b, "index_code", "?")))
+        code = getattr(b, "code", getattr(b, "index_code", "?"))
         by_code.setdefault(code, []).append(b)
 
     anomalies: list[Anomaly] = []

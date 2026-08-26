@@ -23,47 +23,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 from quant_etf_api.infra.db.base import Base, utcnow
 
 
-class EtfUniverseModel(Base):
-    __tablename__ = "etf_universe"
-
-    etf_code: Mapped[str] = mapped_column(
-        String(16), primary_key=True, comment="ETF 代码，如 510300"
-    )
-    exchange: Mapped[str] = mapped_column(
-        String(8), nullable=False, comment="交易所代码，SSE=上交所，SZSE=深交所"
-    )
-    name_cn: Mapped[str] = mapped_column(String(128), nullable=False, comment="ETF 中文简称")
-    fund_full_name: Mapped[str | None] = mapped_column(String(256), comment="基金全称")
-    tracking_index_code: Mapped[str | None] = mapped_column(
-        String(32), comment="跟踪指数代码，如 000300"
-    )
-    tracking_index_name: Mapped[str] = mapped_column(
-        String(128), nullable=False, comment="跟踪指数名称，如 沪深300"
-    )
-    fund_company: Mapped[str | None] = mapped_column(String(128), comment="基金管理公司名称")
-    listing_date: Mapped[Date | None] = mapped_column(Date, comment="上市日期")
-    delisting_date: Mapped[Date | None] = mapped_column(Date, comment="退市日期，NULL 表示仍在交易")
-    category: Mapped[str] = mapped_column(
-        String(64), default="broad_index", comment="ETF 分类，如 broad_index=宽基指数"
-    )
-    is_a_share_etf: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否为 A 股 ETF")
-    is_active: Mapped[bool] = mapped_column(
-        Boolean, default=True, comment="是否在交易中，退市后置 False"
-    )
-    data_source: Mapped[str] = mapped_column(
-        String(32), default="seed", comment="数据来源，seed=内置种子数据"
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, comment="记录创建时间（UTC）"
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=utcnow,
-        onupdate=utcnow,
-        comment="记录最后更新时间（UTC）",
-    )
-
-
 class BenchmarkIndexModel(Base):
     __tablename__ = "benchmark_index"
 
@@ -90,38 +49,6 @@ class BenchmarkIndexModel(Base):
         default=utcnow,
         onupdate=utcnow,
         comment="记录最后更新时间（UTC）",
-    )
-
-
-class EtfDailyBarModel(Base):
-    __tablename__ = "etf_daily_bar"
-    __table_args__ = (UniqueConstraint("trade_date", "etf_code", name="uq_etf_daily_bar"),)
-
-    id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True, comment="自增主键"
-    )
-    trade_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="交易日期")
-    etf_code: Mapped[str] = mapped_column(
-        ForeignKey("etf_universe.etf_code"),
-        nullable=False,
-        comment="ETF 代码，外键关联 etf_universe",
-    )
-    open_price: Mapped[float | None] = mapped_column(Float, comment="开盘价（前复权）")
-    high_price: Mapped[float | None] = mapped_column(Float, comment="最高价（前复权）")
-    low_price: Mapped[float | None] = mapped_column(Float, comment="最低价（前复权）")
-    close_price: Mapped[float | None] = mapped_column(Float, comment="收盘价（前复权）")
-    prev_close_price: Mapped[float | None] = mapped_column(Float, comment="前收盘价（前复权）")
-    change_pct: Mapped[float | None] = mapped_column(
-        Float, comment="涨跌幅，单位 %，如 1.23 表示涨 1.23%"
-    )
-    volume: Mapped[float | None] = mapped_column(Float, comment="成交量，单位 手（100 股）")
-    turnover: Mapped[float | None] = mapped_column(Float, comment="成交额，单位 元")
-    amplitude: Mapped[float | None] = mapped_column(Float, comment="振幅，单位 %")
-    source: Mapped[str] = mapped_column(
-        String(32), default="stub", comment="数据来源，akshare=AkShare，stub=占位数据"
-    )
-    ingested_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, comment="数据入库时间（UTC）"
     )
 
 
@@ -154,34 +81,6 @@ class IndexDailyBarModel(Base):
     )
 
 
-class EtfDailyShareModel(Base):
-    __tablename__ = "etf_daily_share"
-    __table_args__ = (UniqueConstraint("trade_date", "etf_code", name="uq_etf_daily_share"),)
-
-    id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True, comment="自增主键"
-    )
-    trade_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="交易日期")
-    etf_code: Mapped[str] = mapped_column(
-        ForeignKey("etf_universe.etf_code"),
-        nullable=False,
-        comment="ETF 代码，外键关联 etf_universe",
-    )
-    shares_total: Mapped[float | None] = mapped_column(Float, comment="总份额，单位 亿份")
-    shares_delta: Mapped[float | None] = mapped_column(
-        Float, comment="当日份额变化量，单位 亿份，正=申购，负=赎回"
-    )
-    shares_delta_pct: Mapped[float | None] = mapped_column(Float, comment="当日份额变化率，单位 %")
-    nav: Mapped[float | None] = mapped_column(Float, comment="单位净值，单位 元/份")
-    aum: Mapped[float | None] = mapped_column(Float, comment="资产管理规模（AUM），单位 亿元")
-    source: Mapped[str] = mapped_column(
-        String(32), default="stub", comment="数据来源，akshare=AkShare，stub=占位数据"
-    )
-    ingested_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, comment="数据入库时间（UTC）"
-    )
-
-
 class SourcePayloadLogModel(Base):
     __tablename__ = "source_payload_log"
 
@@ -195,7 +94,7 @@ class SourcePayloadLogModel(Base):
         String(64), nullable=False, comment="资源类型，如 daily_bar、share_snapshot"
     )
     resource_key: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="资源标识，如 ETF 代码或指数代码"
+        String(64), nullable=False, comment="资源标识，如指数代码"
     )
     trade_date: Mapped[Date | None] = mapped_column(
         Date, comment="对应交易日期，NULL 表示非日频数据"
@@ -237,51 +136,12 @@ class FactorDefinitionModel(Base):
         comment="是否启用，禁用后不参与计算且前端隐藏",
     )
     required_data: Mapped[dict | None] = mapped_column(
-        JSON, nullable=True, comment="依赖的数据源列表，如 ['etf_bars']，由代码同步"
-    )
-
-
-class EtfFactorValueModel(Base):
-    __tablename__ = "etf_factor_value"
-    __table_args__ = (
-        UniqueConstraint(
-            "trade_date", "etf_code", "factor_id", "strategy_id", name="uq_etf_factor_value"
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True, comment="自增主键"
-    )
-    trade_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="交易日期")
-    etf_code: Mapped[str] = mapped_column(
-        ForeignKey("etf_universe.etf_code"),
-        nullable=False,
-        comment="ETF 代码，外键关联 etf_universe",
-    )
-    factor_id: Mapped[str] = mapped_column(
-        ForeignKey("factor_definition.factor_id"),
-        nullable=False,
-        comment="因子 ID，外键关联 factor_definition",
-    )
-    factor_value_numeric: Mapped[float | None] = mapped_column(
-        Float, comment="因子数值，如量比 1.92、概率得分 78.5"
-    )
-    factor_value_text: Mapped[str | None] = mapped_column(
-        String(128), comment="因子文本值，用于枚举类因子"
-    )
-    factor_payload: Mapped[dict | None] = mapped_column(
-        JSON, comment="因子计算中间数据，用于调试和解释"
-    )
-    strategy_id: Mapped[str | None] = mapped_column(
-        String(64), comment="产生该因子值的策略 ID，NULL 表示通用因子"
+        JSON, nullable=True, comment="依赖的数据源列表，如 ['index_bars']，由代码同步"
     )
 
 
 class IndexFactorValueModel(Base):
-    """指数因子值表，存储指数级别的因子计算结果。
-
-    与 etf_factor_value 并行，用于指数级因子（volume/momentum/volatility/valuation）。
-    """
+    """指数因子值表，存储指数级别的因子计算结果。"""
 
     __tablename__ = "index_factor_value"
     __table_args__ = (
@@ -336,41 +196,6 @@ class SignalDefinitionModel(Base):
     version: Mapped[str] = mapped_column(String(32), default="1.0.0", comment="信号版本号")
 
 
-class EtfSignalModel(Base):
-    __tablename__ = "etf_signal"
-    __table_args__ = (
-        UniqueConstraint("trade_date", "etf_code", "strategy_id", name="uq_etf_signal"),
-    )
-
-    id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True, comment="自增主键"
-    )
-    trade_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="信号对应的交易日期")
-    etf_code: Mapped[str] = mapped_column(
-        ForeignKey("etf_universe.etf_code"),
-        nullable=False,
-        comment="ETF 代码，外键关联 etf_universe",
-    )
-    strategy_id: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="产生该信号的策略 ID"
-    )
-    signal_score: Mapped[float] = mapped_column(
-        Float, nullable=False, comment="综合得分，0-100，越高表示信号越强"
-    )
-    signal_level: Mapped[str] = mapped_column(
-        String(32), nullable=False, comment="信号等级：HIGH≥70，MID 50-69，LOW<50"
-    )
-    signal_label: Mapped[str] = mapped_column(
-        String(128), nullable=False, comment="信号中文标签，如 高确信、中等关注、正常"
-    )
-    signal_payload: Mapped[dict | None] = mapped_column(
-        JSON, comment="信号计算明细，包含各因子得分等中间数据"
-    )
-    run_id: Mapped[str | None] = mapped_column(
-        String(64), comment="产生该信号的研究运行 ID，NULL 表示手动触发"
-    )
-
-
 class IndexSignalModel(Base):
     """指数信号表，存储策略引擎对指数的信号计算结果。"""
 
@@ -409,7 +234,7 @@ class ResearchRunModel(Base):
     run_type: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
-        comment="运行类型：daily_ingest=日频入库，strategy_run=策略运行，universe_refresh=标的刷新",
+        comment="运行类型：daily_ingest=日频入库，strategy_run=策略运行，index_refresh=指数刷新等",
     )
     strategy_id: Mapped[str | None] = mapped_column(
         String(64), comment="关联策略 ID，仅 strategy_run 类型有值"
@@ -422,7 +247,7 @@ class ResearchRunModel(Base):
     )
     params: Mapped[dict | None] = mapped_column(JSON, comment="运行参数，JSON 格式")
     metrics: Mapped[dict | None] = mapped_column(
-        JSON, comment="运行结果指标，如处理 ETF 数量、耗时等"
+        JSON, comment="运行结果指标，如处理标的数量、耗时等"
     )
     error_message: Mapped[str | None] = mapped_column(Text, comment="失败时的错误信息")
     started_at: Mapped[datetime] = mapped_column(
@@ -444,19 +269,17 @@ class ResearchRunItemModel(Base):
         nullable=False,
         comment="所属运行 ID，外键关联 research_run",
     )
-    etf_code: Mapped[str] = mapped_column(
-        ForeignKey("etf_universe.etf_code"),
-        nullable=False,
-        comment="处理的 ETF 代码，外键关联 etf_universe",
+    index_code: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="处理的指数代码"
     )
     status: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
-        comment="单个 ETF 处理状态：success=成功，failed=失败，skipped=跳过",
+        comment="单个标的处理状态：success=成功，failed=失败，skipped=跳过",
     )
     message: Mapped[str | None] = mapped_column(Text, comment="处理结果说明或错误信息")
     metrics: Mapped[dict | None] = mapped_column(
-        JSON, comment="单个 ETF 处理指标，如因子值、信号得分等"
+        JSON, comment="单个标的处理指标，如因子值、信号得分等"
     )
 
 
@@ -474,7 +297,7 @@ class BacktestRunModel(Base):
     universe_filter: Mapped[dict] = mapped_column(
         JSON,
         nullable=False,
-        comment='标的过滤条件，{"mode":"all"} 或 {"mode":"subset","etf_codes":[...]}',
+        comment='标的过滤条件，{"mode":"all"} 或 {"mode":"subset","index_codes":[...]}',
     )
     params: Mapped[dict | None] = mapped_column(JSON, comment="策略参数覆盖，NULL 表示使用默认参数")
     status: Mapped[str] = mapped_column(
@@ -532,13 +355,13 @@ class BacktestDailyResultModel(Base):
         Float, nullable=False, comment="当日回撤幅度，单位 %，负值"
     )
     high_signal_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="当日 HIGH 信号 ETF 数量"
+        Integer, nullable=False, comment="当日 HIGH 信号指数数量"
     )
     mid_signal_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="当日 MID 信号 ETF 数量"
+        Integer, nullable=False, comment="当日 MID 信号指数数量"
     )
     low_signal_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="当日 LOW 信号 ETF 数量"
+        Integer, nullable=False, comment="当日 LOW 信号指数数量"
     )
     timing_regime: Mapped[str | None] = mapped_column(
         String(32), comment="择时状态：offensive/neutral/defensive（配置模式）"
@@ -548,7 +371,7 @@ class BacktestDailyResultModel(Base):
     )
     cash_ratio: Mapped[float | None] = mapped_column(Float, comment="现金比例，0-1（配置模式）")
     positions: Mapped[dict | None] = mapped_column(
-        JSON, comment="持仓明细，etf_code → 权重（配置模式）"
+        JSON, comment="持仓明细，index_code → 权重（配置模式）"
     )
     missing_bar_count: Mapped[int] = mapped_column(
         Integer,
@@ -561,40 +384,6 @@ class BacktestDailyResultModel(Base):
         Float, comment="基准指数当日收益率，单位 %"
     )
     turnover: Mapped[float | None] = mapped_column(Float, comment="当日换手率，0-1")
-
-
-class BacktestEtfResultModel(Base):
-    """回测每日每只 ETF 的信号和实际收益，用于信号准确率分析。"""
-
-    __tablename__ = "backtest_etf_result"
-    __table_args__ = (
-        UniqueConstraint("backtest_id", "trade_date", "etf_code", name="uq_backtest_etf"),
-        Index("ix_backtest_etf_backtest_id", "backtest_id"),
-        Index("ix_backtest_etf_code", "backtest_id", "etf_code"),
-    )
-
-    id: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, autoincrement=True, comment="自增主键"
-    )
-    backtest_id: Mapped[str] = mapped_column(
-        ForeignKey("backtest_run.backtest_id"), nullable=False, comment="所属回测 ID"
-    )
-    trade_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="信号生成日期（T 日）")
-    etf_code: Mapped[str] = mapped_column(
-        ForeignKey("etf_universe.etf_code"), nullable=False, comment="ETF 代码"
-    )
-    signal_score: Mapped[float] = mapped_column(
-        Float, nullable=False, comment="信号综合得分，0-100"
-    )
-    signal_level: Mapped[str] = mapped_column(
-        String(32), nullable=False, comment="信号等级：HIGH/MID/LOW"
-    )
-    in_portfolio: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, comment="是否纳入当日组合（HIGH 信号且满足加权条件）"
-    )
-    etf_return: Mapped[float | None] = mapped_column(
-        Float, comment="T+1 日实际收益率，单位 %，末日为 NULL"
-    )
 
 
 class BacktestIndexResultModel(Base):
@@ -701,7 +490,7 @@ class BacktestComparisonModel(Base):
 class IndexValuationModel(Base):
     """指数估值数据（PE/PB 及历史分位），按指数代码 + 日期唯一。
 
-    用于构建估值类 ETF 因子（如 PE 分位、PB 分位），
+    用于构建估值类因子（如 PE 分位、PB 分位），
     数据来源于 AkShare 的 legulegu PE/PB 接口。
     """
 
@@ -744,7 +533,7 @@ class StrategyConfigModel(Base):
     __tablename__ = "strategy_config"
 
     strategy_id: Mapped[str] = mapped_column(
-        String(64), primary_key=True, comment="策略唯一标识，如 etf_allocation"
+        String(64), primary_key=True, comment="策略唯一标识，如 index_allocation"
     )
     display_name: Mapped[str] = mapped_column(
         String(128), nullable=False, comment="策略中文显示名称"

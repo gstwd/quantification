@@ -334,7 +334,7 @@ class StrategyDecisionService:
             signal_rows.append(
                 {
                     "trade_date": r.trade_date,
-                    "index_code": r.etf_code,
+                    "index_code": r.index_code,
                     "strategy_id": r.strategy_id,
                     "signal_score": r.signal_score,
                     "signal_level": r.signal_level,
@@ -354,7 +354,7 @@ class StrategyDecisionService:
                 factor_rows.append(
                     {
                         "trade_date": r.trade_date,
-                        "index_code": r.etf_code,
+                        "index_code": r.index_code,
                         "factor_id": fv["factor_id"],
                         "factor_value_numeric": num_val,
                         "factor_value_text": txt_val,
@@ -372,7 +372,7 @@ class StrategyDecisionService:
         self._run_repo.mark_success(
             run_id,
             metrics={
-                "etf_count": asset_count,
+                "index_count": asset_count,
                 "signal_count": len(signal_rows),
                 "factor_count": len(factor_rows),
             },

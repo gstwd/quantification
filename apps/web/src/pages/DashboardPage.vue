@@ -54,8 +54,8 @@
             <rect x="2" y="3" width="20" height="14" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line>
           </svg>
         </div>
-        <div class="stat-label">ETF 总数</div>
-        <div class="stat-value">{{ systemStatus?.active_etf_count ?? '—' }}</div>
+        <div class="stat-label">指数总数</div>
+        <div class="stat-value">{{ systemStatus?.active_index_count ?? '—' }}</div>
       </div>
       <div class="stat-card">
         <div class="stat-accent accent-green"></div>
@@ -571,8 +571,6 @@ async function loadSentimentOverview() {
 const qualityGroups = computed(() => {
   if (!quality.value) return []
   return [
-    { key: 'etf_bars', label: 'ETF 日线', data: quality.value.etf_bars },
-    { key: 'etf_shares', label: 'ETF 份额', data: quality.value.etf_shares },
     { key: 'index_bars', label: '指数日线', data: quality.value.index_bars },
     { key: 'index_valuation', label: '指数估值', data: quality.value.index_valuation },
   ]
@@ -596,10 +594,8 @@ function formatRunType(runType: string): string {
   const map: Record<string, string> = {
     daily_ingest: '日频入库',
     strategy_run: '策略运行',
-    universe_refresh: '标的刷新',
     cold_start: '历史回补',
     startup_fill: '启动补全',
-    etf_refresh: 'ETF 行情刷新',
     index_refresh: '指数数据刷新',
     macro_refresh: '宏观数据刷新',
     factor_computation: '因子计算',
@@ -663,9 +659,9 @@ async function loadStarredSummary() {
   }
 }
 
-/** 从排名数据中查找 ETF 代码对应的指数名称 */
-function getIndexName(rankings: Array<{ etf_code: string; name_cn: string }>, code: string): string | null {
-  const found = rankings.find(r => r.etf_code === code)
+/** 从排名数据中查找指数代码对应的指数名称 */
+function getIndexName(rankings: Array<{ index_code: string; name_cn: string }>, code: string): string | null {
+  const found = rankings.find(r => r.index_code === code)
   return found?.name_cn ?? null
 }
 

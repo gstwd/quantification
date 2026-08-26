@@ -31,7 +31,7 @@ class FilterEngine(Protocol):
 
         Args:
             config: 过滤配置。
-            assets: 资产得分，key=etf_code。
+            assets: 资产得分，key=index_code。
             context: 引擎上下文。
 
         Returns:
@@ -91,7 +91,7 @@ class DefaultFilterEngine:
 
         Args:
             config: 过滤配置。
-            assets: 资产得分，key=etf_code。
+            assets: 资产得分，key=index_code。
             context: 引擎上下文。
             debug: 可选的调试收集列表，传入时记录每资产的过滤判定明细。
 
@@ -141,7 +141,7 @@ class DefaultFilterEngine:
                         fail_reason = "；".join(parts)
                 debug.append(
                     AssetFilterDetail(
-                        etf_code=code,
+                        index_code=code,
                         name_cn=name_cn,
                         passed=passed,
                         rule_results=rule_results,

@@ -40,9 +40,9 @@ class TestDefaultRankEngine:
 
         rankings = engine.rank(config, assets, context)
 
-        assert rankings[0].etf_code == "C"
-        assert rankings[1].etf_code == "A"
-        assert rankings[2].etf_code == "B"
+        assert rankings[0].index_code == "C"
+        assert rankings[1].index_code == "A"
+        assert rankings[2].index_code == "B"
 
     def test_ascending_sort(self) -> None:
         """升序排序。"""
@@ -53,9 +53,9 @@ class TestDefaultRankEngine:
 
         rankings = engine.rank(config, assets, context)
 
-        assert rankings[0].etf_code == "B"
-        assert rankings[1].etf_code == "A"
-        assert rankings[2].etf_code == "C"
+        assert rankings[0].index_code == "B"
+        assert rankings[1].index_code == "A"
+        assert rankings[2].index_code == "C"
 
     def test_top_n(self) -> None:
         """TopN 截取。"""
@@ -67,8 +67,8 @@ class TestDefaultRankEngine:
         rankings = engine.rank(config, assets, context)
 
         assert len(rankings) == 2
-        assert rankings[0].etf_code == "C"
-        assert rankings[1].etf_code == "A"
+        assert rankings[0].index_code == "C"
+        assert rankings[1].index_code == "A"
 
     def test_bottom_n(self) -> None:
         """BottomN 截取。"""
@@ -80,8 +80,8 @@ class TestDefaultRankEngine:
         rankings = engine.rank(config, assets, context)
 
         assert len(rankings) == 2
-        assert rankings[0].etf_code == "A"
-        assert rankings[1].etf_code == "B"
+        assert rankings[0].index_code == "A"
+        assert rankings[1].index_code == "B"
 
     def test_empty_assets(self) -> None:
         """空资产返回空列表。"""
@@ -107,7 +107,7 @@ class TestDefaultRankEngine:
 
         rankings = engine.rank(config, assets, context)
 
-        categories = {r.etf_code: r.category for r in rankings}
+        categories = {r.index_code: r.category for r in rankings}
         assert categories["A"] == "宽基"
         assert categories["B"] == "行业"
 
@@ -130,7 +130,7 @@ class TestDefaultRankEngine:
         rankings = engine.rank(config, assets, context)
 
         # 动量排名：C(15) > A(10) > B(5)
-        rank_map = {r.etf_code: r for r in rankings}
+        rank_map = {r.index_code: r for r in rankings}
         assert rank_map["C"].momentum_rank == 1
         assert rank_map["A"].momentum_rank == 2
         assert rank_map["B"].momentum_rank == 3

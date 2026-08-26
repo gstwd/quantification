@@ -68,7 +68,7 @@
             <tr v-for="(row, idx) in crossRows" :key="row.index_code">
               <td class="rank">{{ idx + 1 }}</td>
               <td>
-                <RouterLink :to="`/indexes/${row.index_code}`" class="etf-link">{{ row.index_code }}</RouterLink>
+                <RouterLink :to="`/indexes/${row.index_code}`" class="index-link">{{ row.index_code }}</RouterLink>
               </td>
               <td class="name-cell">{{ row.name_cn }}</td>
               <td class="value mono">{{ row.factor_value_numeric != null ? row.factor_value_numeric.toFixed(4) : '—' }}</td>
@@ -95,8 +95,8 @@
           <div class="controls">
             <input
               type="text"
-              class="etf-input"
-              v-model="seriesEtf"
+              class="index-input"
+              v-model="seriesIndex"
               placeholder="指数代码，如 000300"
               @keyup.enter="() => loadSeries()"
             />
@@ -180,7 +180,7 @@
       <div v-show="tab === 'correlation'" class="card">
         <div class="card-header">
           <span class="card-title">因子相关性矩阵</span>
-          <span v-if="corrData" class="card-subtitle">指数数量：{{ corrData.etf_count }}</span>
+          <span v-if="corrData" class="card-subtitle">指数数量：{{ corrData.index_count }}</span>
           <div class="controls">
             <input type="date" class="date-input" v-model="corrDate" />
             <button class="query-btn" @click="loadCorrelation">查询</button>
@@ -244,7 +244,7 @@ const crossRows = ref<CrossSectionRow[]>([])
 const crossLoading = ref(false)
 
 /** 时间序列状态 */
-const seriesEtf = ref('')
+const seriesIndex = ref('')
 const seriesRows = ref<FactorRow[]>([])
 const seriesLoading = ref(false)
 const chartEl = ref<HTMLElement | null>(null)
@@ -338,21 +338,21 @@ async function loadCrossByDate() {
   }
 }
 
-/** 从横截面跳转到指定 ETF 的时间序列 */
-function goToSeries(etfCode: string) {
-  seriesEtf.value = etfCode
+/** 从横截面跳转到指定指数的时间序列 */
+function goToSeries(indexCode: string) {
+  seriesIndex.value = indexCode
   tab.value = 'series'
   nextTick(() => loadSeries())
 }
 
 /** 加载时间序列数据并渲染图表 */
 async function loadSeries(forceRecompute = false) {
-  if (!seriesEtf.value.trim()) return
+  if (!seriesIndex.value.trim()) return
   seriesLoading.value = true
   try {
     seriesRows.value = await fetchFactorTimeSeries(
       props.factorId,
-      seriesEtf.value.trim(),
+      seriesIndex.value.trim(),
       seriesStart.value,
       seriesEnd.value,
       forceRecompute,
@@ -678,7 +678,7 @@ onUnmounted(() => {
 }
 .date-input:focus { border-color: var(--accent); }
 
-.etf-input {
+.index-input {
   background: var(--surface-2, rgba(255,255,255,0.05));
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -688,8 +688,8 @@ onUnmounted(() => {
   outline: none;
   width: 140px;
 }
-.etf-input:focus { border-color: var(--accent); }
-.etf-input::placeholder { color: var(--text-muted); }
+.index-input:focus { border-color: var(--accent); }
+.index-input::placeholder { color: var(--text-muted); }
 
 .query-btn {
   background: rgba(59, 130, 246, 0.15);
@@ -738,8 +738,8 @@ onUnmounted(() => {
 .name-cell { font-size: 13px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .value.mono { font-family: monospace; font-size: 13px; }
 .bar-col { width: 180px; }
-.etf-link { color: var(--accent); font-family: monospace; font-weight: 600; }
-.etf-link:hover { text-decoration: underline; }
+.index-link { color: var(--accent); font-family: monospace; font-weight: 600; }
+.index-link:hover { text-decoration: underline; }
 
 .bar-cell { padding: 9px 16px 9px 0; }
 .bar-track { background: var(--surface-2, rgba(255,255,255,0.06)); border-radius: 4px; height: 6px; overflow: hidden; }

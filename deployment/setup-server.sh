@@ -35,7 +35,7 @@ mkdir -p /var/log/quant-etf
 if [ ! -f /opt/quant-etf/.env ]; then
     log "生成 .env 配置..."
     cat > /opt/quant-etf/.env << EOF
-# Quant ETF 生产环境配置
+# 指数量化系统生产环境配置
 QUANT_ETF_DATABASE_URL=postgresql+psycopg://quant_etf:${DB_PASS}@localhost:5432/quant_etf
 QUANT_ETF_APP_ENV=production
 QUANT_ETF_APP_HOST=127.0.0.1

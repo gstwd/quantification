@@ -1,19 +1,3 @@
-export interface EtfDetail {
-  etf_code: string
-  exchange: string
-  name_cn: string
-  tracking_index_name: string
-  tracking_index_code?: string | null
-  category: string
-  is_active: boolean
-  fund_full_name?: string | null
-  fund_company?: string | null
-}
-
-export interface EtfCreatePayload {
-  etf_code: string
-}
-
 export interface StrategySummary {
   strategy_id: string
   display_name: string
@@ -83,11 +67,11 @@ export interface ResearchRunDetail {
   duration_seconds?: number | null
 }
 
-/** 单条运行明细，对应一只 ETF 的处理结果 */
+/** 单条运行明细，对应一个指数标的的处理结果 */
 export interface ResearchRunItem {
   id: number
   run_id: string
-  etf_code: string
+  index_code: string
   status: string
   message?: string | null
   metrics?: Record<string, unknown> | null
@@ -104,7 +88,7 @@ export interface DataSourceSnapshot {
 
 /** 系统运行状态完整响应 */
 export interface SystemStatusResponse {
-  active_etf_count: number
+  active_index_count: number
   latest_trade_date: string | null
   data_sources: DataSourceSnapshot[]
   recent_runs: ResearchRunSummary[]
@@ -113,7 +97,7 @@ export interface SystemStatusResponse {
   db_connected: boolean
 }
 
-/** 单个 ETF / 指数的数据新鲜度 */
+/** 单个指数的数据新鲜度 */
 export interface DataFreshnessItem {
   code: string
   name: string
@@ -132,8 +116,6 @@ export interface DataFreshnessGroup {
 
 /** 数据质量总览响应 */
 export interface DataQualityResponse {
-  etf_bars: DataFreshnessGroup
-  etf_shares: DataFreshnessGroup
   index_bars: DataFreshnessGroup
   index_valuation: DataFreshnessGroup
   checked_at: string
@@ -150,17 +132,6 @@ export interface DailyBar {
   change_pct: number | null
   volume: number | null
   turnover: number | null
-  source: string
-}
-
-export interface ShareSnapshot {
-  trade_date: string
-  etf_code: string
-  shares_total: number | null
-  shares_delta: number | null
-  shares_delta_pct: number | null
-  nav: number | null
-  aum: number | null
   source: string
 }
 
@@ -499,7 +470,7 @@ export interface ICResponse {
 export interface CorrelationResponse {
   factor_ids: string[]
   matrix: number[][]
-  etf_count: number
+  index_count: number
   trade_date: string
 }
 
@@ -515,7 +486,7 @@ export interface FactorScoreBreakdown {
 
 /** 单个资产的评分明细 */
 export interface AssetScoreDetail {
-  etf_code: string
+  index_code: string
   name_cn: string
   raw_score: number | null
   final_score: number | null
@@ -537,7 +508,7 @@ export interface FilterRuleResult {
 
 /** 单个资产的过滤明细 */
 export interface AssetFilterDetail {
-  etf_code: string
+  index_code: string
   name_cn: string
   passed: boolean
   rule_results: FilterRuleResult[]
@@ -569,7 +540,7 @@ export interface AllocationTiming {
 }
 
 export interface AllocationRanking {
-  etf_code: string
+  index_code: string
   name_cn: string
   category: string
   score: number

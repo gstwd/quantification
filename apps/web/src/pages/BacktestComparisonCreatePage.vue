@@ -47,7 +47,7 @@
               指定指数子集
             </label>
           </div>
-          <div v-if="aUniverseMode === 'subset'" class="etf-checkboxes">
+          <div v-if="aUniverseMode === 'subset'" class="index-checkboxes">
             <label
               v-for="idx in indexes"
               :key="idx.index_code"
@@ -99,7 +99,7 @@
               指定指数子集
             </label>
           </div>
-          <div v-if="bUniverseMode === 'subset'" class="etf-checkboxes">
+          <div v-if="bUniverseMode === 'subset'" class="index-checkboxes">
             <label
               v-for="idx in indexes"
               :key="idx.index_code"
@@ -393,7 +393,7 @@ onMounted(async () => {
 }
 .radio-label input { accent-color: var(--accent); }
 
-.etf-checkboxes {
+.index-checkboxes {
   display: flex;
   flex-direction: column;
   gap: 6px;

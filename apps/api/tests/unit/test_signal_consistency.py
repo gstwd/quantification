@@ -32,7 +32,7 @@ def _make_context(
     codes = ["000300", "000905", "000016"]
     return EngineContext(
         trade_date=date(2025, 1, 15),
-        universe=[{"etf_code": c, "name_cn": c, "category": "broad_index"} for c in codes],
+        universe=[{"index_code": c, "name_cn": c, "category": "broad_index"} for c in codes],
         asset_factors=asset_factors,
         market_factors=market_factors or {},
         asset_metadata={c: {"name_cn": c, "category": "broad_index"} for c in codes},
@@ -102,7 +102,7 @@ class TestSignalConsistency:
 
         result = engine.run(config, context, include_details=True)
         realtime = {
-            r.etf_code: (r.signal_score, r.signal_level, r.payload["target_weight"])
+            r.index_code: (r.signal_score, r.signal_level, r.payload["target_weight"])
             for r in result.strategy_results
         }
 
@@ -147,7 +147,7 @@ class TestSignalConsistency:
         assert result.timing is not None
         assert result.timing.regime == "defensive"
 
-        realtime_levels = {r.etf_code: r.signal_level for r in result.strategy_results}
+        realtime_levels = {r.index_code: r.signal_level for r in result.strategy_results}
         svc = BacktestService(db=MagicMock())
         codes = ["000300", "000905", "000016"]
         rows = _run_backtest_write(svc, result, config, context.trade_date, codes)

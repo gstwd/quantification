@@ -38,7 +38,7 @@ class MockBar:
 
 
 def _build_index_bars(
-    etf_code: str,
+    index_code: str,
     trade_date: date,
     n_days: int,
     base_volume: float = 1000.0,
@@ -50,7 +50,7 @@ def _build_index_bars(
     从 trade_date 向前推 n_days-1 天，收盘价按 daily_return 递增。
 
     Args:
-        etf_code: 指数代码。
+        index_code: 指数代码。
         trade_date: 最新交易日。
         n_days: 生成的历史天数（含 trade_date 当日）。
         base_volume: 最早一日的成交量。
@@ -64,7 +64,7 @@ def _build_index_bars(
     close = base_close
     for i in range(n_days - 1, -1, -1):
         dt = trade_date - timedelta(days=i)
-        bars[(etf_code, dt)] = MockBar(
+        bars[(index_code, dt)] = MockBar(
             volume=base_volume * (1 + (n_days - 1 - i) * 0.01),
             close_price=round(close, 6),
             change_pct=round(daily_return * 100, 4),
@@ -95,19 +95,19 @@ class TestVolumeRatio20dComputer:
         assert result.numeric > 0
 
     def test_no_data_returns_default(self) -> None:
-        """无任何数据时应返回默认值 1.0（_bar_metrics 的 fallback）。"""
+        """无任何数据时应返回 None（区分无数据与量比恰好为 1）。"""
         ctx = FactorContext()
         result = self._computer.compute("510300", date(2024, 6, 1), ctx)
-        assert result.numeric == 1.0
+        assert result.numeric is None
 
     def test_missing_today_bar(self) -> None:
-        """当日无 K 线时返回默认值 1.0。"""
+        """当日无 K 线时返回 None。"""
         trade_date = date(2024, 6, 1)
         # 只有前一天的数据，没有当日
         bars = _build_index_bars("510300", trade_date - timedelta(days=1), n_days=20)
         ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
-        assert result.numeric == 1.0
+        assert result.numeric is None
 
     def test_payload_contains_lookback(self) -> None:
         """payload 中应包含 lookback_days 字段。"""

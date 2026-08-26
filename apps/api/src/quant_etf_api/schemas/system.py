@@ -8,7 +8,7 @@ from quant_etf_api.schemas.types import UtcDatetime
 
 
 class DataFreshnessItem(BaseModel):
-    """单个 ETF 或指数的数据新鲜度。"""
+    """单个指数的数据新鲜度。"""
 
     code: str
     name: str
@@ -29,8 +29,6 @@ class DataFreshnessGroup(BaseModel):
 class DataQualityResponse(BaseModel):
     """数据质量总览。"""
 
-    etf_bars: DataFreshnessGroup
-    etf_shares: DataFreshnessGroup
     index_bars: DataFreshnessGroup
     index_valuation: DataFreshnessGroup
     checked_at: UtcDatetime
@@ -43,8 +41,8 @@ class DataSourceSnapshot(BaseModel):
     供前端"数据源状态"区域展示各表新鲜度。
     """
 
-    source_name: str  # 展示名称，如 "新浪日线行情"
-    table_name: str  # 数据库表名，如 "etf_daily_bar"
+    source_name: str  # 展示名称，如 "AkShare 指数日线"
+    table_name: str  # 数据库表名，如 "index_daily_bar"
     record_count: int  # 该表记录总数
     latest_trade_date: date | None  # 该表最新交易日期
     latest_ingested_at: UtcDatetime | None  # 该表最晚入库时间
@@ -57,7 +55,7 @@ class SystemStatusResponse(BaseModel):
     供前端"数据状态"页面渲染。
     """
 
-    active_etf_count: int  # 活跃 ETF 数量
+    active_index_count: int  # 活跃指数数量
     latest_trade_date: date | None  # 全局最新交易日（取各表最大值）
     data_sources: list[DataSourceSnapshot]  # 各数据表快照
     recent_runs: list[ResearchRunSummary]  # 最近运行记录（最多 5 条）

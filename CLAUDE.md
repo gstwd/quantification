@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Quant ETF Asset Allocation System — an asset allocation decision system for A-share ETFs (daily frequency only, no individual stocks, no trading execution). Full-stack: FastAPI backend + PostgreSQL + Vue 3 frontend. Uses a **component-based, configuration-driven** strategy engine: new strategies are created via JSON config stored in the database, no Python code needed.
+Quant Index Asset Allocation System — an asset allocation decision system for A-share indexes (daily frequency only, no individual stocks, no ETF, no trading execution). Full-stack: FastAPI backend + PostgreSQL + Vue 3 frontend. Uses a **component-based, configuration-driven** strategy engine: new strategies are created via JSON config stored in the database, no Python code needed.
+
+> **系统范围：本系统只研究 A 股指数，不研究 ETF。** 代码库中不含任何 ETF 数据源、数据表、接口或前端页面（`quant_etf_api` 等包名/环境变量为历史命名保留）。
 
 ## Commands
 
@@ -93,9 +95,9 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
                    factors/ (single-factor computation)
 ```
 
-- **`api/routers/`** — 10 route groups: `health`, `system`, `etfs`, `indexes`, `market_data`, `strategies`, `signals`, `factors`, `runs`, `backtests`
+- **`api/routers/`** — 10 route groups: `health`, `system`, `indexes`, `market_data`, `strategies`, `factors`, `runs`, `backtests`, `ai_factors`, `keyword_tags`
 - **`api/middleware.py`** — `RequestIdMiddleware`：为每个请求注入唯一 request_id，写入响应头和日志 ContextVar
-- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. New services: `metrics.py`（专业绩效指标，含 VaR/CVaR/连续亏损天数）、`benchmark.py`（基准收益计算）、`index_service.py`、`universe_service.py`、`data_quality.py`（日线/估值异常检测 + 连续性缺口检测）.
+- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. New services: `metrics.py`（专业绩效指标，含 VaR/CVaR/连续亏损天数）、`benchmark.py`（基准收益计算）、`index_service.py`、`data_quality.py`（日线/估值异常检测 + 连续性缺口检测）.
 - **`engine/`** — **策略引擎核心**：组件化、配置驱动的策略执行管线（11 个文件）：
   - `config.py` — Pydantic 配置模型（含 `TimingConfig`、`ScoreConfig`、`FilterConfig`、`RankConfig`、`PortfolioConfig`、`RiskConfig`、`RebalanceConfig`）
   - `base.py` — `EngineContext`、`EngineResult` 数据结构
@@ -109,8 +111,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
   - `factor_provider.py` — `FactorProvider`：桥接因子层与引擎层，实时模式从 DB 加载预计算因子，回测模式批量预计算
   - `context_builder.py` — `ContextBuilder`：统一的引擎上下文构建器，同时支持实时和回测两种模式
 - **`infra/db/`** — SQLAlchemy 2 ORM models (`infra/db/models/core.py` has 22 tables) + 11 repository files (`infra/db/repositories/`). Repositories own all DB queries; services delegate to them for read operations, own only write logic.
-- **`infra/clients/`** — 4 data source clients, all inherit from `base.py`:
-  - `akshare_fund.py` (ETF K-line via Sina + shares/AUM via fund_etf_spot_em), `exchange_reference.py` (exchange ref)
+- **`infra/clients/`** — 2 data source clients, all inherit from `base.py`:
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
   - `retry.py` — `@with_retry()` 装饰器，指数退避重试，参数可通过环境变量 `AKSHARE_RETRY_MAX_ATTEMPTS` / `AKSHARE_RETRY_BASE_DELAY` 配置
 - **`infra/trading_calendar.py`** — `TradingCalendar` 类，通过 `akshare.tool_trade_date_hist_sina()` 获取 A 股交易日历，内存缓存 TTL=1 天，API 不可用时降级为周末判断
@@ -119,10 +120,10 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
   - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, AllocationPlan dataclasses)
-  - `etf/`、`market_data/`、`research/` — 预留包目录
-- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `normalization.py` (zscore/rank/minmax/winsorize/MAD 横截面标准化), `builtins/` (18 built-in computers: volume×1, momentum×3, volatility×1, valuation×2, ma×4, atr×1, donchian×2, rsi×1). **所有因子基于指数数据计算**（`index_factor_value` 表）。**架构原则：因子层只使用指数数据，不使用 ETF 特有数据（份额/AUM/折溢价等）**。
+  - `market_data/`、`research/` — 预留包目录
+- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `normalization.py` (zscore/rank/minmax/winsorize/MAD 横截面标准化), `builtins/` (18 built-in computers: volume×1, momentum×3, volatility×1, valuation×2, ma×4, atr×1, donchian×2, rsi×1). **所有因子基于指数数据计算**（`index_factor_value` 表）。**架构原则：因子层只使用指数数据**。
 - **`config/`** — Pydantic settings loaded from `.env`
-- **`schemas/`** — 11 个 Pydantic schema 文件：`etf.py`、`factor.py`、`market_data.py`、`pagination.py`、`run.py`、`signal.py`、`strategy.py`、`system.py`、`types.py`、`backtest.py`、`__init__.py`
+- **`schemas/`** — 10 个 Pydantic schema 文件：`factor.py`、`market_data.py`、`pagination.py`、`run.py`、`signal.py`、`strategy.py`、`system.py`、`types.py`、`backtest.py`、`__init__.py`
 
 ### Strategy Engine（策略引擎）
 
@@ -167,15 +168,15 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 
 | Group | Tables |
 |---|---|
-| Reference | `etf_universe`, `benchmark_index` |
-| Market data | `etf_daily_bar`, `index_daily_bar`, `etf_daily_share`, `index_valuation`, `macro_indicator`, `source_payload_log` |
-| Analytics | `factor_definition`, `etf_factor_value`, `index_factor_value`, `signal_definition`, `etf_signal`, `index_signal` |
+| Reference | `benchmark_index` |
+| Market data | `index_daily_bar`, `index_valuation`, `macro_indicator`, `source_payload_log` |
+| Analytics | `factor_definition`, `index_factor_value`, `signal_definition`, `index_signal` |
 | Runtime | `research_run`, `research_run_item` |
-| Backtest | `backtest_run`（含 progress 列）, `backtest_daily_result`, `backtest_etf_result`, `backtest_index_result` |
+| Backtest | `backtest_run`（含 progress 列）, `backtest_daily_result`, `backtest_index_result`, `backtest_comparison` |
 | Strategy | `strategy_config` |
 
 Key migrations:
-- 0001–0004: 基础表结构、回测表、指数/宏观表、ETF 种子数据
+- 0001–0004: 基础表结构、回测表、指数/宏观表
 - 0005–0006: 因子层表、因子定义增强
 - 0007–0008: 指数因子回测、策略配置表
 - 0009–0012: 回测模式字段、`index_signal` 表、回测日基准收益和换手率、回测指数原始得分
@@ -184,15 +185,15 @@ Key migrations:
 
 ### Frontend
 
-- **Pages** (`src/pages/`): 14 pages — Dashboard, ETF list, ETF detail, Index list, Index detail, Macro, Strategy list, Strategy detail (config viewer + editor), Factors list, Factor detail, Runs, Backtest list, Backtest create, Backtest detail
-- **State** (`src/stores/`): 4 Pinia stores — `etfs`, `strategies`, `signals`, `backtests`; stores are for mutable shared state only
-- **API layer** (`src/api/`): 8 files — `client.ts` (Axios 实例) + 7 API wrapper modules (`etfs.ts`, `strategies.ts`, `signals.ts`, `backtests.ts`, `runs.ts`, `market_data.ts`, `factors.ts`); all return typed `PaginatedResponse<T>` (`{ items, total, offset, limit }`)
+- **Pages** (`src/pages/`): 16 pages — Dashboard, Index list, Index detail, Macro, Strategy list, Strategy detail (config viewer + editor), Factors list, Factor detail, Runs, Backtest list, Backtest create, Backtest detail, Backtest comparison create/detail, AI factors, Keyword tags
+- **State** (`src/stores/`): 3 Pinia stores — `strategies`, `signals`, `backtests`; stores are for mutable shared state only
+- **API layer** (`src/api/`): 7 files — `client.ts` (Axios 实例) + 6 API wrapper modules (`strategies.ts`, `signals.ts`, `backtests.ts`, `runs.ts`, `market_data.ts`, `factors.ts`); all return typed `PaginatedResponse<T>` (`{ items, total, offset, limit }`)
 - **Read-only data pages** (index/macro): Fetch data **inline** via `ref()` + `onMounted`, no Pinia store — lighter pattern for static data views
 - Charts use ECharts 5 (dynamic `import('echarts')`, `watch` with `flush: 'post'`, `dispose()` in `onUnmounted`)
 
 ## Current State
 
-Services fully wired to PostgreSQL. 23 tables across 13 migrations (0001→0013). Each data type has exactly **one** source: ETF K-line→Sina, ETF shares→Eastmoney, Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → lock → external API → upsert via `ON CONFLICT DO NOTHING`. Scheduler runs `daily_ingest` at 17:30 weekdays. `POST /api/runs/daily-ingest` triggers manual full refresh. Startup health check triggers `startup_fill` to backfill data gaps.
+Services fully wired to PostgreSQL. Each data type has exactly **one** source: Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → 未命中时入队 `data_fill` 后台任务并返回空列表。后台任务统一走 `background_job` 持久化队列（迁移 0023）。`POST /api/runs/daily-ingest` 触发手动入队。Startup 时 lifespan 入队 `startup_fill` / `warm_calendar` 任务。
 
 **Strategy Engine**: `engine/` 包实现组件化策略执行管线。策略通过 `strategy_config` 表的 JSON 配置驱动，`StrategyConfigService` 管理 CRUD，`StrategyEngine` 执行管线。`FactorProvider` 桥接因子层与引擎层，`ContextBuilder` 统一构建实时和回测上下文。`BacktestService` 和 `StrategyExecutionService` 统一使用引擎执行。
 
@@ -215,16 +216,15 @@ Services fully wired to PostgreSQL. 23 tables across 13 migrations (0001→0013)
 - **Alembic**: `alembic/versions/` was empty on init — autogenerate requires a live DB connection. Hand-write the first migration if the DB is blank.
 - **SQLAlchemy**: Stack is fully **sync** (`create_engine`, `sessionmaker`). Do not introduce async.
 - **DB session injection**: Services take `db: Session` in `__init__`. Routers use `Depends(get_db)` from `api/deps.py` and construct services per-request (no module-level singletons).
-- **`DailyBar.code` vs `etf_code`**: The schema field is `code` (not `etf_code`). Map `EtfDailyBarModel.etf_code → DailyBar(code=...)`.
-- **AkShareFundClient share snapshot**: Uses `fund_etf_spot_em` with a 10-minute in-process cache; when `shares_total` is missing, falls back to `AUM / price`. Column names may vary across AkShare versions.
+- **`DailyBar.code` 语义**: 指数日线转换时 `IndexDailyBarModel.index_code → DailyBar(code=...)`。
 - **Sync blocking in uvicorn**: Services use synchronous `urlopen` for external APIs. FastAPI runs sync routes in a thread pool (default 40 threads). Concurrent cold-start requests can exhaust the pool and cause timeouts — use a per-resource `threading.Lock` to serialize first-fetch, then read from DB on subsequent requests.
 - **ECharts + TypeScript**: `echarts/index.d.ts` triggers TS1203 with `vue-tsc`. Fix: add `"skipLibCheck": true` to `apps/web/tsconfig.json`.
 - **Backend venv on Windows**: Executables are at `apps/api/.venv/Scripts/` (e.g. `.venv/Scripts/alembic`, `.venv/Scripts/python`). Source code is at `apps/api/src/quant_etf_api/`.
-- **`universe` 字典 key**: `_resolve_index_universe()` 返回的字典同时包含 `etf_code` 和 `index_code`（值相同），以便引擎层通过 `item["etf_code"]` 透明兼容。
+- **`universe` 字典 key**: `build_universe_items()` 输出的 universe 字典以 `index_code` 为资产主键，引擎层统一通过 `item["index_code"]` 读取。
 - **AkShare index valuation**: Only 沪深300(000300), 上证50(000016), 中证500(000905) return PE/PB from legulegu.com. Other indexes (000688/399001/399006) return empty — must handle gracefully in frontend.
 - **Backend GET endpoints never return 500**: External API failures are caught/logged, returning `[]`. A 200 OK with empty array can mean either "no data yet" or "upstream error".
 - **AkShare API instability**: Upstream network errors (ConnectionResetError, AttributeError) are common. Tests use `_retry_fetch()` with 3 attempts. Frontend pages catch errors silently and show "暂无数据".
-- **PostgreSQL NULL uniqueness in `etf_factor_value`**: `NULL != NULL` means `(trade_date, etf_code, factor_id, strategy_id=NULL)` won't prevent duplicates via the composite unique constraint. Solved by partial unique index `uq_etf_factor_value_builtin` on `(trade_date, etf_code, factor_id) WHERE strategy_id IS NULL` (migration 0005). SQLAlchemy upsert uses `index_where=EtfFactorValueModel.strategy_id.is_(None)` to reference it.
+- **PostgreSQL NULL uniqueness in `index_factor_value`**: `NULL != NULL` means `(trade_date, index_code, factor_id, strategy_id=NULL)` won't prevent duplicates via the composite unique constraint. Solved by partial unique index `uq_index_factor_value_builtin` on `(trade_date, index_code, factor_id) WHERE strategy_id IS NULL` (migration 0007). SQLAlchemy upsert uses `index_where=IndexFactorValueModel.strategy_id.is_(None)` to reference it.
 - **`main.py` circular import via `factor_registry`**: `api/deps.py::get_factor_registry()` and `infra/scheduler/__init__.py` both import `factor_registry` from `main.py` using deferred `from quant_etf_api.main import factor_registry` inside the function body — never at module level, or a circular import will occur.
 - **`FactorRow` (schemas/signal.py) is reused for factor API responses** — no separate factor value schema exists. `schemas/factor.py` only defines `FactorSpecResponse`.
 - **`factor_definition.owner_plugin` is nullable** (migration 0005): all built-in factors use `owner_plugin=NULL`.
@@ -234,14 +234,14 @@ Services fully wired to PostgreSQL. 23 tables across 13 migrations (0001→0013)
 - **FactorProvider 依赖注入**: `FactorProvider` 需要 `db: Session`（实时模式）和 `registry: FactorRegistry`（回测模式）。回测服务在 `__init__` 中构建 `FactorRegistry` 和 `FactorProvider`，通过 `ContextBuilder` 注入。
 - **回测仅支持配置模式**: 策略必须配置 `portfolio` 模块，`create_backtest` 会校验并拒绝无 portfolio 的策略。`backtest_mode` 和 `weighting` 字段已移除。
 - **回测日收益基准（benchmark_return）和换手率（turnover）**: 存储在 `backtest_daily_result` 表中（migration 0011），前端 `BacktestDailyResult` 接口包含这两个可选字段。
-- **index_signal 表** (migration 0010): 与 `etf_signal` 结构对齐，但以 `index_code` 替代 `etf_code`，用于存储基于指数的策略信号。
+- **index_signal 表** (migration 0010): 存储策略引擎对指数的信号计算结果，以 `index_code` 关联指数。
 - **信号等级判定常量**: 定义在 `domain/common/constants.py`（`SIGNAL_THRESHOLD_HIGH=70`、`SIGNAL_THRESHOLD_MID=50`），引擎和回测服务统一引用，避免硬编码散落。
 - **`backtest_index_result.original_score`** (migration 0012): 配置模式下保留原始综合得分，避免被权重值覆盖，便于分析策略评分与仓位的对应关系。
 - **FilterRule.compare_to**: 过滤器支持跨因子比较（如 `ma_5d > ma_20d`）。`compare_to` 与 `value` 二选一，不能同时设置。`between` 操作符不支持 `compare_to`。
 - **FactorProvider.collect_required_factor_ids() 必须收集 compare_to**: 遍历 filter rules 时不仅要收集 `rule.factor`，还要收集 `rule.compare_to`（若存在）。遗漏会导致被比较的因子值未加载，filter 始终失败 → 空仓。
 - **FilterRuleValue 前端接口**: 定义在 `StrategyConfigForm.vue`（非共享 types 文件）。修改 FilterRule schema 时需同步更新：接口定义、表单模板、`initFilter()`、`buildConfig()`、校验逻辑，以及 `StrategyDetailPage.vue` 的只读展示。
 - **后台任务状态流转**: `research_run` 状态链：pending → running → success/failed。`RunService.mark_running()` 在 bg 函数开始时调用，`mark_success(run_id, metrics)` / `mark_failed(run_id, error_message)` 在结束时调用。进程重启后 `recover_stuck_runs_on_startup()` 自动恢复卡死任务。
-- **数据刷新按类型拆分**: `IngestService` 提供 `refresh_etf_data()`、`refresh_index_data()`、`refresh_macro_data()` 三个公共方法，各有独立 run 生命周期。对应 API 端点：`POST /runs/etf-refresh`、`/runs/index-refresh`、`/runs/macro-refresh`。各数据页面（ETF/指数/宏观）有自己的"刷新数据"按钮，RunsPage 纯做监控。
+- **数据刷新按类型拆分**: `IngestService` 提供 `refresh_index_data()`、`refresh_macro_data()` 两个公共方法，各有独立 run 生命周期。对应 API 端点：`POST /runs/index-refresh`、`/runs/macro-refresh`。各数据页面（指数/宏观）有自己的"刷新数据"按钮，RunsPage 纯做监控。
 - **Run detail API**: `GET /runs/{run_id}` 返回 `ResearchRunDetail`（含 metrics、duration_seconds），`GET /runs/{run_id}/items` 返回 `ResearchRunItemSchema` 逐条明细，`POST /runs/{run_id}/retry` 重试失败任务（创建新 run 并提交到线程池）。
 
 ## Coding Standards

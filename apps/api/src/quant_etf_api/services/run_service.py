@@ -145,7 +145,7 @@ class RunService:
             ResearchRunItemSchema(
                 id=item.id,
                 run_id=item.run_id,
-                etf_code=item.etf_code,
+                index_code=item.index_code,
                 status=item.status,
                 message=item.message,
                 metrics=item.metrics,

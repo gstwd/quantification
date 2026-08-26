@@ -38,7 +38,7 @@ class WeightAllocator(Protocol):
             timing: 择时信号，None 时默认中性。
 
         Returns:
-            key=etf_code, value=目标权重（0-1）。
+            key=index_code, value=目标权重（0-1）。
         """
         ...
 
@@ -60,7 +60,7 @@ class EqualWeightAllocator:
         n = len(rankings)
         weight = total_exposure / n
 
-        return {r.etf_code: round(weight, 4) for r in rankings}
+        return {r.index_code: round(weight, 4) for r in rankings}
 
     def _get_total_exposure(self, config: PortfolioConfig, timing: TimingSignal | None) -> float:
         """根据择时信号确定总仓位上限。"""
@@ -98,7 +98,7 @@ class ScoreWeightAllocator:
         positions: dict[str, float] = {}
         for r in eligible:
             weight = (r.score / total_score) * total_exposure
-            positions[r.etf_code] = round(weight, 4)
+            positions[r.index_code] = round(weight, 4)
 
         return positions
 
@@ -139,7 +139,7 @@ class WinnerTakeAllAllocator:
         total_exposure = self._get_total_exposure(config, timing)
         winner = rankings[0]
 
-        return {winner.etf_code: round(total_exposure, 4)}
+        return {winner.index_code: round(total_exposure, 4)}
 
     def _get_total_exposure(self, config: PortfolioConfig, timing: TimingSignal | None) -> float:
         """根据择时信号确定总仓位上限。"""

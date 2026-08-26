@@ -136,7 +136,6 @@ class TestNewsEnhancerDedup:
         item = _make_raw_item("test")
         item.url = "https://test.com/duplicate"
 
-        enhancer = NewsEnhancer(NewsSourceManager())
         # 直接用内部逻辑验证
         seen = {item.url}
         result = NewsSearchResult(

@@ -39,7 +39,7 @@ class ScoreCalculator(Protocol):
             context: 引擎上下文。
 
         Returns:
-            key=etf_code, value=得分（0-100）。
+            key=index_code, value=得分（0-100）。
         """
         ...
 
@@ -82,11 +82,11 @@ class DefaultScoreCalculator:
             debug: 可选的调试收集列表，传入时填充每资产的评分明细。
 
         Returns:
-            key=etf_code, value=得分（0-100）。
+            key=index_code, value=得分（0-100）。
         """
         scores: dict[str, float] = {}
         for item in context.universe:
-            code = item["etf_code"]
+            code = item["index_code"]
             name_cn = item.get("name_cn", code)
             breakdown: list[FactorScoreBreakdown] = []
             score = self._score_single_asset(code, config, context, breakdown)
@@ -112,7 +112,7 @@ class DefaultScoreCalculator:
                         b.contribution = round((b.transformed_value or 0) * b.weight / total_abs, 2)
                 debug.append(
                     AssetScoreDetail(
-                        etf_code=code,
+                        index_code=code,
                         name_cn=name_cn,
                         raw_score=score,
                         final_score=score,
@@ -293,7 +293,7 @@ class CrossSectionScorer:
                 和横截面统计信息。
 
         Returns:
-            key=etf_code, value=得分（0-100）。
+            key=index_code, value=得分（0-100）。
         """
         from quant_etf_api.factors.normalization import normalize_rank, normalize_zscore
 
@@ -304,7 +304,7 @@ class CrossSectionScorer:
         # 调试收集：每资产的评分分解
         asset_breakdowns: dict[str, list[FactorScoreBreakdown]] = {}
         for item in context.universe:
-            code = item["etf_code"]
+            code = item["index_code"]
             name_cn = item.get("name_cn", code)
             weighted_sum = 0.0
             total_weight = 0.0
@@ -381,7 +381,7 @@ class CrossSectionScorer:
                             )
                     debug.append(
                         AssetScoreDetail(
-                            etf_code=code,
+                            index_code=code,
                             name_cn=name_cn,
                             raw_score=None,
                             final_score=None,
@@ -398,7 +398,7 @@ class CrossSectionScorer:
                 if debug is not None:
                     debug.append(
                         AssetScoreDetail(
-                            etf_code=code,
+                            index_code=code,
                             name_cn=name_cn,
                             raw_score=None,
                             final_score=None,
@@ -444,12 +444,12 @@ class CrossSectionScorer:
         # 第三步：填充调试数据
         if debug is not None:
             for item in context.universe:
-                code = item["etf_code"]
+                code = item["index_code"]
                 name_cn = item.get("name_cn", code)
                 if code in raw_scores:
                     debug.append(
                         AssetScoreDetail(
-                            etf_code=code,
+                            index_code=code,
                             name_cn=name_cn,
                             raw_score=round(raw_scores[code], 2),
                             final_score=normalized.get(code),

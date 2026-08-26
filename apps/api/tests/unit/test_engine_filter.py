@@ -24,9 +24,9 @@ def _make_context(
         trade_date=date(2025, 1, 15),
         universe=universe
         or [
-            {"etf_code": "A", "name_cn": "A", "category": "broad_index"},
-            {"etf_code": "B", "name_cn": "B", "category": "broad_index"},
-            {"etf_code": "C", "name_cn": "C", "category": "broad_index"},
+            {"index_code": "A", "name_cn": "A", "category": "broad_index"},
+            {"index_code": "B", "name_cn": "B", "category": "broad_index"},
+            {"index_code": "C", "name_cn": "C", "category": "broad_index"},
         ],
         asset_factors=asset_factors or {},
     )
@@ -360,7 +360,7 @@ class TestFilterMissingStrategy:
 
         assert "A" in result
         assert "B" not in result
-        by_code = {d.etf_code: d for d in debug}
+        by_code = {d.index_code: d for d in debug}
         assert by_code["B"].passed is False
         assert by_code["B"].fail_reason == "pe_percentile 因子缺失(exclude)"
         assert by_code["B"].rule_results[0].missing is True

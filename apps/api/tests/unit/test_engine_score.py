@@ -37,8 +37,8 @@ def _make_context(
         trade_date=date(2025, 1, 15),
         universe=universe
         or [
-            {"etf_code": "510300", "name_cn": "沪深300ETF", "category": "broad_index"},
-            {"etf_code": "510500", "name_cn": "中证500ETF", "category": "broad_index"},
+            {"index_code": "000300", "name_cn": "沪深300", "category": "broad_index"},
+            {"index_code": "000905", "name_cn": "中证500", "category": "broad_index"},
         ],
         asset_factors=asset_factors or {},
         market_factors=market_factors or {},
@@ -105,18 +105,18 @@ class TestDefaultScoreCalculator:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "momentum"): 80.0,
-                ("510300", "valuation"): 60.0,
-                ("510500", "momentum"): 50.0,
-                ("510500", "valuation"): 70.0,
+                ("000300", "momentum"): 80.0,
+                ("000300", "valuation"): 60.0,
+                ("000905", "momentum"): 50.0,
+                ("000905", "valuation"): 70.0,
             },
         )
         scores = calc.calculate(config, context)
 
-        # 510300: (80*0.6 + 60*0.4) / (0.6+0.4) = 72.0
-        assert scores["510300"] == 72.0
-        # 510500: (50*0.6 + 70*0.4) / (0.6+0.4) = 58.0
-        assert scores["510500"] == 58.0
+        # 000300: (80*0.6 + 60*0.4) / (0.6+0.4) = 72.0
+        assert scores["000300"] == 72.0
+        # 000905: (50*0.6 + 70*0.4) / (0.6+0.4) = 58.0
+        assert scores["000905"] == 58.0
 
     def test_with_transforms(self) -> None:
         """使用变换函数。"""
@@ -130,14 +130,14 @@ class TestDefaultScoreCalculator:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "return_20d"): 12.0,  # momentum_score -> 85
-                ("510300", "pe_percentile"): 30.0,  # invert_percentile -> 70
+                ("000300", "return_20d"): 12.0,  # momentum_score -> 85
+                ("000300", "pe_percentile"): 30.0,  # invert_percentile -> 70
             },
         )
         scores = calc.calculate(config, context)
 
-        # 510300: (85*0.6 + 70*0.4) / 1.0 = 79.0
-        assert scores["510300"] == 79.0
+        # 000300: (85*0.6 + 70*0.4) / 1.0 = 79.0
+        assert scores["000300"] == 79.0
 
     def test_missing_factor_ignore(self) -> None:
         """缺失因子策略：ignore（忽略并重新归一化）。"""
@@ -148,14 +148,14 @@ class TestDefaultScoreCalculator:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "a"): 80.0,
-                ("510300", "b"): None,  # 缺失
+                ("000300", "a"): 80.0,
+                ("000300", "b"): None,  # 缺失
             },
         )
         scores = calc.calculate(config, context)
 
         # 忽略 b，仅用 a: 80.0
-        assert scores["510300"] == 80.0
+        assert scores["000300"] == 80.0
 
     def test_missing_factor_zero(self) -> None:
         """缺失因子策略：zero（按 0 处理）。"""
@@ -166,14 +166,14 @@ class TestDefaultScoreCalculator:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "a"): 80.0,
-                ("510300", "b"): None,  # 缺失，按 0 处理
+                ("000300", "a"): 80.0,
+                ("000300", "b"): None,  # 缺失，按 0 处理
             },
         )
         scores = calc.calculate(config, context)
 
         # (80*0.6 + 0*0.4) / 1.0 = 48.0
-        assert scores["510300"] == 48.0
+        assert scores["000300"] == 48.0
 
     def test_missing_factor_exclude(self) -> None:
         """缺失因子策略：exclude（排除该资产）。"""
@@ -184,17 +184,17 @@ class TestDefaultScoreCalculator:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "a"): 80.0,
-                ("510300", "b"): None,  # 缺失，排除
-                ("510500", "a"): 70.0,
-                ("510500", "b"): 60.0,
+                ("000300", "a"): 80.0,
+                ("000300", "b"): None,  # 缺失，排除
+                ("000905", "a"): 70.0,
+                ("000905", "b"): 60.0,
             },
         )
         scores = calc.calculate(config, context)
 
-        # 510300 被排除
-        assert "510300" not in scores
-        assert "510500" in scores
+        # 000300 被排除
+        assert "000300" not in scores
+        assert "000905" in scores
 
     def test_negative_weights(self) -> None:
         """支持负权重。"""
@@ -204,14 +204,14 @@ class TestDefaultScoreCalculator:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "a"): 80.0,
-                ("510300", "b"): 30.0,  # 负权重，低值更好
+                ("000300", "a"): 80.0,
+                ("000300", "b"): 30.0,  # 负权重，低值更好
             },
         )
         scores = calc.calculate(config, context)
 
         # (80*0.6 + 30*(-0.4)) / (0.6+0.4) = (48-12)/1 = 36.0
-        assert scores["510300"] == 36.0
+        assert scores["000300"] == 36.0
 
     def test_score_clamped_0_100(self) -> None:
         """得分限制在 0-100 范围。"""
@@ -219,14 +219,14 @@ class TestDefaultScoreCalculator:
         config = ScoreConfig(factors={"a": 1.0})
         context = _make_context(
             asset_factors={
-                ("510300", "a"): 150.0,  # 超出范围
-                ("510500", "a"): -50.0,  # 低于范围
+                ("000300", "a"): 150.0,  # 超出范围
+                ("000905", "a"): -50.0,  # 低于范围
             },
         )
         scores = calc.calculate(config, context)
 
-        assert scores["510300"] == 100.0
-        assert scores["510500"] == 0.0
+        assert scores["000300"] == 100.0
+        assert scores["000905"] == 0.0
 
 
 class TestCrossSectionScorer:
@@ -241,17 +241,17 @@ class TestCrossSectionScorer:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "a"): 80.0,
-                ("510300", "b"): 60.0,
-                ("510500", "a"): None,  # 全部缺失
-                ("510500", "b"): None,
+                ("000300", "a"): 80.0,
+                ("000300", "b"): 60.0,
+                ("000905", "a"): None,  # 全部缺失
+                ("000905", "b"): None,
             },
         )
 
         scores = calc.calculate(config, context)
 
-        assert "510500" not in scores
-        assert "510300" in scores
+        assert "000905" not in scores
+        assert "000300" in scores
 
     def test_zscore_excludes_all_missing_asset(self) -> None:
         """zscore 模式：全部因子缺失的资产不进入得分池。"""
@@ -262,17 +262,17 @@ class TestCrossSectionScorer:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "a"): 80.0,
-                ("510300", "b"): 60.0,
-                ("510500", "a"): None,  # 全部缺失
-                ("510500", "b"): None,
+                ("000300", "a"): 80.0,
+                ("000300", "b"): 60.0,
+                ("000905", "a"): None,  # 全部缺失
+                ("000905", "b"): None,
             },
         )
 
         scores = calc.calculate(config, context)
 
-        assert "510500" not in scores
-        assert "510300" in scores
+        assert "000905" not in scores
+        assert "000300" in scores
 
     def test_zero_strategy_keeps_all_missing_asset(self) -> None:
         """zero 策略：全部因子缺失仍按 0 参与评分，排除语义不生效。"""
@@ -284,18 +284,18 @@ class TestCrossSectionScorer:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "a"): 80.0,
-                ("510300", "b"): 60.0,
-                ("510500", "a"): None,  # 全部缺失，按 0 处理
-                ("510500", "b"): None,
+                ("000300", "a"): 80.0,
+                ("000300", "b"): 60.0,
+                ("000905", "a"): None,  # 全部缺失，按 0 处理
+                ("000905", "b"): None,
             },
         )
 
         scores = calc.calculate(config, context)
 
-        assert "510500" in scores
+        assert "000905" in scores
         # 未排除：正常参与排名，因 raw=0 得到最低排名分
-        assert scores["510500"] < scores["510300"]
+        assert scores["000905"] < scores["000300"]
 
     def test_ignore_partial_missing_keeps_asset(self) -> None:
         """ignore 策略：部分因子缺失时资产仍参与评分。"""
@@ -306,17 +306,17 @@ class TestCrossSectionScorer:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "a"): 80.0,
-                ("510300", "b"): None,  # 部分缺失
-                ("510500", "a"): 50.0,
-                ("510500", "b"): 60.0,
+                ("000300", "a"): 80.0,
+                ("000300", "b"): None,  # 部分缺失
+                ("000905", "a"): 50.0,
+                ("000905", "b"): 60.0,
             },
         )
 
         scores = calc.calculate(config, context)
 
-        assert "510300" in scores
-        assert "510500" in scores
+        assert "000300" in scores
+        assert "000905" in scores
 
     def test_debug_marks_all_missing_excluded(self) -> None:
         """调试信息：全缺失资产标记 excluded 并给出原因。"""
@@ -327,15 +327,15 @@ class TestCrossSectionScorer:
         )
         context = _make_context(
             asset_factors={
-                ("510300", "a"): 80.0,
-                ("510500", "a"): None,  # 全部缺失
+                ("000300", "a"): 80.0,
+                ("000905", "a"): None,  # 全部缺失
             },
         )
 
         debug: list = []
         calc.calculate(config, context, debug=debug)
 
-        missing = next(d for d in debug if d.etf_code == "510500")
+        missing = next(d for d in debug if d.index_code == "000905")
         assert missing.excluded is True
         assert missing.exclude_reason == "因子数据全部缺失"
         assert missing.raw_score is None

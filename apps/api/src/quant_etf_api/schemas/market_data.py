@@ -19,18 +19,6 @@ class DailyBar(BaseModel):
     ingested_at: datetime | None = None
 
 
-class ShareSnapshot(BaseModel):
-    trade_date: date
-    etf_code: str
-    shares_total: float | None = None
-    shares_delta: float | None = None
-    shares_delta_pct: float | None = None
-    nav: float | None = None
-    aum: float | None = None
-    source: str = "stub"
-    ingested_at: datetime | None = None
-
-
 class IndexValuation(BaseModel):
     """指数估值数据（PE/PB 及历史分位）。"""
 

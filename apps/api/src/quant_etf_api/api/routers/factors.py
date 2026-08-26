@@ -247,7 +247,7 @@ def factor_correlation(
 ) -> CorrelationResponse:
     """查询因子间截面 Rank 相关性矩阵。
 
-    对指定交易日的所有 ETF，计算各因子值之间的 Spearman 秩相关系数。
+    对指定交易日的所有指数，计算各因子值之间的 Spearman 秩相关系数。
     可用于判断因子冗余度，相关性高的因子可考虑正交化或二选一。
     """
     try:
@@ -259,6 +259,6 @@ def factor_correlation(
     return CorrelationResponse(
         factor_ids=result["factor_ids"],
         matrix=result["matrix"],
-        etf_count=result.get("etf_count", 0),
+        index_count=result.get("index_count", 0),
         trade_date=result.get("trade_date", str(trade_date)),
     )
