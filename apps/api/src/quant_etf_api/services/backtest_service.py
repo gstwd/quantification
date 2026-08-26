@@ -641,11 +641,11 @@ class BacktestService:
             "[backtest] 回测完成: backtest_id=%s 累计收益=%s%% 最大回撤=%s%% 夏普=%s "
             "胜率=%s%% 信号准确率=%s%%",
             backtest_id,
-            metrics.cumulative_return_pct,
-            metrics.max_drawdown_pct,
-            metrics.sharpe_ratio,
-            metrics.win_rate_pct,
-            metrics.signal_accuracy_pct,
+            metrics.get("cumulative_return_pct", 0.0),
+            metrics.get("max_drawdown_pct", 0.0),
+            metrics.get("sharpe_ratio", 0.0),
+            metrics.get("win_rate_pct", 0.0),
+            metrics.get("signal_accuracy_pct", 0.0),
         )
         self._backtest_repo.mark_success(
             backtest_id,
