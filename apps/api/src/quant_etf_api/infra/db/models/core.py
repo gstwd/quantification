@@ -605,17 +605,19 @@ class BacktestIndexResultModel(Base):
         ForeignKey("benchmark_index.index_code"), nullable=False, comment="指数代码"
     )
     signal_score: Mapped[float] = mapped_column(
-        Float, nullable=False, comment="信号综合得分，0-100"
+        Float, nullable=False, comment="信号综合得分，0-100（与实时 index_signal.signal_score 同义）"
     )
     signal_level: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="信号等级：HIGH/MID/LOW"
     )
-    in_portfolio: Mapped[bool] = mapped_column(Boolean, nullable=False, comment="是否纳入当日组合")
+    in_portfolio: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, comment="信号是否纳入当日目标组合（目标权重>0）"
+    )
     index_return: Mapped[float | None] = mapped_column(
         Float, comment="T+1 日指数收益率，单位 %，末日为 NULL"
     )
-    original_score: Mapped[float | None] = mapped_column(
-        Float, comment="保留原始综合得分（配置模式下不会被权重值覆盖）"
+    target_weight: Mapped[float | None] = mapped_column(
+        Float, comment="信号目标仓位权重（0-1），与实时信号 payload.target_weight 同义"
     )
 
 

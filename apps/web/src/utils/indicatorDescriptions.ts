@@ -297,9 +297,9 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
       label: '防守 regime',
       description: '择时综合得分 ≤ 防守阈值时的市场状态。<br>市场估值偏高/趋势走弱/量能不足 → 减仓防守。<br>防守状态下组合仓位最低（默认 20%），所有信号强制 LOW。',
     },
-    original_score: {
-      label: '原始得分',
-      description: '在资产配置模式中，保留策略引擎计算出的原始综合得分（0-100）。<br>与持仓权重区分：权重是得分经过组合分配后的结果，原始得分反映纯粹的评分排名。<br>用于分析策略评分与仓位分配的对应关系。',
+    target_weight: {
+      label: '目标权重',
+      description: '信号当日的目标仓位权重（0-1），与实时信号 payload 中的 target_weight 同义。<br>配置模式下权重 > 0 才按综合得分判定 HIGH/MID，权重为 0 时信号为 LOW。<br>用于分析策略评分与仓位分配的对应关系。',
     },
   },
 

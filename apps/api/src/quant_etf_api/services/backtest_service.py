@@ -220,7 +220,10 @@ class BacktestService:
     def get_index_results(
         self, backtest_id: str, index_code: str | None = None
     ) -> list[BacktestIndexResult]:
-        """返回回测每日每指数信号与收益。"""
+        """返回回测每日每指数信号与收益。
+
+        口径与实时信号保持一致：signal_score 为综合得分，target_weight 为信号目标仓位权重。
+        """
         try:
             rows = self._backtest_repo.find_index_results(backtest_id, index_code)
             return [
@@ -231,7 +234,7 @@ class BacktestService:
                     signal_level=r.signal_level,
                     in_portfolio=r.in_portfolio,
                     index_return=r.index_return,
-                    original_score=getattr(r, "original_score", None),
+                    target_weight=getattr(r, "target_weight", None),
                 )
                 for r in rows
             ]
@@ -489,7 +492,8 @@ class BacktestService:
                 universe,
                 result,
                 all_bars,
-                positions,
+                result.positions if result.positions else {},
+                timing_regime=result.timing.regime if result.timing else None,
                 scoring_mode=config.score.scoring_mode,
             )
             # 更新每日行的信号计数
@@ -563,10 +567,15 @@ class BacktestService:
         universe: list[dict[str, Any]],
         result: Any,
         all_bars: dict,
-        positions: dict[str, float],
+        signal_positions: dict[str, float],
+        timing_regime: str | None = None,
         scoring_mode: str = "absolute",
     ) -> tuple[int, int, int, int, int]:
-        """写入每日每指数的回测结果，使用统一的信号等级判定逻辑。
+        """写入每日每指数的回测结果，使用与实时一致的信号等级判定逻辑。
+
+        与实时 `_build_strategy_results` 共用同一 `determine_signal_level` 输入：
+        score=当日综合得分、target_weight=当日目标权重（result.positions）、
+        timing_regime=当日择时 regime、scoring_mode=策略评分模式。
 
         Returns:
             (high_cnt, mid_cnt, low_cnt, in_portfolio_count, in_portfolio_positive_count) 元组。
@@ -578,14 +587,14 @@ class BacktestService:
 
         for item in universe:
             code = item["index_code"]
-            target_weight = positions.get(code, 0.0)
+            target_weight = signal_positions.get(code, 0.0)
             score = score_map.get(code, 0.0)
-            original_score = round(score, 2)
 
             level, _ = determine_signal_level(
                 score=score,
                 target_weight=target_weight,
-                has_positions=True,
+                has_positions=bool(signal_positions),
+                timing_regime=timing_regime,
                 scoring_mode=scoring_mode,
             )
             if level == "HIGH":
@@ -596,7 +605,7 @@ class BacktestService:
                 low += 1
 
             in_portfolio = target_weight > 0
-            signal_score = round(target_weight * 100, 2)
+            signal_score = round(score, 2)
 
             idx_ret = None
             if next_date and in_portfolio:
@@ -614,7 +623,7 @@ class BacktestService:
                     signal_level=level,
                     in_portfolio=in_portfolio,
                     index_return=idx_ret,
-                    original_score=original_score,
+                    target_weight=round(target_weight, 4),
                 )
             )
 

@@ -254,8 +254,8 @@ export interface BacktestIndexResult {
   signal_level: string
   in_portfolio: boolean
   index_return: number | null
-  /** 保留原始综合得分，配置模式下不会被权重值覆盖 */
-  original_score?: number | null
+  /** 信号目标仓位权重（0-1），与实时信号 payload.target_weight 同义 */
+  target_weight?: number | null
 }
 
 // =============================================================================

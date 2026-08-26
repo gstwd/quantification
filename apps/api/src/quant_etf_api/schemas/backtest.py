@@ -116,7 +116,10 @@ class BacktestDailyResult(BaseModel):
 
 
 class BacktestIndexResult(BaseModel):
-    """回测单日单指数信号与实际收益。"""
+    """回测单日单指数信号与实际收益。
+
+    口径与实时信号一致：signal_score 为综合得分，target_weight 为信号目标仓位权重。
+    """
 
     trade_date: date
     index_code: str
@@ -124,7 +127,7 @@ class BacktestIndexResult(BaseModel):
     signal_level: str
     in_portfolio: bool
     index_return: float | None = None
-    original_score: float | None = None
+    target_weight: float | None = None
 
 
 # ── 策略对比回测 schemas ──────────────────────────────────────────────

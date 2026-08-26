@@ -265,7 +265,7 @@ class StrategyEngine:
                     trade_date=context.trade_date,
                     etf_code=code,
                     strategy_id=config.strategy_id,
-                    signal_score=round(score, 1),
+                    signal_score=round(score, 2),
                     signal_level=level,
                     signal_label=label,
                     factor_values=factor_values,
