@@ -17,7 +17,8 @@ class MacroIndicatorRepository(BaseRepository):
         """加载全部宏观指标，返回 indicator_code → {period: value} 的映射。
 
         Returns:
-            key=indicator_code, value={period: value} 的字典。
+            key=indicator_code, value={period_date: value} 的字典
+            （period_date 为空时回退到 period 字符串作为 key）。
         """
         rows = self._db.query(MacroIndicatorModel).all()
         result: dict[str, dict[str, float]] = {}
@@ -25,7 +26,9 @@ class MacroIndicatorRepository(BaseRepository):
             code = row.indicator_code
             if code not in result:
                 result[code] = {}
-            result[code][str(row.period)] = row.value
+            # key 统一使用 period_date（为空时回退到 period 字符串），
+            # 与 FactorContext 的 {period_date: value} 契约保持一致
+            result[code][str(row.period_date or row.period)] = row.value
         return result
 
     def find_by_code_limit(self, indicator_code: str, limit: int) -> list[MacroIndicatorModel]:

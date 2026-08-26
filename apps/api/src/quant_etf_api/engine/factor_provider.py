@@ -24,6 +24,7 @@ from quant_etf_api.factors.base import (
     FactorValue,
     MissingReason,
 )
+from quant_etf_api.factors.macro_period import macro_indicators_as_of
 
 if TYPE_CHECKING:
     from quant_etf_api.engine.config import StrategyConfig
@@ -256,6 +257,7 @@ class FactorProvider:
             all_bars: 预加载的指数日线数据，key=(index_code, trade_date)。
             all_valuation: 预加载的估值数据，key=(index_code, trade_date)。
             all_macro: 预加载的宏观指标数据，key=indicator_code, value={period: value}。
+                逐点因子计算时按 period <= trade_date 做时点过滤，避免前视偏差。
             all_sentiment: 预加载的 AI 情绪聚合数据，key=(asset_tag, date)。
 
         Returns:
@@ -316,7 +318,9 @@ class FactorProvider:
                         for (code, dt), val in (all_valuation or {}).items()
                         if dt <= trade_date
                     },
-                    macro_indicators=all_macro or {},
+                    # 宏数据按 period <= trade_date 做时点过滤，
+                    # 避免回测历史日期使用未来才公布的 LPR 等宏观数据
+                    macro_indicators=macro_indicators_as_of(all_macro, trade_date),
                     ai_sentiment={
                         (tag, dt): val
                         for (tag, dt), val in (all_sentiment or {}).items()

@@ -12,13 +12,15 @@ from __future__ import annotations
 from datetime import date
 
 from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
+from quant_etf_api.factors.macro_period import latest_value_as_of
 
 
 class ERPComputer:
     """股权风险溢价（ERP）因子计算器。
 
     计算公式：ERP = (1 / PE × 100) - LPR 1年期。
-    PE 来自 index_valuation 表（当日），LPR 来自 macro_indicator 表（最新报价）。
+    PE 来自 index_valuation 表（当日），LPR 来自 macro_indicator 表
+    （截止 trade_date 的最近一期报价，避免使用未来才公布的 LPR）。
     ERP 为正表示股票预期收益高于无风险利率，越高越有吸引力。
     """
 
@@ -59,7 +61,7 @@ class ERPComputer:
                 payload={"index_code": index_code, "reason": "无有效 PE 数据"},
             )
 
-        # 获取最新 LPR 1年期
+        # 获取截止 trade_date 的最近一期 LPR 1年期
         lpr_data = ctx.macro_indicators.get("lpr1y")
         if not lpr_data:
             return FactorValue(
@@ -67,14 +69,15 @@ class ERPComputer:
                 numeric=None,
                 payload={"index_code": index_code, "reason": "无 LPR 数据"},
             )
-        # 取最新一期 LPR
-        latest_lpr = max(lpr_data.values()) if lpr_data else None
-        if latest_lpr is None:
+        # 取截止 trade_date 的最近一期 LPR（period <= trade_date 中 period 最大者）
+        latest = latest_value_as_of(lpr_data, trade_date)
+        if latest is None:
             return FactorValue(
                 factor_id=self.spec.factor_id,
                 numeric=None,
-                payload={"index_code": index_code, "reason": "LPR 值为空"},
+                payload={"index_code": index_code, "reason": "截止当日无有效 LPR 数据"},
             )
+        latest_period, latest_lpr = latest
 
         pe = val_row.pe
         earnings_yield = 1.0 / pe * 100.0
@@ -88,6 +91,7 @@ class ERPComputer:
                 "pe": round(pe, 2),
                 "earnings_yield": round(earnings_yield, 4),
                 "lpr_1y": latest_lpr,
+                "lpr_period": latest_period,
             },
         )
 
@@ -128,15 +132,16 @@ class ERPPercentileComputer:
         Returns:
             FactorValue，数据不足（< 10 个历史数据点）时 numeric 为 None。
         """
-        # 获取 LPR（与 ERPComputer 保持一致，取最大值）
+        # 获取 LPR（与 ERPComputer 保持一致，取截止 trade_date 的最近一期）
         lpr_data = ctx.macro_indicators.get("lpr1y", {})
-        latest_lpr = max(lpr_data.values()) if lpr_data else None
-        if latest_lpr is None:
+        latest = latest_value_as_of(lpr_data, trade_date)
+        if latest is None:
             return FactorValue(
                 factor_id=self.spec.factor_id,
                 numeric=None,
-                payload={"index_code": index_code, "reason": "无 LPR 数据"},
+                payload={"index_code": index_code, "reason": "截止当日无有效 LPR 数据"},
             )
+        latest_period, latest_lpr = latest
 
         # 获取当日 PE（用于计算当日 ERP）
         current_row = ctx.index_valuation.get((index_code, trade_date))
@@ -179,5 +184,6 @@ class ERPPercentileComputer:
                 "current_erp": round(current_erp, 4),
                 "history_count": len(erp_history),
                 "lpr_1y": latest_lpr,
+                "lpr_period": latest_period,
             },
         )

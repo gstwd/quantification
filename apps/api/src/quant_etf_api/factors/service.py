@@ -287,16 +287,21 @@ class FactorService:
             else []
         )
 
-        # 加载宏观指标数据（LPR 等），取每个指标代码的全部历史记录
+        # 加载宏观指标数据（LPR 等），仅保留 period_date <= trade_date 的时点记录，
+        # 避免补算历史日期时使用未来才公布的宏观数据（前视偏差）
         macro_rows = MacroIndicatorRepository(self._db).find_by_codes(
             ["lpr1y", "lpr5y", "cpi", "pmi"]
         )
         macro_indicators: dict[str, dict[str, float]] = {}
         for row in macro_rows:
+            if row.period_date is not None and row.period_date > trade_date:
+                continue
             code = row.indicator_code
             if code not in macro_indicators:
                 macro_indicators[code] = {}
-            macro_indicators[code][row.period] = row.value
+            # key 统一使用 period_date（为空时回退到 period 字符串），
+            # 与 FactorContext 的 {period_date: value} 契约保持一致
+            macro_indicators[code][str(row.period_date or row.period)] = row.value
 
         return FactorContext(
             index_bars={(r.index_code, r.trade_date): r for r in index_bar_rows},
