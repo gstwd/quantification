@@ -2,8 +2,24 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date
 from typing import Any
+
+
+def _is_nan(value: Any) -> bool:
+    """判断数值是否为 NaN。
+
+    PostgreSQL float 列允许存储 NaN，NaN 参与除法会污染整条收益链，
+    统一按"缺失"处理（与 B10 缺口语义一致）。
+
+    Args:
+        value: 数值或 None。
+
+    Returns:
+        value 为 float 且为 NaN 时返回 True。
+    """
+    return isinstance(value, float) and math.isnan(value)
 
 
 def get_index_return(
@@ -27,9 +43,17 @@ def get_index_return(
     next_bar = all_bars.get((index_code, next_date))
     if today_bar is None or next_bar is None:
         return None
-    if today_bar.close_price is None or next_bar.close_price is None or today_bar.close_price == 0:
+    today_close = today_bar.close_price
+    next_close = next_bar.close_price
+    if (
+        today_close is None
+        or next_close is None
+        or today_close == 0
+        or _is_nan(today_close)
+        or _is_nan(next_close)
+    ):
         return None
-    return round((next_bar.close_price / today_bar.close_price - 1) * 100, 4)
+    return round((next_close / today_close - 1) * 100, 4)
 
 
 def compute_allocation_return(
@@ -89,7 +113,16 @@ def get_index_rebalance_legs(
     close_t = today_bar.close_price
     open_n = next_bar.open_price
     close_n = next_bar.close_price
-    if close_t is None or close_t == 0 or open_n is None or open_n == 0 or close_n is None:
+    if (
+        close_t is None
+        or close_t == 0
+        or open_n is None
+        or open_n == 0
+        or close_n is None
+        or _is_nan(close_t)
+        or _is_nan(open_n)
+        or _is_nan(close_n)
+    ):
         return None, None
     overnight = round((open_n / close_t - 1) * 100, 4)
     intraday = round((close_n / open_n - 1) * 100, 4)

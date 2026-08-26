@@ -166,6 +166,26 @@ class TestTurnoverAndReturns:
         )
         assert ret == 0.0
 
+    def test_nan_prices_treated_as_missing(self) -> None:
+        """NaN 价格按缺失处理，不污染收益链。"""
+        bars = {
+            # close 为 NaN → 收盘对收盘收益应为 None
+            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=float("nan")),
+            ("a", date(2025, 1, 16)): SimpleNamespace(close_price=103.0),
+            # open 为 NaN → 隔夜/日内两段均为 None
+            ("b", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
+            ("b", date(2025, 1, 16)): SimpleNamespace(
+                open_price=float("nan"), close_price=102.0
+            ),
+        }
+        assert get_index_return("a", date(2025, 1, 15), date(2025, 1, 16), bars) is None
+        assert compute_allocation_return(
+            {"a": 1.0}, date(2025, 1, 15), date(2025, 1, 16), bars
+        ) == 0.0
+        assert compute_rebalance_day_return(
+            {"b": 1.0}, {"b": 1.0}, date(2025, 1, 15), date(2025, 1, 16), bars
+        ) == 0.0
+
 
 class TestBacktestDayAccumulator:
     """账户累积器测试。"""

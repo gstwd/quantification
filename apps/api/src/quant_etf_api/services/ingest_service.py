@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -44,6 +45,25 @@ logger = logging.getLogger(__name__)
 
 # 防止 run_daily_ingest 被调度器、手动按钮、重试同时触发
 _daily_ingest_lock = threading.Lock()
+
+
+def _clean_price(value: Any) -> float | None:
+    """将 NaN 价格清洗为 None，避免 PostgreSQL float 列存 NaN 污染收益链。
+
+    Args:
+        value: 上游返回的价格或成交量数值。
+
+    Returns:
+        有限数值原样返回，NaN/None 转为 None。
+    """
+    if value is None:
+        return None
+    try:
+        if math.isnan(value):
+            return None
+    except TypeError:
+        pass
+    return value
 
 
 # ────────────────────────── ETF 行 → Schema ──────────────────────────
@@ -470,14 +490,14 @@ class IngestService:
             {
                 "trade_date": b.trade_date,
                 "index_code": index_code,
-                "open_price": b.open_price,
-                "high_price": b.high_price,
-                "low_price": b.low_price,
-                "close_price": b.close_price,
-                "prev_close_price": b.prev_close_price,
-                "change_pct": b.change_pct,
-                "volume": b.volume,
-                "turnover": b.turnover,
+                "open_price": _clean_price(b.open_price),
+                "high_price": _clean_price(b.high_price),
+                "low_price": _clean_price(b.low_price),
+                "close_price": _clean_price(b.close_price),
+                "prev_close_price": _clean_price(b.prev_close_price),
+                "change_pct": _clean_price(b.change_pct),
+                "volume": _clean_price(b.volume),
+                "turnover": _clean_price(b.turnover),
                 "source": "akshare",
                 "ingested_at": utcnow(),
             }

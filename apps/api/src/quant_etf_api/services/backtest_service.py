@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, timedelta
 from typing import Any
 from uuid import uuid4
@@ -65,6 +66,44 @@ from quant_etf_api.services.metrics import compute_performance_metrics
 from quant_etf_api.services.strategy_config_service import StrategyConfigService
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_metric_value(value: Any) -> Any:
+    """将 NaN/Inf 指标值转为 None，避免写入 JSON 列失败。
+
+    PostgreSQL JSON 类型不允许 NaN/Infinity token，Python json 序列化
+    NaN 会直接报 invalid input syntax for type json。指标层任何除法
+    （如零波动 Sharpe、负累计年化）都可能产生 NaN，统一在此兜底。
+
+    Args:
+        value: 指标值。
+
+    Returns:
+        有限数值原样返回，NaN/Inf 转为 None。
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _safe_metric_diff(a: Any, b: Any, digits: int = 2) -> Any:
+    """计算两个指标差值的容错版本。
+
+    Args:
+        a: 策略 A 指标值。
+        b: 策略 B 指标值。
+        digits: 保留小数位。
+
+    Returns:
+        差值；任一输入为 None/NaN/Inf 时返回 None。
+    """
+    if a is None or b is None:
+        return None
+    if isinstance(a, float) and not math.isfinite(a):
+        return None
+    if isinstance(b, float) and not math.isfinite(b):
+        return None
+    return round(a - b, digits)
 
 
 class BacktestService:
@@ -804,7 +843,7 @@ class BacktestService:
             benchmark_return_pct = round((bench_cumulative - 1) * 100, 2)
             excess_return_pct = round(perf.total_return_pct - benchmark_return_pct, 2)
 
-        return BacktestMetrics(
+        metrics = BacktestMetrics(
             cumulative_return_pct=perf.total_return_pct,
             max_drawdown_pct=perf.max_drawdown_pct,
             sharpe_ratio=perf.sharpe_ratio,
@@ -823,6 +862,9 @@ class BacktestService:
             benchmark_return_pct=benchmark_return_pct,
             excess_return_pct=excess_return_pct,
         ).model_dump()
+        # NaN/Inf 指标转 None，防止 PostgreSQL JSON 列写入失败
+        # （如零波动 Sharpe、负累计年化开方等产生 NaN 的场景）
+        return {k: _sanitize_metric_value(v) for k, v in metrics.items()}
 
     # ── 辅助方法 ───────────────────────────────────────────────────────────
 
@@ -1284,23 +1326,25 @@ class BacktestService:
         def _get(key: str, metrics: dict, default: Any = 0.0) -> Any:
             return metrics.get(key, default)
 
-        # 读取各项指标并计算差值
-        a_cum = _get("cumulative_return_pct", ma)
-        b_cum = _get("cumulative_return_pct", mb)
-        a_ann = _get("annualized_return_pct", ma)
-        b_ann = _get("annualized_return_pct", mb)
-        a_dd = _get("max_drawdown_pct", ma)
-        b_dd = _get("max_drawdown_pct", mb)
-        a_sharpe = _get("sharpe_ratio", ma)
-        b_sharpe = _get("sharpe_ratio", mb)
-        a_sortino = _get("sortino_ratio", ma)
-        b_sortino = _get("sortino_ratio", mb)
-        a_calmar = _get("calmar_ratio", ma)
-        b_calmar = _get("calmar_ratio", mb)
-        a_win = _get("win_rate_pct", ma)
-        b_win = _get("win_rate_pct", mb)
-        a_sig = _get("signal_accuracy_pct", ma)
-        b_sig = _get("signal_accuracy_pct", mb)
+        # 读取各项指标并计算差值。
+        # 指标值经 _sanitize_metric_value 可能为 None，复制项统一回退 0.0
+        # 保证 ComparisonMetrics 必需 float 字段可解析；差值用 _safe_metric_diff 容错。
+        a_cum = _get("cumulative_return_pct", ma) or 0.0
+        b_cum = _get("cumulative_return_pct", mb) or 0.0
+        a_ann = _get("annualized_return_pct", ma) or 0.0
+        b_ann = _get("annualized_return_pct", mb) or 0.0
+        a_dd = _get("max_drawdown_pct", ma) or 0.0
+        b_dd = _get("max_drawdown_pct", mb) or 0.0
+        a_sharpe = _get("sharpe_ratio", ma) or 0.0
+        b_sharpe = _get("sharpe_ratio", mb) or 0.0
+        a_sortino = _get("sortino_ratio", ma) or 0.0
+        b_sortino = _get("sortino_ratio", mb) or 0.0
+        a_calmar = _get("calmar_ratio", ma) or 0.0
+        b_calmar = _get("calmar_ratio", mb) or 0.0
+        a_win = _get("win_rate_pct", ma) or 0.0
+        b_win = _get("win_rate_pct", mb) or 0.0
+        a_sig = _get("signal_accuracy_pct", ma) or 0.0
+        b_sig = _get("signal_accuracy_pct", mb) or 0.0
         a_days = _get("total_trading_days", ma, 0)
         b_days = _get("total_trading_days", mb, 0)
         a_active = _get("active_days", ma, 0)
@@ -1328,14 +1372,14 @@ class BacktestService:
             "a_active_days": a_active,
             "b_active_days": b_active,
             # 差值
-            "cumulative_return_diff_pct": round(a_cum - b_cum, 2),
-            "annualized_return_diff_pct": round(a_ann - b_ann, 2),
-            "max_drawdown_diff_pct": round(a_dd - b_dd, 2),
-            "sharpe_diff": round(a_sharpe - b_sharpe, 4),
-            "sortino_diff": round(a_sortino - b_sortino, 4),
-            "calmar_diff": round(a_calmar - b_calmar, 4),
-            "win_rate_diff_pct": round(a_win - b_win, 2),
-            "signal_accuracy_diff_pct": round(a_sig - b_sig, 2),
+            "cumulative_return_diff_pct": _safe_metric_diff(a_cum, b_cum),
+            "annualized_return_diff_pct": _safe_metric_diff(a_ann, b_ann),
+            "max_drawdown_diff_pct": _safe_metric_diff(a_dd, b_dd),
+            "sharpe_diff": _safe_metric_diff(a_sharpe, b_sharpe, 4),
+            "sortino_diff": _safe_metric_diff(a_sortino, b_sortino, 4),
+            "calmar_diff": _safe_metric_diff(a_calmar, b_calmar, 4),
+            "win_rate_diff_pct": _safe_metric_diff(a_win, b_win),
+            "signal_accuracy_diff_pct": _safe_metric_diff(a_sig, b_sig),
             # 基准对比
             "a_benchmark_return_pct": _get("benchmark_return_pct", ma),
             "b_benchmark_return_pct": _get("benchmark_return_pct", mb),
