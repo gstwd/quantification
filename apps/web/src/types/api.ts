@@ -205,6 +205,8 @@ export interface BacktestMetrics {
   benchmark_return_pct: number | null
   /** 超额收益率（%） */
   excess_return_pct: number | null
+  /** 数据缺口天数：至少一个持仓资产受缺失行情影响的交易日数 */
+  data_gap_days: number
 }
 
 export interface BacktestSummary {
@@ -245,6 +247,8 @@ export interface BacktestDailyResult {
   benchmark_return?: number | null
   /** 当日换手率（0-1） */
   turnover?: number | null
+  /** 当日受数据缺口影响的持仓资产数（0=无缺口） */
+  missing_bar_count?: number
 }
 
 /** 回测执行过程中的结构化提示级别 */

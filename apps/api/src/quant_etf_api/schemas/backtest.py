@@ -71,6 +71,8 @@ class BacktestMetrics(BaseModel):
     information_ratio: float | None = None
     benchmark_return_pct: float | None = None
     excess_return_pct: float | None = None
+    # B10：数据缺口统计
+    data_gap_days: int = 0
 
 
 class BacktestSummary(BaseModel):
@@ -114,6 +116,7 @@ class BacktestDailyResult(BaseModel):
         positions: 持仓明细（资产配置模式），index_code → 权重。
         benchmark_return: 基准日收益率（%）。
         turnover: 当日换手率。
+        missing_bar_count: 当日受数据缺口影响的持仓资产数（B10）。
     """
 
     trade_date: date
@@ -129,6 +132,7 @@ class BacktestDailyResult(BaseModel):
     positions: dict[str, float] | None = None
     benchmark_return: float | None = None
     turnover: float | None = None
+    missing_bar_count: int = 0
 
 
 class BacktestIndexResult(BaseModel):

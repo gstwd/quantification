@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from quant_etf_api.infra.db.models.core import BacktestRunModel
@@ -66,12 +67,12 @@ class TestCollectDataGapWarnings:
         svc = _make_service()
         dates = [date(2025, 1, 2), date(2025, 1, 3), date(2025, 1, 6)]
         all_bars = {
-            ("000300", dates[0]): object(),
-            ("000300", dates[1]): object(),
-            ("000300", dates[2]): object(),
+            ("000300", dates[0]): SimpleNamespace(close_price=100.0, open_price=100.0),
+            ("000300", dates[1]): SimpleNamespace(close_price=101.0, open_price=101.0),
+            ("000300", dates[2]): SimpleNamespace(close_price=102.0, open_price=102.0),
             # 000905 缺 1 月 3 日行情
-            ("000905", dates[0]): object(),
-            ("000905", dates[2]): object(),
+            ("000905", dates[0]): SimpleNamespace(close_price=100.0, open_price=100.0),
+            ("000905", dates[2]): SimpleNamespace(close_price=102.0, open_price=102.0),
         }
 
         warnings = svc._collect_data_gap_warnings(dates, ["000300", "000905"], all_bars)
@@ -81,6 +82,26 @@ class TestCollectDataGapWarnings:
         assert w.code == "DATA_GAP"
         assert w.index_code == "000905"
         assert "1 个交易日" in w.message
+
+    def test_missing_open_price_generates_warning(self) -> None:
+        """bar 存在但开盘价缺失（如 932088 港股通指数）也应生成 DATA_GAP 警告。"""
+        svc = _make_service()
+        dates = [date(2025, 1, 2), date(2025, 1, 3)]
+        all_bars = {
+            ("000300", dates[0]): SimpleNamespace(close_price=100.0, open_price=100.0),
+            ("000300", dates[1]): SimpleNamespace(close_price=101.0, open_price=101.0),
+            # 932088 开盘价缺失但收盘价正常
+            ("932088", dates[0]): SimpleNamespace(close_price=100.0, open_price=None),
+            ("932088", dates[1]): SimpleNamespace(close_price=101.0, open_price=None),
+        }
+
+        warnings = svc._collect_data_gap_warnings(dates, ["000300", "932088"], all_bars)
+
+        assert len(warnings) == 1
+        w = warnings[0]
+        assert w.code == "DATA_GAP"
+        assert w.index_code == "932088"
+        assert "开盘价缺失 2 个交易日" in w.message
 
 
 class TestWarningsPersistence:

@@ -18,6 +18,8 @@ from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
 from quant_etf_api.domain.portfolio.returns import (
     compute_allocation_return,
     compute_rebalance_day_return,
+    count_missing_allocation_assets,
+    count_missing_rebalance_assets,
     get_index_return,
 )
 from quant_etf_api.domain.portfolio.turnover import compute_turnover
@@ -185,6 +187,46 @@ class TestTurnoverAndReturns:
         assert compute_rebalance_day_return(
             {"b": 1.0}, {"b": 1.0}, date(2025, 1, 15), date(2025, 1, 16), bars
         ) == 0.0
+
+    def test_count_missing_allocation_assets(self) -> None:
+        """持仓中缺行情的资产计数（B10）。"""
+        bars = {
+            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
+            ("a", date(2025, 1, 16)): SimpleNamespace(close_price=103.0),
+            # b 缺下一交易日行情
+        }
+        assert (
+            count_missing_allocation_assets(
+                {"a": 0.5, "b": 0.5},
+                date(2025, 1, 15),
+                date(2025, 1, 16),
+                bars,
+            )
+            == 1
+        )
+
+    def test_count_missing_rebalance_assets(self) -> None:
+        """调仓日旧/新仓位任一腿缺失都计数（B10）。"""
+        bars = {
+            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
+            ("a", date(2025, 1, 16)): SimpleNamespace(
+                open_price=float("nan"), close_price=102.0
+            ),
+            ("b", date(2025, 1, 15)): SimpleNamespace(close_price=200.0),
+            ("b", date(2025, 1, 16)): SimpleNamespace(
+                open_price=210.0, close_price=200.0
+            ),
+        }
+        assert (
+            count_missing_rebalance_assets(
+                {"a": 0.5, "b": 0.5},
+                {"a": 0.5, "b": 0.5},
+                date(2025, 1, 15),
+                date(2025, 1, 16),
+                bars,
+            )
+            == 1
+        )
 
 
 class TestBacktestDayAccumulator:

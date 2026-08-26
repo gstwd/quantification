@@ -163,3 +163,70 @@ def compute_rebalance_day_return(
         if intraday is not None and code in new_positions:
             total_return += new_positions[code] * intraday
     return round(total_return, 4)
+
+
+def count_missing_allocation_assets(
+    positions: dict[str, float],
+    trade_date: date,
+    next_date: date | None,
+    all_bars: dict[tuple[str, date], Any],
+) -> int:
+    """统计持仓资产中因行情缺失而无法计算收益的数量。
+
+    与 compute_allocation_return 的缺口语义一致：bar 缺失、收盘价
+    None/NaN/0 均视为缺失（该资产当日收益按 0 处理），用于回测每日
+    missing_bar_count 记录与数据缺口天数统计。
+
+    Args:
+        positions: 持仓权重。
+        trade_date: 基准交易日。
+        next_date: 收益计算目标日，None 时返回 0。
+        all_bars: (code, date) → BarRow 的映射。
+
+    Returns:
+        受数据缺失影响的持仓资产数量。
+    """
+    if next_date is None or not positions:
+        return 0
+    return sum(
+        1
+        for code in positions
+        if get_index_return(code, trade_date, next_date, all_bars) is None
+    )
+
+
+def count_missing_rebalance_assets(
+    old_positions: dict[str, float],
+    new_positions: dict[str, float],
+    trade_date: date,
+    next_date: date | None,
+    all_bars: dict[tuple[str, date], Any],
+) -> int:
+    """统计调仓日受行情缺失影响的持仓资产数量。
+
+    与 compute_rebalance_day_return 的缺口语义一致：旧仓位隔夜段或
+    新仓位日内段任一因缺失（bar 缺失、open/close 为 None/NaN/0）无法
+    计算，即视为该资产当日受数据缺口影响（相关段收益按 0 处理）。
+
+    Args:
+        old_positions: 调仓前持仓权重。
+        new_positions: 调仓后目标权重。
+        trade_date: 信号日 T。
+        next_date: 下一交易日 T+1，None 时返回 0。
+        all_bars: (code, date) → BarRow 的映射。
+
+    Returns:
+        受数据缺失影响的资产数量（同一资产缺一段只计一次）。
+    """
+    if next_date is None:
+        return 0
+    count = 0
+    for code in set(old_positions) | set(new_positions):
+        overnight, intraday = get_index_rebalance_legs(
+            code, trade_date, next_date, all_bars
+        )
+        if (code in old_positions and overnight is None) or (
+            code in new_positions and intraday is None
+        ):
+            count += 1
+    return count

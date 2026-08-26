@@ -21,6 +21,8 @@ from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
 from quant_etf_api.domain.portfolio.returns import (
     compute_allocation_return,
     compute_rebalance_day_return,
+    count_missing_allocation_assets,
+    count_missing_rebalance_assets,
     get_index_return,
 )
 from quant_etf_api.domain.portfolio.turnover import compute_turnover
@@ -104,6 +106,23 @@ def _safe_metric_diff(a: Any, b: Any, digits: int = 2) -> Any:
     if isinstance(b, float) and not math.isfinite(b):
         return None
     return round(a - b, digits)
+
+
+def _price_invalid(value: Any) -> bool:
+    """判断价格字段是否不可用（None / 0 / NaN）。
+
+    Args:
+        value: 价格或 None。
+
+    Returns:
+        value 为 None、0 或 NaN 时返回 True。
+    """
+    if value is None or value == 0:
+        return True
+    try:
+        return math.isnan(value)
+    except TypeError:
+        return False
 
 
 class BacktestService:
@@ -250,6 +269,7 @@ class BacktestService:
                     positions=r.positions,
                     benchmark_return=getattr(r, "benchmark_return", None),
                     turnover=getattr(r, "turnover", None),
+                    missing_bar_count=getattr(r, "missing_bar_count", 0),
                 )
                 for r in rows
             ]
@@ -430,6 +450,8 @@ class BacktestService:
         accumulator = BacktestDayAccumulator()
         prev_positions: dict[str, float] = {}
         last_rebalance_date: date | None = None
+        # 数据缺口天数：至少一个持仓资产当日收益受缺失行情影响的交易日数（B10）
+        data_gap_days = 0
         # 进度跟踪：每完成约 10% 交易日写一次进度
         last_progress = 0
         total_dates = len(trading_dates)
@@ -495,6 +517,19 @@ class BacktestService:
                     positions, trade_date, next_date, all_bars
                 )
 
+            # 统计当日受数据缺口影响的持仓资产数（B10），
+            # 供逐日 missing_bar_count 记录与 data_gap_days 指标汇总
+            if should_rebalance:
+                missing_bar_count = count_missing_rebalance_assets(
+                    prev_positions, positions, trade_date, next_date, all_bars
+                )
+            else:
+                missing_bar_count = count_missing_allocation_assets(
+                    positions, trade_date, next_date, all_bars
+                )
+            if missing_bar_count > 0:
+                data_gap_days += 1
+
             # 持仓统计
             high_cnt = mid_cnt = low_cnt = 0
             has_positions = bool(positions)
@@ -521,6 +556,7 @@ class BacktestService:
                 positions=positions if positions else None,
                 benchmark_return=round(benchmark_ret, 4) if benchmark_ret is not None else None,
                 turnover=round(turnover, 4) if turnover > 0 else None,
+                missing_bar_count=missing_bar_count,
             )
             self._backtest_repo.add_daily_result(daily_row)
             daily_results.append(daily_row)
@@ -597,6 +633,7 @@ class BacktestService:
             benchmark_returns,
             total_in_pos_count=total_in_pos_count,
             total_in_pos_positive=total_in_pos_positive,
+            data_gap_days=data_gap_days,
         )
         # 收集结构化警告：预热期 / 因子缺失 / 数据缺口 / 基准缺失，
         # 随成功状态一并持久化，前端轮询时按 key 去重弹窗。
@@ -799,6 +836,7 @@ class BacktestService:
         benchmark_returns: list[float],
         total_in_pos_count: int = 0,
         total_in_pos_positive: int = 0,
+        data_gap_days: int = 0,
     ) -> dict[str, Any]:
         """计算回测汇总绩效指标，集成专业指标和基准对比。
 
@@ -807,6 +845,7 @@ class BacktestService:
             benchmark_returns: 基准日收益率序列。
             total_in_pos_count: 持仓指数总次数（主循环累积）。
             total_in_pos_positive: 持仓指数正收益总次数（主循环累积）。
+            data_gap_days: 至少一个持仓资产受数据缺口影响的交易日数（B10）。
         """
         if not accumulator.daily_returns:
             return BacktestMetrics(
@@ -861,6 +900,7 @@ class BacktestService:
             information_ratio=perf.information_ratio,
             benchmark_return_pct=benchmark_return_pct,
             excess_return_pct=excess_return_pct,
+            data_gap_days=data_gap_days,
         ).model_dump()
         # NaN/Inf 指标转 None，防止 PostgreSQL JSON 列写入失败
         # （如零波动 Sharpe、负累计年化开方等产生 NaN 的场景）
@@ -1003,15 +1043,36 @@ class BacktestService:
         """
         warnings: list[BacktestWarning] = []
         for code in index_codes:
-            missing = [d for d in trading_dates if (code, d) not in all_bars]
-            if missing:
+            missing_days: list[date] = []
+            open_missing_days: list[date] = []
+            for d in trading_dates:
+                bar = all_bars.get((code, d))
+                if bar is None or _price_invalid(getattr(bar, "close_price", None)):
+                    # 整日缺行情或收盘价不可用：该日收益无法按收盘口径计算
+                    missing_days.append(d)
+                    continue
+                if _price_invalid(getattr(bar, "open_price", None)):
+                    # bar 存在但开盘价缺失：T+1 开盘执行模型的隔夜/日内段受影响
+                    open_missing_days.append(d)
+            parts: list[str] = []
+            if missing_days:
+                parts.append(
+                    f"缺行情数据 {len(missing_days)} 个交易日"
+                    f"（{missing_days[0]}~{missing_days[-1]}）"
+                )
+            if open_missing_days:
+                parts.append(
+                    f"开盘价缺失 {len(open_missing_days)} 个交易日"
+                    f"（{open_missing_days[0]}~{open_missing_days[-1]}，影响 T+1 开盘执行日）"
+                )
+            if parts:
                 warnings.append(
                     BacktestWarning(
                         level="warning",
                         code="DATA_GAP",
                         message=(
-                            f"指数 {code} 在回测区间内有 {len(missing)} 个交易日缺行情数据"
-                            f"（{missing[0]}~{missing[-1]}），相关日期的因子与收益按缺失处理"
+                            f"指数 {code} 回测区间内{'、'.join(parts)}，"
+                            "相关日期的因子与收益按缺失处理"
                         ),
                         index_code=code,
                     )

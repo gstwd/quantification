@@ -79,6 +79,10 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
       label: '持仓日',
       description: '策略实际持有仓位的交易日数量。<br>空仓日（持仓为 0）不计入。<br>持仓日占比反映策略的择时活跃度。',
     },
+    data_gap_days: {
+      label: '数据缺口天数',
+      description: '至少一个持仓资产当日受数据缺失影响的交易日数（B10）。<br>缺失日该资产收益按 0 处理，相关指数会同时出现在"执行提示"的 DATA_GAP 警告中。<br>缺口天数越多，回测结果与真实行情的偏差越大。',
+    },
     benchmark_return_pct: {
       label: '基准收益',
       description: '基准指数（默认沪深300）在回测期间的累计收益率（%）。<br>买入持有基准：回测开始时买入基准指数，结束时卖出。<br>用于判断策略是否跑赢市场大盘。',

@@ -8,11 +8,19 @@
 from __future__ import annotations
 
 import math
+from unittest.mock import MagicMock
 
+from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
 from quant_etf_api.services.backtest_service import (
+    BacktestService,
     _safe_metric_diff,
     _sanitize_metric_value,
 )
+
+
+def _make_service() -> BacktestService:
+    """构建测试用 BacktestService（Mock 会话）。"""
+    return BacktestService(db=MagicMock())
 
 
 class TestSanitizeMetricValue:
@@ -77,3 +85,24 @@ def test_sanitize_metrics_dict() -> None:
         "win_rate_pct": 55.5,
         "benchmark_return_pct": None,
     }
+
+
+class TestSummaryMetricsDataGap:
+    """汇总指标中的数据缺口天数（B10）。"""
+
+    def test_data_gap_days_in_metrics(self) -> None:
+        """data_gap_days 应透传到汇总指标。"""
+        acc = BacktestDayAccumulator()
+        acc.apply_day(1.0, True)
+        acc.apply_day(-0.5, True)
+        svc = _make_service()
+        metrics = svc._compute_summary_metrics(acc, [], data_gap_days=3)
+        assert metrics["data_gap_days"] == 3
+
+    def test_data_gap_days_default_zero(self) -> None:
+        """未传入时默认 0。"""
+        acc = BacktestDayAccumulator()
+        acc.apply_day(1.0, True)
+        svc = _make_service()
+        metrics = svc._compute_summary_metrics(acc, [])
+        assert metrics["data_gap_days"] == 0

@@ -6,6 +6,8 @@ from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
 from quant_etf_api.domain.portfolio.returns import (
     compute_allocation_return,
     compute_rebalance_day_return,
+    count_missing_allocation_assets,
+    count_missing_rebalance_assets,
     get_index_return,
 )
 from quant_etf_api.domain.portfolio.turnover import compute_turnover
@@ -19,6 +21,8 @@ __all__ = [
     "build_universe_items",
     "compute_allocation_return",
     "compute_rebalance_day_return",
+    "count_missing_allocation_assets",
+    "count_missing_rebalance_assets",
     "compute_turnover",
     "filter_universe_rows",
     "get_index_return",

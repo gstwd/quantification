@@ -96,6 +96,12 @@
             <div class="metric-label">持仓日 <HelpTip :text="metricHelp('active_days')" /></div>
             <div class="metric-value">{{ store.current.metrics.active_days }}</div>
           </div>
+          <div class="metric-card">
+            <div class="metric-label">数据缺口天数 <HelpTip :text="metricHelp('data_gap_days')" /></div>
+            <div class="metric-value" :class="store.current.metrics.data_gap_days > 0 ? 'danger' : ''">
+              {{ store.current.metrics.data_gap_days }}
+            </div>
+          </div>
         </div>
 
         <!-- 基准对比（有基准数据时显示） -->

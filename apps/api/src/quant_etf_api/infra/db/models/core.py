@@ -550,6 +550,13 @@ class BacktestDailyResultModel(Base):
     positions: Mapped[dict | None] = mapped_column(
         JSON, comment="持仓明细，etf_code → 权重（配置模式）"
     )
+    missing_bar_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+        comment="当日受数据缺口影响的持仓资产数（B10）",
+    )
     benchmark_return: Mapped[float | None] = mapped_column(
         Float, comment="基准指数当日收益率，单位 %"
     )
