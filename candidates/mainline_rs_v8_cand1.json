@@ -1,0 +1,91 @@
+{
+  "index_codes": [
+    "000905",
+    "399673",
+    "931743",
+    "399975",
+    "930713",
+    "931160",
+    "000688",
+    "931719",
+    "H30199",
+    "000813",
+    "930601",
+    "931152",
+    "931994",
+    "H11059",
+    "399967",
+    "000852",
+    "931594",
+    "H30269"
+  ],
+  "score": {
+    "factors": {
+      "return_17d": 0.5,
+      "return_5d": 0.2,
+      "return_60d": 0.3
+    },
+    "missing_factor_strategy": "exclude",
+    "scoring_mode": "zscore"
+  },
+  "timing": {
+    "factors": {
+      "return_60d": 0.6,
+      "max_drawdown_60d": 0.4
+    },
+    "transforms": {
+      "return_60d": "momentum_score",
+      "max_drawdown_60d": "drawdown_score"
+    },
+    "thresholds": {
+      "offensive": 65,
+      "defensive": 35
+    },
+    "proxy_index_codes": [
+      "000300"
+    ]
+  },
+  "filters": {
+    "logic": "AND",
+    "rules": [
+      {
+        "factor": "close_price",
+        "op": "gt",
+        "compare_to": "ma_17d"
+      },
+      {
+        "factor": "close_price",
+        "op": "gt",
+        "compare_to": "ma_10d"
+      },
+      {
+        "factor": "return_5d",
+        "op": "gt",
+        "value": -5
+      }
+    ]
+  },
+  "rank": {
+    "sort_by": "score",
+    "order": "desc",
+    "top_n": 3
+  },
+  "portfolio": {
+    "method": "equal_weight",
+    "timing_exposure": {
+      "offensive": 0.8,
+      "neutral": 0.5,
+      "defensive": 0.1
+    }
+  },
+  "risk": {
+    "max_asset_weight": 0.3,
+    "max_portfolio_exposure": 1,
+    "min_cash_ratio": 0
+  },
+  "rebalance": {
+    "frequency": "weekly",
+    "day_of_week": 2
+  },
+  "schema_version": "1"
+}

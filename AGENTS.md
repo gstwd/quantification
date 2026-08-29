@@ -56,6 +56,22 @@ python -m quant_etf_api.cli init-factors   # 将代码中的因子元数据同�
 python -m quant_etf_api.cli init-indexes   # 将默认指数种子数据同步到数据库
 ```
 
+### AI 优化 CLI（自动优化闭环）
+
+面向 Codex 等 agent 的策略优化工具，新命令默认 JSON 输出（`--no-json` 转文本）：
+
+```bash
+python -m quant_etf_api.cli strategy list/show/validate/create/update/diff     # 策略配置读写与校验
+python -m quant_etf_api.cli backtest run --strategy <id> [--start --end --async]  # 回测（默认同步执行）
+python -m quant_etf_api.cli backtest status <id> --wait                         # 轮询等待回测终态
+python -m quant_etf_api.cli optimization start --strategy <基线> --candidate-file x.json --hypothesis "..."  # 建草稿候选+会话
+python -m quant_etf_api.cli optimization evaluate <opt_id> [--folds 4]          # 全区间+滚动样本外回测
+python -m quant_etf_api.cli optimization report <opt_id> --file report.md       # 生成报告骨架
+python -m quant_etf_api.cli optimization finish <opt_id> --verdict accept --report-file report.md --promote [--strict]
+```
+
+回测创建时快照策略配置（`backtest_run.config_snapshot/config_hash`），执行时优先用快照重建配置，保证回测结果可复现。优化会话记录在 `strategy_optimization` 表（迁移 0028）。
+
 ### Factor definition sync
 
 因子定义以数据库为唯一 source of truth。首次部署或添加新因子后，需要手动同步：

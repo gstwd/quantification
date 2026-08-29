@@ -97,6 +97,10 @@ class BacktestDetail(BacktestSummary):
     universe_filter: dict[str, Any]
     params: dict[str, Any] | None = None
     warnings: list[BacktestWarning] = Field(default_factory=list)
+    config_snapshot: dict[str, Any] | None = None
+    config_hash: str | None = None
+    data_cutoff_date: date | None = None
+    optimization_id: str | None = None
 
 
 class BacktestDailyResult(BaseModel):

@@ -327,6 +327,22 @@ class BacktestRunModel(Base):
         server_default=sa.text("0"),
         comment="回测执行进度（0-100），每完成约 10% 交易日更新一次",
     )
+    config_snapshot: Mapped[dict | None] = mapped_column(
+        JSONB,
+        comment="创建时的策略配置快照（元数据 + config_json），保证回测结果可复现",
+    )
+    config_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        comment="config_json 规范化序列化的 sha256 哈希，用于前后版本比对",
+    )
+    data_cutoff_date: Mapped[date | None] = mapped_column(
+        Date,
+        comment="回测执行时行情数据截止日期，用于评估数据口径",
+    )
+    optimization_id: Mapped[str | None] = mapped_column(
+        String(64),
+        comment="关联的策略优化会话 ID（由优化 CLI 写入），普通回测为 NULL",
+    )
 
 
 class BacktestDailyResultModel(Base):
@@ -564,6 +580,91 @@ class StrategyConfigModel(Base):
         default=utcnow,
         onupdate=utcnow,
         comment="记录最后更新时间（UTC）",
+    )
+
+
+class StrategyOptimizationModel(Base):
+    """策略优化会话表，记录一次 AI 优化迭代的基线、候选与评估结果。
+
+    候选策略以 status=draft 的 strategy_config 行存在；
+    本表保存会话级元数据、评估区间、回测 ID 与绩效指标，
+    支撑 Codex 等 agent 的自动优化闭环与每次迭代的优化报告。
+    """
+
+    __tablename__ = "strategy_optimization"
+
+    optimization_id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, comment="优化会话唯一 ID"
+    )
+    strategy_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="基线策略 ID"
+    )
+    baseline_version: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="基线策略版本"
+    )
+    baseline_config_hash: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="基线配置哈希"
+    )
+    candidate_strategy_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="候选草稿策略 ID"
+    )
+    candidate_version: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="候选策略版本"
+    )
+    candidate_config_hash: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="候选配置哈希"
+    )
+    hypothesis: Mapped[str] = mapped_column(
+        Text, nullable=False, comment="本轮优化的假设与改动意图"
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="running",
+        comment="状态：running/evaluated/accepted/rejected/failed",
+    )
+    start_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="评估区间起始日期（含）"
+    )
+    end_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="评估区间截止日期（含）"
+    )
+    folds: Mapped[list | None] = mapped_column(
+        JSONB, comment="验证折边界列表，元素为 {start, end} 字典"
+    )
+    baseline_backtest_id: Mapped[str | None] = mapped_column(
+        String(64), comment="基线策略全区间回测 ID"
+    )
+    candidate_backtest_id: Mapped[str | None] = mapped_column(
+        String(64), comment="候选策略全区间回测 ID"
+    )
+    fold_backtests: Mapped[list | None] = mapped_column(
+        JSONB,
+        comment="逐折回测 ID 列表，元素含 fold/start/end/baseline_backtest_id/candidate_backtest_id",
+    )
+    metrics_full: Mapped[dict | None] = mapped_column(
+        JSONB, comment="全区间绩效指标 {baseline: {...}, candidate: {...}}"
+    )
+    metrics_folds: Mapped[list | None] = mapped_column(
+        JSONB, comment="逐折绩效指标列表，元素含 fold/start/end/baseline/candidate"
+    )
+    fold_summary: Mapped[dict | None] = mapped_column(
+        JSONB, comment="逐折聚合统计：均值/中位数/候选胜出折数"
+    )
+    report: Mapped[str | None] = mapped_column(
+        Text, comment="最终优化报告 Markdown 全文"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, comment="会话创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        comment="会话最后更新时间（UTC）",
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="会话完成时间（UTC），未完成时为 NULL"
     )
 
 

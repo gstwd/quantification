@@ -51,6 +51,14 @@ class IndexDailyBarRepository(BaseRepository):
         )
         return row[0], row[1]
 
+    def get_latest_trade_date(self) -> date | None:
+        """查询全部指数日线的最大交易日。
+
+        Returns:
+            最新交易日，无任何行情数据时返回 None。
+        """
+        return self._db.query(func.max(IndexDailyBarModel.trade_date)).scalar()
+
     def find_latest_trade_date_before(self, trade_date: date) -> date | None:
         """查询不超过指定日期的最大交易日。
 
@@ -101,6 +109,30 @@ class IndexDailyBarRepository(BaseRepository):
             .all()
         )
         return [r.trade_date for r in rows]
+
+    def find_all_trading_dates(self, start: date, end: date) -> list[date]:
+        """查询区间内全部指数的交易日（去重、升序）。
+
+        Args:
+            start: 起始日期（含）。
+            end: 截止日期（含）。
+
+        Returns:
+            交易日列表。
+        """
+        rows = (
+            self._db.query(IndexDailyBarModel.trade_date)
+            .filter(
+                and_(
+                    IndexDailyBarModel.trade_date >= start,
+                    IndexDailyBarModel.trade_date <= end,
+                )
+            )
+            .distinct()
+            .order_by(IndexDailyBarModel.trade_date.asc())
+            .all()
+        )
+        return [r[0] for r in rows]
 
     def find_by_code_date_range(
         self, code: str, start: date, end: date

@@ -65,7 +65,10 @@ from quant_etf_api.schemas.backtest import (
 )
 from quant_etf_api.services.benchmark import compute_buy_hold_benchmark
 from quant_etf_api.services.metrics import compute_performance_metrics
-from quant_etf_api.services.strategy_config_service import StrategyConfigService
+from quant_etf_api.services.strategy_config_service import (
+    StrategyConfigService,
+    compute_config_hash,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,11 +157,25 @@ class BacktestService:
         self._factor_provider = FactorProvider(db=db, registry=self._registry)
         self._context_builder = ContextBuilder(db, factor_provider=self._factor_provider)
 
-    def create_backtest(self, req: BacktestCreateRequest) -> BacktestSummary:
+    def create_backtest(
+        self,
+        req: BacktestCreateRequest,
+        optimization_id: str | None = None,
+    ) -> BacktestSummary:
         """创建回测记录，状态为 pending，立即返回。
 
         如果策略配置了 index_codes（非空），则强制将回测标的范围限定为这些指数，
         忽略请求中的 universe_mode 和 index_codes。空 index_codes 表示全指数通用策略。
+
+        Args:
+            req: 创建回测请求。
+            optimization_id: 关联的优化会话 ID（由优化 CLI 写入），普通回测为 None。
+
+        Returns:
+            回测摘要。
+
+        Raises:
+            ValueError: 策略不存在、未配置 portfolio 或配置校验失败。
         """
         backtest_id = str(uuid4())
         now = utcnow()
@@ -203,6 +220,25 @@ class BacktestService:
         params["_enable_benchmark"] = req.enable_benchmark
         params["_benchmark_index_code"] = req.benchmark_index_code
 
+        # 创建时快照策略配置，保证回测结果与当时配置严格对应
+        config_snapshot: dict[str, Any] | None = None
+        config_hash: str | None = None
+        try:
+            detail = config_svc.get_config(req.strategy_id)
+            if detail is not None:
+                config_snapshot = {
+                    "strategy_id": detail.strategy_id,
+                    "display_name": detail.display_name,
+                    "version": detail.version,
+                    "frequency": detail.frequency,
+                    "config_json": detail.config_json,
+                }
+                config_hash = compute_config_hash(detail.config_json)
+        except Exception:
+            # 快照属于增强能力，读取失败不应阻塞回测创建；
+            # 无快照时 run_backtest 会回退到实时配置
+            logger.warning("写入回测配置快照失败，回退为无快照模式", exc_info=True)
+
         try:
             row = BacktestRunModel(
                 backtest_id=backtest_id,
@@ -212,6 +248,9 @@ class BacktestService:
                 universe_filter=universe_filter,
                 params=params,
                 status="pending",
+                config_snapshot=config_snapshot,
+                config_hash=config_hash,
+                optimization_id=optimization_id,
                 created_at=now,
             )
             self._db.add(row)
@@ -313,12 +352,18 @@ class BacktestService:
             # 状态流转统一走仓库（与 RunService 模式一致，避免绕过 repository）
             self._backtest_repo.mark_running(backtest_id)
 
-            # 加载策略配置
+            # 加载策略配置：优先使用创建时的快照，保证结果可复现；
+            # 旧回测行无快照时回退到实时配置
             config_svc = StrategyConfigService(self._db)
-            config = config_svc.get_parsed_config(row.strategy_id)
+            config = None
+            if getattr(row, "config_snapshot", None):
+                config = config_svc.parse_snapshot(row.config_snapshot)
+            if config is None:
+                config = config_svc.get_parsed_config(row.strategy_id)
             if config is None:
                 raise ValueError(f"策略 {row.strategy_id} 配置不存在")
 
+            self._record_data_cutoff(row)
             self._run_backtest_loop(backtest_id, row, config)
 
         except Exception as exc:
@@ -352,6 +397,25 @@ class BacktestService:
                 )
             except Exception:
                 self._db.rollback()
+
+    def _record_data_cutoff(self, row: BacktestRunModel) -> None:
+        """记录回测执行时的行情数据截止日期（非致命失败）。
+
+        数据截止日期用于评估回测所用数据口径，方便优化报告说明
+        "基于截至 X 的数据"；查询失败或为空时不阻塞回测主流程。
+
+        Args:
+            row: 回测记录 ORM 行。
+        """
+        try:
+            cutoff = self._index_bar_repo.get_latest_trade_date()
+            if cutoff is None:
+                return
+            row.data_cutoff_date = cutoff
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            logger.warning("记录回测数据截止日期失败", exc_info=True)
 
     # ── 统一回测主循环 ────────────────────────────────────────────────────
 
@@ -1163,6 +1227,10 @@ class BacktestService:
             universe_filter=row.universe_filter or {"mode": "all"},
             params=row.params,
             warnings=warnings,
+            config_snapshot=row.config_snapshot,
+            config_hash=row.config_hash,
+            data_cutoff_date=getattr(row, "data_cutoff_date", None),
+            optimization_id=getattr(row, "optimization_id", None),
         )
 
     # ── 策略对比回测 ────────────────────────────────────────────────────

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from typing import Any
 
@@ -23,6 +25,27 @@ from quant_etf_api.schemas.strategy import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def compute_config_hash(config_json: dict[str, Any]) -> str:
+    """计算策略配置的规范化 sha256 哈希。
+
+    使用 sort_keys 与固定分隔符保证同一配置在不同环境下哈希一致，
+    用于回测快照与优化会话的前后版本比对。
+
+    Args:
+        config_json: 策略配置 JSON（仅引擎配置）。
+
+    Returns:
+        64 位十六进制 sha256 哈希。
+    """
+    canonical = json.dumps(
+        config_json,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class StrategyConfigService:
@@ -104,7 +127,7 @@ class StrategyConfigService:
             description=req.description,
             frequency=req.frequency,
             config_json=config_json,
-            status="active",
+            status=req.status,
         )
         self._repo.upsert(model)
         self._db.commit()
@@ -378,4 +401,32 @@ class StrategyConfigService:
             return StrategyConfig(**full_config)
         except Exception:
             logger.exception("解析策略配置 %s 失败", strategy_id)
+            return None
+
+    @staticmethod
+    def parse_snapshot(snapshot: dict[str, Any]) -> StrategyConfig | None:
+        """从回测配置快照重建 StrategyConfig 对象。
+
+        快照包含 strategy_id/display_name/version/frequency 等元数据与
+        config_json；解析失败（如快照损坏）时返回 None，由调用方回退到实时配置。
+
+        Args:
+            snapshot: 回测快照字典。
+
+        Returns:
+            解析后的配置对象，失败返回 None。
+        """
+        try:
+            config_json = snapshot.get("config_json") or {}
+            full_config = {
+                "strategy_id": snapshot.get("strategy_id", "_snapshot_"),
+                "display_name": snapshot.get("display_name", ""),
+                "version": snapshot.get("version", "1.0.0"),
+                "description": snapshot.get("description", ""),
+                "frequency": snapshot.get("frequency", "daily"),
+                **config_json,
+            }
+            return StrategyConfig(**full_config)
+        except Exception:
+            logger.exception("解析回测配置快照失败")
             return None

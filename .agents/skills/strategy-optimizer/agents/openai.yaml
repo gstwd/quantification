@@ -1,0 +1,4 @@
+interface:
+  display_name: "策略优化器"
+  short_description: "策略自动优化闭环：基线→候选→滚动验证→报告→promote"
+  default_prompt: "用 $strategy-optimizer 对 mainline_rs_rotation_v8 跑一轮策略优化。"

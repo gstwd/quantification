@@ -58,6 +58,7 @@ class StrategyConfigCreate(BaseModel):
         description: 策略描述。
         frequency: 运行频率。
         config_json: 完整策略配置 JSON。
+        status: 初始状态，active=启用，draft=优化候选草稿（不出现在启用列表）。
     """
 
     strategy_id: str
@@ -66,6 +67,7 @@ class StrategyConfigCreate(BaseModel):
     description: str = ""
     frequency: str = "daily"
     config_json: dict[str, Any]
+    status: str = "active"
 
 
 class StrategyConfigUpdate(BaseModel):
