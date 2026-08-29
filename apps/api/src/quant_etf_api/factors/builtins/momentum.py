@@ -1,4 +1,4 @@
-"""动量类因子：5 日、17 日、20 日、60 日、120 日收益率（基于指数数据）。
+"""动量类因子：5 日、17 日、20 日、60 日、120 日收益率与风险调整动量（基于指数数据）。
 
 不复用 domain.common.bar_metrics.calc_5d_return（数据不足时返回 0.0，语义模糊），
 改用内部 _calc_nd_return：数据不足时明确返回 None，区分"零涨跌"与"无数据"。
@@ -10,9 +10,13 @@
 from __future__ import annotations
 
 import bisect
+import math
 from datetime import date
 
 from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
+
+# A 股全年约 252 个交易日，年化因子为 sqrt(252)，与 volatility.py 口径一致
+_ANNUALIZE_FACTOR = math.sqrt(252)
 
 
 def _calc_nd_return(
@@ -118,6 +122,42 @@ def _calc_batch_returns(
             payload={"lookback_days": n},
         )
     return result
+
+
+def _calc_nd_annualized_vol(
+    close_dates: list[date],
+    close_prices: list[float],
+    trade_date: date,
+    n: int = 20,
+) -> float | None:
+    """计算截至 trade_date 的 n 日年化波动率（%），复用已排序收盘价序列。
+
+    与 volatility.py 的 Volatility20dComputer 使用相同口径：
+    std(近 n 个日收益率, ddof=1) × sqrt(252) × 100，需要 n+1 个连续收盘价。
+
+    Args:
+        close_dates: 已排序的收盘价日期列表。
+        close_prices: 对应收盘价列表。
+        trade_date: 目标交易日。
+        n: 日收益率数量（默认 20）。
+
+    Returns:
+        年化波动率（%），数据不足时返回 None。
+    """
+    idx = bisect.bisect_right(close_dates, trade_date) - 1
+    if idx < 0 or close_dates[idx] != trade_date or idx < n:
+        return None
+    recent = close_prices[idx - n : idx + 1]
+    daily_returns = [
+        (recent[i] - recent[i - 1]) / recent[i - 1]
+        for i in range(1, len(recent))
+        if recent[i - 1] > 0
+    ]
+    if len(daily_returns) < 2:
+        return None
+    mean = sum(daily_returns) / len(daily_returns)
+    variance = sum((r - mean) ** 2 for r in daily_returns) / (len(daily_returns) - 1)
+    return round(math.sqrt(variance) * _ANNUALIZE_FACTOR * 100, 4)
 
 
 class Return5dComputer:
@@ -406,3 +446,104 @@ class Return120dComputer:
         return _calc_batch_returns(
             close_dates, close_prices, dates, n=120, factor_id=self.spec.factor_id
         )
+
+
+class Sharpe60dComputer:
+    """60 日风险调整动量因子计算器（夏普式比率）。
+
+    计算公式：sharpe = return_60d / volatility_20d。
+    return_60d 为近 60 个交易日涨跌幅（%），volatility_20d 为近 20 个
+    交易日年化波动率（%），两者相除得到"每单位波动获得的中期收益"，
+    用于在动量轮动中同时奖励涨幅与惩罚高波动，选"涨得稳"而非"涨得猛"。
+    实现 BatchFactorComputer 协议，支持回测批量预计算。
+    """
+
+    @property
+    def spec(self) -> FactorSpec:
+        """返回 60 日风险调整动量的因子元数据。"""
+        return FactorSpec(
+            factor_id="sharpe_60d",
+            name="60日风险调整动量",
+            category="momentum",
+            version="1.0.0",
+            description=(
+                "60日风险调整动量 = 近60个交易日收益率(%) / 近20个交易日年化波动率(%)。"
+                "衡量每单位波动获得的中期收益，值越高表示动量越稳健。"
+            ),
+            required_data=["index_bars"],
+            lookback_days=90,
+        )
+
+    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
+        """计算 60 日风险调整动量。
+
+        Args:
+            index_code: 指数代码。
+            trade_date: 目标交易日。
+            ctx: FactorContext，需包含至少 61 条历史收盘价。
+
+        Returns:
+            FactorValue，数据不足或波动率为 0 时 numeric 为 None。
+        """
+        ret = _calc_nd_return(index_code, trade_date, ctx, n=60)
+        closes = sorted(
+            [
+                (dt, v.close_price)
+                for (code, dt), v in ctx.index_bars.items()
+                if code == index_code and dt <= trade_date and v.close_price is not None
+            ],
+            key=lambda x: x[0],
+        )
+        close_dates = [d for d, _ in closes]
+        close_prices = [p for _, p in closes]
+        vol = _calc_nd_annualized_vol(close_dates, close_prices, trade_date, n=20)
+        if ret is None or vol is None or vol <= 0:
+            return FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=None,
+                payload={"return_60d": ret, "volatility_20d": vol},
+            )
+        return FactorValue(
+            factor_id=self.spec.factor_id,
+            numeric=round(ret / vol, 4),
+            payload={"return_60d": ret, "volatility_20d": vol},
+        )
+
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的 60 日风险调整动量。
+
+        Args:
+            index_code: 指数代码。
+            dates: 需要计算的交易日列表（升序）。
+            ctx: FactorContext，包含全量回望数据。
+
+        Returns:
+            key=交易日, value=FactorValue 的字典。
+        """
+        close_dates, close_prices = _build_sorted_closes(index_code, ctx)
+        result: dict[date, FactorValue] = {}
+        if not close_dates:
+            return {d: FactorValue(factor_id=self.spec.factor_id, numeric=None) for d in dates}
+
+        # 一次批量计算 60 日收益率，后续逐日只补充波动率与比值
+        returns = _calc_batch_returns(
+            close_dates, close_prices, dates, n=60, factor_id=self.spec.factor_id
+        )
+        for trade_date in dates:
+            ret = returns[trade_date].numeric
+            vol = _calc_nd_annualized_vol(close_dates, close_prices, trade_date, n=20)
+            if ret is None or vol is None or vol <= 0:
+                result[trade_date] = FactorValue(
+                    factor_id=self.spec.factor_id,
+                    numeric=None,
+                    payload={"return_60d": ret, "volatility_20d": vol},
+                )
+                continue
+            result[trade_date] = FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=round(ret / vol, 4),
+                payload={"return_60d": ret, "volatility_20d": vol},
+            )
+        return result

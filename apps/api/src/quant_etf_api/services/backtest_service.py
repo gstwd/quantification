@@ -440,6 +440,10 @@ class BacktestService:
             self._prepare_backtest_data(row)
         )
 
+        # 若策略引用了市场级因子（如市场宽度），需加载全市场活跃指数行情，
+        # 保证回测口径与实时预计算（全量活跃指数）一致
+        self._ensure_market_scope_bars(config, trading_dates, all_bars)
+
         # 确保择时代理指数的行情数据和因子也被加载（代理指数可能不在策略标的池中）
         factor_index_codes = list(index_codes)
         if config.timing:
@@ -782,6 +786,44 @@ class BacktestService:
         all_macro = self._load_all_macro()
 
         return universe, index_codes, trading_dates, all_bars, all_valuation, all_macro
+
+    def _ensure_market_scope_bars(
+        self,
+        config: StrategyConfig,
+        trading_dates: list[date],
+        all_bars: dict,
+    ) -> None:
+        """为市场级因子补充加载全市场活跃指数行情数据（就地更新 all_bars）。
+
+        当策略引用的任一因子的 FactorSpec.market_scope 为 True 时，
+        额外加载全部活跃指数的日线数据作为因子上下文；这些数据只参与
+        因子计算，不进入回测标的池，避免影响组合收益口径。
+
+        Args:
+            config: 策略配置，用于推导所需因子 ID。
+            trading_dates: 回测交易日列表。
+            all_bars: 已加载的行情数据字典，就地补充全市场数据。
+        """
+        factor_ids = FactorProvider.collect_required_factor_ids(config)
+        need_market = any(
+            (c := self._registry.get(fid)) is not None and getattr(c.spec, "market_scope", False)
+            for fid in factor_ids
+        )
+        if not need_market:
+            return
+
+        active = BenchmarkIndexRepository(self._db).find_active()
+        market_codes = [idx.index_code for idx in active]
+        loaded_codes = {code for code, _ in all_bars.keys()}
+        missing = [code for code in market_codes if code not in loaded_codes]
+        if not missing:
+            return
+        logger.info(
+            "[backtest] 策略引用市场级因子，补充加载全市场行情: 新增 %d 个指数",
+            len(missing),
+        )
+        extra_bars = self._load_all_index_bars(trading_dates, missing)
+        all_bars.update(extra_bars)
 
     def _write_index_results(
         self,

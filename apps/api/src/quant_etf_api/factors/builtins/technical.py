@@ -1,4 +1,4 @@
-"""技术指标类因子：均线、ATR、Donchian 通道、RSI（基于指数数据）。
+"""技术指标类因子：均线、均线乖离、ATR、Donchian 通道、RSI、回撤（基于指数数据）。
 
 补充趋势类和通道类因子的缺失，支持双均线、海龟交易、RSI 超买超卖等经典策略。
 
@@ -220,6 +220,131 @@ class MAComputer:
                 factor_id=self.spec.factor_id,
                 numeric=ma,
                 payload={"period": self._period, "sample_count": len(window)},
+            )
+        return result
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 均线乖离率因子
+# ══════════════════════════════════════════════════════════════════════
+
+
+class MADeviationComputer:
+    """均线乖离率因子计算器。
+
+    计算当前收盘价相对指定周期均线的偏离百分比（%）。
+    乖离率 = (close - ma_N) / ma_N × 100，正值表示价格位于均线上方。
+    与现有 trend_score 变换配套使用：trend_score 期望输入
+    "价格相对 MA60 偏离度"，本因子即为该输入。
+    通过构造函数参数 period 生成不同周期的实例。
+
+    Attributes:
+        _period: 均线周期（交易日数）。
+    """
+
+    def __init__(self, period: int = 60) -> None:
+        """初始化均线乖离率计算器。
+
+        Args:
+            period: 均线周期（交易日数），默认 60。
+        """
+        self._period = period
+
+    @property
+    def spec(self) -> FactorSpec:
+        """返回均线乖离率的因子元数据。"""
+        return FactorSpec(
+            factor_id=f"ma{self._period}d_deviation",
+            name=f"{self._period}日均线乖离率",
+            category="technical",
+            version="1.0.0",
+            description=(
+                f"当前收盘价相对 {self._period} 日均线的偏离百分比（%），"
+                "正值表示价格位于均线上方。可用于趋势强度判断。"
+            ),
+            required_data=["index_bars"],
+            lookback_days=max(15, int(self._period * 1.5) + 5),
+        )
+
+    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
+        """计算均线乖离率。
+
+        Args:
+            index_code: 指数代码。
+            trade_date: 目标交易日。
+            ctx: FactorContext。
+
+        Returns:
+            FactorValue，数据不足时 numeric 为 None。
+        """
+        closes = _get_historical_closes(index_code, trade_date, ctx, self._period)
+        if closes is None:
+            return FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=None,
+                payload={"reason": f"收盘价数据不足 {self._period} 条"},
+            )
+        ma = sum(closes) / len(closes)
+        if ma <= 0:
+            return FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=None,
+                payload={"reason": "均线值异常"},
+            )
+        deviation = round((closes[-1] - ma) / ma * 100, 4)
+        return FactorValue(
+            factor_id=self.spec.factor_id,
+            numeric=deviation,
+            payload={
+                "period": self._period,
+                "ma": round(ma, 4),
+                "close": round(closes[-1], 4),
+            },
+        )
+
+    def compute_batch(
+        self,
+        index_code: str,
+        dates: list[date],
+        ctx: FactorContext,
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的均线乖离率。
+
+        Args:
+            index_code: 指数代码。
+            dates: 需要计算的交易日列表（升序）。
+            ctx: FactorContext，包含全量回望数据。
+
+        Returns:
+            key=交易日, value=FactorValue 的字典。
+        """
+        result: dict[date, FactorValue] = {}
+        close_dates, close_prices = _build_sorted_closes_for_code(index_code, ctx)
+        if not close_dates:
+            return {d: FactorValue(factor_id=self.spec.factor_id, numeric=None) for d in dates}
+
+        for trade_date in dates:
+            idx = bisect.bisect_right(close_dates, trade_date) - 1
+            if idx < 0 or close_dates[idx] != trade_date or idx < self._period - 1:
+                result[trade_date] = FactorValue(
+                    factor_id=self.spec.factor_id,
+                    numeric=None,
+                    payload={"reason": f"收盘价数据不足 {self._period} 条"},
+                )
+                continue
+            window = close_prices[idx - self._period + 1 : idx + 1]
+            ma = sum(window) / len(window)
+            if ma <= 0:
+                result[trade_date] = FactorValue(
+                    factor_id=self.spec.factor_id,
+                    numeric=None,
+                    payload={"reason": "均线值异常"},
+                )
+                continue
+            result[trade_date] = FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=round((close_prices[idx] - ma) / ma * 100, 4),
+                payload={"period": self._period, "ma": round(ma, 4)},
             )
         return result
 
@@ -729,3 +854,131 @@ class MaxDrawdown60dComputer:
             numeric=drawdown,
             payload={"highest_60d": round(highest, 2), "current_close": round(current_close, 2)},
         )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 当前回撤因子（250 交易日窗口 + 水下时间）
+# ══════════════════════════════════════════════════════════════════════
+
+
+class DrawdownCurrentComputer:
+    """当前回撤因子计算器（250 交易日窗口）。
+
+    计算当前收盘价相对近 250 个交易日最高价的回撤幅度（%），
+    返回负数或零，如 -12.5 表示回撤 12.5%。
+    与 max_drawdown_60d 的区别：窗口更长（约一年），且 payload 附带
+    水下时间（自峰值以来的交易日数），更适合中线策略的仓位管理。
+    实现 BatchFactorComputer 协议，支持回测批量预计算。
+    """
+
+    _WINDOW = 250
+
+    @property
+    def spec(self) -> FactorSpec:
+        """返回当前回撤的因子元数据。"""
+        return FactorSpec(
+            factor_id="drawdown_current",
+            name="当前回撤",
+            category="technical",
+            version="1.0.0",
+            description=(
+                "当前收盘价相对近 250 个交易日最高价的回撤幅度（%），"
+                "返回负数或零；payload 附自峰值以来的水下交易日数。"
+            ),
+            required_data=["index_bars"],
+            lookback_days=380,
+        )
+
+    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
+        """计算当前回撤幅度。
+
+        Args:
+            index_code: 指数代码。
+            trade_date: 目标交易日。
+            ctx: FactorContext。
+
+        Returns:
+            FactorValue，数据不足时 numeric 为 None。
+        """
+        closes = _get_historical_closes(index_code, trade_date, ctx, self._WINDOW)
+        if closes is None:
+            return FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=None,
+                payload={"reason": f"收盘价数据不足 {self._WINDOW} 条"},
+            )
+        current_close = closes[-1]
+        highest = max(closes)
+        if highest <= 0:
+            return FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=None,
+                payload={"reason": "最高价异常"},
+            )
+        drawdown = round((current_close - highest) / highest * 100, 2)
+        # 水下时间：自峰值以来经过的交易日数（含当日）
+        underwater_days = len(closes) - 1 - closes.index(highest)
+        return FactorValue(
+            factor_id=self.spec.factor_id,
+            numeric=drawdown,
+            payload={
+                "highest_250d": round(highest, 2),
+                "current_close": round(current_close, 2),
+                "underwater_days": underwater_days,
+                "window": self._WINDOW,
+            },
+        )
+
+    def compute_batch(
+        self,
+        index_code: str,
+        dates: list[date],
+        ctx: FactorContext,
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的当前回撤。
+
+        Args:
+            index_code: 指数代码。
+            dates: 需要计算的交易日列表（升序）。
+            ctx: FactorContext，包含全量回望数据。
+
+        Returns:
+            key=交易日, value=FactorValue 的字典。
+        """
+        result: dict[date, FactorValue] = {}
+        close_dates, close_prices = _build_sorted_closes_for_code(index_code, ctx)
+        if not close_dates:
+            return {d: FactorValue(factor_id=self.spec.factor_id, numeric=None) for d in dates}
+
+        for trade_date in dates:
+            idx = bisect.bisect_right(close_dates, trade_date) - 1
+            if idx < 0 or close_dates[idx] != trade_date or idx < self._WINDOW - 1:
+                result[trade_date] = FactorValue(
+                    factor_id=self.spec.factor_id,
+                    numeric=None,
+                    payload={"reason": f"收盘价数据不足 {self._WINDOW} 条"},
+                )
+                continue
+            window = close_prices[idx - self._WINDOW + 1 : idx + 1]
+            highest = max(window)
+            if highest <= 0:
+                result[trade_date] = FactorValue(
+                    factor_id=self.spec.factor_id,
+                    numeric=None,
+                    payload={"reason": "最高价异常"},
+                )
+                continue
+            current_close = window[-1]
+            drawdown = round((current_close - highest) / highest * 100, 2)
+            underwater_days = len(window) - 1 - window.index(highest)
+            result[trade_date] = FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=drawdown,
+                payload={
+                    "highest_250d": round(highest, 2),
+                    "current_close": round(current_close, 2),
+                    "underwater_days": underwater_days,
+                    "window": self._WINDOW,
+                },
+            )
+        return result

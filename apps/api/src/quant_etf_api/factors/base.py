@@ -34,6 +34,9 @@ class FactorSpec:
         description: 计算逻辑说明。
         required_data: 依赖的数据源列表，如 ["index_bars", "index_valuation"]。
         lookback_days: 因子计算所需的自然日回望窗口，默认 90 天。
+        market_scope: 是否需要在全市场指数范围上计算（如市场宽度类因子）。
+            为 True 时，回测服务会额外加载全市场行情数据作为因子上下文，
+            保证实时预计算（全市场）与回测（策略池 + 全市场补充）口径一致。
     """
 
     factor_id: str
@@ -43,6 +46,7 @@ class FactorSpec:
     description: str
     required_data: list[str] = field(default_factory=list)
     lookback_days: int = 90
+    market_scope: bool = False
 
 
 @dataclass

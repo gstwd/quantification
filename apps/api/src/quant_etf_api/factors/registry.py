@@ -62,7 +62,9 @@ def build_default_factor_registry() -> FactorRegistry:
     Returns:
         已注册全部内置因子的 FactorRegistry 实例。
     """
+    from quant_etf_api.factors.builtins.breadth import BreadthMA20Computer
     from quant_etf_api.factors.builtins.erp import ERPComputer, ERPPercentileComputer
+    from quant_etf_api.factors.builtins.macro import PMIMomentumComputer
     from quant_etf_api.factors.builtins.monthly import (
         MonthlyMAComputer,
         MonthlyReturnComputer,
@@ -74,12 +76,15 @@ def build_default_factor_registry() -> FactorRegistry:
         Return20dComputer,
         Return5dComputer,
         Return60dComputer,
+        Sharpe60dComputer,
     )
     from quant_etf_api.factors.builtins.price import ChangePctComputer, ClosePriceComputer
     from quant_etf_api.factors.builtins.technical import (
         ATRComputer,
+        DrawdownCurrentComputer,
         DonchianHighComputer,
         DonchianLowComputer,
+        MADeviationComputer,
         MAComputer,
         MaxDrawdown60dComputer,
         RSIComputer,
@@ -92,7 +97,11 @@ def build_default_factor_registry() -> FactorRegistry:
         Volatility17dComputer,
         Volatility20dComputer,
     )
-    from quant_etf_api.factors.builtins.volume import VolumeRatio17dComputer, VolumeRatio20dComputer
+    from quant_etf_api.factors.builtins.volume import (
+        AmountRatio20dComputer,
+        VolumeRatio17dComputer,
+        VolumeRatio20dComputer,
+    )
 
     registry = FactorRegistry()
 
@@ -108,6 +117,8 @@ def build_default_factor_registry() -> FactorRegistry:
     registry.register(Return20dComputer())
     registry.register(Return60dComputer())
     registry.register(Return120dComputer())
+    # 风险调整动量（夏普式比率）
+    registry.register(Sharpe60dComputer())
     # 波动
     registry.register(Volatility17dComputer())
     registry.register(Volatility20dComputer())
@@ -117,6 +128,8 @@ def build_default_factor_registry() -> FactorRegistry:
     # 技术指标 — 均线
     for period in (5, 10, 17, 20, 60):
         registry.register(MAComputer(period=period))
+    # 技术指标 — 均线乖离率（MA60，配套 trend_score 变换）
+    registry.register(MADeviationComputer(period=60))
     # 技术指标 — ATR
     registry.register(ATRComputer(period=14))
     # 技术指标 — Donchian 通道
@@ -128,9 +141,17 @@ def build_default_factor_registry() -> FactorRegistry:
     registry.register(RSIComputer(period=14))
     # 技术指标 — 最大回撤
     registry.register(MaxDrawdown60dComputer())
+    # 技术指标 — 当前回撤（250 日窗口 + 水下时间）
+    registry.register(DrawdownCurrentComputer())
+    # 量能 — 成交额量比
+    registry.register(AmountRatio20dComputer())
     # 估值 — 股权风险溢价
     registry.register(ERPComputer())
     registry.register(ERPPercentileComputer())
+    # 宏观 — PMI 动量（市场级）
+    registry.register(PMIMomentumComputer())
+    # 市场宽度（市场级，需全市场行情）
+    registry.register(BreadthMA20Computer())
     # 月线级别因子
     registry.register(MonthlyMAComputer(period=5))
     registry.register(MonthlyMAComputer(period=10))

@@ -16,6 +16,10 @@ description: >
 1. **读基线**：`strategy show <id>`，拿到完整 config_json 与元数据。
 2. **跑基线回测**（未跑过时）：`backtest run --strategy <id> --start ... --end ...`，记录年化/夏普/回撤/超额等指标作为对照。
 3. **设计候选**：只改一处、可解释的模块（打分权重、过滤阈值、top_n、调仓频率、择时等），其余保持不变。因子 ID 与配置 schema 参考 `.agents/skills/strategy-builder/references/`（factors.md / config_model.md / transforms.md / limits.md）。
+   - 若当前轮次想引入新因子而非微调参数，优先考虑：`sharpe_60d`（风险调整动量，替代/补充 return_60d）、
+     `ma60d_deviation`（配合 `trend_score` 变换做趋势强度）、`amount_ratio_20d`（成交额确认）、
+     `drawdown_current`（长窗口回撤 + 水下时间，配 `drawdown_score`）、`pmi_momentum_3m` 与
+     `breadth_ma20_pct`（市场级择时/过滤因子，放 timing 或 filters，勿放横截面评分）。
 4. **写候选文件并校验**：完整 config_json 存入 `candidates/` 下的 JSON 文件，`strategy validate --file <path>` 通过后再用。
 5. **开会话**：`optimization start --strategy <基线> --candidate-file <path> --hypothesis "<假设>" [--start --end] --folds 4 --version <新版本>`。`--version` 必传：promote 时基线版本取该值，不传会沿用旧版本号导致版本不递增。
 6. **评估**：`optimization evaluate <opt_id> [--folds 4]`。默认同步执行 2+2K 个回测（K=4 约 40-50 分钟）；`--async` 需要 API 服务端在跑，之后用 `optimization show` 轮询。

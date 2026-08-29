@@ -160,7 +160,7 @@ class TestValuationRegistry:
         from quant_etf_api.factors.registry import build_default_factor_registry
 
         registry = build_default_factor_registry()
-        assert len(registry.all()) == 32
+        assert len(registry.all()) == 38
 
     def test_valuation_factors_registered(self) -> None:
         """估值因子应已注册。"""
