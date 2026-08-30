@@ -615,7 +615,9 @@ class OptimizationService:
             self._check_item(
                 "drawdown_limited",
                 "验证窗平均最大回撤劣化 ≤ 2pct",
-                cand_dd is None or base_dd is None or cand_dd <= (base_dd + 2.0),
+                # 回撤为负值：劣化 ≤ 2pct 等价于候选回撤不低于基线回撤 - 2pct
+                # （原实现用 +2 会把"回撤改善"误判为超限）
+                cand_dd is None or base_dd is None or cand_dd >= (base_dd - 2.0),
             )
         )
         wins = int(sharpe.get("candidate_wins") or 0)
