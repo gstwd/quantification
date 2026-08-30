@@ -23,7 +23,7 @@
 
 | 命令 | 说明 |
 | --- | --- |
-| `backtest run --strategy <id> [--start] [--end] [--universe all\|subset] [--index-codes a,b] [--benchmark 000300] [--no-benchmark] [--async]` | 创建并执行回测；默认同步；`--start/--end` 缺省为今天往前 2 年 |
+| `backtest run --strategy <id> [--start] [--end] [--universe all\|subset] [--index-codes a,b] [--benchmark 000300] [--no-benchmark] [--async]` | 创建并执行回测；默认同步；`--start/--end` 缺省为今天往前 2 年；单次跨度建议 ≤ 2 年，长跨度按 1-2 年滚动分段执行 |
 | `backtest status <id> [--wait] [--timeout 600]` | 状态与指标；`--wait` 轮询至终态（failed 退出码 1，超时 2） |
 | `backtest show <id>` | 详情（含 config_snapshot / config_hash / data_cutoff_date / warnings） |
 | `backtest results <id> [--daily] [--index]` | 每日组合绩效 / 每指数信号与收益 |
@@ -41,7 +41,8 @@
 
 ## 评估语义
 
-- 折叠：`[start, end]` 按交易日等分为 K 个连续验证窗，最后一折吸收余数；每折对基线与候选各跑一次回测。
+- 折叠：`[start, end]` 按交易日等分为 K 个连续验证窗，最后一折吸收余数；每折对基线与候选各跑一次回测。建议每折跨度 ≈ 1-2 年（K ≈ 总年数 ÷ 1.5，至少 3）。
+- 长跨度（> 5 年）：不要以单次全区间回测为结论依据；按 1-2 年逐段 `backtest run`（或按段分别建 optimization 会话）执行，逐段对比年化/夏普/回撤/超额/胜率。
 - `fold_summary`：每个指标输出基线/候选的均值、中位数、候选胜出折数。
 - 验收清单默认阈值：验证窗平均夏普 Δ≥0；平均最大回撤劣化 ≤ 2pct；夏普胜出折数 ≥ 50%；验证窗平均累计收益 Δ≥0。`--strict` 时 accept 必须全部满足。
 
@@ -54,4 +55,4 @@
 
 - 数据库在远程 PostgreSQL（见 `.env` 的 DATABASE_URL）；沙箱内连库失败（`Permission denied` / `WinError 10013`）时用 require_escalated 重跑同一命令。
 - 终端中文乱码是控制台代码页问题，不影响落库数据（UTF-8）。
-- 回测耗时：2 年 × ~18 指数约 8 分钟/个；评估 K=4 共 10 个，同步执行请耐心等待。
+- 回测耗时：2 年 × ~18 指数约 8 分钟/个；评估 K=4 共 10 个，同步执行请耐心等待。单次回测跨度控制在 1-2 年，长跨度按段执行，避免超长任务。
