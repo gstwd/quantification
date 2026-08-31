@@ -401,6 +401,36 @@ export interface DateRange {
   max_date: string | null
 }
 
+/** 单指数日线数据质量统计 */
+export interface BarQuality {
+  total: number
+  min_date: string | null
+  max_date: string | null
+  missing_open: number
+  missing_high: number
+  missing_low: number
+  missing_close: number
+  incomplete_rows: number
+  incomplete_ratio: number
+}
+
+/** 单指数估值数据质量统计 */
+export interface ValuationQuality {
+  total: number
+  min_date: string | null
+  max_date: string | null
+  missing_pe: number
+  missing_pb: number
+  missing_dividend_yield: number
+}
+
+/** 指数详情页数据质量总览 */
+export interface IndexDataQuality {
+  index_code: string
+  bars: BarQuality
+  valuations: ValuationQuality
+}
+
 export interface FactorSpec {
   factor_id: string
   name: string

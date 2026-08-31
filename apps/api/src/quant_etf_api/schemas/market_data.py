@@ -77,6 +77,39 @@ class DateRangeResponse(BaseModel):
     max_date: date | None = None
 
 
+class BarQuality(BaseModel):
+    """单指数日线数据质量统计。"""
+
+    total: int
+    min_date: date | None = None
+    max_date: date | None = None
+    missing_open: int = 0
+    missing_high: int = 0
+    missing_low: int = 0
+    missing_close: int = 0
+    incomplete_rows: int = 0
+    incomplete_ratio: float = 0.0
+
+
+class ValuationQuality(BaseModel):
+    """单指数估值数据质量统计。"""
+
+    total: int
+    min_date: date | None = None
+    max_date: date | None = None
+    missing_pe: int = 0
+    missing_pb: int = 0
+    missing_dividend_yield: int = 0
+
+
+class IndexDataQuality(BaseModel):
+    """指数详情页数据质量总览。"""
+
+    index_code: str
+    bars: BarQuality
+    valuations: ValuationQuality
+
+
 class IndexCreateRequest(BaseModel):
     """添加基准指数请求。"""
 

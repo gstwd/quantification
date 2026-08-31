@@ -88,6 +88,15 @@ class IndexValuationRepository(BaseRepository):
         )
         return row[0], row[1]
 
+    def find_all_by_code(self, code: str) -> list[IndexValuationModel]:
+        """按指数代码查询全部估值记录（升序），供数据质量诊断等场景。"""
+        return (
+            self._db.query(IndexValuationModel)
+            .filter(IndexValuationModel.index_code == code)
+            .order_by(IndexValuationModel.trade_date.asc())
+            .all()
+        )
+
     def find_by_date_range(
         self,
         start: date,

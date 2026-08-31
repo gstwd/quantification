@@ -9,6 +9,7 @@ from quant_etf_api.schemas.market_data import (
     BenchmarkIndex,
     DailyBar,
     DateRangeResponse,
+    IndexDataQuality,
     IndexSummary,
     IndexValuation,
     MacroIndicatorSchema,
@@ -90,3 +91,12 @@ def index_date_range(
     """返回指定指数日线数据的日期范围。"""
     min_d, max_d = IngestService(db).get_index_date_range(index_code)
     return DateRangeResponse(min_date=min_d, max_date=max_d)
+
+
+@router.get("/market-data/indexes/{index_code}/data-quality", response_model=IndexDataQuality)
+def index_data_quality(
+    index_code: str,
+    db: Session = Depends(get_db),
+) -> IndexDataQuality:
+    """返回指定指数的数据质量统计：日线覆盖、OHLC 缺失、估值覆盖与缺失。"""
+    return IngestService(db).get_index_data_quality(index_code)

@@ -31,6 +31,8 @@ class RunType(StrEnum):
     COLD_START = "cold_start"
     STARTUP_FILL = "startup_fill"
     FACTOR_COMPUTATION = "factor_computation"
+    INDEX_REBUILD = "index_rebuild"
+    INDEX_INCREMENTAL_FILL = "index_incremental_fill"
 
 
 class FactorCategory(StrEnum):

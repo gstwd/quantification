@@ -58,7 +58,11 @@ class RunService:
             return [], 0
 
     def create_run(
-        self, run_type: str, strategy_id: str | None, trade_date: date
+        self,
+        run_type: str,
+        strategy_id: str | None,
+        trade_date: date,
+        params: dict | None = None,
     ) -> ResearchRunSummary:
         """创建运行记录。
 
@@ -66,6 +70,7 @@ class RunService:
             run_type: 运行类型，如 daily_ingest、strategy_run。
             strategy_id: 关联策略 ID，仅 strategy_run 类型有值。
             trade_date: 运行对应的交易日期。
+            params: 运行参数（JSON），如单指数任务携带 index_code。
 
         Returns:
             新创建的运行记录摘要。
@@ -81,6 +86,7 @@ class RunService:
                 run_type=run_type,
                 strategy_id=strategy_id,
                 trade_date=trade_date,
+                params=params,
                 status="pending",
                 started_at=now,
             )

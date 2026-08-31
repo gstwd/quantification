@@ -56,6 +56,16 @@ def _enqueue_for_run(
         queue.enqueue("index_refresh", {"run_id": run_id})
     elif run_type == "macro_refresh":
         queue.enqueue("macro_refresh", {"run_id": run_id})
+    elif run_type == "index_rebuild":
+        queue.enqueue(
+            "index_rebuild",
+            {"run_id": run_id, "index_code": (params or {}).get("index_code", "")},
+        )
+    elif run_type == "index_incremental_fill":
+        queue.enqueue(
+            "index_incremental_fill",
+            {"run_id": run_id, "index_code": (params or {}).get("index_code", "")},
+        )
     elif run_type == "startup_fill":
         queue.enqueue("startup_fill", {"run_id": run_id})
     elif run_type == "ai_analysis":
@@ -142,6 +152,42 @@ def cold_start(db: Session = Depends(get_db)) -> dict[str, str]:
     summary = RunService(db).create_run("cold_start", None, date.today())
     _enqueue_for_run("cold_start", summary.run_id, None, None, summary.trade_date or date.today())
     return {"status": "accepted", "run_type": "cold_start", "run_id": summary.run_id}
+
+
+@router.post("/runs/indexes/{index_code}/rebuild")
+def rebuild_index_data(index_code: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """触发单指数全量覆盖重拉（删除旧历史数据后重新拉取全量），入队后台任务执行。"""
+    summary = RunService(db).create_run(
+        "index_rebuild", None, date.today(), params={"index_code": index_code}
+    )
+    _enqueue_for_run(
+        "index_rebuild",
+        summary.run_id,
+        None,
+        summary.params,
+        summary.trade_date or date.today(),
+    )
+    return {"status": "accepted", "run_type": "index_rebuild", "run_id": summary.run_id}
+
+
+@router.post("/runs/indexes/{index_code}/incremental-fill")
+def incremental_fill_index_data(index_code: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """触发单指数增量补数据（从数据库最新交易日补充到当天），入队后台任务执行。"""
+    summary = RunService(db).create_run(
+        "index_incremental_fill", None, date.today(), params={"index_code": index_code}
+    )
+    _enqueue_for_run(
+        "index_incremental_fill",
+        summary.run_id,
+        None,
+        summary.params,
+        summary.trade_date or date.today(),
+    )
+    return {
+        "status": "accepted",
+        "run_type": "index_incremental_fill",
+        "run_id": summary.run_id,
+    }
 
 
 @router.post("/runs/strategies/{strategy_id}/run")

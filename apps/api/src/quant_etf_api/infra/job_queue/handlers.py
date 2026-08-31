@@ -151,6 +151,46 @@ def handle_macro_refresh(payload: dict) -> None:
         db.close()
 
 
+def handle_index_rebuild(payload: dict) -> None:
+    """单指数全量覆盖重拉（删除旧历史数据后重新拉取全量）。"""
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.services.ingest_service import IngestService
+    from quant_etf_api.services.run_service import RunService
+
+    run_id = payload.get("run_id") or ""
+    index_code = payload.get("index_code") or ""
+    db = SessionLocal()
+    try:
+        RunService(db).mark_running(run_id)
+        IngestService(db).rebuild_index_data(run_id, index_code)
+    except Exception as e:
+        logger.exception("指数全量覆盖重拉任务异常: run_id=%s index_code=%s", run_id, index_code)
+        RunService(db).mark_failed(run_id, f"指数全量覆盖重拉异常: {type(e).__name__}: {e}")
+        raise
+    finally:
+        db.close()
+
+
+def handle_index_incremental_fill(payload: dict) -> None:
+    """单指数增量补数据（从数据库最新交易日补充到当天）。"""
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.services.ingest_service import IngestService
+    from quant_etf_api.services.run_service import RunService
+
+    run_id = payload.get("run_id") or ""
+    index_code = payload.get("index_code") or ""
+    db = SessionLocal()
+    try:
+        RunService(db).mark_running(run_id)
+        IngestService(db).incremental_fill_index_data(run_id, index_code)
+    except Exception as e:
+        logger.exception("指数增量补数据任务异常: run_id=%s index_code=%s", run_id, index_code)
+        RunService(db).mark_failed(run_id, f"指数增量补数据异常: {type(e).__name__}: {e}")
+        raise
+    finally:
+        db.close()
+
+
 def handle_ai_analysis(payload: dict) -> None:
     """执行 AI 舆情分析完整链路（采集 → 分析 → 聚合 → 市场研判）。"""
     from quant_etf_api.ai_factors.service import AIFactorService
@@ -290,6 +330,8 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "startup_fill": handle_startup_fill,
     "index_refresh": handle_index_refresh,
     "macro_refresh": handle_macro_refresh,
+    "index_rebuild": handle_index_rebuild,
+    "index_incremental_fill": handle_index_incremental_fill,
     "ai_analysis": handle_ai_analysis,
     "backtest": handle_backtest,
     "comparison": handle_comparison,

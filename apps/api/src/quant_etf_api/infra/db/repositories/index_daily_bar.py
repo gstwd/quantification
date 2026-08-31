@@ -159,6 +159,15 @@ class IndexDailyBarRepository(BaseRepository):
             .scalar()
         )
 
+    def find_all_by_code(self, code: str) -> list[IndexDailyBarModel]:
+        """按指数代码查询全部日线（升序），供数据质量诊断等场景。"""
+        return (
+            self._db.query(IndexDailyBarModel)
+            .filter(IndexDailyBarModel.index_code == code)
+            .order_by(IndexDailyBarModel.trade_date.asc())
+            .all()
+        )
+
     def find_by_date_range(
         self,
         start: date,

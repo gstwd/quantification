@@ -26,11 +26,14 @@ from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRe
 from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.schemas.market_data import (
+    BarQuality,
     BenchmarkIndex,
     DailyBar,
+    IndexDataQuality,
     IndexSummary,
     IndexValuation,
     MacroIndicatorSchema,
+    ValuationQuality,
 )
 from quant_etf_api.services.run_service import RunService
 
@@ -186,30 +189,18 @@ class IngestService:
     # 指数日线（AkShare）
     # ==================================================================
 
-    def _fetch_and_upsert_index_bars(self, index_code: str, incremental: bool = True) -> int:
-        """从 AkShare 拉取指数日线并幂等写入 index_daily_bar。
-
-        增量模式（默认）：从 DB 最新日期回退缓冲窗口拉取，仅写入最新日期之后的数据；
-        全量模式（冷启动）：拉取全量历史数据。
+    def _insert_index_bars(self, index_code: str, bars: list[Any]) -> int:
+        """将日线数据批量幂等写入 index_daily_bar（不提交，由调用方统一提交）。
 
         分批写入，避免单条 INSERT 参数超过 PostgreSQL 65535 限制。
 
+        Args:
+            index_code: 指数代码。
+            bars: 待写入的日线数据列表（AkShare 客户端返回）。
+
         Returns:
-            写入记录数
+            写入记录数。
         """
-        latest = self._index_bar_repo.get_latest_date(index_code) if incremental else None
-        if latest is not None:
-            # 增量拉取：客户端从 latest 回退缓冲窗口，保证边界 bar 的涨跌幅可算
-            bars = AkShareIndexClient().fetch_index_daily_since(index_code, latest)
-        else:
-            bars = AkShareIndexClient().fetch_index_daily(index_code)
-        if not bars:
-            return 0
-
-        # 增量模式：仅保留 DB 中不存在的记录（同时丢弃缓冲窗口内的重复行）
-        if latest is not None:
-            bars = [b for b in bars if b.trade_date > latest]
-
         batch_size = 5000
         values = [
             {
@@ -236,8 +227,33 @@ class IngestService:
                 .on_conflict_do_nothing(constraint="uq_index_daily_bar")
             )
             self._db.execute(stmt)
-        self._db.commit()
         return len(bars)
+
+    def _fetch_and_upsert_index_bars(self, index_code: str, incremental: bool = True) -> int:
+        """从 AkShare 拉取指数日线并幂等写入 index_daily_bar。
+
+        增量模式（默认）：从 DB 最新日期回退缓冲窗口拉取，仅写入最新日期之后的数据；
+        全量模式（冷启动）：拉取全量历史数据。
+
+        Returns:
+            写入记录数
+        """
+        latest = self._index_bar_repo.get_latest_date(index_code) if incremental else None
+        if latest is not None:
+            # 增量拉取：客户端从 latest 回退缓冲窗口，保证边界 bar 的涨跌幅可算
+            bars = AkShareIndexClient().fetch_index_daily_since(index_code, latest)
+        else:
+            bars = AkShareIndexClient().fetch_index_daily(index_code)
+        if not bars:
+            return 0
+
+        # 增量模式：仅保留 DB 中不存在的记录（同时丢弃缓冲窗口内的重复行）
+        if latest is not None:
+            bars = [b for b in bars if b.trade_date > latest]
+
+        count = self._insert_index_bars(index_code, bars)
+        self._db.commit()
+        return count
 
     def get_benchmark_indexes(self) -> list[BenchmarkIndex]:
         """返回所有活跃的基准指数（从种子表读取，已停用的不返回）。"""
@@ -368,19 +384,19 @@ class IngestService:
     # 指数估值 PE/PB（AkShare）
     # ==================================================================
 
-    def _fetch_and_upsert_index_valuation(self, index_code: str) -> int:
-        """从 AkShare 拉取指数 PE/PB 估值并幂等写入 index_valuation。
+    def _insert_index_valuations(self, index_code: str, valuations: list[Any]) -> int:
+        """将估值数据批量幂等写入 index_valuation（不提交，由调用方统一提交）。
 
         分批写入，避免单条 INSERT 参数超过 PostgreSQL 65535 限制
         （每行 9 字段，批次上限 7000 行 = 63000 参数）。
 
-        Returns:
-            写入记录数
-        """
-        valuations = AkShareIndexClient().fetch_index_valuation(index_code)
-        if not valuations:
-            return 0
+        Args:
+            index_code: 指数代码。
+            valuations: 待写入的估值数据列表（AkShare 客户端返回）。
 
+        Returns:
+            写入记录数。
+        """
         batch_size = 7000
         values = [
             {
@@ -404,8 +420,20 @@ class IngestService:
                 .on_conflict_do_nothing(constraint="uq_index_valuation")
             )
             self._db.execute(stmt)
-        self._db.commit()
         return len(valuations)
+
+    def _fetch_and_upsert_index_valuation(self, index_code: str) -> int:
+        """从 AkShare 拉取指数 PE/PB 估值并幂等写入 index_valuation。
+
+        Returns:
+            写入记录数
+        """
+        valuations = AkShareIndexClient().fetch_index_valuation(index_code)
+        if not valuations:
+            return 0
+        count = self._insert_index_valuations(index_code, valuations)
+        self._db.commit()
+        return count
 
     def _query_index_valuation(
         self,
@@ -451,6 +479,77 @@ class IngestService:
     def get_index_date_range(self, index_code: str) -> tuple[date | None, date | None]:
         """查询指数日线数据的最早和最晚日期（读取走仓库）。"""
         return self._index_bar_repo.get_date_range(index_code)
+
+    def get_index_data_quality(self, index_code: str) -> IndexDataQuality:
+        """统计单指数的数据质量：日线覆盖范围、OHLC 缺失情况、估值覆盖与缺失。
+
+        完全无数据时入队后台补数任务并返回零值统计（与 GET 读穿透语义一致）。
+        OHLC 字段的"缺失"口径与 data_quality 模块一致：
+        值为 None、NaN 或非正数均视为缺失/异常。
+
+        Args:
+            index_code: 指数代码。
+
+        Returns:
+            指数数据质量统计。
+        """
+        bars = self._index_bar_repo.find_all_by_code(index_code)
+        valuations = self._valuation_repo.find_all_by_code(index_code)
+
+        if not bars:
+            self._enqueue_data_fill("index_bars", index_code)
+        if not valuations:
+            self._enqueue_data_fill("index_valuation", index_code)
+
+        def _invalid(value: Any) -> bool:
+            """判断价格字段是否缺失/异常（None、NaN 或非正值）。"""
+            if value is None:
+                return True
+            try:
+                if math.isnan(value):
+                    return True
+            except TypeError:
+                pass
+            return value <= 0
+
+        bar_dates = [b.trade_date for b in bars]
+        missing_open = sum(1 for b in bars if _invalid(b.open_price))
+        missing_high = sum(1 for b in bars if _invalid(b.high_price))
+        missing_low = sum(1 for b in bars if _invalid(b.low_price))
+        missing_close = sum(1 for b in bars if _invalid(b.close_price))
+        incomplete_rows = sum(
+            1
+            for b in bars
+            if _invalid(b.open_price) or _invalid(b.high_price) or _invalid(b.low_price)
+        )
+        total_bars = len(bars)
+        bar_quality = BarQuality(
+            total=total_bars,
+            min_date=min(bar_dates) if bar_dates else None,
+            max_date=max(bar_dates) if bar_dates else None,
+            missing_open=missing_open,
+            missing_high=missing_high,
+            missing_low=missing_low,
+            missing_close=missing_close,
+            incomplete_rows=incomplete_rows,
+            incomplete_ratio=round(incomplete_rows / total_bars, 4) if total_bars else 0.0,
+        )
+
+        val_dates = [v.trade_date for v in valuations]
+        valuation_quality = ValuationQuality(
+            total=len(valuations),
+            min_date=min(val_dates) if val_dates else None,
+            max_date=max(val_dates) if val_dates else None,
+            missing_pe=sum(1 for v in valuations if v.pe is None),
+            missing_pb=sum(1 for v in valuations if v.pb is None),
+            missing_dividend_yield=sum(1 for v in valuations if v.dividend_yield is None),
+        )
+
+        return IndexDataQuality(
+            index_code=index_code,
+            bars=bar_quality,
+            valuations=valuation_quality,
+        )
 
     # ==================================================================
     # 宏观指标（AkShare）
@@ -862,6 +961,113 @@ class IngestService:
         except Exception as e:
             self._db.rollback()
             logger.warning("refresh_macro_data 整体失败: %s", e, exc_info=True)
+            self._run_svc.mark_failed(run_id, str(e)[:1000])
+        finally:
+            _daily_ingest_lock.release()
+
+    # ==================================================================
+    # 单指数数据维护（后台线程入口）
+    # ==================================================================
+
+    def rebuild_index_data(self, run_id: str, index_code: str) -> None:
+        """单指数全量覆盖重拉：删除该指数历史日线与估值后重新拉取全量数据。
+
+        先拉取外部数据、后删除旧数据，任一环节失败都会回滚，保证不会出现
+        "旧数据已删、新数据未入库"的中间态。
+
+        Args:
+            run_id: 运行记录 ID。
+            index_code: 指数代码。
+        """
+        if self._index_repo.find_by_code(index_code) is None:
+            self._run_svc.mark_failed(run_id, f"指数不存在: {index_code}")
+            return
+        if not self._try_acquire_ingest_lock(run_id):
+            return
+        start_time = utcnow()
+        try:
+            self._run_svc.mark_running(run_id)
+
+            # 1. 先拉取全量数据（失败时不触碰现有数据）
+            bars = AkShareIndexClient().fetch_index_daily(index_code)
+            valuations = AkShareIndexClient().fetch_index_valuation(index_code)
+
+            # 2. 删除旧数据
+            deleted_bars = (
+                self._db.query(IndexDailyBarModel)
+                .filter(IndexDailyBarModel.index_code == index_code)
+                .delete(synchronize_session=False)
+            )
+            deleted_valuations = (
+                self._db.query(IndexValuationModel)
+                .filter(IndexValuationModel.index_code == index_code)
+                .delete(synchronize_session=False)
+            )
+
+            # 3. 写入新数据并统一提交（失败回滚后旧数据保留）
+            bar_records = self._insert_index_bars(index_code, bars)
+            valuation_records = self._insert_index_valuations(index_code, valuations)
+            self._db.commit()
+
+            self._run_svc.mark_success(
+                run_id,
+                metrics={
+                    "index_code": index_code,
+                    "deleted_bar_records": deleted_bars,
+                    "deleted_valuation_records": deleted_valuations,
+                    "bar_records": bar_records,
+                    "valuation_records": valuation_records,
+                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
+                },
+            )
+        except Exception as e:
+            self._db.rollback()
+            logger.warning("指数 %s 全量覆盖重拉失败: %s", index_code, e, exc_info=True)
+            self._run_svc.mark_failed(run_id, str(e)[:1000])
+        finally:
+            _daily_ingest_lock.release()
+
+    def incremental_fill_index_data(self, run_id: str, index_code: str) -> None:
+        """单指数增量补数据：从数据库最新交易日补充到当天（后台线程入口）。
+
+        与 refresh_index_data 一致：非交易日标记 skipped，避免重复执行。
+
+        Args:
+            run_id: 运行记录 ID。
+            index_code: 指数代码。
+        """
+        if self._index_repo.find_by_code(index_code) is None:
+            self._run_svc.mark_failed(run_id, f"指数不存在: {index_code}")
+            return
+        if not self._try_acquire_ingest_lock(run_id):
+            return
+        start_time = utcnow()
+        try:
+            self._run_svc.mark_running(run_id)
+
+            today = date.today()
+            if not TradingCalendar().is_trading_day(today):
+                self._run_svc.mark_skipped(
+                    run_id,
+                    metrics={"reason": "holiday", "message": "非交易日，跳过数据摄取"},
+                )
+                return
+
+            bar_records = self._fetch_and_upsert_index_bars(index_code)
+            valuation_records = self._fetch_and_upsert_index_valuation(index_code)
+
+            self._run_svc.mark_success(
+                run_id,
+                metrics={
+                    "index_code": index_code,
+                    "bar_records": bar_records,
+                    "valuation_records": valuation_records,
+                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
+                },
+            )
+        except Exception as e:
+            self._db.rollback()
+            logger.warning("指数 %s 增量补数据失败: %s", index_code, e, exc_info=True)
             self._run_svc.mark_failed(run_id, str(e)[:1000])
         finally:
             _daily_ingest_lock.release()

@@ -67,6 +67,18 @@ export async function triggerColdStart(): Promise<{ run_id: string }> {
   return data
 }
 
+/** 触发单指数全量覆盖重拉（删除旧历史数据后重新拉取全量） */
+export async function triggerIndexRebuild(indexCode: string): Promise<{ run_id: string }> {
+  const { data } = await apiClient.post<{ run_id: string }>(`/runs/indexes/${indexCode}/rebuild`)
+  return data
+}
+
+/** 触发单指数增量补数据（从数据库最新交易日补充到当天） */
+export async function triggerIndexIncrementalFill(indexCode: string): Promise<{ run_id: string }> {
+  const { data } = await apiClient.post<{ run_id: string }>(`/runs/indexes/${indexCode}/incremental-fill`)
+  return data
+}
+
 export async function triggerStrategyRun(strategyId: string): Promise<{ run_id: string }> {
   const { data } = await apiClient.post<{ run_id: string }>(`/runs/strategies/${strategyId}/run`)
   return data
