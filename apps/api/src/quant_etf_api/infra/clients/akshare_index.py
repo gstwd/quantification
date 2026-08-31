@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bisect
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
@@ -27,6 +28,11 @@ _INCREMENTAL_BUFFER_DAYS = 10
 _FULL_HISTORY_START_EM = "19700101"
 _FULL_HISTORY_START_CSI = "20100101"
 _FULL_HISTORY_END = "20500101"
+
+# OHLC 完整性校验阈值：请求窗口内开盘/最高/最低缺失比例超过该值视为数据不合格，
+# 触发降级到下一数据源（中证官网等官方源对部分历史区间仅提供收盘价，无 OHLC）。
+# 回测调仓依赖开盘价，缺失会直接污染回测结果，故门槛设得较低。
+_OHLC_MISSING_RATIO_LIMIT = 0.02
 
 # 模块级共享线程池：超时保护的东财调用复用线程，避免每次调用新建线程池
 _EM_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="akshare-em")
@@ -240,6 +246,52 @@ def _build_index_bars(
             bars[i].prev_close_price = prev_close
             bars[i].change_pct = round((bars[i].close_price - prev_close) / prev_close * 100, 4)
     return bars
+
+
+def _is_valid_price(value: float | None) -> bool:
+    """判断价格是否有效（非空、非 NaN、为正数）。
+
+    Args:
+        value: 价格或成交量数值。
+
+    Returns:
+        True 表示有效。
+    """
+    if value is None:
+        return False
+    try:
+        if math.isnan(value):
+            return False
+    except TypeError:
+        return False
+    return value > 0
+
+
+def _ohlc_missing_ratio(bars: list[IndexDailyBar]) -> float:
+    """计算日线列表中 OHLC 缺失比例。
+
+    开盘/最高/最低任一为空、NaN 或非正值即视为该日 OHLC 不完整。
+    拉取时用于数据质量校验：请求窗口内缺失比例超过 _OHLC_MISSING_RATIO_LIMIT
+    则放弃该源继续降级，避免"仅收盘价"的历史区间污染回测。
+
+    Args:
+        bars: 日线列表（已按请求窗口过滤）。
+
+    Returns:
+        缺失比例（0.0~1.0），空列表返回 0.0。
+    """
+    if not bars:
+        return 0.0
+    missing = sum(
+        1
+        for b in bars
+        if not (
+            _is_valid_price(b.open_price)
+            and _is_valid_price(b.high_price)
+            and _is_valid_price(b.low_price)
+        )
+    )
+    return missing / len(bars)
 
 
 _INDEX_NAME_CACHE: dict[str, str] | None = None
@@ -754,6 +806,10 @@ class AkShareIndexClient(BaseDataClient):
 
         与历史行为差异：
         - 任一源返回空数据时继续降级（此前中证源空数据会直接结束）；
+        - 每个源返回后先做 OHLC 完整性校验：请求窗口内开盘/最高/最低缺失比例超过
+          _OHLC_MISSING_RATIO_LIMIT 视为数据不合格，继续降级到下一源
+          （如中证官网对红利低波等指数 2016-2018 年大部分交易日仅返回收盘价）；
+        - 若所有源均不完整，回退首个有数据的源并告警（尽量保证有数据可用）；
         - 全部源失败时抛出最后一个源的异常（此前抛腾讯源原始异常）。
 
         Args:
@@ -772,6 +828,8 @@ class AkShareIndexClient(BaseDataClient):
             ("新浪", self._fetch_index_daily_sina),
         ]
         last_error: Exception | None = None
+        fallback_bars: list[IndexDailyBar] | None = None
+        fallback_source: str | None = None
         for source_name, fetcher in sources:
             try:
                 bars = fetcher(index_code, start_date, end_date)
@@ -784,15 +842,40 @@ class AkShareIndexClient(BaseDataClient):
                     e,
                 )
                 continue
-            if bars:
+            if not bars:
                 self._logger.info(
-                    "指数 %s 日线最终由 %s 提供，共 %d 条",
+                    "指数 %s 日线源 %s 返回空数据，降级到下一源", index_code, source_name
+                )
+                continue
+            missing_ratio = _ohlc_missing_ratio(bars)
+            if missing_ratio > _OHLC_MISSING_RATIO_LIMIT:
+                # 数据不完整（如官方源部分历史区间仅收盘价）：记下作为兜底并继续降级
+                if fallback_bars is None:
+                    fallback_bars = bars
+                    fallback_source = source_name
+                self._logger.warning(
+                    "指数 %s 日线源 %s OHLC 缺失比例 %.2f%% 超过阈值 %.2f%%，继续降级",
                     index_code,
                     source_name,
-                    len(bars),
+                    missing_ratio * 100,
+                    _OHLC_MISSING_RATIO_LIMIT * 100,
                 )
-                return bars
-            self._logger.info("指数 %s 日线源 %s 返回空数据，降级到下一源", index_code, source_name)
+                continue
+            self._logger.info(
+                "指数 %s 日线最终由 %s 提供，共 %d 条",
+                index_code,
+                source_name,
+                len(bars),
+            )
+            return bars
+        if fallback_bars is not None:
+            self._logger.warning(
+                "指数 %s 所有日线源 OHLC 均不完整，回退到 %s 的部分数据（%d 条）",
+                index_code,
+                fallback_source,
+                len(fallback_bars),
+            )
+            return fallback_bars
         if last_error is not None:
             raise last_error
         return []

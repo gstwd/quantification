@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -44,6 +45,7 @@ def check_daily_bar_anomalies(
     - 涨跌幅超过 ±15%（指数）
     - 成交量为 0 但价格有变动
     - 收盘价 <= 0
+    - 开盘/最高/最低缺失或非正（上游部分历史区间仅提供收盘价，影响回测调仓）
 
     Args:
         bars: 日线数据行列表（需有 .trade_date, .code, .change_pct, .volume, .close_price 属性）。
@@ -98,6 +100,26 @@ def check_daily_bar_anomalies(
                     severity="error",
                 )
             )
+
+        # OHLC 完整性：有行情记录但开盘/最高/最低缺失或非正
+        # （如中证官网对红利低波等指数 2016-2018 年部分交易日仅返回收盘价）
+        for ohlc_field in ("open_price", "high_price", "low_price"):
+            ohlc_val = getattr(b, ohlc_field, None)
+            if (
+                ohlc_val is None
+                or (isinstance(ohlc_val, float) and math.isnan(ohlc_val))
+                or ohlc_val <= 0
+            ):
+                anomalies.append(
+                    Anomaly(
+                        date=td,
+                        code=code,
+                        field=ohlc_field,
+                        value=ohlc_val,
+                        expected=">0（完整 OHLC）",
+                        severity="error",
+                    )
+                )
 
     if anomalies:
         logger.warning("日线异常检测发现 %d 个问题", len(anomalies))

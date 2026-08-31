@@ -1,11 +1,12 @@
 """测试 AkShareIndexClient 指数日线与估值接口。
 
-所有测试使用真实 AkShare 调用，不做 mock。
+网络相关测试使用真实 AkShare 调用；降级链与纯逻辑测试使用 mock，避免依赖网络。
 执行方式: pytest tests/unit/test_akshare_index.py -v
 """
 
 import time
-from datetime import date
+from datetime import date, timedelta
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -17,6 +18,7 @@ from quant_etf_api.infra.clients.akshare_index import (
     _build_index_bars,
     _calc_percentile,
     _incremental_start_date,
+    _ohlc_missing_ratio,
 )
 
 
@@ -231,6 +233,131 @@ class TestClientOptimizations:
         assert elapsed < 1.0
 
 
+class TestOhlcQualityGate:
+    """OHLC 完整性校验（纯逻辑，无需网络）。"""
+
+    @staticmethod
+    def _bars(ohlc: list[tuple[float | None, float | None, float | None]]) -> list[IndexDailyBar]:
+        """按 (open, high, low) 构造日线列表，收盘固定为 100。"""
+        return [
+            IndexDailyBar(
+                trade_date=date(2026, 1, 1),
+                open_price=o,
+                close_price=100.0,
+                high_price=h,
+                low_price=low,
+                volume=0.0,
+                turnover=0.0,
+            )
+            for o, h, low in ohlc
+        ]
+
+    def test_complete_ratio_zero(self) -> None:
+        """OHLC 完整时缺失比例为 0。"""
+        bars = self._bars([(100.0, 101.0, 99.0), (101.0, 102.0, 100.0)])
+        assert _ohlc_missing_ratio(bars) == 0.0
+
+    def test_partial_missing_ratio(self) -> None:
+        """None 与 NaN 都计入缺失，比例按天数计算。"""
+        bars = self._bars(
+            [
+                (100.0, 101.0, 99.0),
+                (None, 101.0, 99.0),
+                (100.0, float("nan"), 99.0),
+                (100.0, 101.0, 99.0),
+            ]
+        )
+        assert _ohlc_missing_ratio(bars) == 0.5
+
+    def test_non_positive_counts_missing(self) -> None:
+        """非正值（0/负数）视为缺失。"""
+        bars = self._bars([(0.0, 101.0, 99.0)])
+        assert _ohlc_missing_ratio(bars) == 1.0
+
+    def test_empty_returns_zero(self) -> None:
+        """空列表返回 0，避免除零。"""
+        assert _ohlc_missing_ratio([]) == 0.0
+
+
+class TestFetchDegradation:
+    """五级降级链 + OHLC 完整性校验（mock 各源方法，无需网络）。"""
+
+    @staticmethod
+    def _complete_bars() -> list[IndexDailyBar]:
+        """构造 3 根 OHLC 完整的日线。"""
+        start = date(2026, 1, 5)
+        return [
+            IndexDailyBar(
+                trade_date=start + timedelta(days=i),
+                open_price=100.0 + i,
+                close_price=100.0 + i,
+                high_price=101.0 + i,
+                low_price=99.0 + i,
+                volume=1000.0,
+                turnover=0.0,
+            )
+            for i in range(3)
+        ]
+
+    @staticmethod
+    def _incomplete_bars() -> list[IndexDailyBar]:
+        """构造 OHLC 缺失比例 1/3 的日线（模拟中证官网仅收盘价的区间）。"""
+        bars = TestFetchDegradation._complete_bars()
+        bars[1] = IndexDailyBar(
+            trade_date=bars[1].trade_date,
+            open_price=float("nan"),
+            close_price=101.0,
+            high_price=float("nan"),
+            low_price=float("nan"),
+            volume=1000.0,
+            turnover=0.0,
+        )
+        return bars
+
+    def _patch_sources(self, client: AkShareIndexClient, source_bars: dict[str, list]) -> None:
+        """批量替换各源方法返回值，空列表代表"返回空数据"。"""
+        mapping = {
+            "_fetch_index_daily_tx": source_bars.get("tx", []),
+            "_fetch_index_daily_csi": source_bars.get("csi", []),
+            "_fetch_index_daily_em": source_bars.get("em", []),
+            "_fetch_index_daily_zh_a_hist": source_bars.get("zh_a_hist", []),
+            "_fetch_index_daily_sina": source_bars.get("sina", []),
+        }
+        patchers = [
+            patch.object(client, name, return_value=value) for name, value in mapping.items()
+        ]
+        for p in patchers:
+            p.start()
+        return patchers
+
+    def test_incomplete_source_falls_through(self, client: AkShareIndexClient) -> None:
+        """中证源 OHLC 缺失超阈值时继续降级，由完整源提供数据。"""
+        complete = self._complete_bars()
+        incomplete = self._incomplete_bars()
+        patchers = self._patch_sources(
+            client, {"tx": [], "csi": incomplete, "em": complete, "zh_a_hist": [], "sina": []}
+        )
+        try:
+            bars = client.fetch_index_daily("H30269")
+        finally:
+            for p in patchers:
+                p.stop()
+        assert bars == complete
+
+    def test_all_incomplete_returns_best_effort(self, client: AkShareIndexClient) -> None:
+        """所有源均不完整时回退首个有数据的源，保证有数据可用。"""
+        incomplete = self._incomplete_bars()
+        patchers = self._patch_sources(
+            client, {"tx": [], "csi": incomplete, "em": [], "zh_a_hist": [], "sina": []}
+        )
+        try:
+            bars = client.fetch_index_daily("H30269")
+        finally:
+            for p in patchers:
+                p.stop()
+        assert bars == incomplete
+
+
 class TestIndexValuation:
     """指数估值数据拉取。
 
@@ -258,8 +385,12 @@ class TestIndexValuation:
         assert valuations[-1].trade_date is not None
 
     def test_unsupported_index_returns_empty(self, client: AkShareIndexClient) -> None:
-        """不支持的指数应返回空列表。"""
-        valuations = client.fetch_index_valuation("000688")
+        """无估值源的指数（深证系）应返回空列表。
+
+        中证系指数已由中证官网兜底返回 PE（如 000688 → csindex），
+        深证系（399xxx）无任何估值源，应返回空列表。
+        """
+        valuations = client.fetch_index_valuation("399006")
         assert valuations == []
 
     def test_percentile_calculated(self, client: AkShareIndexClient) -> None:
