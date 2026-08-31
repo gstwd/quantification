@@ -9,9 +9,27 @@ from datetime import date, datetime, timedelta
 import akshare as ak
 
 from quant_etf_api.infra.clients.base import BaseDataClient, HealthStatus
+from quant_etf_api.infra.clients.retry import with_retry
 
 # 东方财富 API 调用超时上限（秒），防止代理/网络问题导致长时间阻塞
 _EM_API_TIMEOUT = 5
+
+# 东方财富通用指数接口超时上限（秒）：首次调用需拉取全市场指数→市场编号映射，耗时更长
+_ZH_A_HIST_TIMEOUT = 15
+
+# 增量拉取缓冲窗口（自然日）：起点回退该天数，保证边界 bar 的 prev_close/change_pct 可算
+_INCREMENTAL_BUFFER_DAYS = 10
+
+# 各源全量历史默认起始/结束哨兵（口径差异见各源注释，统一命名便于追踪）：
+# - 腾讯: start/end 传空串，由上游自动返回最早/最新；
+# - 中证: 20100101 起点（官网接口请求更早日期会额外返回 1990-01-01 基期伪行，故保持 2010）；
+# - 东方财富（含通用接口）: 19700101 起点 + 20500101 终点哨兵，实际按指数上市时间返回。
+_FULL_HISTORY_START_EM = "19700101"
+_FULL_HISTORY_START_CSI = "20100101"
+_FULL_HISTORY_END = "20500101"
+
+# 模块级共享线程池：超时保护的东财调用复用线程，避免每次调用新建线程池
+_EM_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="akshare-em")
 
 
 @dataclass
@@ -107,6 +125,123 @@ def _index_code_to_ak_symbol(index_code: str) -> str:
     return f"sz{index_code}"
 
 
+def _parse_bar_date(value) -> date:
+    """将上游日期的任意类型统一解析为 date。
+
+    AkShare 各接口返回的日期列类型不一致（str / datetime / date / Timestamp），
+    统一在此处收敛，避免每个源各自解析。
+
+    Args:
+        value: 上游日期单元格值。
+
+    Returns:
+        标准化后的 date。
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        return date.fromisoformat(value)
+    if hasattr(value, "date"):
+        return value.date()
+    return date.fromisoformat(str(value))
+
+
+def _incremental_start_date(since_date: date) -> date:
+    """计算增量拉取的缓冲起始日。
+
+    以 since_date 直接作为起点会丢失起点 bar 的 prev_close/change_pct，
+    因此回退 _INCREMENTAL_BUFFER_DAYS 个自然日（覆盖周末与长假断档）。
+
+    Args:
+        since_date: 增量基准日（不含当日）。
+
+    Returns:
+        应传给上游接口的起始日期。
+    """
+    return since_date - timedelta(days=_INCREMENTAL_BUFFER_DAYS)
+
+
+def _build_index_bars(
+    df,
+    date_col: str,
+    open_col: str,
+    close_col: str,
+    high_col: str,
+    low_col: str,
+    volume_col: str | None = None,
+    amount_col: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> list[IndexDailyBar]:
+    """将上游日线 DataFrame 统一转换为 IndexDailyBar 列表。
+
+    集中处理各源差异：
+    - 日期列类型与列名不同（腾讯/东财为英文列名，中证/通用为中文列名）；
+    - 部分源缺少成交量或成交额列（腾讯无 volume、新浪无 amount），缺失列补 0；
+    - 新浪等源不支持服务端日期过滤，统一在本地按 start_date/end_date 过滤。
+
+    Args:
+        df: 上游返回的日线 DataFrame。
+        date_col: 日期列名。
+        open_col/close_col/high_col/low_col: OHLC 列名。
+        volume_col: 成交量列名，None 表示该源无成交量（补 0）。
+        amount_col: 成交额列名，None 表示该源无成交额（补 0）。
+        start_date: 起始日 'YYYYMMDD'，本地过滤下限（含），None 不过滤。
+        end_date: 结束日 'YYYYMMDD'，本地过滤上限（含），None 不过滤。
+
+    Returns:
+        按日期升序排列的日线列表。
+    """
+    if df is None or df.empty:
+        return []
+
+    dates = [_parse_bar_date(v) for v in df[date_col]]
+    opens = [float(v) for v in df[open_col]]
+    closes = [float(v) for v in df[close_col]]
+    highs = [float(v) for v in df[high_col]]
+    lows = [float(v) for v in df[low_col]]
+    volumes = (
+        [float(v) if v is not None else 0.0 for v in df[volume_col]]
+        if volume_col
+        else [0.0] * len(df)
+    )
+    amounts = (
+        [float(v) if v is not None else 0.0 for v in df[amount_col]]
+        if amount_col
+        else [0.0] * len(df)
+    )
+
+    start = datetime.strptime(start_date, "%Y%m%d").date() if start_date else None
+    end = datetime.strptime(end_date, "%Y%m%d").date() if end_date else None
+
+    bars: list[IndexDailyBar] = []
+    for i, bar_date in enumerate(dates):
+        if start is not None and bar_date < start:
+            continue
+        if end is not None and bar_date > end:
+            continue
+        bars.append(
+            IndexDailyBar(
+                trade_date=bar_date,
+                open_price=opens[i],
+                close_price=closes[i],
+                high_price=highs[i],
+                low_price=lows[i],
+                volume=volumes[i],
+                turnover=amounts[i],
+            )
+        )
+    # 逐日计算涨跌幅（第一根无前收盘，保持 None）
+    for i in range(1, len(bars)):
+        prev_close = bars[i - 1].close_price
+        if prev_close and prev_close != 0:
+            bars[i].prev_close_price = prev_close
+            bars[i].change_pct = round((bars[i].close_price - prev_close) / prev_close * 100, 4)
+    return bars
+
+
 _INDEX_NAME_CACHE: dict[str, str] | None = None
 _EM_INDEX_NAME_CACHE: dict[str, str] | None = None
 
@@ -115,7 +250,7 @@ class AkShareIndexClient(BaseDataClient):
     """指数行情与估值客户端（基于 AkShare SDK）。
 
     封装三层数据源降级策略：
-    - 日线：腾讯源 → 中证指数官网 → 东方财富
+    - 日线：腾讯源 → 中证指数官网 → 东方财富 → 东方财富通用 → 新浪
     - 估值：乐股乐源 → 中证指数官网
     - 名称：聚宽 → 中证指数官网 → 东方财富
     """
@@ -131,6 +266,8 @@ class AkShareIndexClient(BaseDataClient):
         """在独立线程中执行函数，超时则抛出 TimeoutError。
 
         用于包装东方财富 API 调用，防止代理/网络问题导致长时间阻塞。
+        使用模块级共享线程池 _EM_EXECUTOR，避免每次调用新建线程；
+        超时后仅放弃等待并取消 future（线程无法强制终止，但不再阻塞调用方）。
 
         Args:
             fn: 无参可调用对象
@@ -142,9 +279,12 @@ class AkShareIndexClient(BaseDataClient):
         Raises:
             TimeoutError: 执行超时
         """
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(fn)
+        future = _EM_EXECUTOR.submit(fn)
+        try:
             return future.result(timeout=timeout)
+        except FutureTimeoutError:
+            future.cancel()
+            raise
 
     def _fetch_index_name_from_csi(self, index_code: str) -> str | None:
         """通过中证指数官网查询指数中文名称。
@@ -299,6 +439,7 @@ class AkShareIndexClient(BaseDataClient):
     # 指数日线
     # ------------------------------------------------------------------
 
+    @with_retry()
     def _fetch_index_daily_csi(
         self,
         index_code: str,
@@ -325,33 +466,21 @@ class AkShareIndexClient(BaseDataClient):
         try:
             df = ak.stock_zh_index_hist_csindex(
                 symbol=index_code,
-                start_date=start_date or "20100101",
+                start_date=start_date or _FULL_HISTORY_START_CSI,
                 end_date=end_date or date.today().strftime("%Y%m%d"),
             )
-            bars: list[IndexDailyBar] = []
-            for _, row in df.iterrows():
-                bar_date = row["日期"]
-                if isinstance(bar_date, str):
-                    bar_date = datetime.strptime(bar_date, "%Y-%m-%d").date()
-                bars.append(
-                    IndexDailyBar(
-                        trade_date=bar_date,
-                        open_price=float(row["开盘"]),
-                        close_price=float(row["收盘"]),
-                        high_price=float(row["最高"]),
-                        low_price=float(row["最低"]),
-                        volume=float(row.get("成交量", 0) or 0),
-                        turnover=float(row.get("成交额", 0) or 0),
-                    )
-                )
-            # 逐日计算涨跌幅（第一根无前收盘，保持 None）
-            for i in range(1, len(bars)):
-                prev_close = bars[i - 1].close_price
-                if prev_close and prev_close != 0:
-                    bars[i].prev_close_price = prev_close
-                    bars[i].change_pct = round(
-                        (bars[i].close_price - prev_close) / prev_close * 100, 4
-                    )
+            bars = _build_index_bars(
+                df,
+                date_col="日期",
+                open_col="开盘",
+                close_col="收盘",
+                high_col="最高",
+                low_col="最低",
+                volume_col="成交量",
+                amount_col="成交金额",
+                start_date=start_date,
+                end_date=end_date,
+            )
             elapsed = (time.perf_counter() - start) * 1000
             self._log_response(endpoint, len(bars), elapsed)
             return bars
@@ -368,9 +497,12 @@ class AkShareIndexClient(BaseDataClient):
     ) -> list[IndexDailyBar]:
         """通过东方财富源拉取指数日线（备用源）。
 
-        当腾讯源不支持某个指数或返回空数据时，降级使用此方法。
-        ak.stock_zh_index_daily_em 直接使用指数代码（无 sh/sz 前缀）。
-        调用受 _EM_API_TIMEOUT 超时保护。
+        ak.stock_zh_index_daily_em 要求 symbol 带市场前缀（sz/sh/csi/bj），
+        传纯代码会直接返回空 DataFrame（历史缺陷：原实现传纯代码导致本源恒空），
+        此处通过 index_code_id_map_em() 解析市场编号后组装前缀；
+        解析失败时返回空列表，交由通用接口 index_zh_a_hist 兜底。
+        调用受 _EM_API_TIMEOUT 超时保护；不叠加 with_retry，因为超时后线程仍可能
+        在运行，重试会叠加并发请求，降级链本身已提供容错。
 
         Args:
             index_code: 指数代码，如 931743
@@ -383,38 +515,31 @@ class AkShareIndexClient(BaseDataClient):
         endpoint = "stock_zh_index_daily_em"
         self._log_request(endpoint, {"index_code": index_code})
         start = time.perf_counter()
+        symbol = self._em_market_symbol(index_code)
+        if symbol is None:
+            # 无法解析市场编号时跳过本源，交由通用接口 index_zh_a_hist 兜底
+            self._logger.info("指数 %s 无法解析东方财富市场编号，跳过 %s", index_code, endpoint)
+            return []
         try:
             df = self._call_with_timeout(
                 lambda: ak.stock_zh_index_daily_em(
-                    symbol=index_code,
-                    start_date=start_date or "19700101",
-                    end_date=end_date or "20500101",
+                    symbol=symbol,
+                    start_date=start_date or _FULL_HISTORY_START_EM,
+                    end_date=end_date or _FULL_HISTORY_END,
                 )
             )
-            bars: list[IndexDailyBar] = []
-            for _, row in df.iterrows():
-                bar_date = row["date"]
-                if isinstance(bar_date, str):
-                    bar_date = datetime.strptime(bar_date, "%Y-%m-%d").date()
-                bars.append(
-                    IndexDailyBar(
-                        trade_date=bar_date,
-                        open_price=float(row["open"]),
-                        close_price=float(row["close"]),
-                        high_price=float(row["high"]),
-                        low_price=float(row["low"]),
-                        volume=float(row.get("volume", 0)),
-                        turnover=float(row.get("amount", 0)),
-                    )
-                )
-            # 逐日计算涨跌幅（第一根无前收盘，保持 None）
-            for i in range(1, len(bars)):
-                prev_close = bars[i - 1].close_price
-                if prev_close and prev_close != 0:
-                    bars[i].prev_close_price = prev_close
-                    bars[i].change_pct = round(
-                        (bars[i].close_price - prev_close) / prev_close * 100, 4
-                    )
+            bars = _build_index_bars(
+                df,
+                date_col="date",
+                open_col="open",
+                close_col="close",
+                high_col="high",
+                low_col="low",
+                volume_col="volume",
+                amount_col="amount",
+                start_date=start_date,
+                end_date=end_date,
+            )
             elapsed = (time.perf_counter() - start) * 1000
             self._log_response(endpoint, len(bars), elapsed)
             return bars
@@ -431,18 +556,43 @@ class AkShareIndexClient(BaseDataClient):
             self._log_error(endpoint, e, elapsed)
             raise
 
-    def fetch_index_daily(
+    @staticmethod
+    def _em_market_symbol(index_code: str) -> str | None:
+        """将 index_code 解析为东方财富 stock_zh_index_daily_em 所需的市场前缀代码。
+
+        东方财富 kline 接口要求 symbol 带市场前缀（sz/sh/csi/bj），
+        市场编号通过 akshare 的 index_code_id_map_em() 映射获取（进程级缓存）。
+
+        Args:
+            index_code: 指数代码，如 '000300'。
+
+        Returns:
+            带市场前缀的 symbol，如 'sh000300'；无法解析时返回 None。
+        """
+        try:
+            market_map = ak.index_code_id_map_em()
+        except Exception:
+            return None
+        market_id = market_map.get(index_code)
+        if market_id is None:
+            return None
+        prefix = {0: "sz", 1: "sh", 2: "csi"}.get(int(market_id))
+        if prefix is None:
+            return None
+        return f"{prefix}{index_code}"
+
+    @with_retry()
+    def _fetch_index_daily_tx(
         self,
         index_code: str,
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> list[IndexDailyBar]:
-        """拉取指数日线 OHLCV 数据。
+        """通过腾讯源拉取指数日线（主源）。
 
-        三级降级策略：
-        1. 腾讯源 stock_zh_index_daily_tx（覆盖主流交易所指数）
-        2. 中证指数官网 stock_zh_index_hist_csindex（覆盖所有中证指数）
-        3. 东方财富 stock_zh_index_daily_em（最终兜底，5 秒超时保护）
+        ak.stock_zh_index_daily_tx 支持服务端日期过滤，但无成交量列
+        （仅 date/OHLC/amount），且全量历史按年分页请求，拉全量较慢；
+        限定期望日期范围时单请求即可返回。
 
         Args:
             index_code: 指数代码，如 000300
@@ -452,7 +602,6 @@ class AkShareIndexClient(BaseDataClient):
         Returns:
             按日期升序排列的日线数据列表
         """
-        # 第一级：腾讯源
         endpoint = "stock_zh_index_daily_tx"
         symbol = _index_code_to_ak_symbol(index_code)
         self._log_request(endpoint, {"index_code": index_code, "symbol": symbol})
@@ -461,51 +610,209 @@ class AkShareIndexClient(BaseDataClient):
             df = ak.stock_zh_index_daily_tx(
                 symbol=symbol, start_date=start_date or "", end_date=end_date or ""
             )
-            bars: list[IndexDailyBar] = []
-            for _, row in df.iterrows():
-                bar_date = row["date"]
-                if isinstance(bar_date, str):
-                    bar_date = datetime.strptime(bar_date, "%Y-%m-%d").date()
-                bars.append(
-                    IndexDailyBar(
-                        trade_date=bar_date,
-                        open_price=float(row["open"]),
-                        close_price=float(row["close"]),
-                        high_price=float(row["high"]),
-                        low_price=float(row["low"]),
-                        volume=float(row.get("volume", 0)),
-                        turnover=float(row["amount"]),
-                    )
-                )
-            for i in range(1, len(bars)):
-                prev_close = bars[i - 1].close_price
-                if prev_close and prev_close != 0:
-                    bars[i].prev_close_price = prev_close
-                    bars[i].change_pct = round(
-                        (bars[i].close_price - prev_close) / prev_close * 100, 4
-                    )
+            bars = _build_index_bars(
+                df,
+                date_col="date",
+                open_col="open",
+                close_col="close",
+                high_col="high",
+                low_col="low",
+                amount_col="amount",
+                start_date=start_date,
+                end_date=end_date,
+            )
             elapsed = (time.perf_counter() - start) * 1000
             self._log_response(endpoint, len(bars), elapsed)
-            if bars:
-                return bars
-            # 腾讯源空数据，降级到中证官网
-            self._logger.info("腾讯源对指数 %s 返回空数据，降级到中证指数官网", index_code)
-            return self._fetch_index_daily_csi(index_code, start_date, end_date)
+            return bars
         except Exception as e:
             elapsed = (time.perf_counter() - start) * 1000
             self._log_error(endpoint, e, elapsed)
-            # 腾讯源失败 → 第二级：中证指数官网
-            self._logger.info("腾讯源对指数 %s 拉取失败: %s，降级到中证指数官网", index_code, e)
+            raise
+
+    def _fetch_index_daily_zh_a_hist(
+        self,
+        index_code: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[IndexDailyBar]:
+        """通过东方财富通用接口 index_zh_a_hist 拉取指数日线（东财第二源）。
+
+        通用接口接受纯指数代码，内部通过指数→市场编号映射自动解析交易所归属，
+        覆盖东财全市场指数（含深证 399xxx 与中证系），返回列含涨跌幅/换手率。
+        注意：接口内部始终拉取全量再按日期切片，且首次调用需拉取全市场映射，
+        故超时上限放宽到 _ZH_A_HIST_TIMEOUT。
+
+        Args:
+            index_code: 指数代码，如 399001
+            start_date: 起始日 'YYYYMMDD'，None 表示 19700101
+            end_date: 结束日 'YYYYMMDD'，None 表示 22220101
+
+        Returns:
+            按日期升序排列的日线数据列表
+        """
+        endpoint = "index_zh_a_hist"
+        self._log_request(endpoint, {"index_code": index_code})
+        start = time.perf_counter()
+        try:
+            df = self._call_with_timeout(
+                lambda: ak.index_zh_a_hist(
+                    symbol=index_code,
+                    period="daily",
+                    start_date=start_date or _FULL_HISTORY_START_EM,
+                    end_date=end_date or _FULL_HISTORY_END,
+                ),
+                timeout=_ZH_A_HIST_TIMEOUT,
+            )
+            bars = _build_index_bars(
+                df,
+                date_col="日期",
+                open_col="开盘",
+                close_col="收盘",
+                high_col="最高",
+                low_col="最低",
+                volume_col="成交量",
+                amount_col="成交额",
+                start_date=start_date,
+                end_date=end_date,
+            )
+            elapsed = (time.perf_counter() - start) * 1000
+            self._log_response(endpoint, len(bars), elapsed)
+            return bars
+        except FutureTimeoutError:
+            elapsed = (time.perf_counter() - start) * 1000
+            self._log_error(
+                endpoint,
+                TimeoutError(f"东方财富通用接口超时（{_ZH_A_HIST_TIMEOUT}s）"),
+                elapsed,
+            )
+            raise
+        except Exception as e:
+            elapsed = (time.perf_counter() - start) * 1000
+            self._log_error(endpoint, e, elapsed)
+            raise
+
+    @with_retry()
+    def _fetch_index_daily_sina(
+        self,
+        index_code: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[IndexDailyBar]:
+        """通过新浪源拉取指数日线（最后兜底）。
+
+        ak.stock_zh_index_daily 无日期参数，始终返回全量历史（本地过滤）；
+        深证指数（399xxx）覆盖好且全量拉取快（约 0.5s），但无成交额列（补 0），
+        且上游对大量抓取有封 IP 风险，仅作为其他源全部失败时的兜底。
+
+        Args:
+            index_code: 指数代码，如 399001
+            start_date: 起始日 'YYYYMMDD'，本地过滤
+            end_date: 结束日 'YYYYMMDD'，本地过滤
+
+        Returns:
+            按日期升序排列的日线数据列表
+        """
+        endpoint = "stock_zh_index_daily"
+        symbol = _index_code_to_ak_symbol(index_code)
+        self._log_request(endpoint, {"index_code": index_code, "symbol": symbol})
+        start = time.perf_counter()
+        try:
+            df = ak.stock_zh_index_daily(symbol=symbol)
+            bars = _build_index_bars(
+                df,
+                date_col="date",
+                open_col="open",
+                close_col="close",
+                high_col="high",
+                low_col="low",
+                volume_col="volume",
+                start_date=start_date,
+                end_date=end_date,
+            )
+            elapsed = (time.perf_counter() - start) * 1000
+            self._log_response(endpoint, len(bars), elapsed)
+            return bars
+        except Exception as e:
+            elapsed = (time.perf_counter() - start) * 1000
+            self._log_error(endpoint, e, elapsed)
+            raise
+
+    def fetch_index_daily(
+        self,
+        index_code: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[IndexDailyBar]:
+        """拉取指数日线 OHLCV 数据。
+
+        五级降级策略（按覆盖范围与数据完整度排序）：
+        1. 腾讯源 stock_zh_index_daily_tx（主源，支持服务端日期过滤）
+        2. 中证指数官网 stock_zh_index_hist_csindex（中证系全覆盖，含 930/931/932 自定义指数）
+        3. 东方财富 stock_zh_index_daily_em（带市场前缀，含成交量/成交额，5 秒超时保护）
+        4. 东方财富通用接口 index_zh_a_hist（纯代码自动解析市场，覆盖最全）
+        5. 新浪 stock_zh_index_daily（最后兜底，无成交额、全量拉取、有封 IP 风险）
+
+        与历史行为差异：
+        - 任一源返回空数据时继续降级（此前中证源空数据会直接结束）；
+        - 全部源失败时抛出最后一个源的异常（此前抛腾讯源原始异常）。
+
+        Args:
+            index_code: 指数代码，如 000300
+            start_date: 起始日 'YYYYMMDD'，None 表示最早
+            end_date: 结束日 'YYYYMMDD'，None 表示最新
+
+        Returns:
+            按日期升序排列的日线数据列表
+        """
+        sources = [
+            ("腾讯源", self._fetch_index_daily_tx),
+            ("中证指数官网", self._fetch_index_daily_csi),
+            ("东方财富", self._fetch_index_daily_em),
+            ("东方财富通用", self._fetch_index_daily_zh_a_hist),
+            ("新浪", self._fetch_index_daily_sina),
+        ]
+        last_error: Exception | None = None
+        for source_name, fetcher in sources:
             try:
-                return self._fetch_index_daily_csi(index_code, start_date, end_date)
-            except Exception:
-                pass
-            # 中证官网也失败 → 第三级：东方财富
-            self._logger.info("中证指数官网对指数 %s 拉取失败，降级到东方财富源", index_code)
-            try:
-                return self._fetch_index_daily_em(index_code, start_date, end_date)
-            except Exception:
-                raise e
+                bars = fetcher(index_code, start_date, end_date)
+            except Exception as e:
+                last_error = e
+                self._logger.info(
+                    "指数 %s 日线源 %s 拉取失败，降级到下一源: %s",
+                    index_code,
+                    source_name,
+                    e,
+                )
+                continue
+            if bars:
+                self._logger.info(
+                    "指数 %s 日线最终由 %s 提供，共 %d 条",
+                    index_code,
+                    source_name,
+                    len(bars),
+                )
+                return bars
+            self._logger.info("指数 %s 日线源 %s 返回空数据，降级到下一源", index_code, source_name)
+        if last_error is not None:
+            raise last_error
+        return []
+
+    def fetch_index_daily_since(self, index_code: str, since_date: date) -> list[IndexDailyBar]:
+        """增量拉取指数日线：仅拉取 since_date 之前的缓冲窗口到最新。
+
+        直接以 since_date 为起点会导致起点 bar 的 prev_close/change_pct 缺失，
+        因此向前回退 _INCREMENTAL_BUFFER_DAYS 个自然日（覆盖节假日/周末断档），
+        调用方按自身口径过滤（如 trade_date > since_date）即可丢弃缓冲行。
+
+        Args:
+            index_code: 指数代码，如 000300
+            since_date: 起始日期（不含，即仅拉取该日之后的数据）
+
+        Returns:
+            按日期升序排列的日线数据列表（含缓冲窗口内的历史行）
+        """
+        start = _incremental_start_date(since_date)
+        return self.fetch_index_daily(index_code, start_date=start.strftime("%Y%m%d"))
 
     # ------------------------------------------------------------------
     # 指数估值 PE/PB
@@ -712,7 +1019,9 @@ class AkShareIndexClient(BaseDataClient):
         """通过拉取上证指数最近数据检测连通性。"""
         try:
             start = time.perf_counter()
-            bars = self.fetch_index_daily("000001")
+            # 只拉最近一周，避免健康检查触发全量历史拉取（腾讯全量按年分页较慢）
+            start_date = (date.today() - timedelta(days=7)).strftime("%Y%m%d")
+            bars = self.fetch_index_daily("000001", start_date=start_date)
             elapsed = (time.perf_counter() - start) * 1000
             ok = len(bars) > 0
             return HealthStatus(

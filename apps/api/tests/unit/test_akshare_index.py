@@ -5,14 +5,18 @@
 """
 
 import time
+from datetime import date
 
+import pandas as pd
 import pytest
 
 from quant_etf_api.infra.clients.akshare_index import (
     AkShareIndexClient,
     IndexDailyBar,
     IndexValuation,
+    _build_index_bars,
     _calc_percentile,
+    _incremental_start_date,
 )
 
 
@@ -110,6 +114,18 @@ class TestIndexDaily:
             assert str(bars[0].trade_date) >= "2026-01-01"
             assert str(bars[-1].trade_date) <= "2026-03-31"
 
+    def test_fetch_index_daily_since(self, client: AkShareIndexClient) -> None:
+        """增量拉取带缓冲窗口，since 之后的 bar 涨跌幅可算。"""
+        since = date(2026, 1, 5)
+        bars = _retry_fetch(lambda: client.fetch_index_daily_since("000300", since))
+        assert len(bars) > 0
+        assert bars[0].trade_date >= _incremental_start_date(since)
+        assert bars[-1].trade_date >= since
+        # 缓冲窗口保证 since 之后每根 bar 都有前收盘
+        for b in bars:
+            if b.trade_date > since:
+                assert b.prev_close_price is not None
+
     def test_prev_close_and_change_pct_populated(self, client: AkShareIndexClient) -> None:
         """验证 prev_close_price 和 change_pct 字段被正确填充。"""
         bars = _retry_fetch(lambda: client.fetch_index_daily("000300"))
@@ -121,6 +137,98 @@ class TestIndexDaily:
         assert bars[1].prev_close_price is not None
         assert bars[1].prev_close_price > 0
         assert bars[1].change_pct is not None
+
+    def test_sina_covers_shenzhen(self, client: AkShareIndexClient) -> None:
+        """新浪源兜底覆盖深证指数（中证官网不支持 399xxx）。"""
+        bars = _retry_fetch(
+            lambda: client._fetch_index_daily_sina("399001", "20260101", "20260331")
+        )
+        assert len(bars) > 0
+        assert bars[0].trade_date >= date(2026, 1, 1)
+        assert bars[-1].trade_date <= date(2026, 3, 31)
+
+    def test_zh_a_hist_general(self, client: AkShareIndexClient) -> None:
+        """东方财富通用接口接受纯指数代码。"""
+        try:
+            bars = _retry_fetch(
+                lambda: client._fetch_index_daily_zh_a_hist("000016", "20260101", "20260331")
+            )
+        except Exception:
+            pytest.skip("东方财富接口在当前网络环境不可用")
+        assert len(bars) > 0
+        assert bars[0].trade_date >= date(2026, 1, 1)
+
+
+class TestBuildIndexBars:
+    """共享 DataFrame→Bar 转换助手（纯逻辑，无需网络）。"""
+
+    def test_mapping_and_pct(self) -> None:
+        """列名映射、日期解析与涨跌幅计算正确。"""
+        df = pd.DataFrame(
+            {
+                "date": ["2026-01-05", "2026-01-06", "2026-01-07"],
+                "open": [100.0, 101.0, 102.0],
+                "close": [101.0, 102.0, 101.5],
+                "high": [102.0, 103.0, 103.0],
+                "low": [99.0, 100.0, 100.5],
+                "volume": [1000, 1100, 1200],
+            }
+        )
+        bars = _build_index_bars(df, "date", "open", "close", "high", "low", volume_col="volume")
+        assert len(bars) == 3
+        assert bars[0].trade_date == date(2026, 1, 5)
+        assert bars[0].prev_close_price is None
+        assert bars[0].change_pct is None
+        assert bars[1].prev_close_price == 101.0
+        assert bars[1].change_pct == round((102.0 - 101.0) / 101.0 * 100, 4)
+        # 无成交额列 → 补 0；成交量按列名映射
+        assert bars[0].turnover == 0.0
+        assert bars[0].volume == 1000.0
+
+    def test_local_date_filter(self) -> None:
+        """本地日期过滤（新浪等无服务端过滤的源使用）。"""
+        df = pd.DataFrame(
+            {
+                "date": ["2026-01-05", "2026-01-06", "2026-01-07"],
+                "open": [1.0, 2.0, 3.0],
+                "close": [1.0, 2.0, 3.0],
+                "high": [1.0, 2.0, 3.0],
+                "low": [1.0, 2.0, 3.0],
+            }
+        )
+        bars = _build_index_bars(
+            df,
+            "date",
+            "open",
+            "close",
+            "high",
+            "low",
+            start_date="20260106",
+            end_date="20260106",
+        )
+        assert len(bars) == 1
+        assert bars[0].trade_date == date(2026, 1, 6)
+
+    def test_empty_df(self) -> None:
+        """空 DataFrame 返回空列表。"""
+        bars = _build_index_bars(pd.DataFrame(), "date", "open", "close", "high", "low")
+        assert bars == []
+
+
+class TestClientOptimizations:
+    """第一轮评审优化点的纯逻辑测试。"""
+
+    def test_incremental_start_date(self) -> None:
+        """增量缓冲窗口回退 10 个自然日。"""
+        assert _incremental_start_date(date(2026, 1, 15)) == date(2026, 1, 5)
+
+    def test_call_with_timeout_returns_fast(self, client: AkShareIndexClient) -> None:
+        """超时调用在限定时间内返回，不阻塞等待后台线程。"""
+        t0 = time.perf_counter()
+        with pytest.raises(TimeoutError):
+            client._call_with_timeout(lambda: time.sleep(2), timeout=0.3)
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 1.0
 
 
 class TestIndexValuation:

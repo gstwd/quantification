@@ -189,7 +189,7 @@ class IngestService:
     def _fetch_and_upsert_index_bars(self, index_code: str, incremental: bool = True) -> int:
         """从 AkShare 拉取指数日线并幂等写入 index_daily_bar。
 
-        增量模式（默认）：仅拉取 DB 中最新日期之后的数据；
+        增量模式（默认）：从 DB 最新日期回退缓冲窗口拉取，仅写入最新日期之后的数据；
         全量模式（冷启动）：拉取全量历史数据。
 
         分批写入，避免单条 INSERT 参数超过 PostgreSQL 65535 限制。
@@ -197,22 +197,18 @@ class IngestService:
         Returns:
             写入记录数
         """
-        if incremental:
-            # 查询该指数最新数据日期
-            latest = self._index_bar_repo.get_latest_date(index_code)
-            if latest is not None:
-                # 已有数据，仅做增量（AkShare 客户端当前不支持增量，仍拉全量后过滤）
-                pass
-
-        bars = AkShareIndexClient().fetch_index_daily(index_code)
+        latest = self._index_bar_repo.get_latest_date(index_code) if incremental else None
+        if latest is not None:
+            # 增量拉取：客户端从 latest 回退缓冲窗口，保证边界 bar 的涨跌幅可算
+            bars = AkShareIndexClient().fetch_index_daily_since(index_code, latest)
+        else:
+            bars = AkShareIndexClient().fetch_index_daily(index_code)
         if not bars:
             return 0
 
-        # 增量模式：仅保留 DB 中不存在的记录
-        if incremental:
-            existing = latest
-            if existing is not None:
-                bars = [b for b in bars if b.trade_date > existing]
+        # 增量模式：仅保留 DB 中不存在的记录（同时丢弃缓冲窗口内的重复行）
+        if latest is not None:
+            bars = [b for b in bars if b.trade_date > latest]
 
         batch_size = 5000
         values = [
