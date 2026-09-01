@@ -98,6 +98,20 @@ class Settings(BaseSettings):
         description="社交媒体情绪 API Key（api.adanos.org），用于美股情绪分析",
     )
 
+    # ========== 多数据源指数日线摄取 ==========
+
+    tushare_token: str | None = Field(
+        default=None,
+        description="Tushare Pro API Token，配置后启用 tushare 指数日线数据源",
+    )
+    index_daily_source_order: str = Field(
+        default="efinance,akshare,tushare,pytdx,baostock",
+        description=(
+            "指数日线多数据源优先级（逗号分隔），可选 efinance/akshare/tushare/pytdx/baostock；"
+            "tushare 未配置 Token 时自动跳过"
+        ),
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

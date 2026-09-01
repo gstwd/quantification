@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import bisect
-import math
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
@@ -10,6 +9,15 @@ from datetime import date, datetime, timedelta
 import akshare as ak
 
 from quant_etf_api.infra.clients.base import BaseDataClient, HealthStatus
+from quant_etf_api.infra.clients.index_daily_common import (
+    IndexDailyBar,
+    _build_index_bars,
+    _incremental_start_date,
+    _index_code_to_market_symbol,
+    _ohlc_missing_ratio,  # noqa: F401  # 兼容旧测试导入的共享助手
+    _parse_bar_date,  # noqa: F401  # 兼容旧测试导入的共享助手
+    ohlc_missing_count,
+)
 from quant_etf_api.infra.clients.retry import with_retry
 
 # 东方财富 API 调用超时上限（秒），防止代理/网络问题导致长时间阻塞
@@ -17,9 +25,6 @@ _EM_API_TIMEOUT = 5
 
 # 东方财富通用指数接口超时上限（秒）：首次调用需拉取全市场指数→市场编号映射，耗时更长
 _ZH_A_HIST_TIMEOUT = 15
-
-# 增量拉取缓冲窗口（自然日）：起点回退该天数，保证边界 bar 的 prev_close/change_pct 可算
-_INCREMENTAL_BUFFER_DAYS = 10
 
 # 各源全量历史默认起始/结束哨兵（口径差异见各源注释，统一命名便于追踪）：
 # - 腾讯: start/end 传空串，由上游自动返回最早/最新；
@@ -29,28 +34,8 @@ _FULL_HISTORY_START_EM = "19700101"
 _FULL_HISTORY_START_CSI = "20100101"
 _FULL_HISTORY_END = "20500101"
 
-# OHLC 完整性校验阈值：请求窗口内开盘/最高/最低缺失比例超过该值视为数据不合格，
-# 触发降级到下一数据源（中证官网等官方源对部分历史区间仅提供收盘价，无 OHLC）。
-# 回测调仓依赖开盘价，缺失会直接污染回测结果，故门槛设得较低。
-_OHLC_MISSING_RATIO_LIMIT = 0.02
-
 # 模块级共享线程池：超时保护的东财调用复用线程，避免每次调用新建线程池
 _EM_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="akshare-em")
-
-
-@dataclass
-class IndexDailyBar:
-    """指数日线行情数据结构。"""
-
-    trade_date: date
-    open_price: float
-    close_price: float
-    high_price: float
-    low_price: float
-    volume: float
-    turnover: float
-    prev_close_price: float | None = None
-    change_pct: float | None = None
 
 
 @dataclass
@@ -110,188 +95,6 @@ _PE_PB_NAME_MAP: dict[str, str] = {
     "000015": "上证红利",
     "000903": "中证100",
 }
-
-
-def _index_code_to_ak_symbol(index_code: str) -> str:
-    """将 index_code 转为 AkShare 腾讯日线接口的 symbol。
-
-    分类规则：
-    - 0/51/56 开头：上交所指数（上证综指、上证50 等）
-    - 9 开头（930/931/932）：中证自定义指数，归属上海市场
-    - 其他（399 开头等）：深交所指数
-
-    Args:
-        index_code: 指数代码，如 000300、399001、931743
-
-    Returns:
-        AkShare symbol，如 sh000300、sz399001、sh931743
-    """
-    if index_code.startswith(("0", "51", "56", "9")):
-        return f"sh{index_code}"
-    return f"sz{index_code}"
-
-
-def _parse_bar_date(value) -> date:
-    """将上游日期的任意类型统一解析为 date。
-
-    AkShare 各接口返回的日期列类型不一致（str / datetime / date / Timestamp），
-    统一在此处收敛，避免每个源各自解析。
-
-    Args:
-        value: 上游日期单元格值。
-
-    Returns:
-        标准化后的 date。
-    """
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if isinstance(value, str):
-        return date.fromisoformat(value)
-    if hasattr(value, "date"):
-        return value.date()
-    return date.fromisoformat(str(value))
-
-
-def _incremental_start_date(since_date: date) -> date:
-    """计算增量拉取的缓冲起始日。
-
-    以 since_date 直接作为起点会丢失起点 bar 的 prev_close/change_pct，
-    因此回退 _INCREMENTAL_BUFFER_DAYS 个自然日（覆盖周末与长假断档）。
-
-    Args:
-        since_date: 增量基准日（不含当日）。
-
-    Returns:
-        应传给上游接口的起始日期。
-    """
-    return since_date - timedelta(days=_INCREMENTAL_BUFFER_DAYS)
-
-
-def _build_index_bars(
-    df,
-    date_col: str,
-    open_col: str,
-    close_col: str,
-    high_col: str,
-    low_col: str,
-    volume_col: str | None = None,
-    amount_col: str | None = None,
-    start_date: str | None = None,
-    end_date: str | None = None,
-) -> list[IndexDailyBar]:
-    """将上游日线 DataFrame 统一转换为 IndexDailyBar 列表。
-
-    集中处理各源差异：
-    - 日期列类型与列名不同（腾讯/东财为英文列名，中证/通用为中文列名）；
-    - 部分源缺少成交量或成交额列（腾讯无 volume、新浪无 amount），缺失列补 0；
-    - 新浪等源不支持服务端日期过滤，统一在本地按 start_date/end_date 过滤。
-
-    Args:
-        df: 上游返回的日线 DataFrame。
-        date_col: 日期列名。
-        open_col/close_col/high_col/low_col: OHLC 列名。
-        volume_col: 成交量列名，None 表示该源无成交量（补 0）。
-        amount_col: 成交额列名，None 表示该源无成交额（补 0）。
-        start_date: 起始日 'YYYYMMDD'，本地过滤下限（含），None 不过滤。
-        end_date: 结束日 'YYYYMMDD'，本地过滤上限（含），None 不过滤。
-
-    Returns:
-        按日期升序排列的日线列表。
-    """
-    if df is None or df.empty:
-        return []
-
-    dates = [_parse_bar_date(v) for v in df[date_col]]
-    opens = [float(v) for v in df[open_col]]
-    closes = [float(v) for v in df[close_col]]
-    highs = [float(v) for v in df[high_col]]
-    lows = [float(v) for v in df[low_col]]
-    volumes = (
-        [float(v) if v is not None else 0.0 for v in df[volume_col]]
-        if volume_col
-        else [0.0] * len(df)
-    )
-    amounts = (
-        [float(v) if v is not None else 0.0 for v in df[amount_col]]
-        if amount_col
-        else [0.0] * len(df)
-    )
-
-    start = datetime.strptime(start_date, "%Y%m%d").date() if start_date else None
-    end = datetime.strptime(end_date, "%Y%m%d").date() if end_date else None
-
-    bars: list[IndexDailyBar] = []
-    for i, bar_date in enumerate(dates):
-        if start is not None and bar_date < start:
-            continue
-        if end is not None and bar_date > end:
-            continue
-        bars.append(
-            IndexDailyBar(
-                trade_date=bar_date,
-                open_price=opens[i],
-                close_price=closes[i],
-                high_price=highs[i],
-                low_price=lows[i],
-                volume=volumes[i],
-                turnover=amounts[i],
-            )
-        )
-    # 逐日计算涨跌幅（第一根无前收盘，保持 None）
-    for i in range(1, len(bars)):
-        prev_close = bars[i - 1].close_price
-        if prev_close and prev_close != 0:
-            bars[i].prev_close_price = prev_close
-            bars[i].change_pct = round((bars[i].close_price - prev_close) / prev_close * 100, 4)
-    return bars
-
-
-def _is_valid_price(value: float | None) -> bool:
-    """判断价格是否有效（非空、非 NaN、为正数）。
-
-    Args:
-        value: 价格或成交量数值。
-
-    Returns:
-        True 表示有效。
-    """
-    if value is None:
-        return False
-    try:
-        if math.isnan(value):
-            return False
-    except TypeError:
-        return False
-    return value > 0
-
-
-def _ohlc_missing_ratio(bars: list[IndexDailyBar]) -> float:
-    """计算日线列表中 OHLC 缺失比例。
-
-    开盘/最高/最低任一为空、NaN 或非正值即视为该日 OHLC 不完整。
-    拉取时用于数据质量校验：请求窗口内缺失比例超过 _OHLC_MISSING_RATIO_LIMIT
-    则放弃该源继续降级，避免"仅收盘价"的历史区间污染回测。
-
-    Args:
-        bars: 日线列表（已按请求窗口过滤）。
-
-    Returns:
-        缺失比例（0.0~1.0），空列表返回 0.0。
-    """
-    if not bars:
-        return 0.0
-    missing = sum(
-        1
-        for b in bars
-        if not (
-            _is_valid_price(b.open_price)
-            and _is_valid_price(b.high_price)
-            and _is_valid_price(b.low_price)
-        )
-    )
-    return missing / len(bars)
 
 
 _INDEX_NAME_CACHE: dict[str, str] | None = None
@@ -655,7 +458,7 @@ class AkShareIndexClient(BaseDataClient):
             按日期升序排列的日线数据列表
         """
         endpoint = "stock_zh_index_daily_tx"
-        symbol = _index_code_to_ak_symbol(index_code)
+        symbol = _index_code_to_market_symbol(index_code)
         self._log_request(endpoint, {"index_code": index_code, "symbol": symbol})
         start = time.perf_counter()
         try:
@@ -765,7 +568,7 @@ class AkShareIndexClient(BaseDataClient):
             按日期升序排列的日线数据列表
         """
         endpoint = "stock_zh_index_daily"
-        symbol = _index_code_to_ak_symbol(index_code)
+        symbol = _index_code_to_market_symbol(index_code)
         self._log_request(endpoint, {"index_code": index_code, "symbol": symbol})
         start = time.perf_counter()
         try:
@@ -804,13 +607,17 @@ class AkShareIndexClient(BaseDataClient):
         4. 东方财富通用接口 index_zh_a_hist（纯代码自动解析市场，覆盖最全）
         5. 新浪 stock_zh_index_daily（最后兜底，无成交额、全量拉取、有封 IP 风险）
 
+        OHLC 完整性采用严格口径（与 IngestService 多源切换一致）：
+        - 请求窗口内开盘/最高/最低/收盘任一缺失（含 NaN、非正值）即视为数据源不合格；
+        - 任一源返回空数据或不合格时继续降级到下一源；
+        - 首个 OHLC 完全完整的数据源直接采用（缺失 0 即理论最小值）；
+        - 若所有源均不完整，回退缺失交易日最少的数据源并告警；
+        - 全部源失败时抛出最后一个源的异常。
+
         与历史行为差异：
         - 任一源返回空数据时继续降级（此前中证源空数据会直接结束）；
-        - 每个源返回后先做 OHLC 完整性校验：请求窗口内开盘/最高/最低缺失比例超过
-          _OHLC_MISSING_RATIO_LIMIT 视为数据不合格，继续降级到下一源
-          （如中证官网对红利低波等指数 2016-2018 年大部分交易日仅返回收盘价）；
-        - 若所有源均不完整，回退首个有数据的源并告警（尽量保证有数据可用）；
-        - 全部源失败时抛出最后一个源的异常（此前抛腾讯源原始异常）。
+        - 完整性阈值从"缺失比例 > 2%"改为"任一缺失即不合格"，
+          兜底策略从"首个有数据的源"改为"缺失交易日最少的数据源"。
 
         Args:
             index_code: 指数代码，如 000300
@@ -828,8 +635,9 @@ class AkShareIndexClient(BaseDataClient):
             ("新浪", self._fetch_index_daily_sina),
         ]
         last_error: Exception | None = None
-        fallback_bars: list[IndexDailyBar] | None = None
-        fallback_source: str | None = None
+        best_source: str | None = None
+        best_bars: list[IndexDailyBar] | None = None
+        best_missing = -1
         for source_name, fetcher in sources:
             try:
                 bars = fetcher(index_code, start_date, end_date)
@@ -847,18 +655,18 @@ class AkShareIndexClient(BaseDataClient):
                     "指数 %s 日线源 %s 返回空数据，降级到下一源", index_code, source_name
                 )
                 continue
-            missing_ratio = _ohlc_missing_ratio(bars)
-            if missing_ratio > _OHLC_MISSING_RATIO_LIMIT:
-                # 数据不完整（如官方源部分历史区间仅收盘价）：记下作为兜底并继续降级
-                if fallback_bars is None:
-                    fallback_bars = bars
-                    fallback_source = source_name
+            missing = ohlc_missing_count(bars)
+            if missing > 0:
+                # 数据不完整（如官方源部分历史区间仅收盘价）：记录缺失最少者作为兜底并继续降级
+                if best_bars is None or missing < best_missing:
+                    best_source = source_name
+                    best_bars = bars
+                    best_missing = missing
                 self._logger.warning(
-                    "指数 %s 日线源 %s OHLC 缺失比例 %.2f%% 超过阈值 %.2f%%，继续降级",
+                    "指数 %s 日线源 %s OHLC 缺失 %d 日，视为不合格，继续降级",
                     index_code,
                     source_name,
-                    missing_ratio * 100,
-                    _OHLC_MISSING_RATIO_LIMIT * 100,
+                    missing,
                 )
                 continue
             self._logger.info(
@@ -868,14 +676,15 @@ class AkShareIndexClient(BaseDataClient):
                 len(bars),
             )
             return bars
-        if fallback_bars is not None:
+        if best_bars is not None:
             self._logger.warning(
-                "指数 %s 所有日线源 OHLC 均不完整，回退到 %s 的部分数据（%d 条）",
+                "指数 %s 所有日线源 OHLC 均不完整，回退到缺失最少的数据源 %s（缺失 %d 日，共 %d 条）",
                 index_code,
-                fallback_source,
-                len(fallback_bars),
+                best_source,
+                best_missing,
+                len(best_bars),
             )
-            return fallback_bars
+            return best_bars
         if last_error is not None:
             raise last_error
         return []

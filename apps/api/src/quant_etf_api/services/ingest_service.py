@@ -10,8 +10,19 @@ from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from quant_etf_api.config.settings import get_settings
 from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
 from quant_etf_api.infra.clients.akshare_macro import AkShareMacroClient
+from quant_etf_api.infra.clients.baostock_index import BaostockIndexClient
+from quant_etf_api.infra.clients.efinance_index import EfinanceIndexClient
+from quant_etf_api.infra.clients.index_daily_common import (
+    IndexDailyBar,
+    _incremental_start_date,
+    compare_index_bar_overlap,
+    ohlc_missing_count,
+)
+from quant_etf_api.infra.clients.pytdx_index import PytdxIndexClient
+from quant_etf_api.infra.clients.tushare_index import TushareIndexClient
 from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import (
@@ -189,14 +200,15 @@ class IngestService:
     # 指数日线（AkShare）
     # ==================================================================
 
-    def _insert_index_bars(self, index_code: str, bars: list[Any]) -> int:
+    def _insert_index_bars(self, index_code: str, bars: list[Any], source: str = "akshare") -> int:
         """将日线数据批量幂等写入 index_daily_bar（不提交，由调用方统一提交）。
 
         分批写入，避免单条 INSERT 参数超过 PostgreSQL 65535 限制。
 
         Args:
             index_code: 指数代码。
-            bars: 待写入的日线数据列表（AkShare 客户端返回）。
+            bars: 待写入的日线数据列表（多数据源客户端统一返回 IndexDailyBar）。
+            source: 实际提供数据的数据源标识（如 efinance/akshare/tushare/pytdx/baostock）。
 
         Returns:
             写入记录数。
@@ -214,7 +226,7 @@ class IngestService:
                 "change_pct": _clean_price(b.change_pct),
                 "volume": _clean_price(b.volume),
                 "turnover": _clean_price(b.turnover),
-                "source": "akshare",
+                "source": source,
                 "ingested_at": utcnow(),
             }
             for b in bars
@@ -229,11 +241,144 @@ class IngestService:
             self._db.execute(stmt)
         return len(bars)
 
+    def _build_index_daily_sources(self) -> list[tuple[str, Any]]:
+        """按配置优先级构建指数日线数据源列表。
+
+        优先级来自 settings.index_daily_source_order（逗号分隔），
+        非法名称跳过并告警；tushare 未配置 Token 时自动跳过。
+
+        Returns:
+            [(数据源标识, 客户端实例), ...] 列表，按优先级排序。
+        """
+        registry: dict[str, Any] = {
+            "efinance": EfinanceIndexClient,
+            "akshare": AkShareIndexClient,
+            "tushare": TushareIndexClient,
+            "pytdx": PytdxIndexClient,
+            "baostock": BaostockIndexClient,
+        }
+        order = get_settings().index_daily_source_order
+        sources: list[tuple[str, Any]] = []
+        for name in (part.strip() for part in order.split(",")):
+            if not name:
+                continue
+            client_cls = registry.get(name)
+            if client_cls is None:
+                logger.warning("未知的指数日线数据源 %s，已忽略", name)
+                continue
+            client = client_cls()
+            # tushare 依赖 Token，未配置时不加入候选，避免每次调用都打警告
+            if isinstance(client, TushareIndexClient) and not client.is_configured():
+                logger.info("未配置 TUSHARE_TOKEN，跳过 tushare 指数日线源")
+                continue
+            sources.append((name, client))
+        return sources
+
+    def _fetch_index_daily_multi_source(
+        self,
+        index_code: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> tuple[list[IndexDailyBar], str]:
+        """多数据源拉取指数日线：OHLC 任一缺失即不合格，最终采用缺失最少的数据源。
+
+        切换规则（与 AkShareIndexClient.fetch_index_daily 内部降级链口径一致）：
+        - 按配置优先级依次调用各 SDK 客户端，任一源抛错或返回空数据时继续降级；
+        - 请求窗口内开盘/最高/最低/收盘任一缺失（NaN/非正值）即视为该源不合格，
+          记录其缺失交易日数量后继续拉取下一数据源；
+        - 首个 OHLC 完全完整的数据源直接采用（缺失 0 为理论最小值，无需再试后续源）；
+        - 所有源均不合格时回退缺失交易日最少的数据源并告警（尽量保证有数据可用）；
+        - 命中候选源时与前一候选对比共同交易日收盘点位，记录跨源一致性日志。
+
+        Args:
+            index_code: 指数代码，如 000300。
+            start_date: 起始日 'YYYYMMDD'，None 表示最早。
+            end_date: 结束日 'YYYYMMDD'，None 表示最新。
+
+        Returns:
+            (日线列表, 数据源标识)；全部失败时返回 ([], "")。
+        """
+        sources = self._build_index_daily_sources()
+        if not sources:
+            logger.warning("指数 %s 无可用日线数据源", index_code)
+            return [], ""
+
+        last_error: Exception | None = None
+        best_source = ""
+        best_bars: list[IndexDailyBar] = []
+        best_missing = -1
+        for source, client in sources:
+            try:
+                bars = client.fetch_index_daily(index_code, start_date, end_date)
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "指数 %s 日线源 %s 拉取失败，降级到下一源: %s",
+                    index_code,
+                    source,
+                    e,
+                )
+                continue
+            if not bars:
+                logger.info("指数 %s 日线源 %s 返回空数据，降级到下一源", index_code, source)
+                continue
+            missing = ohlc_missing_count(bars)
+            if missing == 0:
+                # 与前一非空候选（若有）对比收盘点位，核对跨源数据一致性
+                if best_bars:
+                    common, max_diff = compare_index_bar_overlap(best_bars, bars)
+                    if max_diff is not None:
+                        logger.info(
+                            "指数 %s 数据源 %s 与 %s 共同交易日 %d 天，收盘点位最大差 %.4f",
+                            index_code,
+                            best_source,
+                            source,
+                            common,
+                            max_diff,
+                        )
+                logger.info("指数 %s 日线最终由 %s 提供，共 %d 条", index_code, source, len(bars))
+                return bars, source
+            if best_bars and missing < best_missing:
+                common, max_diff = compare_index_bar_overlap(best_bars, bars)
+                if max_diff is not None:
+                    logger.info(
+                        "指数 %s 数据源 %s 与 %s 共同交易日 %d 天，收盘点位最大差 %.4f",
+                        index_code,
+                        best_source,
+                        source,
+                        common,
+                        max_diff,
+                    )
+            if not best_bars or missing < best_missing:
+                best_source = source
+                best_bars = bars
+                best_missing = missing
+            logger.warning(
+                "指数 %s 日线源 %s OHLC 缺失 %d 日，视为不合格，继续降级",
+                index_code,
+                source,
+                missing,
+            )
+
+        if best_bars:
+            logger.warning(
+                "指数 %s 所有日线源 OHLC 均不完整，回退到缺失最少的数据源 %s（缺失 %d 日，共 %d 条）",
+                index_code,
+                best_source,
+                best_missing,
+                len(best_bars),
+            )
+            return best_bars, best_source
+        if last_error is not None:
+            raise last_error
+        return [], ""
+
     def _fetch_and_upsert_index_bars(self, index_code: str, incremental: bool = True) -> int:
-        """从 AkShare 拉取指数日线并幂等写入 index_daily_bar。
+        """从多数据源拉取指数日线并幂等写入 index_daily_bar。
 
         增量模式（默认）：从 DB 最新日期回退缓冲窗口拉取，仅写入最新日期之后的数据；
-        全量模式（冷启动）：拉取全量历史数据。
+        全量模式（冷启动）：拉取全量历史数据。数据源切换由
+        _fetch_index_daily_multi_source 统一管理，入库时记录实际数据源。
 
         Returns:
             写入记录数
@@ -241,9 +386,12 @@ class IngestService:
         latest = self._index_bar_repo.get_latest_date(index_code) if incremental else None
         if latest is not None:
             # 增量拉取：客户端从 latest 回退缓冲窗口，保证边界 bar 的涨跌幅可算
-            bars = AkShareIndexClient().fetch_index_daily_since(index_code, latest)
+            start = _incremental_start_date(latest)
+            bars, source = self._fetch_index_daily_multi_source(
+                index_code, start_date=start.strftime("%Y%m%d")
+            )
         else:
-            bars = AkShareIndexClient().fetch_index_daily(index_code)
+            bars, source = self._fetch_index_daily_multi_source(index_code)
         if not bars:
             return 0
 
@@ -251,7 +399,7 @@ class IngestService:
         if latest is not None:
             bars = [b for b in bars if b.trade_date > latest]
 
-        count = self._insert_index_bars(index_code, bars)
+        count = self._insert_index_bars(index_code, bars, source=source)
         self._db.commit()
         return count
 
@@ -988,9 +1136,17 @@ class IngestService:
         try:
             self._run_svc.mark_running(run_id)
 
-            # 1. 先拉取全量数据（失败时不触碰现有数据）
-            bars = AkShareIndexClient().fetch_index_daily(index_code)
+            # 1. 先拉取全量数据（失败时不触碰现有数据）；
+            #    日线走多数据源切换（OHLC 严格校验 + 最少缺失兜底），入库记录实际数据源
+            bars, source = self._fetch_index_daily_multi_source(index_code)
             valuations = AkShareIndexClient().fetch_index_valuation(index_code)
+            logger.info(
+                "指数 %s 全量覆盖重拉：日线数据源 %s，共 %d 条，估值 %d 条",
+                index_code,
+                source,
+                len(bars),
+                len(valuations),
+            )
 
             # 2. 删除旧数据
             deleted_bars = (
@@ -1005,7 +1161,7 @@ class IngestService:
             )
 
             # 3. 写入新数据并统一提交（失败回滚后旧数据保留）
-            bar_records = self._insert_index_bars(index_code, bars)
+            bar_records = self._insert_index_bars(index_code, bars, source=source)
             valuation_records = self._insert_index_valuations(index_code, valuations)
             self._db.commit()
 
@@ -1017,6 +1173,7 @@ class IngestService:
                     "deleted_valuation_records": deleted_valuations,
                     "bar_records": bar_records,
                     "valuation_records": valuation_records,
+                    "bar_source": source,
                     "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
                 },
             )

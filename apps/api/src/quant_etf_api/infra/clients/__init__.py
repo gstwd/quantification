@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from quant_etf_api.infra.clients.akshare_index import (
     AkShareIndexClient,
     IndexDailyBar,
@@ -9,6 +10,10 @@ from quant_etf_api.infra.clients.akshare_macro import (
     MacroIndicator,
 )
 from quant_etf_api.infra.clients.base import BaseDataClient, HealthStatus
+from quant_etf_api.infra.clients.baostock_index import BaostockIndexClient
+from quant_etf_api.infra.clients.efinance_index import EfinanceIndexClient
+from quant_etf_api.infra.clients.pytdx_index import PytdxIndexClient
+from quant_etf_api.infra.clients.tushare_index import TushareIndexClient
 
 __all__ = [
     "AkShareIndexClient",
@@ -18,4 +23,8 @@ __all__ = [
     "IndexDailyBar",
     "IndexValuation",
     "MacroIndicator",
+    "EfinanceIndexClient",
+    "PytdxIndexClient",
+    "TushareIndexClient",
+    "BaostockIndexClient",
 ]

@@ -164,7 +164,7 @@ def rebuild_index_data(index_code: str, db: Session = Depends(get_db)) -> dict[s
         "index_rebuild",
         summary.run_id,
         None,
-        summary.params,
+        {"index_code": index_code},  # ResearchRunSummary 不含 params，直接传参数字典
         summary.trade_date or date.today(),
     )
     return {"status": "accepted", "run_type": "index_rebuild", "run_id": summary.run_id}
@@ -180,7 +180,7 @@ def incremental_fill_index_data(index_code: str, db: Session = Depends(get_db)) 
         "index_incremental_fill",
         summary.run_id,
         None,
-        summary.params,
+        {"index_code": index_code},  # ResearchRunSummary 不含 params，直接传参数字典
         summary.trade_date or date.today(),
     )
     return {
