@@ -31,13 +31,12 @@ class Settings(BaseSettings):
         default=True, description="是否在日频调度中自动触发 AI 舆情分析"
     )
     ai_schedule_time: str = Field(
-        default="23:30", description="AI 舆情分析触发时间（HH:MM），默认夜里 23:30，覆盖当天全部新闻"
+        default="23:30",
+        description="AI 舆情分析触发时间（HH:MM），默认夜里 23:30，覆盖当天全部新闻",
     )
 
     # 后台任务队列
-    job_queue_workers: int = Field(
-        default=4, ge=1, description="后台任务队列 worker 线程数"
-    )
+    job_queue_workers: int = Field(default=4, ge=1, description="后台任务队列 worker 线程数")
     job_poll_interval_seconds: float = Field(
         default=1.0, gt=0, description="任务队列空转时的轮询间隔（秒）"
     )
@@ -100,15 +99,22 @@ class Settings(BaseSettings):
 
     # ========== 多数据源指数日线摄取 ==========
 
+    tickflow_api_key: str | None = Field(
+        default=None,
+        description=(
+            "TickFlow API Key；未配置时自动使用免费服务（free-api.tickflow.org，"
+            "无需注册，仅提供历史日 K 线）"
+        ),
+    )
     tushare_token: str | None = Field(
         default=None,
         description="Tushare Pro API Token，配置后启用 tushare 指数日线数据源",
     )
     index_daily_source_order: str = Field(
-        default="akshare,tushare,baostock",
+        default="akshare,tickflow,tushare,baostock",
         description=(
-            "指数日线多数据源优先级（逗号分隔），可选 akshare/tushare/baostock；"
-            "tushare 未配置 Token 时自动跳过"
+            "指数日线多数据源优先级（逗号分隔），可选 akshare/tickflow/tushare/baostock；"
+            "tickflow 默认使用免费服务（无需 Key），tushare 未配置 Token 时自动跳过"
         ),
     )
 

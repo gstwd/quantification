@@ -9,6 +9,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from quant_etf_api.infra.clients.index_daily_common import IndexDailyBar
+from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
+from quant_etf_api.infra.clients.baostock_index import BaostockIndexClient
+from quant_etf_api.infra.clients.tickflow_index import TickFlowIndexClient
 from quant_etf_api.services.ingest_service import IngestService
 
 
@@ -68,7 +71,7 @@ def _make_service() -> IngestService:
     return IngestService(db)
 
 
-def _patch_settings(monkeypatch, source_order: str = "efinance,akshare,tushare,pytdx,baostock"):
+def _patch_settings(monkeypatch, source_order: str = "akshare,tickflow,tushare,baostock"):
     """替换 get_settings 返回假配置。"""
     monkeypatch.setattr(
         "quant_etf_api.services.ingest_service.get_settings",
@@ -87,21 +90,31 @@ class TestBuildIndexDailySources:
         _patch_settings(monkeypatch)
         svc = _make_service()
         sources = svc._build_index_daily_sources()
-        assert [name for name, _ in sources] == ["efinance", "akshare", "pytdx", "baostock"]
+        assert [name for name, _ in sources] == ["akshare", "tickflow", "baostock"]
 
     def test_unknown_source_ignored(self, monkeypatch) -> None:
         """未知数据源名被忽略并告警。"""
-        _patch_settings(monkeypatch, source_order="efinance,unknown,baostock")
+        _patch_settings(monkeypatch, source_order="akshare,unknown,baostock")
         svc = _make_service()
         sources = svc._build_index_daily_sources()
-        assert [name for name, _ in sources] == ["efinance", "baostock"]
+        assert [name for name, _ in sources] == ["akshare", "baostock"]
 
     def test_custom_order(self, monkeypatch) -> None:
-        """支持自定义优先级（如 baostock 优先）。"""
-        _patch_settings(monkeypatch, source_order="baostock,efinance")
+        """支持自定义优先级（如 tickflow 优先）。"""
+        _patch_settings(monkeypatch, source_order="tickflow,baostock,akshare")
         svc = _make_service()
         sources = svc._build_index_daily_sources()
-        assert [name for name, _ in sources] == ["baostock", "efinance"]
+        assert [name for name, _ in sources] == ["tickflow", "baostock", "akshare"]
+
+    def test_clients_are_instances(self, monkeypatch) -> None:
+        """构建出的客户端应为实例，可正常调用实例方法并携带各自配置。"""
+        _patch_settings(monkeypatch)
+        svc = _make_service()
+        sources = svc._build_index_daily_sources()
+        by_name = dict(sources)
+        assert isinstance(by_name["akshare"], AkShareIndexClient)
+        assert isinstance(by_name["tickflow"], TickFlowIndexClient)
+        assert isinstance(by_name["baostock"], BaostockIndexClient)
 
 
 class TestFetchIndexDailyMultiSource:
@@ -111,55 +124,55 @@ class TestFetchIndexDailyMultiSource:
         """首个 OHLC 完整的数据源直接采用（按优先级）。"""
         svc = _make_service()
         sources = [
-            ("efinance", _FakeClient(_complete_bars())),
             ("akshare", _FakeClient(_complete_bars())),
-        ]
-        monkeypatch.setattr(svc, "_build_index_daily_sources", lambda: sources)
-        bars, source = svc._fetch_index_daily_multi_source("000300")
-        assert source == "efinance"
-        assert len(bars) == 3
-
-    def test_incomplete_source_falls_through(self, monkeypatch) -> None:
-        """任一缺失即不合格，继续降级到完整源。"""
-        svc = _make_service()
-        sources = [
-            ("efinance", _FakeClient(_incomplete_bars(1))),
-            ("akshare", _FakeClient(_complete_bars())),
+            ("tickflow", _FakeClient(_complete_bars())),
         ]
         monkeypatch.setattr(svc, "_build_index_daily_sources", lambda: sources)
         bars, source = svc._fetch_index_daily_multi_source("000300")
         assert source == "akshare"
         assert len(bars) == 3
 
+    def test_incomplete_source_falls_through(self, monkeypatch) -> None:
+        """任一缺失即不合格，继续降级到完整源。"""
+        svc = _make_service()
+        sources = [
+            ("akshare", _FakeClient(_incomplete_bars(1))),
+            ("tickflow", _FakeClient(_complete_bars())),
+        ]
+        monkeypatch.setattr(svc, "_build_index_daily_sources", lambda: sources)
+        bars, source = svc._fetch_index_daily_multi_source("000300")
+        assert source == "tickflow"
+        assert len(bars) == 3
+
     def test_least_missing_fallback(self, monkeypatch) -> None:
         """所有源均不完整时采用缺失交易日最少的数据源。"""
         svc = _make_service()
         sources = [
-            ("efinance", _FakeClient(_incomplete_bars(2))),
-            ("akshare", _FakeClient(_incomplete_bars(1))),
+            ("akshare", _FakeClient(_incomplete_bars(2))),
+            ("tickflow", _FakeClient(_incomplete_bars(1))),
         ]
         monkeypatch.setattr(svc, "_build_index_daily_sources", lambda: sources)
         bars, source = svc._fetch_index_daily_multi_source("000300")
-        assert source == "akshare"  # 缺失 1 日 < 缺失 2 日
+        assert source == "tickflow"  # 缺失 1 日 < 缺失 2 日
         assert len(bars) == 3
 
     def test_all_fail_raises_last_error(self, monkeypatch) -> None:
         """全部源抛错时抛出最后一个异常。"""
         svc = _make_service()
         sources = [
-            ("efinance", _FakeClient(error=RuntimeError("efinance down"))),
             ("akshare", _FakeClient(error=RuntimeError("akshare down"))),
+            ("baostock", _FakeClient(error=RuntimeError("baostock down"))),
         ]
         monkeypatch.setattr(svc, "_build_index_daily_sources", lambda: sources)
-        with pytest.raises(RuntimeError, match="akshare down"):
+        with pytest.raises(RuntimeError, match="baostock down"):
             svc._fetch_index_daily_multi_source("000300")
 
     def test_all_empty_returns_empty(self, monkeypatch) -> None:
         """全部返回空数据时返回空列表。"""
         svc = _make_service()
         sources = [
-            ("efinance", _FakeClient([])),
             ("akshare", _FakeClient([])),
+            ("tickflow", _FakeClient([])),
         ]
         monkeypatch.setattr(svc, "_build_index_daily_sources", lambda: sources)
         bars, source = svc._fetch_index_daily_multi_source("000300")
@@ -170,7 +183,7 @@ class TestFetchIndexDailyMultiSource:
         """某源失败后继续降级，最终由后续完整源提供。"""
         svc = _make_service()
         sources = [
-            ("efinance", _FakeClient(error=ConnectionError("timeout"))),
+            ("tickflow", _FakeClient(error=ConnectionError("timeout"))),
             ("baostock", _FakeClient(_complete_bars())),
         ]
         monkeypatch.setattr(svc, "_build_index_daily_sources", lambda: sources)
@@ -216,7 +229,7 @@ class TestFetchAndUpsertIndexBars:
         monkeypatch.setattr(
             svc,
             "_fetch_index_daily_multi_source",
-            lambda *a, **k: (bars, "efinance"),
+            lambda *a, **k: (bars, "tickflow"),
         )
         captured: dict = {}
 
@@ -231,7 +244,7 @@ class TestFetchAndUpsertIndexBars:
         # _complete_bars(5) 日期为 01-05~01-09，仅保留 > 01-06 的 3 条
         assert len(captured["rows"]) == 3
         assert all(r.trade_date > latest for r in captured["rows"])
-        assert captured["source"] == "efinance"
+        assert captured["source"] == "tickflow"
 
 
 class TestRebuildIndexDataMultiSource:
@@ -248,7 +261,7 @@ class TestRebuildIndexDataMultiSource:
         monkeypatch.setattr(
             svc,
             "_fetch_index_daily_multi_source",
-            lambda *a, **k: (_complete_bars(), "pytdx"),
+            lambda *a, **k: (_complete_bars(), "tickflow"),
         )
         # 估值仍走 AkShare 客户端（多源仅覆盖日线）
         monkeypatch.setattr(
@@ -269,11 +282,11 @@ class TestRebuildIndexDataMultiSource:
 
         svc.rebuild_index_data("run-1", "000300")
 
-        assert inserted["source"] == "pytdx"
+        assert inserted["source"] == "tickflow"
         assert inserted["index_code"] == "000300"
         assert inserted["count"] == 3
         svc._db.commit.assert_called()
         fake_run_svc.mark_success.assert_called_once()
         # 运行指标应记录实际数据源，便于排查走了哪个源
         metrics = fake_run_svc.mark_success.call_args.kwargs["metrics"]
-        assert metrics["bar_source"] == "pytdx"
+        assert metrics["bar_source"] == "tickflow"

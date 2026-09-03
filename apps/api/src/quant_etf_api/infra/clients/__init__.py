@@ -11,6 +11,7 @@ from quant_etf_api.infra.clients.akshare_macro import (
 )
 from quant_etf_api.infra.clients.base import BaseDataClient, HealthStatus
 from quant_etf_api.infra.clients.baostock_index import BaostockIndexClient
+from quant_etf_api.infra.clients.tickflow_index import TickFlowIndexClient
 from quant_etf_api.infra.clients.tushare_index import TushareIndexClient
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "IndexDailyBar",
     "IndexValuation",
     "MacroIndicator",
+    "TickFlowIndexClient",
     "TushareIndexClient",
     "BaostockIndexClient",
 ]

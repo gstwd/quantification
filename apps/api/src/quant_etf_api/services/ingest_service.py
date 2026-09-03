@@ -20,6 +20,7 @@ from quant_etf_api.infra.clients.index_daily_common import (
     compare_index_bar_overlap,
     ohlc_missing_count,
 )
+from quant_etf_api.infra.clients.tickflow_index import TickFlowIndexClient
 from quant_etf_api.infra.clients.tushare_index import TushareIndexClient
 from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.infra.db.base import utcnow
@@ -206,7 +207,7 @@ class IngestService:
         Args:
             index_code: 指数代码。
             bars: 待写入的日线数据列表（多数据源客户端统一返回 IndexDailyBar）。
-            source: 实际提供数据的数据源标识（如 efinance/akshare/tushare/pytdx/baostock）。
+            source: 实际提供数据的数据源标识（如 akshare/tickflow/tushare/baostock）。
 
         Returns:
             写入记录数。
@@ -243,13 +244,15 @@ class IngestService:
         """按配置优先级构建指数日线数据源列表。
 
         优先级来自 settings.index_daily_source_order（逗号分隔），
-        非法名称跳过并告警；tushare 未配置 Token 时自动跳过。
+        非法名称跳过并告警；tickflow 默认免费档可用（无需 Key），
+        tushare 未配置 Token 时自动跳过。
 
         Returns:
             [(数据源标识, 客户端实例), ...] 列表，按优先级排序。
         """
         registry: dict[str, Any] = {
             "akshare": AkShareIndexClient,
+            "tickflow": TickFlowIndexClient,
             "tushare": TushareIndexClient,
             "baostock": BaostockIndexClient,
         }
@@ -262,7 +265,7 @@ class IngestService:
             if client_cls is None:
                 logger.warning("未知的指数日线数据源 %s，已忽略", name)
                 continue
-            client = client_cls
+            client = client_cls()
             # tushare 依赖 Token，未配置时不加入候选，避免每次调用都打警告
             if isinstance(client, TushareIndexClient) and not client.is_configured():
                 logger.info("未配置 TUSHARE_TOKEN，跳过 tushare 指数日线源")

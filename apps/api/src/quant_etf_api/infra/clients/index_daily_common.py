@@ -35,8 +35,8 @@ class IndexDailyBar:
 def _parse_bar_date(value) -> date:
     """将上游日期的任意类型统一解析为 date。
 
-    AkShare / efinance / pytdx 等各接口返回的日期列类型不一致
-    （str / datetime / date / Timestamp），统一在此处收敛。
+    各 SDK/接口返回的日期列类型不一致（str / datetime / date / Timestamp），
+    统一在此处收敛。
 
     Args:
         value: 上游日期单元格值。
