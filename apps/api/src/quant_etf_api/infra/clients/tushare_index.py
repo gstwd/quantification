@@ -14,7 +14,7 @@ from quant_etf_api.infra.clients.index_daily_common import (
     _incremental_start_date,
     index_code_market_prefix,
 )
-from quant_etf_api.infra.clients.retry import with_retry
+from quant_etf_api.infra.clients.retry_decorator import with_retry
 
 # Tushare 免费档对指数日线接口有每分钟调用频次限制，调用间隔（秒）可配置
 _TUSHARE_MIN_INTERVAL = float(os.getenv("TUSHARE_INDEX_MIN_INTERVAL", "1.0"))

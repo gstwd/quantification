@@ -18,7 +18,7 @@ from quant_etf_api.infra.clients.index_daily_common import (
     _parse_bar_date,  # noqa: F401  # 兼容旧测试导入的共享助手
     ohlc_missing_count,
 )
-from quant_etf_api.infra.clients.retry import with_retry
+from quant_etf_api.infra.clients.retry_decorator import with_retry
 
 # 东方财富 API 调用超时上限（秒），防止代理/网络问题导致长时间阻塞
 _EM_API_TIMEOUT = 5

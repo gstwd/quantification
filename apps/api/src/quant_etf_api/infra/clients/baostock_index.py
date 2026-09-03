@@ -13,7 +13,7 @@ from quant_etf_api.infra.clients.index_daily_common import (
     _incremental_start_date,
     index_code_market_prefix,
 )
-from quant_etf_api.infra.clients.retry import with_retry
+from quant_etf_api.infra.clients.retry_decorator import with_retry
 
 # Baostock 为全局登录状态，并发调用需串行化（与 IngestService 多线程摄取配合）
 _BAOSTOCK_LOGIN_LOCK = threading.Lock()

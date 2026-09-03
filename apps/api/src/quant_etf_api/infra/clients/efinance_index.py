@@ -12,7 +12,7 @@ from quant_etf_api.infra.clients.index_daily_common import (
     _incremental_start_date,
     index_code_market_prefix,
 )
-from quant_etf_api.infra.clients.retry import with_retry
+from quant_etf_api.infra.clients.retry_decorator import with_retry
 
 # efinance 库内部使用 requests 无超时，东财主机不可达时可能长时间阻塞；
 # 统一在独立线程中执行并限制等待时间（秒），超时后仅放弃等待，线程由进程回收
@@ -196,3 +196,6 @@ class EfinanceIndexClient(BaseDataClient):
             )
         except Exception as e:
             return HealthStatus(healthy=False, message=str(e))
+if __name__ == '__main__':
+    bars = EfinanceIndexClient().fetch_index_daily("000300", "20260101", "20260131")
+    print(bars)
