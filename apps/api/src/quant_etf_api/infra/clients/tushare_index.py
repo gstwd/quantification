@@ -11,7 +11,7 @@ from quant_etf_api.infra.clients.base import BaseDataClient, HealthStatus
 from quant_etf_api.infra.clients.index_daily_common import (
     IndexDailyBar,
     _build_index_bars,
-    _incremental_start_date,
+    incremental_start_date,
     index_code_market_prefix,
 )
 from quant_etf_api.infra.clients.retry_decorator import with_retry
@@ -165,7 +165,7 @@ class TushareIndexClient(BaseDataClient):
         Returns:
             按日期升序排列的日线数据列表（含缓冲窗口内的历史行）。
         """
-        start = _incremental_start_date(since_date)
+        start = incremental_start_date(since_date)
         return self.fetch_index_daily(index_code, start_date=start.strftime("%Y%m%d"))
 
     def health_check(self) -> HealthStatus:

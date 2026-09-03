@@ -55,7 +55,7 @@ def _parse_bar_date(value) -> date:
     return date.fromisoformat(str(value))
 
 
-def _incremental_start_date(since_date: date) -> date:
+def incremental_start_date(since_date: date) -> date:
     """计算增量拉取的缓冲起始日。
 
     以 since_date 直接作为起点会丢失起点 bar 的 prev_close/change_pct，

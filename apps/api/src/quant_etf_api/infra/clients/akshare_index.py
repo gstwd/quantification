@@ -12,7 +12,7 @@ from quant_etf_api.infra.clients.base import BaseDataClient, HealthStatus
 from quant_etf_api.infra.clients.index_daily_common import (
     IndexDailyBar,
     _build_index_bars,
-    _incremental_start_date,
+    incremental_start_date,
     _index_code_to_market_symbol,
     _ohlc_missing_ratio,  # noqa: F401  # 兼容旧测试导入的共享助手
     _parse_bar_date,  # noqa: F401  # 兼容旧测试导入的共享助手
@@ -703,7 +703,7 @@ class AkShareIndexClient(BaseDataClient):
         Returns:
             按日期升序排列的日线数据列表（含缓冲窗口内的历史行）
         """
-        start = _incremental_start_date(since_date)
+        start = incremental_start_date(since_date)
         return self.fetch_index_daily(index_code, start_date=start.strftime("%Y%m%d"))
 
     # ------------------------------------------------------------------

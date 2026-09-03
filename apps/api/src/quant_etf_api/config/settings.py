@@ -105,9 +105,9 @@ class Settings(BaseSettings):
         description="Tushare Pro API Token，配置后启用 tushare 指数日线数据源",
     )
     index_daily_source_order: str = Field(
-        default="efinance,akshare,tushare,pytdx,baostock",
+        default="akshare,tushare,baostock",
         description=(
-            "指数日线多数据源优先级（逗号分隔），可选 efinance/akshare/tushare/pytdx/baostock；"
+            "指数日线多数据源优先级（逗号分隔），可选 akshare/tushare/baostock；"
             "tushare 未配置 Token 时自动跳过"
         ),
     )

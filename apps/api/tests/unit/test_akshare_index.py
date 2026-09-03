@@ -17,7 +17,7 @@ from quant_etf_api.infra.clients.akshare_index import (
     IndexValuation,
     _build_index_bars,
     _calc_percentile,
-    _incremental_start_date,
+    incremental_start_date,
     _ohlc_missing_ratio,
 )
 
@@ -121,7 +121,7 @@ class TestIndexDaily:
         since = date(2026, 1, 5)
         bars = _retry_fetch(lambda: client.fetch_index_daily_since("000300", since))
         assert len(bars) > 0
-        assert bars[0].trade_date >= _incremental_start_date(since)
+        assert bars[0].trade_date >= incremental_start_date(since)
         assert bars[-1].trade_date >= since
         # 缓冲窗口保证 since 之后每根 bar 都有前收盘
         for b in bars:
@@ -222,7 +222,7 @@ class TestClientOptimizations:
 
     def test_incremental_start_date(self) -> None:
         """增量缓冲窗口回退 10 个自然日。"""
-        assert _incremental_start_date(date(2026, 1, 15)) == date(2026, 1, 5)
+        assert incremental_start_date(date(2026, 1, 15)) == date(2026, 1, 5)
 
     def test_call_with_timeout_returns_fast(self, client: AkShareIndexClient) -> None:
         """超时调用在限定时间内返回，不阻塞等待后台线程。"""

@@ -14,14 +14,12 @@ from quant_etf_api.config.settings import get_settings
 from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
 from quant_etf_api.infra.clients.akshare_macro import AkShareMacroClient
 from quant_etf_api.infra.clients.baostock_index import BaostockIndexClient
-from quant_etf_api.infra.clients.efinance_index import EfinanceIndexClient
 from quant_etf_api.infra.clients.index_daily_common import (
     IndexDailyBar,
-    _incremental_start_date,
+    incremental_start_date,
     compare_index_bar_overlap,
     ohlc_missing_count,
 )
-from quant_etf_api.infra.clients.pytdx_index import PytdxIndexClient
 from quant_etf_api.infra.clients.tushare_index import TushareIndexClient
 from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.infra.db.base import utcnow
@@ -251,10 +249,8 @@ class IngestService:
             [(数据源标识, 客户端实例), ...] 列表，按优先级排序。
         """
         registry: dict[str, Any] = {
-            "efinance": EfinanceIndexClient,
             "akshare": AkShareIndexClient,
             "tushare": TushareIndexClient,
-            "pytdx": PytdxIndexClient,
             "baostock": BaostockIndexClient,
         }
         order = get_settings().index_daily_source_order
@@ -266,7 +262,7 @@ class IngestService:
             if client_cls is None:
                 logger.warning("未知的指数日线数据源 %s，已忽略", name)
                 continue
-            client = client_cls()
+            client = client_cls
             # tushare 依赖 Token，未配置时不加入候选，避免每次调用都打警告
             if isinstance(client, TushareIndexClient) and not client.is_configured():
                 logger.info("未配置 TUSHARE_TOKEN，跳过 tushare 指数日线源")
@@ -386,7 +382,7 @@ class IngestService:
         latest = self._index_bar_repo.get_latest_date(index_code) if incremental else None
         if latest is not None:
             # 增量拉取：客户端从 latest 回退缓冲窗口，保证边界 bar 的涨跌幅可算
-            start = _incremental_start_date(latest)
+            start = incremental_start_date(latest)
             bars, source = self._fetch_index_daily_multi_source(
                 index_code, start_date=start.strftime("%Y%m%d")
             )

@@ -9,7 +9,7 @@ import pandas as pd
 from quant_etf_api.infra.clients.index_daily_common import (
     IndexDailyBar,
     _build_index_bars,
-    _incremental_start_date,
+    incremental_start_date,
     _index_code_to_market_symbol,
     _parse_bar_date,
     compare_index_bar_overlap,
@@ -77,7 +77,7 @@ class TestIncrementalStartDate:
 
     def test_buffer_days(self) -> None:
         """起点回退 10 个自然日。"""
-        assert _incremental_start_date(date(2026, 1, 15)) == date(2026, 1, 5)
+        assert incremental_start_date(date(2026, 1, 15)) == date(2026, 1, 5)
 
 
 class TestStrictOhlcQuality:
