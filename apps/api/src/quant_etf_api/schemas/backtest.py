@@ -75,6 +75,18 @@ class BacktestMetrics(BaseModel):
     data_gap_days: int = 0
 
 
+class AnnualMetrics(BaseModel):
+    """单自然年的回测绩效汇总（分年度表）。"""
+
+    year: int
+    trading_days: int
+    total_return_pct: float
+    annualized_return_pct: float
+    sharpe_ratio: float
+    sortino_ratio: float
+    max_drawdown_pct: float
+
+
 class BacktestSummary(BaseModel):
     """回测列表摘要，不含明细数据。"""
 
@@ -101,6 +113,7 @@ class BacktestDetail(BacktestSummary):
     config_hash: str | None = None
     data_cutoff_date: date | None = None
     optimization_id: str | None = None
+    annual_metrics: list[AnnualMetrics] = Field(default_factory=list)
 
 
 class BacktestDailyResult(BaseModel):
@@ -121,6 +134,8 @@ class BacktestDailyResult(BaseModel):
         benchmark_return: 基准日收益率（%）。
         turnover: 当日换手率。
         missing_bar_count: 当日受数据缺口影响的持仓资产数（B10）。
+        rolling_sharpe_252: 截至当日的 252 交易日滚动夏普比率，样本不足时为 None。
+        rolling_sortino_252: 截至当日的 252 交易日滚动索提诺比率，样本不足时为 None。
     """
 
     trade_date: date
@@ -137,6 +152,8 @@ class BacktestDailyResult(BaseModel):
     benchmark_return: float | None = None
     turnover: float | None = None
     missing_bar_count: int = 0
+    rolling_sharpe_252: float | None = None
+    rolling_sortino_252: float | None = None
 
 
 class BacktestIndexResult(BaseModel):

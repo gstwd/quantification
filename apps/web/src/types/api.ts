@@ -180,6 +180,23 @@ export interface BacktestMetrics {
   data_gap_days: number
 }
 
+/** 单自然年的回测绩效汇总（分年度表） */
+export interface AnnualMetrics {
+  year: number
+  /** 该年参与统计的交易日数 */
+  trading_days: number
+  /** 该年累计收益率（%） */
+  total_return_pct: number
+  /** 该年年化收益率（%） */
+  annualized_return_pct: number
+  /** 该年夏普比率 */
+  sharpe_ratio: number
+  /** 该年索提诺比率 */
+  sortino_ratio: number
+  /** 该年最大回撤（%，负值） */
+  max_drawdown_pct: number
+}
+
 export interface BacktestSummary {
   backtest_id: string
   strategy_id: string
@@ -200,6 +217,8 @@ export interface BacktestDetail extends BacktestSummary {
   params: Record<string, unknown> | null
   /** 回测执行过程中的结构化提示（预热期/因子缺失/数据缺口/部分结果等） */
   warnings?: BacktestWarning[]
+  /** 分年度绩效表（仅成功回测返回） */
+  annual_metrics?: AnnualMetrics[]
 }
 
 export interface BacktestDailyResult {
@@ -220,6 +239,10 @@ export interface BacktestDailyResult {
   turnover?: number | null
   /** 当日受数据缺口影响的持仓资产数（0=无缺口） */
   missing_bar_count?: number
+  /** 截至当日的 252 交易日滚动夏普比率，样本不足时为 null */
+  rolling_sharpe_252?: number | null
+  /** 截至当日的 252 交易日滚动索提诺比率，样本不足时为 null */
+  rolling_sortino_252?: number | null
 }
 
 /** 回测执行过程中的结构化提示级别 */

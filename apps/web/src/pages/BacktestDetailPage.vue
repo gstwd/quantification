@@ -138,6 +138,37 @@
         </template>
       </div>
 
+      <!-- 分年度绩效表 -->
+      <div v-if="store.current?.annual_metrics?.length" class="metrics-section">
+        <div class="section-label">分年度绩效</div>
+        <div class="annual-table-wrap">
+          <table class="annual-table">
+            <thead>
+              <tr>
+                <th>年份</th>
+                <th>交易日</th>
+                <th>累计收益</th>
+                <th>年化收益</th>
+                <th>夏普</th>
+                <th>索提诺</th>
+                <th>最大回撤</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in store.current.annual_metrics" :key="row.year">
+                <td>{{ row.year }}</td>
+                <td>{{ row.trading_days }}</td>
+                <td :class="pctClass(row.total_return_pct)">{{ formatPct(row.total_return_pct) }}</td>
+                <td :class="pctClass(row.annualized_return_pct)">{{ formatPct(row.annualized_return_pct) }}</td>
+                <td>{{ row.sharpe_ratio.toFixed(2) }}</td>
+                <td>{{ row.sortino_ratio.toFixed(2) }}</td>
+                <td class="danger">{{ formatPct(row.max_drawdown_pct) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <!-- 权益曲线 -->
       <div class="chart-card">
         <div class="chart-title">权益曲线（累计收益率 %）</div>
@@ -148,6 +179,12 @@
       <div class="chart-card">
         <div class="chart-title">回撤曲线（%）</div>
         <div ref="drawdownChartEl" class="chart-container"></div>
+      </div>
+
+      <!-- 滚动风险调整指标 -->
+      <div v-if="hasRollingMetrics" class="chart-card">
+        <div class="chart-title">滚动风险调整指标（252 个交易日窗口）</div>
+        <div ref="rollingChartEl" class="chart-container"></div>
       </div>
 
       <!-- 仓位变化 -->
@@ -200,6 +237,7 @@ const store = useBacktestStore()
 
 const equityChartEl = ref<HTMLElement | null>(null)
 const drawdownChartEl = ref<HTMLElement | null>(null)
+const rollingChartEl = ref<HTMLElement | null>(null)
 const positionsChartEl = ref<HTMLElement | null>(null)
 const timingChartEl = ref<HTMLElement | null>(null)
 /** 轮询回测执行状态，组件卸载时自动停止 */
@@ -220,6 +258,8 @@ const indexNameMap = ref<Record<string, string>>({})
 let equityChart: any = null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let drawdownChart: any = null
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let rollingChart: any = null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let positionsChart: any = null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -254,9 +294,21 @@ function formatPct(v: number): string {
   return (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
 }
 
+/** 收益类数值的颜色类（正收益/负收益） */
+function pctClass(v: number): string {
+  return v >= 0 ? 'success' : 'danger'
+}
+
 /** 是否有基准收益数据 */
 const hasBenchmark = computed(() => {
   return store.dailyResults.some((r) => r.benchmark_return !== null && r.benchmark_return !== undefined)
+})
+
+/** 是否存在至少一个非空的滚动指标点 */
+const hasRollingMetrics = computed(() => {
+  return store.dailyResults.some(
+    (r) => r.rolling_sharpe_252 != null || r.rolling_sortino_252 != null,
+  )
 })
 
 /** 基准累计收益率序列（从日收益率累加，用于权益曲线对比） */
@@ -376,6 +428,48 @@ async function initCharts() {
         lineStyle: { color: '#ef4444', width: 1.5 },
         areaStyle: { color: 'rgba(239,68,68,0.15)' },
       }],
+    })
+  }
+
+  // 滚动夏普/索提诺（252 个交易日窗口，样本不足处留空）
+  if (rollingChartEl.value && hasRollingMetrics.value) {
+    rollingChart?.dispose()
+    rollingChart = echarts.init(rollingChartEl.value)
+    rollingChart.setOption({
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'axis',
+        formatter: (params: { name: string; seriesName: string; value: number | null }[]) => {
+          let tip = params[0]?.name ? `${params[0].name}<br/>` : ''
+          for (const p of params) {
+            if (p.value === null || p.value === undefined) continue
+            tip += `${p.seriesName}: ${p.value.toFixed(2)}<br/>`
+          }
+          return tip
+        },
+      },
+      legend: { data: ['滚动夏普', '滚动索提诺'], textStyle: { color: '#94a3b8', fontSize: 11 }, top: 0 },
+      grid: { left: 60, right: 20, top: 30, bottom: 40 },
+      xAxis: { type: 'category', data: dates, axisLabel: { color: '#94a3b8', fontSize: 11 }, axisLine: { lineStyle: { color: '#334155' } } },
+      yAxis: { type: 'value', scale: true, axisLabel: { color: '#94a3b8', fontSize: 11, formatter: (v: number) => v.toFixed(1) }, splitLine: { lineStyle: { color: '#1e293b' } } },
+      series: [
+        {
+          name: '滚动夏普',
+          type: 'line',
+          data: store.dailyResults.map((r) => r.rolling_sharpe_252 ?? null),
+          smooth: true,
+          symbol: 'none',
+          lineStyle: { color: '#3b82f6', width: 1.8 },
+        },
+        {
+          name: '滚动索提诺',
+          type: 'line',
+          data: store.dailyResults.map((r) => r.rolling_sortino_252 ?? null),
+          smooth: true,
+          symbol: 'none',
+          lineStyle: { color: '#a855f7', width: 1.8 },
+        },
+      ],
     })
   }
 
@@ -585,6 +679,7 @@ onMounted(async () => {
 onUnmounted(() => {
   equityChart?.dispose()
   drawdownChart?.dispose()
+  rollingChart?.dispose()
   positionsChart?.dispose()
   timingChart?.dispose()
 })
@@ -600,6 +695,36 @@ onUnmounted(() => {
 .subtitle { font-size: 13px; color: var(--text-muted); margin-top: 2px; }
 
 .loading { padding: 60px; text-align: center; color: var(--text-muted); }
+
+.annual-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.annual-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.annual-table th,
+.annual-table td {
+  padding: 8px 14px;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+.annual-table th {
+  color: var(--text-muted);
+  font-weight: 600;
+  background: rgba(148, 163, 184, 0.06);
+}
+.annual-table tr:last-child td {
+  border-bottom: none;
+}
+.annual-table td:first-child {
+  text-align: left;
+  font-weight: 600;
+}
 
 .polling-banner {
   display: flex;

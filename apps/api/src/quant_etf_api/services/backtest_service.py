@@ -49,6 +49,7 @@ from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRep
 from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
 from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
 from quant_etf_api.schemas.backtest import (
+    AnnualMetrics,
     BacktestComparisonCreateRequest,
     BacktestComparisonDetail,
     BacktestComparisonSummary,
@@ -64,7 +65,11 @@ from quant_etf_api.schemas.backtest import (
     ComparisonMetrics,
 )
 from quant_etf_api.services.benchmark import compute_buy_hold_benchmark
-from quant_etf_api.services.metrics import compute_performance_metrics
+from quant_etf_api.services.metrics import (
+    compute_annual_breakdown,
+    compute_performance_metrics,
+    compute_rolling_metrics,
+)
 from quant_etf_api.services.strategy_config_service import (
     StrategyConfigService,
     compute_config_hash,
@@ -284,16 +289,42 @@ class BacktestService:
             row = self._backtest_repo.find_by_id(backtest_id)
             if row is None:
                 return None
-            return self._row_to_detail(row)
+            detail = self._row_to_detail(row)
+            # 分年度绩效表：读取时按自然年切分已持久化的日收益序列计算，
+            # 存量回测无需重跑即可获得该表（滚动/分年度口径仅依赖单条序列）
+            if detail.status == "success":
+                daily_rows = self._backtest_repo.find_daily_results(backtest_id)
+                if daily_rows:
+                    annual_rows = compute_annual_breakdown(
+                        [r.portfolio_return for r in daily_rows],
+                        [r.trade_date for r in daily_rows],
+                    )
+                    detail = detail.model_copy(
+                        update={
+                            "annual_metrics": [
+                                AnnualMetrics(
+                                    year=r.year,
+                                    trading_days=r.trading_days,
+                                    total_return_pct=r.total_return_pct,
+                                    annualized_return_pct=r.annualized_return_pct,
+                                    sharpe_ratio=r.sharpe_ratio,
+                                    sortino_ratio=r.sortino_ratio,
+                                    max_drawdown_pct=r.max_drawdown_pct,
+                                )
+                                for r in annual_rows
+                            ]
+                        }
+                    )
+            return detail
         except Exception:
             logger.warning("get_backtest DB query failed", exc_info=True)
             return None
 
     def get_daily_results(self, backtest_id: str) -> list[BacktestDailyResult]:
-        """返回回测每日组合绩效。"""
+        """返回回测每日组合绩效（含 252 交易日滚动夏普/索提诺）。"""
         try:
             rows = self._backtest_repo.find_daily_results(backtest_id)
-            return [
+            results = [
                 BacktestDailyResult(
                     trade_date=r.trade_date,
                     portfolio_return=r.portfolio_return,
@@ -312,6 +343,20 @@ class BacktestService:
                 )
                 for r in rows
             ]
+            if rows:
+                # 滚动指标在读取路径计算：与全期指标共用同一纯函数与口径，
+                # 样本不足 252 个交易日的回测前段返回 None（前端留空展示）
+                rolling = compute_rolling_metrics([r.portfolio_return for r in rows])
+                results = [
+                    m.model_copy(
+                        update={
+                            "rolling_sharpe_252": rm.sharpe_ratio if rm else None,
+                            "rolling_sortino_252": rm.sortino_ratio if rm else None,
+                        }
+                    )
+                    for m, rm in zip(results, rolling)
+                ]
+            return results
         except Exception:
             logger.warning("get_daily_results DB query failed", exc_info=True)
             return []
@@ -486,6 +531,12 @@ class BacktestService:
         params = row.params or {}
         enable_benchmark = params.get("_enable_benchmark", True)
         benchmark_index_code = params.get("_benchmark_index_code", "000300")
+        # 基准口径标记：策略/基准逐日序列均按"决策日归因"落账
+        # （T 日决策 → T+1 行情），历史数据一次性回填命令据此跳过新记录
+        params["_benchmark_alignment"] = "decision_day"
+        row.params = params
+        # 无风险利率（%）：默认 0（历史口径），预留从回测参数读取的通道
+        risk_free_rate_pct = float(params.get("_annual_risk_free_rate_pct", 0.0) or 0.0)
 
         # 基准日收益率序列
         benchmark_returns: list[float] = []
@@ -702,6 +753,7 @@ class BacktestService:
             total_in_pos_count=total_in_pos_count,
             total_in_pos_positive=total_in_pos_positive,
             data_gap_days=data_gap_days,
+            annual_risk_free_rate_pct=risk_free_rate_pct,
         )
         # 收集结构化警告：预热期 / 因子缺失 / 数据缺口 / 基准缺失，
         # 随成功状态一并持久化，前端轮询时按 key 去重弹窗。
@@ -725,13 +777,9 @@ class BacktestService:
                 FactorProvider.collect_required_factor_ids(config),
             )
         )
-        run_warnings.extend(
-            self._collect_data_gap_warnings(trading_dates, index_codes, all_bars)
-        )
+        run_warnings.extend(self._collect_data_gap_warnings(trading_dates, index_codes, all_bars))
         if enable_benchmark:
-            bench_missing = [
-                d for d in trading_dates if (benchmark_index_code, d) not in all_bars
-            ]
+            bench_missing = [d for d in trading_dates if (benchmark_index_code, d) not in all_bars]
             if bench_missing:
                 run_warnings.append(
                     BacktestWarning(
@@ -943,6 +991,7 @@ class BacktestService:
         total_in_pos_count: int = 0,
         total_in_pos_positive: int = 0,
         data_gap_days: int = 0,
+        annual_risk_free_rate_pct: float = 0.0,
     ) -> dict[str, Any]:
         """计算回测汇总绩效指标，集成专业指标和基准对比。
 
@@ -952,6 +1001,7 @@ class BacktestService:
             total_in_pos_count: 持仓指数总次数（主循环累积）。
             total_in_pos_positive: 持仓指数正收益总次数（主循环累积）。
             data_gap_days: 至少一个持仓资产受数据缺口影响的交易日数（B10）。
+            annual_risk_free_rate_pct: 年化无风险利率（%），默认 0（历史口径）。
         """
         if not accumulator.daily_returns:
             return BacktestMetrics(
@@ -972,6 +1022,7 @@ class BacktestService:
             daily_rets,
             benchmark_returns=benchmark_returns if benchmark_returns else None,
             active_returns=active_rets,
+            annual_risk_free_rate_pct=annual_risk_free_rate_pct,
         )
 
         # 信号准确率（从主循环累积的内存计数器获取，无需 DB 查询）
