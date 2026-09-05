@@ -29,7 +29,6 @@ class RunType(StrEnum):
     DAILY_INGEST = "daily_ingest"
     STRATEGY_RUN = "strategy_run"
     COLD_START = "cold_start"
-    STARTUP_FILL = "startup_fill"
     FACTOR_COMPUTATION = "factor_computation"
     INDEX_REBUILD = "index_rebuild"
     INDEX_INCREMENTAL_FILL = "index_incremental_fill"

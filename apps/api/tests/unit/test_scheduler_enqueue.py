@@ -24,13 +24,39 @@ class TestDailyIngestScheduler:
     """日频摄取调度器测试。"""
 
     def test_execute_enqueues_daily_ingest(self, monkeypatch) -> None:
-        """交易日应创建 run 并入队 daily_ingest，不执行摄取。"""
+        """应创建 run 并入队 daily_ingest，不执行摄取（不做交易日判断）。"""
+        fake_db = MagicMock()
+        monkeypatch.setattr(
+            "quant_etf_api.infra.db.base.SessionLocal", lambda: fake_db
+        )
+        fake_run_svc = MagicMock()
+        fake_run_svc.create_run.return_value = _make_run_summary()
+        monkeypatch.setattr(
+            "quant_etf_api.infra.scheduler.RunService", lambda db: fake_run_svc
+        )
+        fake_queue = MagicMock()
+        monkeypatch.setattr(
+            "quant_etf_api.infra.scheduler.get_job_queue", lambda: fake_queue
+        )
+        scheduler = DailyIngestScheduler()
+
+        scheduler._execute_daily_ingest()
+
+        fake_run_svc.create_run.assert_called_once_with("daily_ingest", None, date.today())
+        fake_queue.enqueue.assert_called_once_with(
+            "daily_ingest",
+            {"run_id": "run-1"},
+            job_key="daily_ingest",
+        )
+
+    def test_non_trading_day_still_enqueues(self, monkeypatch) -> None:
+        """非交易日也创建 run 并入队，由摄取侧补拉最近交易日数据。"""
         fake_db = MagicMock()
         monkeypatch.setattr(
             "quant_etf_api.infra.db.base.SessionLocal", lambda: fake_db
         )
         fake_cal = MagicMock()
-        fake_cal.is_trading_day.return_value = True
+        fake_cal.is_trading_day.return_value = False
         monkeypatch.setattr(
             "quant_etf_api.infra.scheduler.TradingCalendar", lambda: fake_cal
         )
@@ -53,32 +79,8 @@ class TestDailyIngestScheduler:
             {"run_id": "run-1"},
             job_key="daily_ingest",
         )
-
-    def test_non_trading_day_skips(self, monkeypatch) -> None:
-        """非交易日应跳过，不创建 run 也不入队。"""
-        fake_db = MagicMock()
-        monkeypatch.setattr(
-            "quant_etf_api.infra.db.base.SessionLocal", lambda: fake_db
-        )
-        fake_cal = MagicMock()
-        fake_cal.is_trading_day.return_value = False
-        monkeypatch.setattr(
-            "quant_etf_api.infra.scheduler.TradingCalendar", lambda: fake_cal
-        )
-        fake_run_svc = MagicMock()
-        monkeypatch.setattr(
-            "quant_etf_api.infra.scheduler.RunService", lambda db: fake_run_svc
-        )
-        fake_queue = MagicMock()
-        monkeypatch.setattr(
-            "quant_etf_api.infra.scheduler.get_job_queue", lambda: fake_queue
-        )
-        scheduler = DailyIngestScheduler()
-
-        scheduler._execute_daily_ingest()
-
-        fake_run_svc.create_run.assert_not_called()
-        fake_queue.enqueue.assert_not_called()
+        # 调度器不再自行按交易日跳过，交易日判断交给摄取服务按数据缺口处理
+        fake_cal.is_trading_day.assert_not_called()
 
 
 class TestAIAnalysisScheduler:

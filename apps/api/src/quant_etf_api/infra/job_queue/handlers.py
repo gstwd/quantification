@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def handle_daily_ingest(payload: dict) -> None:
-    """执行日频数据摄取，落库完成后入队当日因子计算。"""
+    """执行日频数据摄取，落库完成后按实际行情日期入队因子计算。"""
     from quant_etf_api.infra.db.base import SessionLocal
     from quant_etf_api.infra.job_queue.queue import get_job_queue
     from quant_etf_api.services.ingest_service import IngestService
@@ -25,14 +25,15 @@ def handle_daily_ingest(payload: dict) -> None:
     db = SessionLocal()
     try:
         RunService(db).mark_running(run_id)
-        IngestService(db).run_daily_ingest(run_id)
-        # 数据落库完成后触发当日因子计算，避免与摄取任务竞态
-        today = date.today()
-        get_job_queue().enqueue(
-            "factor_computation",
-            {"trade_date": today.isoformat()},
-            job_key=f"factor_computation:{today}",
-        )
+        # 返回值仅在本次有新数据落库时非空：按实际补齐的交易日入队因子
+        # 计算，避免按日历"今天"产生无行情日期的因子，也避免空跑重复计算
+        data_date = IngestService(db).run_daily_ingest(run_id)
+        if data_date is not None:
+            get_job_queue().enqueue(
+                "factor_computation",
+                {"trade_date": data_date.isoformat()},
+                job_key=f"factor_computation:{data_date.isoformat()}",
+            )
     except Exception as e:
         logger.exception("数据摄取任务异常: run_id=%s", run_id)
         RunService(db).mark_failed(run_id, f"数据摄取异常: {type(e).__name__}: {e}")
@@ -83,31 +84,6 @@ def handle_cold_start(payload: dict) -> None:
     except Exception as e:
         logger.exception("冷启动任务异常: run_id=%s", run_id)
         RunService(db).mark_failed(run_id, f"冷启动异常: {type(e).__name__}: {e}")
-        raise
-    finally:
-        db.close()
-
-
-def handle_startup_fill(payload: dict) -> None:
-    """执行启动补全：仅补全有数据缺口的指数。"""
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.services.ingest_service import IngestService
-    from quant_etf_api.services.run_service import RunService
-
-    db = SessionLocal()
-    run_id = payload.get("run_id") or ""
-    try:
-        # 调度触发时无 run_id，由处理器自行创建运行记录；
-        # 手动重试时复用传入的 run_id
-        if not run_id:
-            summary = RunService(db).create_run("startup_fill", None, date.today())
-            run_id = summary.run_id
-        RunService(db).mark_running(run_id)
-        IngestService(db).run_startup_fill(run_id)
-    except Exception as e:
-        logger.exception("启动补全任务异常")
-        if run_id:
-            RunService(db).mark_failed(run_id, f"启动补全异常: {type(e).__name__}: {e}")
         raise
     finally:
         db.close()
@@ -327,7 +303,6 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "daily_ingest": handle_daily_ingest,
     "strategy_run": handle_strategy_run,
     "cold_start": handle_cold_start,
-    "startup_fill": handle_startup_fill,
     "index_refresh": handle_index_refresh,
     "macro_refresh": handle_macro_refresh,
     "index_rebuild": handle_index_rebuild,

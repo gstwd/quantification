@@ -17,6 +17,8 @@ class DailyIngestScheduler:
     """日频数据自动调度器。
 
     使用 daemon 线程 + Event 循环，在预定的时间点触发每日数据摄取。
+    无论当天是否交易日都会入队：周末/节假日触发时由摄取服务按"最近
+    交易日缺口"决定是否补拉，避免节假日错过上一交易日数据后无法补齐。
     调度线程仅作为定时器：将摄取任务入队后立即返回，
     实际执行由后台任务队列的固定 worker 完成。
     """
@@ -68,13 +70,14 @@ class DailyIngestScheduler:
         return (target - now).total_seconds()
 
     def _execute_daily_ingest(self) -> None:
-        """触发一次每日数据摄取任务（与手动触发走同一入队链路）。"""
+        """触发一次每日数据摄取任务（与手动触发走同一入队链路）。
+
+        不做交易日判断：摄取服务内部以最近交易日为目标检查缺口，
+        非交易日触发时自动补拉缺失的最近交易日数据。
+        """
         db = SessionLocal()
         try:
             today = date.today()
-            if not TradingCalendar().is_trading_day(today):
-                logger.info("调度器: 非交易日跳过 %s", today)
-                return
             summary = RunService(db).create_run("daily_ingest", None, today)
             get_job_queue().enqueue(
                 "daily_ingest",

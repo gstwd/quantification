@@ -115,7 +115,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
   - `retry_decorator.py` — `@with_retry()` 装饰器，指数退避重试，参数可通过环境变量 `AKSHARE_RETRY_MAX_ATTEMPTS` / `AKSHARE_RETRY_BASE_DELAY` 配置
 - **`infra/trading_calendar.py`** — `TradingCalendar` 类，通过 `akshare.tool_trade_date_hist_sina()` 获取 A 股交易日历，内存缓存 TTL=1 天，API 不可用时降级为周末判断
-- **`infra/scheduler/`** — `DailyIngestScheduler`: daemon `Thread` + `Event` loop, runs at `settings.schedule_time` (default 17:30), skips weekends. 调度器同步执行，不走线程池
+- **`infra/scheduler/`** — `DailyIngestScheduler` / `AIAnalysisScheduler`: daemon `Thread` + `Event` 定时器，仅将任务入队（`job_key="daily_ingest"` / `ai_analysis:{date}`），不执行外部调用；数据摄取调度器不做交易日判断（周末/节假日也入队，由摄取侧按最近交易日缺口补拉），任务由 `background_job` worker 执行。
 - **`api/executor.py`** — 共享后台任务线程池。所有 bg 路由（runs、backtests）通过 `get_bg_executor()` 获取统一 executor，`main.py` lifespan 统一 shutdown。所有 bg 函数统一 `mark_running` → `mark_success/failed` 状态流转，外层 try/except 兜底。
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
   - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）
@@ -193,7 +193,7 @@ Key migrations:
 
 ## Current State
 
-Services fully wired to PostgreSQL. Each data type has exactly **one** source: Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → 未命中时入队 `data_fill` 后台任务并返回空列表。后台任务统一走 `background_job` 持久化队列（迁移 0023）。`POST /api/runs/daily-ingest` 触发手动入队。Startup 时 lifespan 入队 `startup_fill` / `warm_calendar` 任务。
+Services fully wired to PostgreSQL. Each data type has exactly **one** source: Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → 未命中时入队 `data_fill` 后台任务并返回空列表。后台任务统一走 `background_job` 持久化队列（迁移 0023）。`POST /api/runs/daily-ingest` 触发手动入队。Startup 时 lifespan 仅入队 `warm_calendar` 预热任务（启动补全已移除）；`daily_ingest`/`index_refresh` 不再按"当天是否交易日"跳过，改为按最近交易日缺口补拉。
 
 **Strategy Engine**: `engine/` 包实现组件化策略执行管线。策略通过 `strategy_config` 表的 JSON 配置驱动，`StrategyConfigService` 管理 CRUD，`StrategyEngine` 执行管线。`FactorProvider` 桥接因子层与引擎层，`ContextBuilder` 统一构建实时和回测上下文。`BacktestService` 和 `StrategyExecutionService` 统一使用引擎执行。
 

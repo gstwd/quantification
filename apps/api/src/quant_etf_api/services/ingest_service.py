@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy import func
@@ -873,6 +873,39 @@ class IngestService:
     # 全量日频摄取（后台线程入口）
     # ==================================================================
 
+    def _has_bar_gap(self, index_code: str, target_date: date) -> bool:
+        """判断指数日线相对目标交易日是否存在需要补拉的缺口。
+
+        最新日线日期为 None（尚无数据）或早于目标交易日时视为存在缺口，
+        触发增量补拉；周末/节假日触发时目标为最近交易日，可自动补齐
+        缺失的上一交易日数据。
+
+        Args:
+            index_code: 指数代码。
+            target_date: 目标交易日（最近交易日）。
+
+        Returns:
+            True 表示需要补拉该指数日线。
+        """
+        latest = self._index_bar_repo.get_latest_date(index_code)
+        return latest is None or latest < target_date
+
+    def _has_valuation_gap(self, index_code: str, target_date: date) -> bool:
+        """判断指数估值相对目标交易日是否存在需要补拉的缺口。
+
+        口径与 _has_bar_gap 一致：估值来源更新晚于日线时也会单独补拉，
+        避免日线已就绪而 PE/PB 仍停留在更早交易日。
+
+        Args:
+            index_code: 指数代码。
+            target_date: 目标交易日（最近交易日）。
+
+        Returns:
+            True 表示需要补拉该指数估值。
+        """
+        latest = self._valuation_repo.get_latest_date(index_code)
+        return latest is None or latest < target_date
+
     def _try_acquire_ingest_lock(self, run_id: str) -> bool:
         """尝试获取摄取互斥锁，失败时将运行记录标记为 skipped。
 
@@ -934,50 +967,59 @@ class IngestService:
         logger.info("数据质量检测完成: trade_date=%s stats=%s", trade_date, stats)
         return stats
 
-    def run_daily_ingest(self, run_id: str) -> None:
+    def run_daily_ingest(self, run_id: str) -> date | None:
         """执行日频数据全量摄取任务（后台线程入口）。
 
+        无论当天是否为交易日都会执行：以最近一个交易日为目标日期，逐个指数
+        检查日线/估值是否落后于目标并增量补拉（周末/节假日触发时自动把数据
+        补到最近交易日）；已覆盖到最近交易日时不会发起外部拉取。
+
         依次拉取：
-        1. 所有基准指数的日线和估值
+        1. 所有基准指数的日线和估值（仅补有缺口的指数）
         2. 宏观指标（CPI/PMI/LPR）
 
-        完成后更新 research_run 状态为 success/skipped/failed
-        （并发冲突或非交易日时标记为 skipped，语义上表示"未执行"）。
+        完成后更新 research_run 状态：
+        - success：本次执行完成（无缺口时写入 0 条）
+        - skipped：与其它摄取任务并发冲突（metrics.reason=concurrent_skip）
+        - failed：整体异常
+
+        Args:
+            run_id: 运行记录 ID。
+
+        Returns:
+            实际有新数据落库时返回执行后全库最新日线日期（供处理器触发
+            对应日期的因子计算）；未产生新数据、并发冲突或失败时返回 None。
         """
         # 非阻塞并发控制：如果已有 ingest 正在运行，跳过本次执行
         if not self._try_acquire_ingest_lock(run_id):
-            return
+            return None
         try:
             start_time = utcnow()
             self._run_svc.mark_running(run_id)
 
-            today = date.today()
-            cal = TradingCalendar()
-
-            if not cal.is_trading_day(today):
-                self._run_svc.mark_skipped(
-                    run_id,
-                    metrics={"reason": "holiday", "message": "非交易日，跳过数据摄取"},
-                )
-                return
+            # 以最近交易日为补拉目标：非交易日（周末/节假日）也能把缺失的
+            # 上一交易日数据补上，而不是按"今天是否交易日"一刀切跳过
+            target_date = TradingCalendar().latest_trading_day(date.today())
 
             # ------------------------------ 1. 指数日线 + 估值 ------------------------------
-            indexes = (
-                self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
-            )
+            indexes = self._index_repo.find_all()
             index_bar_count = 0
             index_valuation_count = 0
 
             for idx in indexes:
-                try:
-                    index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code)
-                except Exception as e:
-                    logger.warning("指数 %s 日线拉取失败: %s", idx.index_code, e)
+                if self._has_bar_gap(idx.index_code, target_date):
+                    try:
+                        index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code)
+                    except Exception as e:
+                        logger.warning("指数 %s 日线补拉失败: %s", idx.index_code, e)
 
-                try:
-                    index_valuation_count += self._fetch_and_upsert_index_valuation(idx.index_code)
-                except Exception as e:
-                    logger.warning("指数 %s 估值拉取失败: %s", idx.index_code, e)
+                if self._has_valuation_gap(idx.index_code, target_date):
+                    try:
+                        index_valuation_count += self._fetch_and_upsert_index_valuation(
+                            idx.index_code
+                        )
+                    except Exception as e:
+                        logger.warning("指数 %s 估值补拉失败: %s", idx.index_code, e)
 
             # ------------------------------ 2. 宏观指标 ------------------------------
             macro_count = 0
@@ -986,10 +1028,11 @@ class IngestService:
             except Exception as e:
                 logger.warning("宏观指标拉取失败: %s", e)
 
-            # 数据质量检测接入摄取闭环：异常记录日志并计入运行指标
-            quality = self._run_quality_checks(today)
+            # 数据质量检测接入摄取闭环：以目标交易日为准检测新补齐的数据
+            quality = self._run_quality_checks(target_date)
 
-            # ------------------------------ 汇总 ------------------------------
+            # 汇总时返回执行后最新行情日期，供因子计算按实际数据日期入队
+            data_date = self._index_bar_repo.get_latest_trade_date()
             self._run_svc.mark_success(
                 run_id,
                 metrics={
@@ -1000,14 +1043,21 @@ class IngestService:
                     },
                     "macro": {"records": macro_count},
                     "quality": quality,
+                    "target_date": target_date.isoformat(),
+                    "data_date": data_date.isoformat() if data_date is not None else None,
                     "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
                 },
             )
+            # 仅在实际有新数据落库时返回数据日期，避免空跑（如周末无缺口）
+            # 时重复入队同一交易日的因子计算
+            has_new_data = index_bar_count > 0 or index_valuation_count > 0
+            return data_date if has_new_data and data_date is not None else None
 
         except Exception as e:
             self._db.rollback()
             logger.warning("run_daily_ingest 整体失败: %s", e, exc_info=True)
             self._run_svc.mark_failed(run_id, str(e)[:1000])
+            return None
         finally:
             _daily_ingest_lock.release()
 
@@ -1018,6 +1068,10 @@ class IngestService:
     def refresh_index_data(self, run_id: str) -> None:
         """刷新所有基准指数的日线和估值数据（后台线程入口）。
 
+        与 daily_ingest 同样不再按"当天是否交易日"跳过：以最近交易日为
+        目标日期，仅补拉落后于该日期的指数（周末/节假日触发会补齐缺失的
+        最近交易日数据），已是最新时不会发起外部拉取。
+
         Args:
             run_id: 运行记录 ID。
         """
@@ -1027,31 +1081,29 @@ class IngestService:
         try:
             self._run_svc.mark_running(run_id)
 
-            today = date.today()
-            cal = TradingCalendar()
-            if not cal.is_trading_day(today):
-                self._run_svc.mark_skipped(
-                    run_id,
-                    metrics={"reason": "holiday", "message": "非交易日，跳过数据摄取"},
-                )
-                return
+            # 补拉目标 = 最近交易日；非交易日触发时自动补上一交易日
+            target_date = TradingCalendar().latest_trading_day(date.today())
 
             indexes = self._index_repo.find_all()
             index_bar_count = 0
             index_valuation_count = 0
 
             for idx in indexes:
-                try:
-                    index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code)
-                except Exception as e:
-                    logger.warning("指数 %s 日线拉取失败: %s", idx.index_code, e)
+                if self._has_bar_gap(idx.index_code, target_date):
+                    try:
+                        index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code)
+                    except Exception as e:
+                        logger.warning("指数 %s 日线补拉失败: %s", idx.index_code, e)
 
-                try:
-                    index_valuation_count += self._fetch_and_upsert_index_valuation(idx.index_code)
-                except Exception as e:
-                    logger.warning("指数 %s 估值拉取失败: %s", idx.index_code, e)
+                if self._has_valuation_gap(idx.index_code, target_date):
+                    try:
+                        index_valuation_count += self._fetch_and_upsert_index_valuation(
+                            idx.index_code
+                        )
+                    except Exception as e:
+                        logger.warning("指数 %s 估值补拉失败: %s", idx.index_code, e)
 
-            quality = self._run_quality_checks(today)
+            quality = self._run_quality_checks(target_date)
             self._run_svc.mark_success(
                 run_id,
                 metrics={
@@ -1061,6 +1113,7 @@ class IngestService:
                         "valuation_records": index_valuation_count,
                     },
                     "quality": quality,
+                    "target_date": target_date.isoformat(),
                     "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
                 },
             )
@@ -1186,7 +1239,9 @@ class IngestService:
     def incremental_fill_index_data(self, run_id: str, index_code: str) -> None:
         """单指数增量补数据：从数据库最新交易日补充到当天（后台线程入口）。
 
-        与 refresh_index_data 一致：非交易日标记 skipped，避免重复执行。
+        本入口服务于指数详情页的单指数手动增量，仍按"当天是否交易日"
+        判断：非交易日标记 skipped（不参与 daily_ingest/index_refresh 的
+        "按最近交易日缺口补拉"语义）。
 
         Args:
             run_id: 运行记录 ID。
@@ -1286,60 +1341,3 @@ class IngestService:
             logger.warning("run_cold_start 整体失败: %s", e, exc_info=True)
             self._run_svc.mark_failed(run_id, str(e)[:1000])
 
-    def run_startup_fill(self, run_id: str) -> None:
-        """启动补全：检查所有指数的数据缺口并按需补全（系统启动时自动调用）。
-
-        与 run_cold_start 的区别：
-        - 指数/宏观数据仅在超过 5 天未更新时才重新拉取
-        """
-        start_time = utcnow()
-        stale_threshold = date.today() - timedelta(days=5)
-
-        try:
-            self._run_svc.mark_running(run_id)
-
-            # 1. 指数日线 + 估值（超过 5 天未更新才重新拉取）
-            indexes = self._index_repo.find_all()
-            index_bar_count = 0
-            index_val_count = 0
-
-            for idx in indexes:
-                idx_max = self._index_bar_repo.get_latest_date(idx.index_code)
-                if idx_max is None or idx_max <= stale_threshold:
-                    try:
-                        index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code)
-                    except Exception as e:
-                        logger.warning("指数 %s 日线补全失败: %s", idx.index_code, e)
-
-                    try:
-                        index_val_count += self._fetch_and_upsert_index_valuation(idx.index_code)
-                    except Exception as e:
-                        logger.warning("指数 %s 估值补全失败: %s", idx.index_code, e)
-
-            # 2. 宏观指标（超过 5 天未入库才重新拉取）
-            macro_latest_ingest: datetime | None = self._macro_repo.find_latest_ingested_at()
-            # DateTime 列返回 naive datetime，去掉 tzinfo 后再比较
-            macro_stale_threshold = utcnow() - timedelta(days=5)
-            macro_count = 0
-            if macro_latest_ingest is None or macro_latest_ingest < macro_stale_threshold:
-                try:
-                    macro_count = self._fetch_and_upsert_macro()
-                except Exception as e:
-                    logger.warning("宏观指标补全失败: %s", e)
-
-            self._run_svc.mark_success(
-                run_id,
-                metrics={
-                    "index": {
-                        "bar_records": index_bar_count,
-                        "valuation_records": index_val_count,
-                    },
-                    "macro": {"records": macro_count},
-                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-                },
-            )
-
-        except Exception as e:
-            self._db.rollback()
-            logger.warning("run_startup_fill 整体失败: %s", e, exc_info=True)
-            self._run_svc.mark_failed(run_id, str(e)[:1000])

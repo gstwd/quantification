@@ -50,14 +50,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         get_scheduler().start()
     if settings.ai_analysis_enabled:
         get_ai_scheduler().start()
-    # 启动补全与日历预热均为尽力而为：入队失败（如数据库未迁移）不阻塞启动
+    # 日历预热为尽力而为：入队失败（如数据库未迁移）不阻塞启动
     try:
-        if settings.startup_fill_enabled:
-            job_queue.enqueue("startup_fill", {}, job_key="startup_fill")
         # 预热交易日历缓存，防止首个请求触发慢速加载/并发崩溃
         job_queue.enqueue("warm_calendar", {}, job_key="warm_calendar")
     except Exception:
-        logger.warning("启动补全/日历预热任务入队失败，服务继续启动", exc_info=True)
+        logger.warning("日历预热任务入队失败，服务继续启动", exc_info=True)
     yield
     get_scheduler().stop()
     if settings.ai_analysis_enabled:

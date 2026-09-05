@@ -595,7 +595,6 @@ function formatRunType(runType: string): string {
     daily_ingest: '日频入库',
     strategy_run: '策略运行',
     cold_start: '历史回补',
-    startup_fill: '启动补全',
     index_refresh: '指数数据刷新',
     macro_refresh: '宏观数据刷新',
     factor_computation: '因子计算',

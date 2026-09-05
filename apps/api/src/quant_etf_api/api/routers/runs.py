@@ -66,8 +66,6 @@ def _enqueue_for_run(
             "index_incremental_fill",
             {"run_id": run_id, "index_code": (params or {}).get("index_code", "")},
         )
-    elif run_type == "startup_fill":
-        queue.enqueue("startup_fill", {"run_id": run_id})
     elif run_type == "ai_analysis":
         queue.enqueue("ai_analysis", {"run_id": run_id}, job_key=f"ai_analysis:{trade_date}")
     else:

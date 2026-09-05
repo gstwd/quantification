@@ -131,8 +131,8 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
   - `retry_decorator.py` — `@with_retry()` 装饰器，指数退避重试，参数可通过环境变量 `AKSHARE_RETRY_MAX_ATTEMPTS` / `AKSHARE_RETRY_BASE_DELAY` 配置
 - **`infra/trading_calendar.py`** — `TradingCalendar` 类，通过 `akshare.tool_trade_date_hist_sina()` 获取 A 股交易日历，内存缓存 TTL=1 天，API 不可用时降级为周末判断
-- **`infra/job_queue/`** — **统一后台任务队列**：`background_job` 表（迁移 0023）+ `JobRepository`（`FOR UPDATE SKIP LOCKED` 认领）+ `JobQueue`（固定 worker 线程池，`settings.job_queue_workers` 默认 4）+ `handlers.py`（`JOB_HANDLERS` 分发表）。所有后台任务（摄取/因子/回测/对比/AI/启动补全/日历预热/GET 补数）统一 `enqueue(job_type, payload, job_key=...)`，支持 `job_key` 幂等去重与 `max_attempts` 重试。进程重启后 `recover_stuck_jobs()` 将 running 任务标记失败。
-- **`infra/scheduler/`** — `DailyIngestScheduler` / `AIAnalysisScheduler`: daemon `Thread` + `Event` 定时器，仅负责在预定时间将任务入队（`job_key="daily_ingest"` / `ai_analysis:{date}`），实际执行在任务队列 worker 中，调度线程不做任何同步外部调用。
+- **`infra/job_queue/`** — **统一后台任务队列**：`background_job` 表（迁移 0023）+ `JobRepository`（`FOR UPDATE SKIP LOCKED` 认领）+ `JobQueue`（固定 worker 线程池，`settings.job_queue_workers` 默认 4）+ `handlers.py`（`JOB_HANDLERS` 分发表）。所有后台任务（摄取/因子/回测/对比/AI/日历预热/GET 补数）统一 `enqueue(job_type, payload, job_key=...)`，支持 `job_key` 幂等去重与 `max_attempts` 重试。进程重启后 `recover_stuck_jobs()` 将 running 任务标记失败。
+- **`infra/scheduler/`** — `DailyIngestScheduler` / `AIAnalysisScheduler`: daemon `Thread` + `Event` 定时器，仅负责在预定时间将任务入队（`job_key="daily_ingest"` / `ai_analysis:{date}`），实际执行在任务队列 worker 中，调度线程不做任何同步外部调用。数据摄取调度器不做交易日判断：周末/节假日也会入队，由摄取任务按"最近交易日缺口"决定是否补拉。
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
   - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）、`trading_calendar.py`（`TradingCalendarLike` 协议 + 周末兜底实现）
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, UniverseAsset dataclasses)、`rebalance.py`（纯调仓规则，engine/rebalance.py 为兼容转发层）
@@ -213,7 +213,7 @@ Key migrations:
 
 ## Current State
 
-Services fully wired to PostgreSQL. Each data type has exactly **one** source: Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → 未命中时入队 `data_fill` 后台任务并返回空列表（不再在请求线程同步抓取）。后台任务统一走 `background_job` 持久化队列（迁移 0023），调度器仅负责定时入队。`POST /api/runs/daily-ingest` 触发手动入队。Startup 时 lifespan 入队 `startup_fill` / `warm_calendar` 任务。
+Services fully wired to PostgreSQL. Each data type has exactly **one** source: Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → 未命中时入队 `data_fill` 后台任务并返回空列表（不再在请求线程同步抓取）。后台任务统一走 `background_job` 持久化队列（迁移 0023），调度器仅负责定时入队（周末/节假日也入队，由摄取侧按最近交易日缺口补拉）。`POST /api/runs/daily-ingest` 触发手动入队。Startup 时 lifespan 仅入队 `warm_calendar` 预热任务（启动补全已移除）。
 
 **Strategy Engine**: `engine/` 包实现组件化策略执行管线。策略通过 `strategy_config` 表的 JSON 配置驱动，`StrategyConfigService` 管理 CRUD，`StrategyEngine` 执行管线。`FactorProvider` 桥接因子层与引擎层，`ContextBuilder` 统一构建实时和回测上下文。`BacktestService` 和 `StrategyExecutionService` 统一使用引擎执行。
 
@@ -264,7 +264,7 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 - **FilterRule.missing_strategy** (B6): 过滤规则因子值（或 compare_to 参照值）为 `None` 时的处理策略，取值 `pass` / `fail` / `exclude`，默认 `fail`（与历史行为一致，仅显式化）。`FilterRuleResult` 带 `missing` / `missing_strategy` 调试字段；非法值在配置校验期（P4）报 422。前端需同步 `StrategyConfigForm.vue` 的 `FilterRuleValue` 接口与 `StrategyDetailPage.vue` 只读展示。
 - **FactorProvider.collect_required_factor_ids() 必须收集 compare_to**: 遍历 filter rules 时不仅要收集 `rule.factor`，还要收集 `rule.compare_to`（若存在）。遗漏会导致被比较的因子值未加载，filter 始终失败 → 空仓。
 - **FilterRuleValue 前端接口**: 定义在 `StrategyConfigForm.vue`（非共享 types 文件）。修改 FilterRule schema 时需同步更新：接口定义、表单模板、`initFilter()`、`buildConfig()`、校验逻辑，以及 `StrategyDetailPage.vue` 的只读展示。
-- **后台任务状态流转**: `research_run` 状态链：pending → running → success/skipped/failed。`skipped` 表示"未执行"：daily_ingest 与三个手动刷新共享同一把摄取互斥锁，并发冲突或非交易日时标记 skipped（metrics.reason=concurrent_skip/holiday）。任务通过 `get_job_queue().enqueue(...)` 入队 `background_job`，由 worker 认领执行；处理器内 `RunService.mark_running()` / `mark_success` / `mark_failed` 维护 run 状态。进程重启后 `recover_stuck_runs_on_startup()` 与 `get_job_queue().recover_stuck_jobs()` 分别恢复卡死的 run 与 job。
+- **后台任务状态流转**: `research_run` 状态链：pending → running → success/skipped/failed。`skipped` 表示"未执行"：daily_ingest/index_refresh/macro_refresh 等摄取入口共享同一把摄取互斥锁，并发冲突时标记 skipped（metrics.reason=concurrent_skip）；daily_ingest/index_refresh 已不再因非交易日跳过（改为按最近交易日缺口补拉，周末/节假日触发时补齐缺失数据），macro_refresh 与单指数增量补数仍保留非交易日跳过（reason=holiday）。任务通过 `get_job_queue().enqueue(...)` 入队 `background_job`，由 worker 认领执行；处理器内 `RunService.mark_running()` / `mark_success` / `mark_failed` 维护 run 状态。进程重启后 `recover_stuck_runs_on_startup()` 与 `get_job_queue().recover_stuck_jobs()` 分别恢复卡死的 run 与 job。
 - **回测 checkpoint 提交（P7）**: `_run_backtest_loop` 每 100 天 flush+commit 一次（进度随 checkpoint 可见）；中途失败仅回滚当前未提交分段，已提交部分结果保留，失败信息通过 `BacktestRepository.find_latest_daily_date()` 附带"已保存部分结果至 {date}"。若未来实现回测重试，必须先清理该 backtest_id 的 daily/index 结果再重跑。
 - **数据刷新按类型拆分**: `IngestService` 提供 `refresh_index_data()`、`refresh_macro_data()` 两个公共方法，各有独立 run 生命周期。对应 API 端点：`POST /runs/index-refresh`、`/runs/macro-refresh`。各数据页面（指数/宏观）有自己的"刷新数据"按钮，RunsPage 纯做监控。
 - **Run detail API**: `GET /runs/{run_id}` 返回 `ResearchRunDetail`（含 metrics、duration_seconds），`GET /runs/{run_id}/items` 返回 `ResearchRunItemSchema` 逐条明细，`POST /runs/{run_id}/retry` 重试失败任务（创建新 run 并入队对应后台任务）。
