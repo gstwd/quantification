@@ -844,6 +844,49 @@ class IngestService:
             "latest_date": str(idx_val_latest) if idx_val_latest else None,
         }
 
+        # --- 个股日线（基于 stock_universe 质量快照聚合） ---
+        from quant_etf_api.infra.db.models.industry import StockDailyCloseModel  # noqa: PLC0415
+        from quant_etf_api.infra.db.models.stock import StockUniverseModel  # noqa: PLC0415
+
+        stock_rows = self._db.query(StockUniverseModel).all()
+        stock_stale: list[dict[str, Any]] = []
+        stock_missing: list[dict[str, Any]] = []
+        for stock in stock_rows:
+            if (
+                stock.quality_checked_at is None
+                or stock.bar_count is None
+                or stock.bar_count == 0
+                or stock.data_end_date is None
+            ):
+                stock_missing.append(
+                    {
+                        "code": stock.stock_code,
+                        "name": stock.name_cn,
+                        "latest_date": None,
+                        "is_stale": True,
+                    }
+                )
+                continue
+            if stock.data_end_date < stale_threshold:
+                stock_stale.append(
+                    {
+                        "code": stock.stock_code,
+                        "name": stock.name_cn,
+                        "latest_date": str(stock.data_end_date),
+                        "is_stale": True,
+                    }
+                )
+        stock_latest_db = self._db.query(func.max(StockDailyCloseModel.trade_date)).scalar()
+        result["stock_bars"] = {
+            "total": len(stock_rows),
+            "up_to_date": len(stock_rows) - len(stock_stale) - len(stock_missing),
+            "stale": stock_stale[:3],
+            "missing": stock_missing[:3],
+            "stale_total": len(stock_stale),
+            "missing_total": len(stock_missing),
+            "latest_date": str(stock_latest_db) if stock_latest_db else None,
+        }
+
         # --- 字段级质量 ---
         total_index_bars = self._db.query(func.count(IndexDailyBarModel.id)).scalar() or 0
         null_index_change_pct = (

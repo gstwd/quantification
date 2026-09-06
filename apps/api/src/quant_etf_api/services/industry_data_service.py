@@ -198,6 +198,17 @@ class IndustryDataService:
             )
         self._membership_repo.bulk_upsert(rows)
         self._db.commit()
+        # 新出现的成分股票自动进入个股元数据占位行，保证个股页面名单不滞后
+        try:
+            from quant_etf_api.services.stock_data_service import (  # noqa: PLC0415
+                StockDataService,
+            )
+
+            StockDataService(self._db).ensure_membership_stocks()
+        except Exception:
+            logger.warning(
+                "成分股票元数据占位同步失败（可稍后执行 stock init-universe）", exc_info=True
+            )
         logger.info(
             "行业成分同步完成: total=%s mapped=%s skipped=%s prefixes=%s",
             total,
@@ -303,7 +314,7 @@ class IndustryDataService:
             self.refresh_stock_close_snapshot(target_date or latest)
         except Exception:
             logger.warning(
-                "个股收盘快照刷新失败，跳过（可稍后执行 backfill-stock-close）", exc_info=True
+                "个股收盘快照刷新失败，跳过（可稍后执行 stock fill --all）", exc_info=True
             )
         return latest
 

@@ -15,6 +15,7 @@ import IndexDetailPage from '../pages/IndexDetailPage.vue'
 import IndexListPage from '../pages/IndexListPage.vue'
 import MacroPage from '../pages/MacroPage.vue'
 import RRGLabPage from '../pages/RRGLabPage.vue'
+import StockListPage from '../pages/StockListPage.vue'
 import StrategiesPage from '../pages/StrategiesPage.vue'
 import StrategyDetailPage from '../pages/StrategyDetailPage.vue'
 
@@ -23,6 +24,7 @@ const router = createRouter({
   routes: [
     { path: '/', component: DashboardPage },
     { path: '/indexes', component: IndexListPage },
+    { path: '/stocks', component: StockListPage },
     { path: '/indexes/:indexCode', component: IndexDetailPage, props: true },
     { path: '/macro', component: MacroPage },
     { path: '/strategies', component: StrategiesPage },

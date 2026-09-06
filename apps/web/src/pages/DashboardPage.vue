@@ -378,7 +378,7 @@
           v-for="group in qualityGroups"
           :key="group.key"
           class="quality-card"
-          :class="{ 'quality-card-warn': group.data.stale.length > 0 || group.data.missing.length > 0 }"
+          :class="{ 'quality-card-warn': staleCount(group.data) > 0 || missingCount(group.data) > 0 }"
         >
           <div class="quality-card-header">
             <span class="quality-name">{{ group.label }}</span>
@@ -388,14 +388,14 @@
           </div>
           <div class="quality-date">最新: {{ group.data.latest_date ?? '—' }}</div>
           <div v-if="group.data.stale.length" class="quality-issues">
-            <span class="issue-label warn">过期 {{ group.data.stale.length }}</span>
+            <span class="issue-label warn">过期 {{ staleCount(group.data) }}</span>
             <span v-for="item in group.data.stale.slice(0, 3)" :key="item.code" class="issue-item" :title="item.name + ' ' + item.latest_date">{{ item.code }}</span>
-            <span v-if="group.data.stale.length > 3" class="issue-more">+{{ group.data.stale.length - 3 }}</span>
+            <span v-if="staleCount(group.data) > 3" class="issue-more">+{{ staleCount(group.data) - 3 }}</span>
           </div>
           <div v-if="group.data.missing.length" class="quality-issues">
-            <span class="issue-label danger">缺失 {{ group.data.missing.length }}</span>
+            <span class="issue-label danger">缺失 {{ missingCount(group.data) }}</span>
             <span v-for="item in group.data.missing.slice(0, 3)" :key="item.code" class="issue-item" :title="item.name">{{ item.code }}</span>
-            <span v-if="group.data.missing.length > 3" class="issue-more">+{{ group.data.missing.length - 3 }}</span>
+            <span v-if="missingCount(group.data) > 3" class="issue-more">+{{ missingCount(group.data) - 3 }}</span>
           </div>
         </div>
       </div>
@@ -459,7 +459,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import type { DailySentimentResponse, DataQualityResponse, MarketSynthesisResponse, StarredSummaryResponse, SystemStatusResponse, TagNewsItem } from '../types/api'
+import type { DailySentimentResponse, DataFreshnessGroup, DataQualityResponse, MarketSynthesisResponse, StarredSummaryResponse, SystemStatusResponse, TagNewsItem } from '../types/api'
 import { fetchDataQuality, fetchSystemStatus, triggerColdStart, triggerDailyIngest } from '../api/runs'
 import { fetchDailySentiment, fetchMarketSynthesis, fetchPreviousTradingDay, fetchSentimentNews } from '../api/aiFactors'
 import { fetchStarredSummary } from '../api/strategies'
@@ -573,8 +573,19 @@ const qualityGroups = computed(() => {
   return [
     { key: 'index_bars', label: '指数日线', data: quality.value.index_bars },
     { key: 'index_valuation', label: '指数估值', data: quality.value.index_valuation },
+    ...(quality.value.stock_bars ? [{ key: 'stock_bars', label: '个股日线', data: quality.value.stock_bars }] : []),
   ]
 })
+
+/** 数据质量组的过期总数（大数据量表使用 *_total，其余回退数组长度） */
+function staleCount(group: DataFreshnessGroup): number {
+  return group.stale_total ?? group.stale.length
+}
+
+/** 数据质量组的缺失总数 */
+function missingCount(group: DataFreshnessGroup): number {
+  return group.missing_total ?? group.missing.length
+}
 
 
 /** 格式化 ISO 时间戳为简短中文友好格式（北京时间） */
@@ -598,6 +609,11 @@ function formatRunType(runType: string): string {
     index_refresh: '指数数据刷新',
     macro_refresh: '宏观数据刷新',
     factor_computation: '因子计算',
+    industry_ingest: '行业数据刷新',
+    industry_factor_compute: '行业因子计算',
+    stock_quality_check: '个股质量检查',
+    stock_data_fill: '个股日线补全',
+    stock_data_rebuild: '个股全量重拉',
   }
   return map[runType] ?? runType
 }

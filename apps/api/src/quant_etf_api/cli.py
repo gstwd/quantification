@@ -8,7 +8,7 @@ import json
 import logging
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from quant_etf_api.config.logging_config import setup_logging
@@ -435,8 +435,20 @@ def _run_industry(args: argparse.Namespace) -> None:
             return
         if args.subcommand == "backfill-stock-close":
             codes = _split_codes(args.stock_codes)
-            result = IndustryDataService(db).backfill_stock_close(
-                start_date=args.start, stock_codes=codes
+            from quant_etf_api.services.stock_data_service import (  # noqa: PLC0415
+                StockDataService,
+            )
+
+            start_date = (
+                datetime.strptime(args.start, "%Y%m%d").date()
+                if isinstance(args.start, str)
+                else args.start
+            )
+            result = StockDataService(db).bulk_fill(
+                codes=codes,
+                start_date=start_date,
+                only_missing=False,
+                rebuild=False,
             )
             _emit(result, not args.no_json)
             if result["errors"]:
@@ -523,6 +535,75 @@ def _run_industry(args: argparse.Namespace) -> None:
             return
     except ValueError as exc:
         _fail(str(exc))
+    finally:
+        db.close()
+
+
+def _build_stock_group(subparsers: argparse._SubParsersAction) -> None:
+    """注册 stock 命令组（个股元数据/质量/补全，批量操作仅限 CLI）。"""
+    group = subparsers.add_parser("stock", help="个股数据管理（质量快照与批量补全）")
+    sub = group.add_subparsers(dest="subcommand", required=True)
+
+    p = sub.add_parser("init-universe", help="初始化/同步个股元数据（申万成分+交易所名单）")
+    _add_json_flag(p)
+
+    p = sub.add_parser("quality", help="批量重算并落库个股数据质量快照")
+    p.add_argument("--all", action="store_true", help="全部股票（默认）")
+    p.add_argument("--codes", dest="stock_codes", help="逗号分隔股票代码")
+    _add_json_flag(p)
+
+    p = sub.add_parser("fill", help="批量补全个股日线到最近交易日")
+    p.add_argument("--all", action="store_true", help="全部股票（默认）")
+    p.add_argument("--codes", dest="stock_codes", help="逗号分隔股票代码")
+    p.add_argument("--only-missing", action="store_true", help="仅处理缺失>0或无数据的股票")
+    p.add_argument("--start", default="20130101", help="起始日 YYYYMMDD，默认 20130101")
+    _add_json_flag(p)
+
+    p = sub.add_parser("rebuild", help="批量全量重拉个股日线（先拉取成功后清空旧行）")
+    p.add_argument("--codes", dest="stock_codes", required=True, help="逗号分隔股票代码")
+    p.add_argument("--start", default="20130101", help="起始日 YYYYMMDD，默认 20130101")
+    _add_json_flag(p)
+
+
+def _run_stock(args: argparse.Namespace) -> None:
+    """执行 stock 命令组。"""
+    db = SessionLocal()
+    try:
+        from quant_etf_api.services.stock_data_service import (  # noqa: PLC0415
+            StockDataService,
+        )
+
+        service = StockDataService(db)
+        if args.subcommand == "init-universe":
+            result = service.sync_universe()
+            _emit(result, not args.no_json)
+            return
+
+        codes = _split_codes(args.stock_codes)
+        if args.subcommand == "quality":
+            if args.all:
+                codes = None
+            result = service.bulk_quality(codes)
+            _emit(result, not args.no_json)
+            if result["errors"]:
+                sys.exit(1)
+            return
+        if args.subcommand in ("fill", "rebuild"):
+            start_date = datetime.strptime(args.start, "%Y%m%d").date()
+            if args.subcommand == "rebuild" and codes is None:
+                _fail("rebuild 必须通过 --codes 指定要重拉的股票")
+            if args.all:
+                codes = None
+            result = service.bulk_fill(
+                codes=codes,
+                start_date=start_date,
+                only_missing=args.only_missing if args.subcommand == "fill" else False,
+                rebuild=args.subcommand == "rebuild",
+            )
+            _emit(result, not args.no_json)
+            if result["errors"]:
+                sys.exit(1)
+            return
     finally:
         db.close()
 
@@ -754,6 +835,7 @@ def main() -> None:
     _build_backtest_group(subparsers)
     _build_optimization_group(subparsers)
     _build_industry_group(subparsers)
+    _build_stock_group(subparsers)
 
     args = parser.parse_args()
 
@@ -765,6 +847,8 @@ def main() -> None:
         _run_optimization(args)
     elif args.command == "industry":
         _run_industry(args)
+    elif args.command == "stock":
+        _run_stock(args)
     elif args.command == "init-factors":
         init_factors()
     elif args.command == "init-indexes":

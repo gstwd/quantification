@@ -356,6 +356,74 @@ def handle_industry_factor_compute(payload: dict) -> None:
         db.close()
 
 
+def _run_stock_task(
+    *,
+    job_type: str,
+    payload: dict,
+    action: str,
+) -> None:
+    """执行单只股票后台任务（质量检查/补全/重拉）的公共骨架。"""
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.services.run_service import RunService
+    from quant_etf_api.services.stock_data_service import StockDataService
+
+    run_id = payload.get("run_id") or ""
+    stock_code = payload.get("stock_code") or ""
+    db = SessionLocal()
+    try:
+        run_svc = RunService(db)
+        run_svc.mark_running(run_id)
+        service = StockDataService(db)
+        if action == "quality":
+            metrics = service.quality_check(stock_code)
+        elif action == "fill":
+            metrics = service.fill_stock(stock_code)
+        elif action == "rebuild":
+            metrics = service.rebuild_stock(stock_code)
+        else:
+            raise ValueError(f"未知单股任务 action: {action}")
+        run_svc.mark_success(run_id, metrics=_json_safe(metrics))
+    except Exception as e:
+        logger.exception(
+            "单股任务异常: job_type=%s run_id=%s stock_code=%s",
+            job_type,
+            run_id,
+            stock_code,
+        )
+        RunService(db).mark_failed(run_id, f"单股任务失败: {type(e).__name__}: {e}")
+        raise
+    finally:
+        db.close()
+
+
+def _json_safe(value: object) -> object:
+    """递归把 dict/list 中的 date/datetime 转为 ISO 字符串（JSON 列入库用）。"""
+    from datetime import date
+
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def handle_stock_quality_check(payload: dict) -> None:
+    """执行单只股票数据质量检查。"""
+    _run_stock_task(job_type="stock_quality_check", payload=payload, action="quality")
+
+
+def handle_stock_data_fill(payload: dict) -> None:
+    """执行单只股票日线补全。"""
+    _run_stock_task(job_type="stock_data_fill", payload=payload, action="fill")
+
+
+def handle_stock_data_rebuild(payload: dict) -> None:
+    """执行单只股票全量重拉。"""
+    _run_stock_task(job_type="stock_data_rebuild", payload=payload, action="rebuild")
+
+
 JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "daily_ingest": handle_daily_ingest,
     "strategy_run": handle_strategy_run,
@@ -372,4 +440,7 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "warm_calendar": handle_warm_calendar,
     "industry_daily_ingest": handle_industry_daily_ingest,
     "industry_factor_compute": handle_industry_factor_compute,
+    "stock_quality_check": handle_stock_quality_check,
+    "stock_data_fill": handle_stock_data_fill,
+    "stock_data_rebuild": handle_stock_data_rebuild,
 }

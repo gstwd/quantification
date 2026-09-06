@@ -14,7 +14,10 @@ from quant_etf_api.schemas.market_data import (
     IndexValuation,
     MacroIndicatorSchema,
 )
+from quant_etf_api.schemas.pagination import PaginatedResponse
+from quant_etf_api.schemas.stock import StockSummary
 from quant_etf_api.services.ingest_service import IngestService
+from quant_etf_api.services.stock_data_service import StockDataService
 
 router = APIRouter(tags=["market-data"])
 
@@ -37,6 +40,26 @@ def list_index_summaries(
     前端指数列表页只需一次请求即可获取全部所需数据。
     """
     return IngestService(db).get_index_summaries()
+
+
+@router.get("/market-data/stocks", response_model=PaginatedResponse[StockSummary])
+def list_stock_summaries(
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=200),
+    keyword: str | None = Query(default=None, description="股票代码/名称关键字"),
+    industry_code: str | None = Query(default=None, description="申万一级行业代码"),
+    status: str | None = Query(default=None, description="active=活跃, delisted=已退市"),
+    db: Session = Depends(get_db),
+) -> PaginatedResponse[StockSummary]:
+    """分页查询个股元数据与日线质量快照（个股数据列表页）。"""
+    items, total = StockDataService(db).list_stocks(
+        offset=offset,
+        limit=limit,
+        keyword=keyword,
+        industry_code=industry_code,
+        status=status,
+    )
+    return PaginatedResponse(items=items, total=total, offset=offset, limit=limit)
 
 
 @router.get("/market-data/indexes/{index_code}/daily-bars", response_model=list[DailyBar])

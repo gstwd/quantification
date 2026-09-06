@@ -11,6 +11,7 @@ from quant_etf_api.infra.db.models.core import (
     IndexValuationModel,
     MacroIndicatorModel,
 )
+from quant_etf_api.infra.db.models.industry import StockDailyCloseModel
 from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.schemas.run import ResearchRunSummary
@@ -155,6 +156,11 @@ class SystemService:
                 source_name="宏观经济指标",
                 table_name="macro_indicator",
                 date_column="period",
+            ),
+            self._get_table_snapshot(
+                StockDailyCloseModel,
+                source_name="个股日线行情",
+                table_name="stock_daily_close",
             ),
         ]
 

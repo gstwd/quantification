@@ -112,12 +112,16 @@ export interface DataFreshnessGroup {
   stale: DataFreshnessItem[]
   missing: DataFreshnessItem[]
   latest_date: string | null
+  /** 大数据量表（如个股）的完整过期/缺失计数，数组仅含样本 */
+  stale_total?: number | null
+  missing_total?: number | null
 }
 
 /** 数据质量总览响应 */
 export interface DataQualityResponse {
   index_bars: DataFreshnessGroup
   index_valuation: DataFreshnessGroup
+  stock_bars?: DataFreshnessGroup | null
   checked_at: string
 }
 

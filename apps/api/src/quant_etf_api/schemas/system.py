@@ -24,6 +24,9 @@ class DataFreshnessGroup(BaseModel):
     stale: list[DataFreshnessItem] = []
     missing: list[DataFreshnessItem] = []
     latest_date: date | None = None
+    # 大数据量表（如个股）stale/missing 只返回样本，完整计数放 *_total
+    stale_total: int | None = None
+    missing_total: int | None = None
 
 
 class DataQualityResponse(BaseModel):
@@ -31,6 +34,7 @@ class DataQualityResponse(BaseModel):
 
     index_bars: DataFreshnessGroup
     index_valuation: DataFreshnessGroup
+    stock_bars: DataFreshnessGroup | None = None
     checked_at: UtcDatetime
 
 

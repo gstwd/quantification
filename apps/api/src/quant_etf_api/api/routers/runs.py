@@ -68,6 +68,24 @@ def _enqueue_for_run(
         )
     elif run_type == "ai_analysis":
         queue.enqueue("ai_analysis", {"run_id": run_id}, job_key=f"ai_analysis:{trade_date}")
+    elif run_type == "stock_quality_check":
+        queue.enqueue(
+            "stock_quality_check",
+            {"run_id": run_id, "stock_code": (params or {}).get("stock_code", "")},
+            job_key=f"stock_quality:{(params or {}).get('stock_code', '')}",
+        )
+    elif run_type == "stock_data_fill":
+        queue.enqueue(
+            "stock_data_fill",
+            {"run_id": run_id, "stock_code": (params or {}).get("stock_code", "")},
+            job_key=f"stock_data_fill:{(params or {}).get('stock_code', '')}",
+        )
+    elif run_type == "stock_data_rebuild":
+        queue.enqueue(
+            "stock_data_rebuild",
+            {"run_id": run_id, "stock_code": (params or {}).get("stock_code", "")},
+            job_key=f"stock_data_rebuild:{(params or {}).get('stock_code', '')}",
+        )
     else:
         return False
     return True
@@ -194,6 +212,44 @@ def run_strategy(strategy_id: str, db: Session = Depends(get_db)) -> dict[str, s
     summary = RunService(db).create_run("strategy_run", strategy_id, date.today())
     _enqueue_for_run("strategy_run", summary.run_id, strategy_id, None, summary.trade_date or date.today())
     return {"status": "accepted", "strategy_id": strategy_id, "run_id": summary.run_id}
+
+
+def _enqueue_stock_run(
+    run_type: str,
+    stock_code: str,
+    db: Session,
+) -> dict[str, str]:
+    """创建单股运行记录并入队对应后台任务。"""
+    summary = RunService(db).create_run(
+        run_type, None, date.today(), params={"stock_code": stock_code}
+    )
+    if not _enqueue_for_run(
+        run_type,
+        summary.run_id,
+        None,
+        {"stock_code": stock_code},
+        summary.trade_date or date.today(),
+    ):
+        raise HTTPException(status_code=400, detail=f"不支持的单股任务类型: {run_type}")
+    return {"status": "accepted", "run_type": run_type, "run_id": summary.run_id}
+
+
+@router.post("/runs/stocks/{stock_code}/quality")
+def stock_quality_check(stock_code: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """触发单只股票数据质量检查（重算并落库质量快照）。"""
+    return _enqueue_stock_run("stock_quality_check", stock_code, db)
+
+
+@router.post("/runs/stocks/{stock_code}/fill")
+def stock_data_fill(stock_code: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """触发单只股票日线补全（补到最近交易日并刷新质量快照）。"""
+    return _enqueue_stock_run("stock_data_fill", stock_code, db)
+
+
+@router.post("/runs/stocks/{stock_code}/rebuild")
+def stock_data_rebuild(stock_code: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """触发单只股票全量重拉（清空旧行后重新拉取入库）。"""
+    return _enqueue_stock_run("stock_data_rebuild", stock_code, db)
 
 
 @router.post("/runs/{run_id}/retry")

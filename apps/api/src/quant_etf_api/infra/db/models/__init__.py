@@ -25,6 +25,7 @@ from .industry import (
     IndustryUniverseModel,
     StockDailyCloseModel,
 )
+from .stock import StockUniverseModel
 
 __all__ = [
     "BacktestComparisonModel",
@@ -49,4 +50,5 @@ __all__ = [
     "IndustryMembershipEventModel",
     "IndustryUniverseModel",
     "StockDailyCloseModel",
+    "StockUniverseModel",
 ]

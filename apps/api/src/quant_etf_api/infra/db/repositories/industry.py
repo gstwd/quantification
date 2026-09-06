@@ -56,6 +56,26 @@ class IndustryUniverseRepository(BaseRepository):
 class IndustryDailyBarRepository(BaseRepository):
     """industry_daily_bar 只读查询仓库。"""
 
+    def find_market_trading_dates(
+        self,
+        start: date,
+        end: date,
+    ) -> list[date]:
+        """查询区间内行业日线覆盖的市场交易日（去重升序，供日历兜底）。"""
+        rows = (
+            self._db.query(IndustryDailyBarModel.trade_date)
+            .filter(
+                and_(
+                    IndustryDailyBarModel.trade_date >= start,
+                    IndustryDailyBarModel.trade_date <= end,
+                )
+            )
+            .distinct()
+            .order_by(IndustryDailyBarModel.trade_date.asc())
+            .all()
+        )
+        return [r[0] for r in rows]
+
     def find_range(
         self,
         start: date,
@@ -153,6 +173,31 @@ class IndustryMembershipEventRepository(BaseRepository):
 
 class StockDailyCloseRepository(BaseRepository):
     """stock_daily_close 只读查询与写入门禁。"""
+
+    def find_trade_dates_by_code(
+        self,
+        stock_code: str,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> list[date]:
+        """查询单只股票在日期区间内的全部交易日（升序去重）。"""
+        query = self._db.query(StockDailyCloseModel.trade_date).filter(
+            StockDailyCloseModel.stock_code == stock_code
+        )
+        if start is not None:
+            query = query.filter(StockDailyCloseModel.trade_date >= start)
+        if end is not None:
+            query = query.filter(StockDailyCloseModel.trade_date <= end)
+        return [r[0] for r in query.order_by(StockDailyCloseModel.trade_date.asc()).all()]
+
+    def delete_by_code(self, stock_code: str) -> int:
+        """删除单只股票的全部日线行（供全量重拉使用，调用方负责事务）。"""
+        result = (
+            self._db.query(StockDailyCloseModel)
+            .filter(StockDailyCloseModel.stock_code == stock_code)
+            .delete(synchronize_session=False)
+        )
+        return int(result)
 
     def find_range(
         self,
