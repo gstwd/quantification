@@ -299,6 +299,63 @@ def handle_warm_calendar(payload: dict) -> None:
     TradingCalendar().refresh()
 
 
+def handle_industry_daily_ingest(payload: dict) -> None:
+    """执行申万行业日频摄取，落库后按实际行情日入队行业因子计算。"""
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.infra.job_queue.queue import get_job_queue
+    from quant_etf_api.services.industry_data_service import IndustryDataService
+    from quant_etf_api.services.run_service import RunService
+
+    run_id = payload.get("run_id") or ""
+    db = SessionLocal()
+    try:
+        RunService(db).mark_running(run_id)
+        target_date = IndustryDataService(db).run_daily_ingest()
+        if target_date is not None:
+            get_job_queue().enqueue(
+                "industry_factor_compute",
+                {"trade_date": target_date.isoformat()},
+                job_key=f"industry_factor_compute:{target_date.isoformat()}",
+            )
+        RunService(db).mark_success(run_id)
+    except Exception as e:
+        logger.exception("行业日频摄取任务异常: run_id=%s", run_id)
+        RunService(db).mark_failed(run_id, f"行业日频摄取异常: {type(e).__name__}: {e}")
+        raise
+    finally:
+        db.close()
+
+
+def handle_industry_factor_compute(payload: dict) -> None:
+    """计算指定交易日申万行业因子并入库。"""
+    from datetime import date as date_cls
+
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.services.industry_factor_service import IndustryFactorService
+    from quant_etf_api.services.run_service import RunService
+
+    trade_date_str = payload.get("trade_date") or date_cls.today().isoformat()
+    trade_date = date_cls.fromisoformat(trade_date_str)
+    db = SessionLocal()
+    run_id = ""
+    try:
+        run_svc = RunService(db)
+        run = run_svc.create_run("industry_factor_compute", None, trade_date)
+        run_id = run.run_id
+        run_svc.mark_running(run_id)
+        metrics = IndustryFactorService(db).compute_and_store(
+            start=trade_date, end=trade_date
+        )
+        run_svc.mark_success(run_id, metrics=metrics)
+    except Exception as e:
+        logger.exception("行业因子计算任务异常: trade_date=%s", trade_date)
+        if run_id:
+            RunService(db).mark_failed(run_id, f"行业因子计算异常: {type(e).__name__}: {e}")
+        raise
+    finally:
+        db.close()
+
+
 JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "daily_ingest": handle_daily_ingest,
     "strategy_run": handle_strategy_run,
@@ -313,4 +370,6 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "data_fill": handle_data_fill,
     "factor_computation": handle_factor_computation,
     "warm_calendar": handle_warm_calendar,
+    "industry_daily_ingest": handle_industry_daily_ingest,
+    "industry_factor_compute": handle_industry_factor_compute,
 }

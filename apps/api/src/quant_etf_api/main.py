@@ -14,6 +14,7 @@ from quant_etf_api.api.routers import (
     factors,
     health,
     indexes,
+    industry,
     keyword_tags,
     market_data,
     runs,
@@ -24,7 +25,11 @@ from quant_etf_api.config.logging_config import setup_logging
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.factors.registry import FactorRegistry, get_default_factor_registry
 from quant_etf_api.infra.job_queue.queue import get_job_queue
-from quant_etf_api.infra.scheduler import get_ai_scheduler, get_scheduler
+from quant_etf_api.infra.scheduler import (
+    get_ai_scheduler,
+    get_industry_scheduler,
+    get_scheduler,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         get_scheduler().start()
     if settings.ai_analysis_enabled:
         get_ai_scheduler().start()
+    if settings.schedule_enabled and settings.industry_refresh_enabled:
+        get_industry_scheduler().start()
     # 日历预热为尽力而为：入队失败（如数据库未迁移）不阻塞启动
     try:
         # 预热交易日历缓存，防止首个请求触发慢速加载/并发崩溃
@@ -60,6 +67,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     get_scheduler().stop()
     if settings.ai_analysis_enabled:
         get_ai_scheduler().stop()
+    if settings.schedule_enabled and settings.industry_refresh_enabled:
+        get_industry_scheduler().stop()
     # 停止后台任务队列
     job_queue.stop()
 
@@ -77,6 +86,7 @@ app.add_middleware(
 app.include_router(health.router, prefix=settings.api_prefix)
 app.include_router(system.router, prefix=settings.api_prefix)
 app.include_router(indexes.router, prefix=settings.api_prefix)
+app.include_router(industry.router, prefix=settings.api_prefix)
 app.include_router(market_data.router, prefix=settings.api_prefix)
 app.include_router(strategies.router, prefix=settings.api_prefix)
 

@@ -18,6 +18,13 @@ from .core import (
     StrategyConfigModel,
     TradingCalendarModel,
 )
+from .industry import (
+    IndustryDailyBarModel,
+    IndustryFactorValueModel,
+    IndustryMembershipEventModel,
+    IndustryUniverseModel,
+    StockDailyCloseModel,
+)
 
 __all__ = [
     "BacktestComparisonModel",
@@ -37,4 +44,9 @@ __all__ = [
     "SourcePayloadLogModel",
     "StrategyConfigModel",
     "TradingCalendarModel",
+    "IndustryDailyBarModel",
+    "IndustryFactorValueModel",
+    "IndustryMembershipEventModel",
+    "IndustryUniverseModel",
+    "StockDailyCloseModel",
 ]

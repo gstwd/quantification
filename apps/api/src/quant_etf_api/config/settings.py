@@ -115,6 +115,17 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ========== 申万行业轮动子系统 ==========
+
+    industry_refresh_enabled: bool = Field(
+        default=True,
+        description="是否在每日定时任务中自动刷新行业日线/成分/收盘并重算行业因子",
+    )
+    industry_refresh_time: str = Field(
+        default="03:10",
+        description="行业轮动子系统自动刷新触发时间（HH:MM），默认位于日频摄取之后",
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

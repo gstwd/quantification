@@ -224,13 +224,43 @@ class StrategyConfigService:
             校验结果。
         """
         errors, warnings = self._structural_validation(config)
-        errors.extend(self._factor_reference_errors(config))
-        errors.extend(self._transform_validation_errors(config))
+        errors.extend(self._industry_rotation_errors(config))
+        if config.rotation is None:
+            errors.extend(self._factor_reference_errors(config))
+            errors.extend(self._transform_validation_errors(config))
         return StrategyValidationResult(
             valid=len(errors) == 0,
             errors=errors,
             warnings=warnings,
         )
+
+    def _industry_rotation_errors(self, config: StrategyConfig) -> list[str]:
+        """校验 rotation 策略的行业资产范围存在于行业目录。
+
+        Args:
+            config: 已解析的策略配置。
+
+        Returns:
+            错误信息列表；无 rotation 或未限定 index_codes 时返回空列表。
+        """
+        if config.rotation is None or not config.index_codes:
+            return []
+        try:
+            from quant_etf_api.infra.db.repositories.industry import (
+                IndustryUniverseRepository,
+            )
+
+            available = set(IndustryUniverseRepository(self._db).find_active_codes())
+        except Exception:
+            logger.warning("查询行业目录失败，跳过 rotation 资产校验", exc_info=True)
+            return []
+        missing = sorted(set(config.index_codes) - available)
+        if missing:
+            return [
+                "rotation 策略的 index_codes 含非申万一级行业代码 "
+                f"{missing}，请先同步行业目录（industry init-universe）"
+            ]
+        return []
 
     @staticmethod
     def _structural_validation(config: StrategyConfig) -> tuple[list[str], list[str]]:
@@ -250,13 +280,37 @@ class StrategyConfigService:
             errors.append("strategy_id 不能为空")
         if not config.display_name:
             errors.append("display_name 不能为空")
-        if not config.score.factors:
+        if config.rotation is None and not config.score.factors:
             errors.append("score.factors 不能为空")
         if config.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
             errors.append(
                 f"不支持的配置 schema_version '{config.schema_version}'，"
                 f"可用: {sorted(SUPPORTED_SCHEMA_VERSIONS)}"
             )
+
+        # 行业轮动配置校验（纯静态部分）
+        if config.rotation:
+            valid_signals = {"quadrant", "diffusion", "diffusion_rrg"}
+            if config.rotation.signal not in valid_signals:
+                errors.append(
+                    f"rotation.signal '{config.rotation.signal}' 不合法，"
+                    f"可用: {sorted(valid_signals)}"
+                )
+            if config.rotation.top_n <= 0:
+                errors.append("rotation.top_n 必须为正整数")
+            if not set(config.rotation.keep_quadrants).issubset({1, 2, 3, 4}):
+                errors.append("rotation.keep_quadrants 只能包含 1/2/3/4")
+            if config.rotation.signal in {"quadrant", "diffusion_rrg"}:
+                if not config.rotation.keep_quadrants:
+                    errors.append(
+                        f"rotation.signal={config.rotation.signal} 时 keep_quadrants 不能为空"
+                    )
+            if config.rotation.lookback_ratio <= 0 or config.rotation.lookback_mom <= 0:
+                errors.append("rotation.lookback_ratio/lookback_mom 必须为正整数")
+            if config.rotation.smooth_window <= 0:
+                errors.append("rotation.smooth_window 必须为正整数")
+            if config.rotation.diffusion_lookback <= 0:
+                errors.append("rotation.diffusion_lookback 必须为正整数")
 
         # 择时代理指数校验
         if config.timing and not config.timing.proxy_index_codes:

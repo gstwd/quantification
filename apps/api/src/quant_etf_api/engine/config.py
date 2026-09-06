@@ -176,6 +176,31 @@ class RegimeRuleConfig(BaseModel):
     portfolio: PortfolioConfig | None = None
 
 
+class RotationConfig(BaseModel):
+    """行业轮动选择模块配置（研报三类信号，仅申万一级行业域可用）。
+
+    Attributes:
+        signal: 信号类型：quadrant=纯 RRG 象限、
+            diffusion=纯扩散 top_n、diffusion_rrg=扩散 top_n 后剔除三四象限。
+        top_n: 每日最多选中行业数。
+        keep_quadrants: 保留象限集合（1=领先/2=改善/3=滞后/4=疲软）。
+        benchmark_exclude: 从 RRG 行业等权基准中剔除的行业代码。
+        lookback_ratio: RS-Ratio 比率回看天数。
+        lookback_mom: RS-Momentum 比率回看天数。
+        smooth_window: MA 平滑窗口。
+        diffusion_lookback: 扩散指标上涨判定回看天数。
+    """
+
+    signal: str = "diffusion_rrg"
+    top_n: int = 6
+    keep_quadrants: list[int] = Field(default_factory=lambda: [1, 2])
+    benchmark_exclude: list[str] = Field(default_factory=list)
+    lookback_ratio: int = 220
+    lookback_mom: int = 60
+    smooth_window: int = 20
+    diffusion_lookback: int = 220
+
+
 class StrategyConfig(BaseModel):
     """完整策略配置。
 
@@ -193,6 +218,7 @@ class StrategyConfig(BaseModel):
         portfolio: 组合配置，None 表示信号模式。
         risk: 风控配置，None 表示无风控。
         rebalance: 调仓配置，None 表示每日调仓。
+        rotation: 行业轮动选择配置，None 表示走通用评分管线。
     """
 
     strategy_id: str
@@ -211,6 +237,7 @@ class StrategyConfig(BaseModel):
     portfolio: PortfolioConfig | None = None
     risk: RiskConfig | None = None
     rebalance: RebalanceConfig | None = None
+    rotation: RotationConfig | None = None
     regime_rules: dict[str, RegimeRuleConfig] = Field(
         default_factory=dict,
         description="regime 条件化配置，key=regime 名称（offensive/neutral/defensive），value=该 regime 下的配置覆盖",

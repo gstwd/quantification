@@ -5,6 +5,7 @@ __all__ = [
     "factors",
     "health",
     "indexes",
+    "industry",
     "market_data",
     "runs",
     "strategies",

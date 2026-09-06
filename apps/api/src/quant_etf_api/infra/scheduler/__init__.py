@@ -137,9 +137,7 @@ class AIAnalysisScheduler:
         if self._thread is not None:
             return
         self._shutdown_event.clear()
-        self._thread = threading.Thread(
-            target=self._loop, daemon=True, name="ai-scheduler"
-        )
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="ai-scheduler")
         self._thread.start()
         logger.info("AI 分析调度器已启动，目标时间 %s", self._target_time.strftime("%H:%M"))
 
@@ -227,3 +225,103 @@ def get_ai_scheduler() -> AIAnalysisScheduler:
         target = time(int(parts[0]), int(parts[1]))
         _ai_scheduler = AIAnalysisScheduler(target)
     return _ai_scheduler
+
+
+# ---------------------------------------------------------------------------
+# 行业轮动子系统专用调度器
+# ---------------------------------------------------------------------------
+
+
+class IndustryIngestScheduler:
+    """申万行业轮动子系统日频调度器。
+
+    独立于通用数据摄取调度器，在 industry_refresh_time（默认 03:10）触发
+    industry_daily_ingest；任务完成后由处理器自动入队行业因子计算。
+    调度线程只做定时入队。
+    """
+
+    def __init__(self, target_time: time | None = None) -> None:
+        """初始化行业摄取调度器。
+
+        Args:
+            target_time: 触发时间，默认 03:10。
+        """
+        self._target_time = target_time or time(3, 10)
+        self._shutdown_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        """启动调度器后台线程。"""
+        if self._thread is not None:
+            return
+        self._shutdown_event.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="industry-scheduler")
+        self._thread.start()
+        logger.info(
+            "行业调度器已启动，目标时间 %s",
+            self._target_time.strftime("%H:%M"),
+        )
+
+    def stop(self) -> None:
+        """停止调度器，等待当前执行完成。"""
+        self._shutdown_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=30)
+            self._thread = None
+        logger.info("行业调度器已停止")
+
+    def _loop(self) -> None:
+        """调度主循环：等待目标时间并触发行业摄取。"""
+        while not self._shutdown_event.is_set():
+            delay = self._seconds_until_target()
+            if delay > 0:
+                self._shutdown_event.wait(delay)
+            if self._shutdown_event.is_set():
+                break
+            self._execute_industry_ingest()
+
+    def _seconds_until_target(self) -> float:
+        """计算距离下一次触发时间的秒数。"""
+        from datetime import timedelta
+
+        now = datetime.now()
+        target = now.replace(
+            hour=self._target_time.hour,
+            minute=self._target_time.minute,
+            second=0,
+            microsecond=0,
+        )
+        if target <= now:
+            target = target + timedelta(days=1)
+        return (target - now).total_seconds()
+
+    def _execute_industry_ingest(self) -> None:
+        """触发一次行业日频摄取任务（入队后立即返回）。"""
+        db = SessionLocal()
+        try:
+            today = date.today()
+            summary = RunService(db).create_run("industry_ingest", None, today)
+            get_job_queue().enqueue(
+                "industry_daily_ingest",
+                {"run_id": summary.run_id},
+                job_key="industry_daily_ingest",
+            )
+            logger.info("行业调度器: 行业日频摄取已入队 run_id=%s", summary.run_id)
+        except Exception:
+            logger.exception("行业调度器: 行业日频摄取入队失败")
+        finally:
+            db.close()
+
+
+_industry_scheduler: IndustryIngestScheduler | None = None
+
+
+def get_industry_scheduler() -> IndustryIngestScheduler:
+    """获取行业摄取调度器单例。"""
+    global _industry_scheduler
+    if _industry_scheduler is None:
+        s = get_settings()
+        parts = s.industry_refresh_time.split(":")
+        target = time(int(parts[0]), int(parts[1]))
+        _industry_scheduler = IndustryIngestScheduler(target)
+    return _industry_scheduler

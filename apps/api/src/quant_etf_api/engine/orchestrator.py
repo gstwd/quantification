@@ -23,6 +23,10 @@ from quant_etf_api.engine.pipeline_detail import PipelineDetail
 from quant_etf_api.engine.portfolio import build_allocator
 from quant_etf_api.engine.rank import DefaultRankEngine, RankEngine
 from quant_etf_api.engine.risk import DefaultRiskManager, RiskManager
+from quant_etf_api.engine.rotation import (
+    IndustryRotationEngine,
+    IndustryRotationInput,
+)
 from quant_etf_api.engine.score import CrossSectionScorer, DefaultScoreCalculator, ScoreCalculator
 
 logger = logging.getLogger(__name__)
@@ -76,6 +80,11 @@ class StrategyEngine:
         """
         stage_start = time.perf_counter()
         strategy_tag = f"strategy={config.strategy_id} date={context.trade_date}"
+
+        # 0. 行业轮动模式：配置了 rotation 时走专用选择引擎，
+        #    不进入通用 score/filter/rank/portfolio 管线（对旧配置零影响）
+        if config.rotation is not None:
+            return self._run_rotation(config, context, include_details)
 
         # 1. 择时评估（可选）
         timing = None
@@ -155,7 +164,10 @@ class StrategyEngine:
                     logger.debug(
                         "[pipeline] 风控明细: %s %s",
                         strategy_tag,
-                        {k: (round(pre_risk_positions.get(k, 0.0), 4), round(v, 4)) for k, v in positions.items()},
+                        {
+                            k: (round(pre_risk_positions.get(k, 0.0), 4), round(v, 4))
+                            for k, v in positions.items()
+                        },
                     )
 
             total_exposure = round(sum(positions.values()), 4)
@@ -208,6 +220,62 @@ class StrategyEngine:
             cash_ratio=cash_ratio,
             strategy_results=strategy_results,
             pipeline_detail=pipeline_detail,
+        )
+
+    def _run_rotation(
+        self,
+        config: StrategyConfig,
+        context: EngineContext,
+        include_details: bool,
+    ) -> EngineResult:
+        """执行行业轮动专用管线并构造兼容输出。"""
+        rotation_input = context.extra.get("industry_rotation_input")
+        if not isinstance(rotation_input, IndustryRotationInput):
+            raise ValueError(
+                "rotation 策略缺少行业轮动输入：请通过行业轮动服务/CLI 执行，"
+                "或在 EngineContext.extra 注入 industry_rotation_input"
+            )
+        rotation = config.rotation
+        if rotation is None:
+            raise ValueError("rotation 策略缺少 rotation 配置")
+        rotation_engine = IndustryRotationEngine()
+        selected, positions = rotation_engine.select(rotation, rotation_input)
+        scores = {code: 1.0 for code in selected}
+        total_exposure = round(sum(positions.values()), 4)
+        cash_ratio = round(1.0 - total_exposure, 4)
+        strategy_tag = f"strategy={config.strategy_id} date={context.trade_date}"
+        strategy_results: list[StrategyResult] = []
+        if include_details:
+            strategy_results = [
+                StrategyResult(
+                    trade_date=rotation_input.trade_date,
+                    index_code=code,
+                    strategy_id=config.strategy_id,
+                    signal_score=100.0,
+                    signal_level="HIGH",
+                    signal_label="轮动入选",
+                    payload={"rotation_signal": rotation.signal},
+                )
+                for code in selected
+            ]
+        logger.info(
+            "[pipeline] 行业轮动完成: %s signal=%s 选中=%s 总仓位=%s",
+            strategy_tag,
+            rotation.signal,
+            selected,
+            total_exposure,
+        )
+        return EngineResult(
+            trade_date=context.trade_date,
+            strategy_id=config.strategy_id,
+            timing=None,
+            scores=scores,
+            rankings=[],
+            positions=positions,
+            total_exposure=total_exposure,
+            cash_ratio=cash_ratio,
+            strategy_results=strategy_results,
+            pipeline_detail=None,
         )
 
     def _run_timing(self, config: StrategyConfig, context: EngineContext) -> TimingSignal:

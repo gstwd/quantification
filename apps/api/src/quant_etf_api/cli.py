@@ -342,6 +342,198 @@ def _build_optimization_group(subparsers: argparse._SubParsersAction) -> None:
     _add_json_flag(p)
 
 
+def _build_industry_group(subparsers: argparse._SubParsersAction) -> None:
+    """注册 industry 命令组（申万行业轮动子系统工具）。"""
+    group = subparsers.add_parser("industry", help="申万行业 RRG/扩散子系统")
+    sub = group.add_subparsers(dest="subcommand", required=True)
+
+    p = sub.add_parser("init-universe", help="同步 31 个申万一级行业目录")
+    _add_json_flag(p)
+
+    p = sub.add_parser("backfill-bars", help="全量回填行业指数日线")
+    p.add_argument("--codes", dest="industry_codes", help="逗号分隔的行业代码，默认全部")
+    _add_json_flag(p)
+
+    p = sub.add_parser("backfill-membership", help="同步申万行业成分事件")
+    p.add_argument("--force", action="store_true", help="忽略最近刷新时间强制重取")
+    _add_json_flag(p)
+
+    p = sub.add_parser("backfill-stock-close", help="回填成分股历史收盘价")
+    p.add_argument("--start", default="20130101", help="起始日 YYYYMMDD，默认 20130101")
+    p.add_argument("--codes", dest="stock_codes", help="逗号分隔的股票代码，默认全部成分股")
+    _add_json_flag(p)
+
+    p = sub.add_parser("compute-factors", help="计算并持久化区间行业因子")
+    p.add_argument("--start", type=date.fromisoformat, required=True)
+    p.add_argument("--end", type=date.fromisoformat, required=True)
+    p.add_argument("--codes", dest="industry_codes", help="逗号分隔的行业代码，默认全部")
+    p.add_argument("--lookback-ratio", type=int, default=220)
+    p.add_argument("--lookback-mom", type=int, default=60)
+    p.add_argument("--smooth-window", type=int, default=20)
+    p.add_argument("--diffusion-lookback", type=int, default=220)
+    _add_json_flag(p)
+
+    p = sub.add_parser("create-replica-strategy", help="创建扩散+RRG 行业轮动复刻策略")
+    p.add_argument("--id", dest="strategy_id", default="sw_diffusion_rrg_rotation")
+    p.add_argument("--name", dest="display_name", default="扩散+RRG行业轮动(申万)")
+    _add_json_flag(p)
+
+    p = sub.add_parser("backtest", help="独立行业轮动回测（不写 backtest_* 表）")
+    p.add_argument("--start", type=date.fromisoformat, required=True)
+    p.add_argument("--end", type=date.fromisoformat, required=True)
+    p.add_argument(
+        "--signal", default="diffusion_rrg", choices=["quadrant", "diffusion", "diffusion_rrg"]
+    )
+    p.add_argument("--top-n", type=int, default=6)
+    p.add_argument("--keep-quadrants", default="1,2", help="逗号分隔，如 1,2")
+    p.add_argument("--codes", dest="industry_codes", help="逗号分隔的行业代码，默认全部")
+    p.add_argument("--lookback-ratio", type=int, default=220)
+    p.add_argument("--lookback-mom", type=int, default=60)
+    p.add_argument("--smooth-window", type=int, default=20)
+    p.add_argument("--diffusion-lookback", type=int, default=220)
+    p.add_argument("--daily", action="store_true", help="JSON 输出包含逐日明细")
+    p.add_argument("--file", dest="output_file", help="另存逐日明细 CSV 文件")
+    _add_json_flag(p)
+
+
+def _run_industry(args: argparse.Namespace) -> None:
+    """执行 industry 命令组。"""
+    db = SessionLocal()
+    try:
+        from quant_etf_api.domain.industry.constants import (  # noqa: PLC0415
+            SW_L1_INDUSTRIES,
+            SW_EXCLUDED_INDUSTRY_CODES,
+        )
+        from quant_etf_api.engine.config import RotationConfig  # noqa: PLC0415
+        from quant_etf_api.services.industry_data_service import (  # noqa: PLC0415
+            IndustryDataService,
+        )
+        from quant_etf_api.services.industry_factor_service import (  # noqa: PLC0415
+            IndustryFactorService,
+        )
+        from quant_etf_api.services.industry_rotation_service import (  # noqa: PLC0415
+            IndustryRotationService,
+        )
+        from quant_etf_api.services.strategy_config_service import (  # noqa: PLC0415
+            StrategyConfigService,
+        )
+
+        if args.subcommand == "init-universe":
+            result = IndustryDataService(db).sync_universe()
+            _emit(result, not args.no_json)
+            return
+        if args.subcommand == "backfill-bars":
+            codes = _split_codes(args.industry_codes)
+            result = IndustryDataService(db).backfill_industry_bars(codes)
+            _emit(result, not args.no_json)
+            if result["errors"]:
+                sys.exit(1)
+            return
+        if args.subcommand == "backfill-membership":
+            result = IndustryDataService(db).refresh_membership(force=args.force)
+            _emit(result, not args.no_json)
+            return
+        if args.subcommand == "backfill-stock-close":
+            codes = _split_codes(args.stock_codes)
+            result = IndustryDataService(db).backfill_stock_close(
+                start_date=args.start, stock_codes=codes
+            )
+            _emit(result, not args.no_json)
+            if result["errors"]:
+                sys.exit(1)
+            return
+        if args.subcommand == "compute-factors":
+            if args.start > args.end:
+                _fail("--start 不能晚于 --end")
+            codes = _split_codes(args.industry_codes)
+            result = IndustryFactorService(db).compute_and_store(
+                start=args.start,
+                end=args.end,
+                industry_codes=codes,
+                lookback_ratio=args.lookback_ratio,
+                lookback_mom=args.lookback_mom,
+                smooth_window=args.smooth_window,
+                diffusion_lookback=args.diffusion_lookback,
+            )
+            _emit(result, not args.no_json)
+            return
+        if args.subcommand == "create-replica-strategy":
+            codes = [code for code in SW_L1_INDUSTRIES if code not in SW_EXCLUDED_INDUSTRY_CODES]
+            config_json = {
+                "schema_version": "1",
+                "index_codes": codes,
+                "score": {"factors": {}},
+                "portfolio": {"method": "equal_weight", "default_exposure": 1.0},
+                "rebalance": {"frequency": "monthly"},
+                "rotation": {
+                    "signal": "diffusion_rrg",
+                    "top_n": 6,
+                    "keep_quadrants": [1, 2],
+                    "benchmark_exclude": sorted(SW_EXCLUDED_INDUSTRY_CODES),
+                },
+            }
+            req = StrategyConfigCreate(
+                strategy_id=args.strategy_id,
+                display_name=args.display_name,
+                version="1.0.0",
+                description=(
+                    "复刻西部证券《扩散指标+RRG 行业轮动》：扩散 top6 后剔除"
+                    "三四象限（不补足），月末调仓等权，直接作用于申万一级行业指数。"
+                ),
+                frequency="daily",
+                config_json=config_json,
+                status="active",
+            )
+            detail = StrategyConfigService(db).create_config(req)
+            _emit(detail.model_dump(), not args.no_json)
+            return
+        if args.subcommand == "backtest":
+            if args.start > args.end:
+                _fail("--start 不能晚于 --end")
+            keep_quadrants = [
+                int(part.strip()) for part in args.keep_quadrants.split(",") if part.strip()
+            ]
+            rotation = RotationConfig(
+                signal=args.signal,
+                top_n=args.top_n,
+                keep_quadrants=keep_quadrants,
+                benchmark_exclude=sorted(SW_EXCLUDED_INDUSTRY_CODES),
+                lookback_ratio=args.lookback_ratio,
+                lookback_mom=args.lookback_mom,
+                smooth_window=args.smooth_window,
+                diffusion_lookback=args.diffusion_lookback,
+            )
+            codes = _split_codes(args.industry_codes)
+            result = IndustryRotationService(db).run_backtest(
+                start=args.start,
+                end=args.end,
+                rotation=rotation,
+                industry_codes=codes,
+                monthly=True,
+            )
+            payload: dict[str, Any] = {
+                "stats": result["stats"],
+                "selections": result["selections"],
+            }
+            if args.daily:
+                payload["daily"] = result["daily"].to_dict(orient="records")
+            if args.output_file:
+                result["daily"].to_csv(args.output_file, index=False, encoding="utf-8")
+            _emit(payload, not args.no_json)
+            return
+    except ValueError as exc:
+        _fail(str(exc))
+    finally:
+        db.close()
+
+
+def _split_codes(raw: str | None) -> list[str] | None:
+    """把逗号分隔代码串转列表；为空返回 None。"""
+    if not raw:
+        return None
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def _run_strategy(args: argparse.Namespace) -> None:
     """执行 strategy 命令组。"""
     db = SessionLocal()
@@ -561,6 +753,7 @@ def main() -> None:
     _build_strategy_group(subparsers)
     _build_backtest_group(subparsers)
     _build_optimization_group(subparsers)
+    _build_industry_group(subparsers)
 
     args = parser.parse_args()
 
@@ -570,6 +763,8 @@ def main() -> None:
         _run_backtest(args)
     elif args.command == "optimization":
         _run_optimization(args)
+    elif args.command == "industry":
+        _run_industry(args)
     elif args.command == "init-factors":
         init_factors()
     elif args.command == "init-indexes":
