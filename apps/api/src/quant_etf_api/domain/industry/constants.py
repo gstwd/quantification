@@ -98,6 +98,11 @@ INDUSTRY_FACTOR_IDS: frozenset[str] = frozenset(
     }
 )
 
+# 调试研究接口单次允许的最大自然日跨度：超长区间会放大响应体与逐点展开成本。
+# RRG 需要更久历史展示轨迹，扩散受个股逐行业加载成本约束，上限略低。
+RRG_LAB_MAX_RANGE_DAYS: int = 3700
+DIFFUSION_LAB_MAX_RANGE_DAYS: int = 2200
+
 
 # 申万一级行业指数在系统内的归一化代码：去掉交易所后缀（如 801010.SI → 801010）
 def normalize_sw_code(code: str) -> str:

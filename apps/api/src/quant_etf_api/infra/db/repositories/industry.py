@@ -409,6 +409,47 @@ class StockDailyCloseRepository(BaseRepository):
             StockDailyCloseModel.stock_code.asc(),
         ).all()
 
+    def find_close_rows(
+        self,
+        start: date,
+        end: date,
+        stock_codes: list[str],
+    ) -> list[Any]:
+        """按股票列表查询收盘三列轻量行（trade_date, stock_code, close）。
+
+        供扩散指标按行业分批计算使用：只投影必需列，避免把整行 ORM 对象
+        载入内存（P02 内存优化的读取侧改造）。
+
+        Args:
+            start: 起始日期（含）。
+            end: 结束日期（含）。
+            stock_codes: 股票代码列表。
+
+        Returns:
+            (trade_date, stock_code, close) 元组列表，按日期、股票升序。
+        """
+        if not stock_codes:
+            return []
+        return list(
+            self._db.query(
+                StockDailyCloseModel.trade_date,
+                StockDailyCloseModel.stock_code,
+                StockDailyCloseModel.close,
+            )
+            .filter(
+                and_(
+                    StockDailyCloseModel.trade_date >= start,
+                    StockDailyCloseModel.trade_date <= end,
+                    StockDailyCloseModel.stock_code.in_(stock_codes),
+                )
+            )
+            .order_by(
+                StockDailyCloseModel.trade_date.asc(),
+                StockDailyCloseModel.stock_code.asc(),
+            )
+            .all()
+        )
+
     def trading_dates(self, start: date, end: date) -> list[date]:
         """查询区间内个股收盘覆盖的交易日（去重升序）。"""
         rows = (

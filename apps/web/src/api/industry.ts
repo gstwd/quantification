@@ -54,12 +54,99 @@ export interface IndustryRRGPoint {
   quadrant: number | null
 }
 
+/** 调试页数据问题条目 */
+export interface IndustryLabIssue {
+  level: 'warn' | 'error' | 'info'
+  code: string
+  message: string
+  industry_codes: string[]
+  count: number | null
+  sample_dates: string[]
+}
+
+/** 单行业 RRG 数据覆盖与有效区间 */
+export interface IndustryRRGCoverageItem {
+  industry_code: string
+  name_cn: string
+  data_start_date: string | null
+  data_end_date: string | null
+  expected_input_days: number
+  present_input_days: number
+  missing_input_days: number
+  output_days: number
+  leading_nan_days: number
+  valid_count: number
+  valid_from: string | null
+  valid_until: string | null
+}
+
+/** RRG 查询元信息 */
+export interface IndustryRRGMeta {
+  requested_start: string
+  requested_end: string
+  effective_start: string | null
+  effective_end: string | null
+  market_trading_days: number
+  warmup_required: number
+  max_range_days: number
+  range_exceeded: boolean
+  issues: IndustryLabIssue[]
+  coverage: IndustryRRGCoverageItem[]
+  notes: string[]
+}
+
+/** RRG 响应 */
+export interface IndustryRRGResponse {
+  points: IndustryRRGPoint[]
+  warmup_days: number
+  meta: IndustryRRGMeta | null
+}
+
 /** 扩散单点数据 */
 export interface IndustryDiffusionPoint {
   trade_date: string
   industry_code: string
   name_cn: string
   value: number | null
+  valid_count: number | null
+  member_count: number | null
+  coverage: number | null
+}
+
+/** 单行业扩散数据覆盖统计 */
+export interface IndustryDiffusionCoverageItem {
+  industry_code: string
+  name_cn: string
+  member_count: number
+  data_start_date: string | null
+  data_end_date: string | null
+  output_days: number
+  no_sample_days: number
+  valid_count: number
+  valid_from: string | null
+  valid_until: string | null
+  avg_sample_count: number | null
+}
+
+/** 扩散查询元信息 */
+export interface IndustryDiffusionMeta {
+  requested_start: string
+  requested_end: string
+  effective_start: string | null
+  effective_end: string | null
+  market_trading_days: number
+  output_days: number
+  max_range_days: number
+  range_exceeded: boolean
+  issues: IndustryLabIssue[]
+  coverage: IndustryDiffusionCoverageItem[]
+  rules: string[]
+}
+
+/** 扩散响应 */
+export interface IndustryDiffusionResponse {
+  points: IndustryDiffusionPoint[]
+  meta: IndustryDiffusionMeta | null
 }
 
 /** 轮动单日选择 */
@@ -143,6 +230,7 @@ export interface DailyBarLike {
  * @param end - 截止日期 YYYY-MM-DD
  * @param codes - 行业代码列表
  * @param params - RRG 参数
+ * @param options - 可选超时配置；RRG/扩散为研究计算，默认放宽到 120 秒
  * @returns RRG 序列点
  */
 export async function fetchRRG(
@@ -150,8 +238,9 @@ export async function fetchRRG(
   end: string,
   codes: string[],
   params: Pick<RotationParams, 'lookbackRatio' | 'lookbackMom' | 'smoothWindow'>,
-): Promise<IndustryRRGPoint[]> {
-  const { data } = await apiClient.get<{ points: IndustryRRGPoint[] }>('/industry/rrg', {
+  options: { timeout?: number } = {},
+): Promise<IndustryRRGResponse> {
+  const { data } = await apiClient.get<IndustryRRGResponse>('/industry/rrg', {
     params: {
       start,
       end,
@@ -160,8 +249,9 @@ export async function fetchRRG(
       lookback_mom: params.lookbackMom,
       smooth_window: params.smoothWindow,
     },
+    timeout: options.timeout ?? 120_000,
   })
-  return data.points
+  return data
 }
 
 /**
@@ -171,6 +261,8 @@ export async function fetchRRG(
  * @param end - 截止日期 YYYY-MM-DD
  * @param codes - 行业代码列表
  * @param params - 扩散参数
+ * @param withCoverage - 是否逐点返回每日覆盖度
+ * @param options - 可选超时配置；扩散为研究计算，默认放宽到 120 秒
  * @returns 扩散序列点
  */
 export async function fetchDiffusion(
@@ -178,20 +270,21 @@ export async function fetchDiffusion(
   end: string,
   codes: string[],
   params: Pick<RotationParams, 'diffusionLookback' | 'smoothWindow'>,
-): Promise<IndustryDiffusionPoint[]> {
-  const { data } = await apiClient.get<{ points: IndustryDiffusionPoint[] }>(
-    '/industry/diffusion',
-    {
-      params: {
-        start,
-        end,
-        industry_codes: codes.join(','),
-        diffusion_lookback: params.diffusionLookback,
-        smooth_window: params.smoothWindow,
-      },
+  withCoverage = true,
+  options: { timeout?: number } = {},
+): Promise<IndustryDiffusionResponse> {
+  const { data } = await apiClient.get<IndustryDiffusionResponse>('/industry/diffusion', {
+    params: {
+      start,
+      end,
+      industry_codes: codes.join(','),
+      diffusion_lookback: params.diffusionLookback,
+      smooth_window: params.smoothWindow,
+      with_coverage: withCoverage,
     },
-  )
-  return data.points
+    timeout: options.timeout ?? 120_000,
+  })
+  return data
 }
 
 /**

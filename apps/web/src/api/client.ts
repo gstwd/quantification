@@ -19,6 +19,26 @@ export const apiClient = axios.create({
   timeout: 30000,
 })
 
+// 为每个请求生成/透传 X-Request-ID，便于后端日志与浏览器网络面板相互关联。
+apiClient.interceptors.request.use((config) => {
+  const headers = config.headers ?? {}
+  const hasId =
+    typeof headers.get === 'function' ? Boolean(headers.get('X-Request-ID')) : Boolean(headers['X-Request-ID'])
+  if (!hasId) {
+    const id =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    if (typeof headers.set === 'function') {
+      headers.set('X-Request-ID', id)
+    } else {
+      headers['X-Request-ID'] = id
+    }
+  }
+  config.headers = headers
+  return config
+})
+
 /**
  * 从 Axios 错误中提取用户可读的提示文案。
  *

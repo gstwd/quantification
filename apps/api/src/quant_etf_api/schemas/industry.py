@@ -26,11 +26,56 @@ class IndustryRRGPoint(BaseModel):
     quadrant: int | None = None
 
 
+class IndustryLabIssue(BaseModel):
+    """调试页数据问题条目（替代“空结果=无数据”的静默语义）。"""
+
+    level: str = "warn"
+    code: str
+    message: str
+    industry_codes: list[str] = Field(default_factory=list)
+    count: int | None = None
+    sample_dates: list[str] = Field(default_factory=list)
+
+
+class IndustryRRGCoverageItem(BaseModel):
+    """单行业 RRG 数据覆盖与有效区间（按行业日线质量统计）。"""
+
+    industry_code: str
+    name_cn: str = ""
+    data_start_date: date | None = None
+    data_end_date: date | None = None
+    expected_input_days: int = 0
+    present_input_days: int = 0
+    missing_input_days: int = 0
+    output_days: int = 0
+    leading_nan_days: int = 0
+    valid_count: int = 0
+    valid_from: date | None = None
+    valid_until: date | None = None
+
+
+class IndustryRRGMeta(BaseModel):
+    """RRG 查询的计算口径与数据问题汇总。"""
+
+    requested_start: date
+    requested_end: date
+    effective_start: date | None = None
+    effective_end: date | None = None
+    market_trading_days: int = 0
+    warmup_required: int = 0
+    max_range_days: int = 0
+    range_exceeded: bool = False
+    issues: list[IndustryLabIssue] = Field(default_factory=list)
+    coverage: list[IndustryRRGCoverageItem] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class IndustryRRGResponse(BaseModel):
     """RRG 序列响应。"""
 
     points: list[IndustryRRGPoint]
     warmup_days: int = Field(default=0, description="指标 warm-up 交易日数")
+    meta: IndustryRRGMeta | None = None
 
 
 class IndustryDiffusionPoint(BaseModel):
@@ -40,12 +85,48 @@ class IndustryDiffusionPoint(BaseModel):
     industry_code: str
     name_cn: str = ""
     value: float | None = None
+    valid_count: int | None = None
+    member_count: int | None = None
+    coverage: float | None = None
+
+
+class IndustryDiffusionCoverageItem(BaseModel):
+    """单行业扩散数据覆盖统计（成员股、样本、无样本日）。"""
+
+    industry_code: str
+    name_cn: str = ""
+    member_count: int = 0
+    data_start_date: date | None = None
+    data_end_date: date | None = None
+    output_days: int = 0
+    no_sample_days: int = 0
+    valid_count: int = 0
+    valid_from: date | None = None
+    valid_until: date | None = None
+    avg_sample_count: float | None = None
+
+
+class IndustryDiffusionMeta(BaseModel):
+    """扩散查询的计算口径与数据问题汇总。"""
+
+    requested_start: date
+    requested_end: date
+    effective_start: date | None = None
+    effective_end: date | None = None
+    market_trading_days: int = 0
+    output_days: int = 0
+    max_range_days: int = 0
+    range_exceeded: bool = False
+    issues: list[IndustryLabIssue] = Field(default_factory=list)
+    coverage: list[IndustryDiffusionCoverageItem] = Field(default_factory=list)
+    rules: list[str] = Field(default_factory=list)
 
 
 class IndustryDiffusionResponse(BaseModel):
     """扩散指标序列响应。"""
 
     points: list[IndustryDiffusionPoint]
+    meta: IndustryDiffusionMeta | None = None
 
 
 class IndustryRotationSelection(BaseModel):

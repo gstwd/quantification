@@ -9,6 +9,8 @@ import pytest
 from fastapi import HTTPException
 
 from quant_etf_api.api.routers.industry import (
+    get_diffusion_series,
+    get_rrg_series,
     industry_daily_bars,
     industry_quality_detail,
 )
@@ -40,3 +42,27 @@ def test_quality_unknown_industry_returns_404(monkeypatch) -> None:
     with pytest.raises(HTTPException) as exc_info:
         industry_quality_detail("999999", db=MagicMock())
     assert exc_info.value.status_code == 404
+
+
+def test_rrg_range_exceeds_cap_returns_422() -> None:
+    """RRG 单次查询超过自然日上限时返回 422，不触达服务层。"""
+    with pytest.raises(HTTPException) as exc_info:
+        get_rrg_series(
+            start=date(2012, 1, 1),
+            end=date(2026, 9, 1),
+            db=MagicMock(),
+        )
+    assert exc_info.value.status_code == 422
+    assert "最多支持" in str(exc_info.value.detail)
+
+
+def test_diffusion_range_exceeds_cap_returns_422() -> None:
+    """扩散单次查询超过自然日上限时返回 422，不触达服务层。"""
+    with pytest.raises(HTTPException) as exc_info:
+        get_diffusion_series(
+            start=date(2018, 1, 1),
+            end=date(2026, 9, 1),
+            db=MagicMock(),
+        )
+    assert exc_info.value.status_code == 422
+    assert "最多支持" in str(exc_info.value.detail)
