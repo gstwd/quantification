@@ -7,6 +7,43 @@ export interface IndustryIndexSummary {
   is_benchmark_excluded: boolean
 }
 
+/** 行业数据管理列表摘要（元数据 + 成分数 + 质量快照 + 最新行情） */
+export interface IndustrySummaryItem {
+  industry_code: string
+  name_cn: string
+  is_benchmark_excluded: boolean
+  member_count: number
+  data_start_date: string | null
+  data_end_date: string | null
+  bar_count: number | null
+  missing_day_count: number | null
+  quality_checked_at: string | null
+  latest_trade_date: string | null
+  latest_close: number | null
+  latest_change_pct: number | null
+}
+
+/** 行业详情页数据质量 */
+export interface IndustryQualityDetail {
+  industry_code: string
+  data_start_date: string | null
+  data_end_date: string | null
+  bar_count: number | null
+  missing_day_count: number | null
+  quality_checked_at: string | null
+  total: number
+  min_date: string | null
+  max_date: string | null
+  missing_open: number
+  missing_high: number
+  missing_low: number
+  missing_close: number
+  incomplete_rows: number
+  incomplete_ratio: number
+  change_pct_null: number
+  change_pct_null_rate: number
+}
+
 /** RRG 单点数据 */
 export interface IndustryRRGPoint {
   trade_date: string
@@ -47,6 +84,56 @@ export interface RotationParams {
 export async function fetchIndustryIndexes(): Promise<IndustryIndexSummary[]> {
   const { data } = await apiClient.get<IndustryIndexSummary[]>('/industry/indexes')
   return data
+}
+
+/** 拉取行业数据管理列表摘要 */
+export async function fetchIndustrySummaries(): Promise<IndustrySummaryItem[]> {
+  const { data } = await apiClient.get<IndustrySummaryItem[]>('/industry/summary')
+  return data
+}
+
+/** 拉取单个申万一级行业日线 K 线数据 */
+export async function fetchIndustryDailyBars(
+  industryCode: string,
+  params: { startDate?: string; endDate?: string; limit?: number } = {},
+): Promise<DailyBarLike[]> {
+  const { data } = await apiClient.get<DailyBarLike[]>(
+    `/industry/indexes/${industryCode}/bars`,
+    {
+      params: {
+        start_date: params.startDate || undefined,
+        end_date: params.endDate || undefined,
+        limit: params.limit ?? 250,
+      },
+    },
+  )
+  return data
+}
+
+/** 拉取单个申万一级行业的数据质量详情 */
+export async function fetchIndustryQuality(
+  industryCode: string,
+): Promise<IndustryQualityDetail> {
+  const { data } = await apiClient.get<IndustryQualityDetail>(
+    `/industry/indexes/${industryCode}/quality`,
+  )
+  return data
+}
+
+/** 行业日线 K 线明细（与系统 DailyBar 一致，本地最小接口避免循环依赖） */
+export interface DailyBarLike {
+  trade_date: string
+  code: string
+  open_price: number | null
+  high_price: number | null
+  low_price: number | null
+  close_price: number | null
+  prev_close_price: number | null
+  change_pct: number | null
+  volume: number | null
+  turnover: number | null
+  source: string
+  ingested_at?: string | null
 }
 
 /**

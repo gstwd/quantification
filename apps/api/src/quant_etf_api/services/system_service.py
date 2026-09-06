@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from sqlalchemy import func, text
+from sqlalchemy import func, null, text
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.db.models.core import (
@@ -11,7 +11,11 @@ from quant_etf_api.infra.db.models.core import (
     IndexValuationModel,
     MacroIndicatorModel,
 )
-from quant_etf_api.infra.db.models.industry import StockDailyCloseModel
+from quant_etf_api.infra.db.models.industry import (
+    IndustryDailyBarModel,
+    IndustryMembershipEventModel,
+    StockDailyCloseModel,
+)
 from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.schemas.run import ResearchRunSummary
@@ -43,6 +47,7 @@ class SystemService:
             self._db.execute(text("SELECT 1"))
             return True
         except Exception:
+            self._db.rollback()
             logger.warning("数据库连接检测失败", exc_info=True)
             return False
 
@@ -51,6 +56,7 @@ class SystemService:
         try:
             return self._index_repo.count_active()
         except Exception:
+            self._db.rollback()
             logger.warning("活跃指数数量查询失败", exc_info=True)
             return 0
 
@@ -60,6 +66,7 @@ class SystemService:
         source_name: str,
         table_name: str,
         date_column: str = "trade_date",
+        ingested_column: str = "ingested_at",
     ) -> DataSourceSnapshot:
         """查询单张数据表的统计快照。
 
@@ -68,24 +75,33 @@ class SystemService:
             source_name: 数据源展示名称（如 "新浪日线行情"）。
             table_name: 数据库表名（如 "index_daily_bar"）。
             date_column: 用于获取最新日期的列名，默认 "trade_date"。
+                None 表示该表无业务日期维度（如成分事件，只展示入库时间）。
+            ingested_column: 用于获取最近入库时间的列名，默认 "ingested_at"。
 
         Returns:
             DataSourceSnapshot，查询失败时返回全零值快照。
         """
         try:
-            result = self._db.query(
-                func.count().label("cnt"),
-                func.max(getattr(model, date_column)).label("max_date"),
-                func.max(model.ingested_at).label("max_ingested"),
-            ).one()
+            query = self._db.query(func.count().label("cnt"))
+            if date_column is not None:
+                query = query.add_columns(
+                    func.max(getattr(model, date_column)).label("max_date")
+                )
+            else:
+                query = query.add_columns(null().label("max_date"))
+            query = query.add_columns(
+                func.max(getattr(model, ingested_column)).label("max_ingested")
+            )
+            result = query.one()
             return DataSourceSnapshot(
                 source_name=source_name,
                 table_name=table_name,
                 record_count=result.cnt or 0,
-                latest_trade_date=result.max_date,
+                latest_trade_date=result.max_date if date_column is not None else None,
                 latest_ingested_at=result.max_ingested,
             )
         except Exception:
+            self._db.rollback()
             logger.warning("表 %s 快照查询失败", table_name, exc_info=True)
             return DataSourceSnapshot(
                 source_name=source_name,
@@ -113,6 +129,7 @@ class SystemService:
                 for r in rows
             ]
         except Exception:
+            self._db.rollback()
             logger.warning("最近运行记录查询失败", exc_info=True)
             return []
 
@@ -161,6 +178,18 @@ class SystemService:
                 StockDailyCloseModel,
                 source_name="个股日线行情",
                 table_name="stock_daily_close",
+            ),
+            self._get_table_snapshot(
+                IndustryDailyBarModel,
+                source_name="行业日线行情",
+                table_name="industry_daily_bar",
+            ),
+            self._get_table_snapshot(
+                IndustryMembershipEventModel,
+                source_name="申万行业成分",
+                table_name="industry_membership_event",
+                date_column=None,
+                ingested_column="fetched_at",
             ),
         ]
 

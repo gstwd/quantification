@@ -53,6 +53,21 @@ class IndustryUniverseModel(Base):
         server_default=sa.text("TRUE"),
         comment="是否启用",
     )
+    data_start_date: Mapped[date | None] = mapped_column(
+        Date, nullable=True, comment="库内日线最早日期（质量快照）"
+    )
+    data_end_date: Mapped[date | None] = mapped_column(
+        Date, nullable=True, comment="库内日线最晚日期（质量快照）"
+    )
+    bar_count: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="库内日线行数（质量快照）"
+    )
+    missing_day_count: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="按交易日历校验的缺失交易日数（质量快照）"
+    )
+    quality_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="最近一次数据质量检查时间（UTC）"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, comment="记录创建时间（UTC）"
     )

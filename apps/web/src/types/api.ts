@@ -122,6 +122,7 @@ export interface DataQualityResponse {
   index_bars: DataFreshnessGroup
   index_valuation: DataFreshnessGroup
   stock_bars?: DataFreshnessGroup | null
+  industry_bars?: DataFreshnessGroup | null
   checked_at: string
 }
 

@@ -86,6 +86,28 @@ def _enqueue_for_run(
             {"run_id": run_id, "stock_code": (params or {}).get("stock_code", "")},
             job_key=f"stock_data_rebuild:{(params or {}).get('stock_code', '')}",
         )
+    elif run_type == "industry_universe_refresh":
+        queue.enqueue("industry_universe_refresh", {"run_id": run_id}, job_key="industry_universe_refresh")
+    elif run_type == "industry_bars_refresh":
+        queue.enqueue("industry_bars_refresh", {"run_id": run_id}, job_key="industry_bars_refresh")
+    elif run_type == "industry_quality_check":
+        queue.enqueue(
+            "industry_quality_check",
+            {"run_id": run_id, "industry_code": (params or {}).get("industry_code", "")},
+            job_key=f"industry_quality:{(params or {}).get('industry_code', '')}",
+        )
+    elif run_type == "industry_data_fill":
+        queue.enqueue(
+            "industry_data_fill",
+            {"run_id": run_id, "industry_code": (params or {}).get("industry_code", "")},
+            job_key=f"industry_data_fill:{(params or {}).get('industry_code', '')}",
+        )
+    elif run_type == "industry_data_rebuild":
+        queue.enqueue(
+            "industry_data_rebuild",
+            {"run_id": run_id, "industry_code": (params or {}).get("industry_code", "")},
+            job_key=f"industry_data_rebuild:{(params or {}).get('industry_code', '')}",
+        )
     else:
         return False
     return True
@@ -234,6 +256,26 @@ def _enqueue_stock_run(
     return {"status": "accepted", "run_type": run_type, "run_id": summary.run_id}
 
 
+def _enqueue_industry_run(
+    run_type: str,
+    industry_code: str,
+    db: Session,
+) -> dict[str, str]:
+    """创建单行业运行记录并入队对应后台任务。"""
+    summary = RunService(db).create_run(
+        run_type, None, date.today(), params={"industry_code": industry_code}
+    )
+    if not _enqueue_for_run(
+        run_type,
+        summary.run_id,
+        None,
+        {"industry_code": industry_code},
+        summary.trade_date or date.today(),
+    ):
+        raise HTTPException(status_code=400, detail=f"不支持的行业任务类型: {run_type}")
+    return {"status": "accepted", "run_type": run_type, "run_id": summary.run_id}
+
+
 @router.post("/runs/stocks/{stock_code}/quality")
 def stock_quality_check(stock_code: str, db: Session = Depends(get_db)) -> dict[str, str]:
     """触发单只股票数据质量检查（重算并落库质量快照）。"""
@@ -250,6 +292,64 @@ def stock_data_fill(stock_code: str, db: Session = Depends(get_db)) -> dict[str,
 def stock_data_rebuild(stock_code: str, db: Session = Depends(get_db)) -> dict[str, str]:
     """触发单只股票全量重拉（清空旧行后重新拉取入库）。"""
     return _enqueue_stock_run("stock_data_rebuild", stock_code, db)
+
+
+@router.post("/runs/industry/refresh-info")
+def industry_universe_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
+    """触发行业目录与成分事件强制刷新（页面顶部“更新行业信息”）。"""
+    summary = RunService(db).create_run("industry_universe_refresh", None, date.today())
+    _enqueue_for_run(
+        "industry_universe_refresh",
+        summary.run_id,
+        None,
+        None,
+        summary.trade_date or date.today(),
+    )
+    return {
+        "status": "accepted",
+        "run_type": "industry_universe_refresh",
+        "run_id": summary.run_id,
+    }
+
+
+@router.post("/runs/industry/refresh-bars")
+def industry_bars_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
+    """触发全部行业日线增量刷新并重算质量快照。"""
+    summary = RunService(db).create_run("industry_bars_refresh", None, date.today())
+    _enqueue_for_run(
+        "industry_bars_refresh",
+        summary.run_id,
+        None,
+        None,
+        summary.trade_date or date.today(),
+    )
+    return {
+        "status": "accepted",
+        "run_type": "industry_bars_refresh",
+        "run_id": summary.run_id,
+    }
+
+
+@router.post("/runs/industries/{industry_code}/quality")
+def industry_quality_check(
+    industry_code: str, db: Session = Depends(get_db)
+) -> dict[str, str]:
+    """触发单个行业数据质量检查（重算并落库质量快照）。"""
+    return _enqueue_industry_run("industry_quality_check", industry_code, db)
+
+
+@router.post("/runs/industries/{industry_code}/fill")
+def industry_data_fill(industry_code: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """触发单个行业日线补全（补到最近交易日并刷新质量快照）。"""
+    return _enqueue_industry_run("industry_data_fill", industry_code, db)
+
+
+@router.post("/runs/industries/{industry_code}/rebuild")
+def industry_data_rebuild(
+    industry_code: str, db: Session = Depends(get_db)
+) -> dict[str, str]:
+    """触发单个行业全量重拉（清空旧行后重新拉取入库）。"""
+    return _enqueue_industry_run("industry_data_rebuild", industry_code, db)
 
 
 @router.post("/runs/{run_id}/retry")

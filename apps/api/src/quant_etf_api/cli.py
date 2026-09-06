@@ -354,6 +354,20 @@ def _build_industry_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--codes", dest="industry_codes", help="逗号分隔的行业代码，默认全部")
     _add_json_flag(p)
 
+    p = sub.add_parser("quality", help="批量重算并落库行业日线质量快照")
+    p.add_argument("--all", action="store_true", help="全部行业（默认）")
+    p.add_argument("--codes", dest="industry_codes", help="逗号分隔的行业代码")
+    _add_json_flag(p)
+
+    p = sub.add_parser("fill", help="批量补全行业日线到最近交易日")
+    p.add_argument("--all", action="store_true", help="全部行业（默认）")
+    p.add_argument("--codes", dest="industry_codes", help="逗号分隔的行业代码")
+    _add_json_flag(p)
+
+    p = sub.add_parser("rebuild", help="批量全量重拉行业日线（先拉取成功后清空旧行）")
+    p.add_argument("--codes", dest="industry_codes", required=True, help="逗号分隔的行业代码")
+    _add_json_flag(p)
+
     p = sub.add_parser("backfill-membership", help="同步申万行业成分事件")
     p.add_argument("--force", action="store_true", help="忽略最近刷新时间强制重取")
     _add_json_flag(p)
@@ -427,6 +441,49 @@ def _run_industry(args: argparse.Namespace) -> None:
             result = IndustryDataService(db).backfill_industry_bars(codes)
             _emit(result, not args.no_json)
             if result["errors"]:
+                sys.exit(1)
+            return
+        if args.subcommand == "quality":
+            codes = _split_codes(args.industry_codes)
+            if args.all:
+                codes = None
+            result = IndustryDataService(db).bulk_quality(codes)
+            _emit(result, not args.no_json)
+            if result["errors"]:
+                sys.exit(1)
+            return
+        if args.subcommand in ("fill", "rebuild"):
+            codes = _split_codes(args.industry_codes)
+            if args.all or (args.subcommand == "fill" and codes is None):
+                codes = None
+            if args.subcommand == "rebuild" and not codes:
+                _fail("rebuild 必须通过 --codes 指定要重拉的行业")
+            if codes is None:
+                from quant_etf_api.infra.db.repositories.industry import (  # noqa: PLC0415
+                    IndustryUniverseRepository,
+                )
+
+                codes = IndustryUniverseRepository(db).find_active_codes()
+            service = IndustryDataService(db)
+            errors: list[str] = []
+            items: list[dict[str, Any]] = []
+            for code in codes:
+                try:
+                    items.append(
+                        service.fill_industry(code)
+                        if args.subcommand == "fill"
+                        else service.rebuild_industry(code)
+                    )
+                except Exception as exc:
+                    errors.append(f"{code}: {type(exc).__name__}: {exc}")
+                    logger.warning("行业 %s %s 失败: %s", code, args.subcommand, exc)
+            summary = {
+                "codes": len(codes),
+                "items": items,
+                "errors": errors,
+            }
+            _emit(summary, not args.no_json)
+            if errors:
                 sys.exit(1)
             return
         if args.subcommand == "backfill-membership":

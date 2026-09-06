@@ -310,16 +310,34 @@ def handle_industry_daily_ingest(payload: dict) -> None:
     db = SessionLocal()
     try:
         RunService(db).mark_running(run_id)
-        target_date = IndustryDataService(db).run_daily_ingest()
-        if target_date is not None:
+        result = IndustryDataService(db).run_daily_ingest()
+        bars = result.get("bars") or {}
+        stock_snapshot = result.get("stock_snapshot") or {}
+        target_date = result.get("target_date")
+        bars_errors = bars.get("errors") or []
+        snapshot_error = stock_snapshot.get("error")
+        # 行情/快照不完整时不入队当日因子计算，避免用缺边缺角输入算扩散/RRG
+        if (
+            target_date is not None
+            and not bars_errors
+            and snapshot_error is None
+        ):
             get_job_queue().enqueue(
                 "industry_factor_compute",
                 {"trade_date": target_date.isoformat()},
                 job_key=f"industry_factor_compute:{target_date.isoformat()}",
             )
-        RunService(db).mark_success(run_id)
+        else:
+            result["factor_skipped"] = {
+                "target_date": target_date.isoformat() if target_date else None,
+                "reason": "行业日线或个股收盘快照存在未补齐错误，等待补齐后重跑",
+                "bars_errors": len(bars_errors),
+                "stock_snapshot_error": bool(snapshot_error),
+            }
+        RunService(db).mark_success(run_id, metrics=_json_safe(result))
     except Exception as e:
         logger.exception("行业日频摄取任务异常: run_id=%s", run_id)
+        db.rollback()
         RunService(db).mark_failed(run_id, f"行业日频摄取异常: {type(e).__name__}: {e}")
         raise
     finally:
@@ -350,6 +368,7 @@ def handle_industry_factor_compute(payload: dict) -> None:
     except Exception as e:
         logger.exception("行业因子计算任务异常: trade_date=%s", trade_date)
         if run_id:
+            db.rollback()
             RunService(db).mark_failed(run_id, f"行业因子计算异常: {type(e).__name__}: {e}")
         raise
     finally:
@@ -390,6 +409,7 @@ def _run_stock_task(
             run_id,
             stock_code,
         )
+        db.rollback()
         RunService(db).mark_failed(run_id, f"单股任务失败: {type(e).__name__}: {e}")
         raise
     finally:
@@ -424,6 +444,119 @@ def handle_stock_data_rebuild(payload: dict) -> None:
     _run_stock_task(job_type="stock_data_rebuild", payload=payload, action="rebuild")
 
 
+def _run_industry_task(
+    *,
+    job_type: str,
+    payload: dict,
+    action: str,
+) -> None:
+    """执行单个行业后台任务（质量检查/补全/重拉）的公共骨架。"""
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.services.industry_data_service import IndustryDataService
+    from quant_etf_api.services.run_service import RunService
+
+    run_id = payload.get("run_id") or ""
+    industry_code = payload.get("industry_code") or ""
+    db = SessionLocal()
+    try:
+        run_svc = RunService(db)
+        run_svc.mark_running(run_id)
+        service = IndustryDataService(db)
+        if action == "quality":
+            metrics = service.quality_check(industry_code)
+        elif action == "fill":
+            metrics = service.fill_industry(industry_code)
+        elif action == "rebuild":
+            metrics = service.rebuild_industry(industry_code)
+        else:
+            raise ValueError(f"未知单行业任务 action: {action}")
+        run_svc.mark_success(run_id, metrics=_json_safe(metrics))
+    except Exception as e:
+        logger.exception(
+            "单行业任务异常: job_type=%s run_id=%s industry_code=%s",
+            job_type,
+            run_id,
+            industry_code,
+        )
+        db.rollback()
+        RunService(db).mark_failed(run_id, f"单行业任务失败: {type(e).__name__}: {e}")
+        raise
+    finally:
+        db.close()
+
+
+def handle_industry_universe_refresh(payload: dict) -> None:
+    """执行行业目录与成分事件强制刷新（页面“更新行业信息”入口）。"""
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.services.industry_data_service import IndustryDataService
+    from quant_etf_api.services.run_service import RunService
+
+    run_id = payload.get("run_id") or ""
+    db = SessionLocal()
+    try:
+        run_svc = RunService(db)
+        run_svc.mark_running(run_id)
+        service = IndustryDataService(db)
+        universe = service.sync_universe()
+        membership = service.refresh_membership(force=True)
+        run_svc.mark_success(
+            run_id,
+            metrics={
+                "universe": universe,
+                "membership": membership,
+            },
+        )
+    except Exception as e:
+        logger.exception("行业目录刷新任务异常: run_id=%s", run_id)
+        db.rollback()
+        RunService(db).mark_failed(run_id, f"行业目录刷新异常: {type(e).__name__}: {e}")
+        raise
+    finally:
+        db.close()
+
+
+def handle_industry_bars_refresh(payload: dict) -> None:
+    """执行全部行业日线增量刷新并重算质量快照。"""
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.services.industry_data_service import IndustryDataService
+    from quant_etf_api.services.run_service import RunService
+
+    run_id = payload.get("run_id") or ""
+    db = SessionLocal()
+    try:
+        run_svc = RunService(db)
+        run_svc.mark_running(run_id)
+        service = IndustryDataService(db)
+        bars = service.refresh_industry_bars_incremental()
+        quality = service.bulk_quality()
+        run_svc.mark_success(
+            run_id,
+            metrics=_json_safe({"bars": bars, "quality": quality}),
+        )
+    except Exception as e:
+        logger.exception("行业日线刷新任务异常: run_id=%s", run_id)
+        db.rollback()
+        RunService(db).mark_failed(run_id, f"行业日线刷新异常: {type(e).__name__}: {e}")
+        raise
+    finally:
+        db.close()
+
+
+def handle_industry_quality_check(payload: dict) -> None:
+    """执行单个行业数据质量检查。"""
+    _run_industry_task(job_type="industry_quality_check", payload=payload, action="quality")
+
+
+def handle_industry_data_fill(payload: dict) -> None:
+    """执行单个行业日线补全。"""
+    _run_industry_task(job_type="industry_data_fill", payload=payload, action="fill")
+
+
+def handle_industry_data_rebuild(payload: dict) -> None:
+    """执行单个行业全量重拉。"""
+    _run_industry_task(job_type="industry_data_rebuild", payload=payload, action="rebuild")
+
+
 JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "daily_ingest": handle_daily_ingest,
     "strategy_run": handle_strategy_run,
@@ -440,6 +573,11 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "warm_calendar": handle_warm_calendar,
     "industry_daily_ingest": handle_industry_daily_ingest,
     "industry_factor_compute": handle_industry_factor_compute,
+    "industry_universe_refresh": handle_industry_universe_refresh,
+    "industry_bars_refresh": handle_industry_bars_refresh,
+    "industry_quality_check": handle_industry_quality_check,
+    "industry_data_fill": handle_industry_data_fill,
+    "industry_data_rebuild": handle_industry_data_rebuild,
     "stock_quality_check": handle_stock_quality_check,
     "stock_data_fill": handle_stock_data_fill,
     "stock_data_rebuild": handle_stock_data_rebuild,

@@ -77,6 +77,14 @@
 
 ### P03 行业数据源未纳入数据源状态/数据质量/补拉体系（用户问题 3）
 
+> 处理记录（2026-09-06，P03 方案落地，迁移 0031 待应用）：
+> 新增行业数据管理页 `/industries` 与行业详情页（K 线 + 数据质量），侧栏加入口；
+> `industry_universe` 增加日线质量快照列；新增 `GET /industry/summary` 与单行业
+> bars/quality 只读端点，以及 industry_universe_refresh / industry_bars_refresh /
+> industry_quality_check / industry_data_fill / industry_data_rebuild 五个后台任务；
+> `/system/status` 增加行业日线与申万行业成分两张数据源状态卡，
+> `/system/data-quality` 增加 industry_bars 分组；CLI 新增 industry quality/fill/rebuild。
+
 现状核实：
 
 - 现有 `GET /system/status` 的 `data_sources` 只统计 `index_daily_bar`、`index_valuation`、`macro_indicator` 三张表（`apps/api/src/quant_etf_api/services/system_service.py:127`），不含 `industry_*` 与 `stock_daily_close`。
@@ -132,6 +140,11 @@
 
 ### P08 行业日线表 `prev_close_price`/`change_pct` 恒为 NULL
 
+> 处理记录（2026-09-06）：摄取链路统一按同一行业代码升序补写
+> `prev_close_price`/`change_pct`（`domain/industry/bars.py` 派生，
+> `_upsert_bars` 对冲突行 DO UPDATE），历史存量可在应用迁移 0031 后执行
+> `industry fill --all`（或 `industry backfill-bars`）一次性补齐。
+
 现状核实：
 
 - 模型与迁移都定义了 `prev_close_price`、`change_pct` 两列（`infra/db/models/industry.py:88-89`、迁移 `0029`）。
@@ -141,6 +154,11 @@
 
 ### P09 行业日线“增量刷新”实际仍全量拉取再过滤
 
+> 处理记录（2026-09-06）：已评估，本轮随 P03 不处理、留作专项。
+> 上游 AkShare `index_hist_sw` 无按日期增量下载能力，客户端仍是全量下载后本地
+> 裁剪；fill/rebuild 复用全量路径，增量刷新以“窗口前最近收盘”作为
+> prev_close_override，保证窗口首行派生正确。待上游支持或换源时专项优化。
+
 现状核实：
 
 - `SwIndustryClient.fetch_daily` 的请求固定为 `ak.index_hist_sw(symbol=symbol, period="day")` 全量拉取，`start_date/end_date` 参数只在本地对返回 DataFrame 做过滤（`sw_industry_client.py:41-55`）。
@@ -148,6 +166,11 @@
 - 影响：每日刷新成本约等于全量回填的重复成本；且对上游接口压力大，失败面与全量拉取相同。
 
 ### P10 行业日频摄取部分失败仍整体 success，无质量指标落库
+
+> 处理记录（2026-09-06）：`run_daily_ingest` 改为返回结构化 dict
+> `{target_date, bars, membership, stock_snapshot, quality}`，逐行业失败进入
+> `bars.errors`；handler 以 metrics 落库并仅在 bars/个股快照无错误时入队当日
+> 因子计算（否则记录 `factor_skipped` 原因）；成分失败不阻塞但显式进入 metrics。
 
 现状核实：
 
@@ -158,6 +181,11 @@
 
 ### P11 申万行业/个股数据源单一，健康检查未接入统一状态
 
+> 处理记录（2026-09-06）：`/system/status` 已增加“行业日线行情
+> (industry_daily_bar)”与“申万行业成分 (industry_membership_event)”快照卡；
+> 个股日线卡（P01）已接入。统一健康轮询仍未实现，保持“按需调用 + 失败在
+> run metrics/质量快照可见”的现状，全局健康巡检另立后续项。
+
 现状核实：
 
 - 行业指数日线唯一来源为申万官网/AkShare `index_hist_sw`；分类文件唯一来源为申万官网 XLS（客户端内做了浏览器头 + 多 URL 重试 + `verify=False`，`sw_industry_client.py:84-135`）；个股历史唯一来源为 baostock（AkShare 仅空结果兜底）；快照唯一来源为东财 `stock_zh_a_spot_em`。
@@ -165,6 +193,10 @@
 - 影响：单一上游风控（508/502）、限流或停更时无降级与告警，只能人工跑 CLI 发现。
 
 ### P12 行业因子同 factor_id 覆盖不同参数计算结果，无元数据
+
+> 处理记录（2026-09-06）：已评估，本轮不处理、留作专项。需要为
+> `industry_factor_value` 增加参数版本维度（如 params_hash/参数 JSON 列），
+> 并将默认参数消费者与自定义参数计算隔离，避免覆盖污染。
 
 现状核实：
 

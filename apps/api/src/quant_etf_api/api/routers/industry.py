@@ -11,15 +11,22 @@ from sqlalchemy.orm import Session
 from quant_etf_api.api.deps import get_db
 from quant_etf_api.domain.industry.constants import normalize_sw_code
 from quant_etf_api.engine.config import RotationConfig
-from quant_etf_api.infra.db.repositories.industry import IndustryUniverseRepository
+from quant_etf_api.infra.db.repositories.industry import (
+    IndustryDailyBarRepository,
+    IndustryUniverseRepository,
+)
+from quant_etf_api.schemas.market_data import DailyBar
 from quant_etf_api.schemas.industry import (
     IndustryDiffusionResponse,
     IndustryIndexSummary,
+    IndustryQualityDetail,
     IndustryRotationResponse,
     IndustryRRGPoint,
     IndustryRRGResponse,
+    IndustrySummaryItem,
 )
 from quant_etf_api.services.industry_factor_service import IndustryFactorService
+from quant_etf_api.services.industry_data_service import IndustryDataService
 from quant_etf_api.services.industry_rotation_service import IndustryRotationService
 
 router = APIRouter(prefix="/industry", tags=["industry"])
@@ -64,6 +71,62 @@ def list_industry_indexes(
         )
         for row in repo.find_all_active()
     ]
+
+
+@router.get("/summary", response_model=list[IndustrySummaryItem])
+def industry_summary(db: Session = Depends(get_db)) -> list[IndustrySummaryItem]:
+    """行业数据管理列表（目录 + 成分数 + 质量快照 + 最新行情）。"""
+    return IndustryDataService(db).list_summary()
+
+
+@router.get("/indexes/{industry_code}/bars", response_model=list[DailyBar])
+def industry_daily_bars(
+    industry_code: str,
+    start_date: date | None = Query(default=None, description="起始日期"),
+    end_date: date | None = Query(default=None, description="结束日期"),
+    limit: int = Query(default=250, ge=1, le=2000, description="返回最近 N 行"),
+    db: Session = Depends(get_db),
+) -> list[DailyBar]:
+    """查询单个申万一级行业指数日线（K 线数据源）。"""
+    code = normalize_sw_code(industry_code)
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise HTTPException(status_code=422, detail="start_date 不能晚于 end_date")
+    repo = IndustryDailyBarRepository(db)
+    if start_date is not None and end_date is not None:
+        rows = repo.find_range(start_date, end_date, [code])
+    else:
+        rows = repo.find_by_code(code)
+    rows = rows[-limit:] if limit and len(rows) > limit else rows
+    return [
+        DailyBar(
+            trade_date=row.trade_date,
+            code=row.industry_code,
+            open_price=row.open_price,
+            high_price=row.high_price,
+            low_price=row.low_price,
+            close_price=row.close_price,
+            prev_close_price=row.prev_close_price,
+            change_pct=row.change_pct,
+            volume=row.volume,
+            turnover=row.turnover,
+            source=row.source,
+            ingested_at=row.ingested_at,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/indexes/{industry_code}/quality", response_model=IndustryQualityDetail)
+def industry_quality_detail(
+    industry_code: str,
+    db: Session = Depends(get_db),
+) -> IndustryQualityDetail:
+    """行业详情页数据质量（快照 + OHLC/change_pct 字段完整性）。"""
+    code = normalize_sw_code(industry_code)
+    try:
+        return IndustryDataService(db).industry_quality_detail(code)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/rrg", response_model=IndustryRRGResponse)

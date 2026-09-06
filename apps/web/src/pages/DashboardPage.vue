@@ -574,6 +574,7 @@ const qualityGroups = computed(() => {
     { key: 'index_bars', label: '指数日线', data: quality.value.index_bars },
     { key: 'index_valuation', label: '指数估值', data: quality.value.index_valuation },
     ...(quality.value.stock_bars ? [{ key: 'stock_bars', label: '个股日线', data: quality.value.stock_bars }] : []),
+    ...(quality.value.industry_bars ? [{ key: 'industry_bars', label: '行业日线', data: quality.value.industry_bars }] : []),
   ]
 })
 
@@ -611,6 +612,11 @@ function formatRunType(runType: string): string {
     factor_computation: '因子计算',
     industry_ingest: '行业数据刷新',
     industry_factor_compute: '行业因子计算',
+    industry_universe_refresh: '更新行业信息',
+    industry_bars_refresh: '行业日线刷新',
+    industry_quality_check: '行业质量检查',
+    industry_data_fill: '行业日线补全',
+    industry_data_rebuild: '行业全量重拉',
     stock_quality_check: '个股质量检查',
     stock_data_fill: '个股日线补全',
     stock_data_rebuild: '个股全量重拉',

@@ -82,17 +82,25 @@ class StockUniverseRepository(BaseRepository):
         """批量幂等写入个股元数据；冲突时仅更新指定列。"""
         if not rows:
             return 0
-        stmt = pg_insert(StockUniverseModel).values(rows)
-        if update_cols:
-            stmt = stmt.on_conflict_do_update(
-                index_elements=[StockUniverseModel.stock_code],
-                set_={
-                    col: getattr(stmt.excluded, col) for col in update_cols if col != "stock_code"
-                },
-            )
-        else:
-            stmt = stmt.on_conflict_do_nothing(index_elements=[StockUniverseModel.stock_code])
-        self._db.execute(stmt)
+        # 全市场元数据同步一次可能数千行，按 500 行切块避免单语句参数过多
+        chunk_size = 500
+        for start in range(0, len(rows), chunk_size):
+            chunk = rows[start : start + chunk_size]
+            stmt = pg_insert(StockUniverseModel).values(chunk)
+            if update_cols:
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[StockUniverseModel.stock_code],
+                    set_={
+                        col: getattr(stmt.excluded, col)
+                        for col in update_cols
+                        if col != "stock_code"
+                    },
+                )
+            else:
+                stmt = stmt.on_conflict_do_nothing(
+                    index_elements=[StockUniverseModel.stock_code]
+                )
+            self._db.execute(stmt)
         return len(rows)
 
     def latest_data_date(self) -> date | None:

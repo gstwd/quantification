@@ -35,6 +35,7 @@ class DataQualityResponse(BaseModel):
     index_bars: DataFreshnessGroup
     index_valuation: DataFreshnessGroup
     stock_bars: DataFreshnessGroup | None = None
+    industry_bars: DataFreshnessGroup | None = None
     checked_at: UtcDatetime
 
 

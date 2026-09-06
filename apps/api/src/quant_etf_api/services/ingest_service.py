@@ -887,6 +887,53 @@ class IngestService:
             "latest_date": str(stock_latest_db) if stock_latest_db else None,
         }
 
+        # --- 行业日线（基于 industry_universe 质量快照聚合） ---
+        from quant_etf_api.infra.db.models.industry import (  # noqa: PLC0415
+            IndustryDailyBarModel,
+            IndustryUniverseModel,
+        )
+
+        industry_rows = self._db.query(IndustryUniverseModel).all()
+        industry_stale: list[dict[str, Any]] = []
+        industry_missing: list[dict[str, Any]] = []
+        for industry in industry_rows:
+            if (
+                industry.quality_checked_at is None
+                or industry.bar_count is None
+                or industry.bar_count == 0
+                or industry.data_end_date is None
+            ):
+                industry_missing.append(
+                    {
+                        "code": industry.industry_code,
+                        "name": industry.name_cn,
+                        "latest_date": None,
+                        "is_stale": True,
+                    }
+                )
+                continue
+            if industry.data_end_date < stale_threshold:
+                industry_stale.append(
+                    {
+                        "code": industry.industry_code,
+                        "name": industry.name_cn,
+                        "latest_date": str(industry.data_end_date),
+                        "is_stale": True,
+                    }
+                )
+        industry_latest_db = self._db.query(
+            func.max(IndustryDailyBarModel.trade_date)
+        ).scalar()
+        result["industry_bars"] = {
+            "total": len(industry_rows),
+            "up_to_date": len(industry_rows) - len(industry_stale) - len(industry_missing),
+            "stale": industry_stale[:3],
+            "missing": industry_missing[:3],
+            "stale_total": len(industry_stale),
+            "missing_total": len(industry_missing),
+            "latest_date": str(industry_latest_db) if industry_latest_db else None,
+        }
+
         # --- 字段级质量 ---
         total_index_bars = self._db.query(func.count(IndexDailyBarModel.id)).scalar() or 0
         null_index_change_pct = (
