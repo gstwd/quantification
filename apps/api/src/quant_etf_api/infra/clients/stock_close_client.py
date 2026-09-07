@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -45,11 +46,61 @@ def _fmt_date(value: str) -> str:
     return f"{value[0:4]}-{value[4:6]}-{value[6:8]}"
 
 
+def _normalize_stock_code(value: Any) -> str | None:
+    """把快照代码规范化为 6 位数字代码。
+
+    东方财富返回纯数字代码，新浪可能带 sh/sz/bj 交易所前缀，统一取末尾
+    6 位数字，避免入库时与 stock_daily_close 的 stock_code 口径不一致。
+
+    Args:
+        value: 快照原始代码，如 600000、sh600000、bj430047。
+
+    Returns:
+        6 位数字股票代码；无法识别时返回 None（调用方跳过该行）。
+    """
+    match = re.search(r"(\d{6})$", str(value))
+    return match.group(1) if match else None
+
+
+def _build_snapshot_rows(df: Any, source: str) -> list[dict[str, Any]]:
+    """从“代码/最新价”快照 DataFrame 抽取可入库行。
+
+    Args:
+        df: AkShare 快照接口返回的 DataFrame，需含 代码/最新价 列。
+        source: 入库 source 标识，如 akshare_em / akshare_sina。
+
+    Returns:
+        [{trade_date, stock_code, close, source}]，无有效行时返回空列表。
+    """
+    if (
+        df is None
+        or len(df) == 0
+        or "代码" not in df.columns
+        or "最新价" not in df.columns
+    ):
+        return []
+    codes = df["代码"].map(_normalize_stock_code)
+    closes = pd.to_numeric(df["最新价"], errors="coerce")
+    today = date.today()
+    rows: list[dict[str, Any]] = []
+    for code, close in zip(codes, closes):
+        if code and pd.notna(close):
+            rows.append(
+                {
+                    "trade_date": today,
+                    "stock_code": code,
+                    "close": float(close),
+                    "source": source,
+                }
+            )
+    return rows
+
+
 class StockCloseClient(BaseDataClient):
     """个股收盘数据客户端。
 
     历史回填默认走 baostock（覆盖沪/深含退市历史），回退 AkShare 个股历史；
-    每日增量用东方财富全 A 当日快照一次拉全市场最新价。
+    每日增量用全 A 当日快照一次拉全市场最新价（东方财富主源、新浪备用源）。
     """
 
     source_name = "stock_close"
@@ -231,33 +282,41 @@ class StockCloseClient(BaseDataClient):
         return rows
 
     def fetch_all_close_snapshot(self) -> list[dict[str, Any]]:
-        """拉取当日全 A（沪深京）最新价快照。
+        """拉取当日全 A（沪深京）最新价快照，主源失败时回退备用源。
+
+        主源为东方财富 ``stock_zh_a_spot_em``；当主源在代理/限流/网络故障等
+        场景不可达时依次回退新浪 ``stock_zh_a_spot``。两个源都输出
+        “代码/最新价”列，共用同一套解析逻辑，避免单源故障导致当日
+        个股收盘快照整体缺失（进而跳过行业因子计算）。
 
         Returns:
-            [{trade_date, stock_code, close}]，trade_date 取当天日期。
+            [{trade_date, stock_code, close, source}]，trade_date 取当天日期。
+
+        Raises:
+            RuntimeError: 全部快照源均失败或返回空数据时抛出。
         """
-        endpoint = "stock_zh_a_spot_em"
-        self._log_request(endpoint, {})
-        start = time.perf_counter()
-        df = ak.stock_zh_a_spot_em()
-        rows: list[dict[str, Any]] = []
-        if df is not None and len(df) > 0:
-            codes = df["代码"].astype(str).str.zfill(6)
-            closes = pd.to_numeric(df["最新价"], errors="coerce")
-            today = date.today()
-            for code, close in zip(codes, closes):
-                if pd.notna(close):
-                    rows.append(
-                        {
-                            "trade_date": today,
-                            "stock_code": code,
-                            "close": float(close),
-                            "source": "akshare_em",
-                        }
-                    )
-        elapsed = (time.perf_counter() - start) * 1000
-        self._log_response(endpoint, len(rows), elapsed)
-        return rows
+        attempts: list[tuple[str, str, Any]] = [
+            ("stock_zh_a_spot_em", "akshare_em", lambda: ak.stock_zh_a_spot_em()),
+            ("stock_zh_a_spot", "akshare_sina", lambda: ak.stock_zh_a_spot()),
+        ]
+        errors: list[str] = []
+        for endpoint, source, fetcher in attempts:
+            start = time.perf_counter()
+            self._log_request(endpoint, {})
+            try:
+                rows = _build_snapshot_rows(fetcher(), source)
+            except Exception as exc:
+                elapsed = (time.perf_counter() - start) * 1000
+                self._log_error(endpoint, exc, elapsed)
+                errors.append(f"{endpoint}: {type(exc).__name__}: {exc}")
+                continue
+            elapsed = (time.perf_counter() - start) * 1000
+            if rows:
+                self._log_response(endpoint, len(rows), elapsed)
+                return rows
+            self._log_response(endpoint, 0, elapsed)
+            errors.append(f"{endpoint}: 返回空数据或缺少代码/最新价列")
+        raise RuntimeError("；".join(errors) or "所有快照源均未尝试")
 
     def health_check(self) -> HealthStatus:
         """通过拉取当日快照检测连通性。"""

@@ -198,6 +198,12 @@
 > (industry_daily_bar)”与“申万行业成分 (industry_membership_event)”快照卡；
 > 个股日线卡（P01）已接入。统一健康轮询仍未实现，保持“按需调用 + 失败在
 > run metrics/质量快照可见”的现状，全局健康巡检另立后续项。
+>
+> 补充处理（2026-09-07）：个股收盘快照由“东财唯一源”改为“东财
+> `stock_zh_a_spot_em` 主源 + 新浪 `stock_zh_a_spot` 备用源”，两源均为
+> 代码/最新价同构列，主源在代理/限流故障时自动回退（
+> `stock_close_client.py:fetch_all_close_snapshot`），避免单源故障导致当日
+> 快照整体缺失并连带跳过行业因子计算。
 
 现状核实：
 
