@@ -2,10 +2,55 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from enum import Enum
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Protocol, runtime_checkable
+
+
+# 因子元数据四轴取值常量（与 factor_definition 表、前端展示共用）。
+# 资产域：因子值作用于哪一类资产。
+ASSET_DOMAIN_INDEX = "index"
+ASSET_DOMAIN_INDUSTRY = "industry"
+
+# 值形态：决定因子值在实时/回测中的加载与预计算方式。
+VALUE_SHAPE_ASSET = "asset"  # 每资产一个独立值（如 return_20d）
+VALUE_SHAPE_MARKET = "market"  # 市场级单一值（如市场宽度）
+VALUE_SHAPE_PANEL = "panel"  # 依赖资产集合与参数的面板值（如 RRG/扩散）
+
+# 适用位置（usage）：因子允许被策略管线中的哪些模块消费。
+USAGE_TIMING = "timing"
+USAGE_SCORE = "score"
+USAGE_FILTER = "filter"
+USAGE_RANK = "rank"
+USAGE_ROTATION_INPUT = "rotation_input"
+
+# 存量指数因子默认允许的消费位置（保持向后兼容的显式声明）；
+# 新因子应在 FactorSpec.usage 中按语义收敛，市场级/面板级因子只开放适用位置。
+DEFAULT_INDEX_FACTOR_USAGE = [USAGE_TIMING, USAGE_SCORE, USAGE_FILTER, USAGE_RANK]
+
+
+def factor_params_hash(params: dict[str, Any]) -> str:
+    """计算因子参数指纹（规范化 JSON 的 sha256）。
+
+    用于 industry_factor_value 等“参数化因子值表”区分不同参数组合，
+    避免同 factor_id 不同参数互相覆盖（P12）。
+
+    Args:
+        params: 因子计算参数字典。
+
+    Returns:
+        64 位十六进制 sha256 哈希。
+    """
+    canonical = json.dumps(
+        params,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class MissingReason(str, Enum):
@@ -37,6 +82,13 @@ class FactorSpec:
         market_scope: 是否需要在全市场指数范围上计算（如市场宽度类因子）。
             为 True 时，回测服务会额外加载全市场行情数据作为因子上下文，
             保证实时预计算（全市场）与回测（策略池 + 全市场补充）口径一致。
+        asset_domain: 因子资产域：index=宽基/行业指数域（benchmark_index），
+            industry=申万一级行业域（industry_universe）。
+        value_shape: 因子值形态：asset=每资产值、market=市场级值、
+            panel=依赖资产集合与参数的面板值。
+        usage: 适用位置数组：timing/score/filter/rank/rotation_input，
+            配置校验按此限制因子在策略中的消费位置。
+        default_params: 因子默认参数（参数化因子的默认口径，非参数化因子为空）。
     """
 
     factor_id: str
@@ -47,6 +99,10 @@ class FactorSpec:
     required_data: list[str] = field(default_factory=list)
     lookback_days: int = 90
     market_scope: bool = False
+    asset_domain: str = ASSET_DOMAIN_INDEX
+    value_shape: str = VALUE_SHAPE_ASSET
+    usage: list[str] = field(default_factory=lambda: list(DEFAULT_INDEX_FACTOR_USAGE))
+    default_params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

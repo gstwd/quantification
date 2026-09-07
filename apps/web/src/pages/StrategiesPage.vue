@@ -207,10 +207,15 @@ async function handleCreate(): Promise<void> {
     finalConfig = configJson.value
   }
 
-  const success = await store.create({
+  const payload = {
     ...form.value,
     config_json: finalConfig,
-  })
+  }
+  // 行业轮动策略顶层频率与调仓频率保持一致（避免 P20 类不一致）
+  if ((finalConfig.rotation as Record<string, unknown> | undefined)) {
+    payload.frequency = 'monthly'
+  }
+  const success = await store.create(payload)
   if (success) {
     showCreate.value = false
   }

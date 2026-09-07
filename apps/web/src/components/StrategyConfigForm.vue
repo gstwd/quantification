@@ -19,35 +19,140 @@
         <span :class="['arrow', expanded.scope ? 'open' : '']">▾</span>
       </div>
       <div v-show="expanded.scope" class="module-body">
-        <div class="module-desc">指定策略运行的目标指数。不选则自动使用全部可用指数。</div>
+        <div class="module-desc">
+          {{ domainMode === 'industry' ? '指定策略轮动的目标申万一级行业。' : '指定策略运行的目标指数。不选则自动使用全部可用指数。' }}
+        </div>
         <div class="sub-field">
-          <label class="sub-label">选择指数</label>
+          <label class="sub-label">{{ domainMode === 'industry' ? '选择行业' : '选择指数' }}</label>
           <div class="index-checkboxes">
             <label
-              v-for="idx in availableIndexes"
-              :key="idx.index_code"
+              v-for="idx in scopedAssets"
+              :key="idx.code"
               class="checkbox-label"
             >
               <input
                 type="checkbox"
-                :checked="selectedIndexCodes.includes(idx.index_code)"
-                @change="toggleIndexCode(idx.index_code)"
+                :checked="selectedIndexCodes.includes(idx.code)"
+                @change="toggleIndexCode(idx.code)"
               />
-              <span class="index-code">{{ idx.index_code }}</span>
-              <span class="index-name">{{ idx.index_name }}</span>
+              <span class="index-code">{{ idx.code }}</span>
+              <span class="index-name">{{ idx.name }}</span>
             </label>
           </div>
           <div v-if="selectedIndexCodes.length > 0" class="index-summary">
             已选 <strong>{{ selectedIndexCodes.length }}</strong> 个：
             <span class="index-codes">{{ selectedIndexCodes.join(', ') }}</span>
           </div>
-          <div v-else class="index-summary empty">未选择（使用全部可用指数）</div>
+          <div v-else class="index-summary empty">
+            {{ domainMode === 'industry' ? '未选择行业（轮动策略必须选择至少一个行业）' : '未选择（使用全部可用指数）' }}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ 策略模式/资产域 ═══ -->
+    <div class="module-card">
+      <div class="module-header" @click="toggleModule('domain')">
+        <span class="module-title">策略模式 / 资产域 <HelpTip :text="scHelp('asset_domain')" /></span>
+        <span :class="['arrow', expanded.domain ? 'open' : '']">▾</span>
+      </div>
+      <div v-show="expanded.domain" class="module-body">
+        <div class="sub-field">
+          <label class="sub-label">资产域</label>
+          <div class="radio-row">
+            <label class="radio-opt">
+              <input type="radio" :value="'index'" v-model="domainMode" @change="onDomainModeChange('index')" /> 指数（宽基/行业指数）
+            </label>
+            <label class="radio-opt">
+              <input type="radio" :value="'industry'" v-model="domainMode" @change="onDomainModeChange('industry')" /> 申万一级行业
+            </label>
+          </div>
+          <div v-if="domainMode === 'industry'" class="module-desc">
+            行业域当前仅支持“轮动模块（RRG/扩散）”策略：按研报三类信号选择行业，
+            不支持通用评分/择时/过滤/风控。
+          </div>
+        </div>
+
+        <!-- 轮动模块（行业域专用） -->
+        <div class="module-card rotation-card">
+          <div class="module-header" @click="toggleModule('rotation')">
+            <span class="module-title">轮动模块 (Rotation: RRG/扩散) <HelpTip :text="scHelp('rotation')" /></span>
+            <label class="toggle-switch" @click.stop>
+              <input type="checkbox" v-model="rotationEnabled" @change="onRotationToggle()" />
+              <span class="toggle-track"></span>
+            </label>
+            <span :class="['arrow', expanded.rotation ? 'open' : '']">▾</span>
+          </div>
+          <div v-show="rotationEnabled && expanded.rotation" class="module-body">
+            <div class="module-desc">
+              信号消费因子中心已登记的行业因子：rrg_rs_ratio / rrg_rs_momentum /
+              rrg_quadrant / diffusion_count_ratio（默认参数 220/60/20/220，剔除综合）。
+            </div>
+            <div class="sub-field">
+              <label class="sub-label">信号类型</label>
+              <select v-model="rotationSignal" class="fp-select">
+                <option value="quadrant">A：纯 RRG 象限</option>
+                <option value="diffusion">B：纯扩散 top_n</option>
+                <option value="diffusion_rrg">C：扩散 top_n 后剔除三四象限</option>
+              </select>
+            </div>
+            <div class="threshold-row">
+              <div class="threshold-field">
+                <label class="sub-label">Top N（每日最多选中）</label>
+                <input v-model.number="rotationTopN" type="number" min="1" class="fp-input" />
+              </div>
+            </div>
+            <div class="sub-field">
+              <label class="sub-label">保留象限</label>
+              <div class="radio-row">
+                <label v-for="q in [1, 2, 3, 4]" :key="q" class="radio-opt">
+                  <input type="checkbox" :value="q" v-model="rotationKeepQuadrants" />
+                  {{ { 1: '领先', 2: '改善', 3: '滞后', 4: '疲软' }[q] }}
+                </label>
+              </div>
+            </div>
+            <div class="sub-field">
+              <label class="sub-label">基准剔除行业（RRG 行业等权基准不参与计算的行业）</label>
+              <div class="index-checkboxes">
+                <label v-for="idx in availableIndustries" :key="idx.industry_code" class="checkbox-label">
+                  <input type="checkbox" :value="idx.industry_code" v-model="rotationBenchmarkExcluded" />
+                  <span class="index-code">{{ idx.industry_code }}</span>
+                  <span class="index-name">{{ idx.name_cn }}</span>
+                </label>
+              </div>
+            </div>
+            <div class="threshold-row">
+              <div class="threshold-field">
+                <label class="sub-label">RS-Ratio 回看 (lookback_ratio)</label>
+                <input v-model.number="rotationLookbackRatio" type="number" min="1" class="fp-input" />
+              </div>
+              <div class="threshold-field">
+                <label class="sub-label">RS-Momentum 回看 (lookback_mom)</label>
+                <input v-model.number="rotationLookbackMom" type="number" min="1" class="fp-input" />
+              </div>
+            </div>
+            <div class="threshold-row">
+              <div class="threshold-field">
+                <label class="sub-label">平滑窗口 (smooth_window)</label>
+                <input v-model.number="rotationSmoothWindow" type="number" min="1" class="fp-input" />
+              </div>
+              <div class="threshold-field">
+                <label class="sub-label">扩散上涨回看 (diffusion_lookback)</label>
+                <input v-model.number="rotationDiffusionLookback" type="number" min="1" class="fp-input" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="module-desc">
+          选择“资产范围”中的目标行业代码。启用轮动后，评分/择时/过滤/排名/风控模块不可用，
+          组合模块固定为 equal_weight（总仓位 100%），请配置调仓频率（建议 monthly）。
         </div>
       </div>
     </div>
 
     <!-- ═══ 评分模块（必填） ═══ -->
-    <div class="module-card">
+    <div class="module-card" v-show="!rotationEnabled">
       <div class="module-header" @click="toggleModule('score')">
         <span class="module-title">评分模块 (Score) <HelpTip :text="scHelp('score')" /></span>
         <span class="module-badge required">必填</span>
@@ -67,7 +172,7 @@
         <FactorPicker
           v-for="(row, i) in scoreFactors"
           :key="i"
-          :factors="availableFactors"
+          :factors="scoreModuleFactors"
           :model-value="row"
           @update:model-value="updateScoreFactor(i, $event)"
           @remove="removeScoreFactor(i)"
@@ -108,7 +213,7 @@
     </div>
 
     <!-- ═══ 择时模块（可选） ═══ -->
-    <div class="module-card">
+    <div class="module-card" v-show="!rotationEnabled">
       <div class="module-header" @click="toggleModule('timing')">
         <span class="module-title">择时模块 (Timing) <HelpTip :text="scHelp('timing')" /></span>
         <span class="module-badge optional">可选</span>
@@ -131,7 +236,7 @@
         <FactorPicker
           v-for="(row, i) in timingFactors"
           :key="i"
-          :factors="availableFactors"
+          :factors="timingModuleFactors"
           :model-value="row"
           @update:model-value="updateTimingFactor(i, $event)"
           @remove="removeTimingFactor(i)"
@@ -180,7 +285,7 @@
     </div>
 
     <!-- ═══ 过滤模块（可选） ═══ -->
-    <div class="module-card">
+    <div class="module-card" v-show="!rotationEnabled">
       <div class="module-header" @click="toggleModule('filter')">
         <span class="module-title">过滤模块 (Filter) <HelpTip :text="scHelp('filter')" /></span>
         <span class="module-badge optional">可选</span>
@@ -212,7 +317,7 @@
             @change="updateFilterRule(i, 'factor', ($event.target as HTMLSelectElement).value)"
           >
             <option value="" disabled>选择因子</option>
-            <optgroup v-for="group in groupedFactors" :key="group.category" :label="group.category || '其他'">
+            <optgroup v-for="group in filterGroupedFactors" :key="group.category" :label="group.category || '其他'">
               <option v-for="f in group.items" :key="f.factor_id" :value="f.factor_id">
                 {{ f.factor_id }}
               </option>
@@ -283,7 +388,7 @@
                 @change="updateFilterRule(i, 'compare_to', ($event.target as HTMLSelectElement).value)"
               >
                 <option value="" disabled>选择比较因子</option>
-                <optgroup v-for="group in groupedFactors" :key="group.category" :label="group.category || '其他'">
+                <optgroup v-for="group in filterGroupedFactors" :key="group.category" :label="group.category || '其他'">
                   <option v-for="f in group.items" :key="f.factor_id" :value="f.factor_id">
                     {{ f.factor_id }}
                   </option>
@@ -310,7 +415,7 @@
     </div>
 
     <!-- ═══ 排名模块 ═══ -->
-    <div class="module-card">
+    <div class="module-card" v-show="!rotationEnabled">
       <div class="module-header" @click="toggleModule('rank')">
         <span class="module-title">排名模块 (Rank) <HelpTip :text="scHelp('rank')" /></span>
         <span class="module-badge always">始终启用</span>
@@ -462,7 +567,7 @@
     </div>
 
     <!-- ═══ 风控模块（可选） ═══ -->
-    <div class="module-card">
+    <div class="module-card" v-show="!rotationEnabled">
       <div class="module-header" @click="toggleModule('risk')">
         <span class="module-title">风控模块 (Risk) <HelpTip :text="scHelp('risk')" /></span>
         <span class="module-badge optional">可选</span>
@@ -606,8 +711,10 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { fetchFactorSpecs } from '../api/factors'
+import { fetchIndustryIndexes } from '../api/industry'
 import { fetchBenchmarkIndexes } from '../api/market_data'
 import type { BenchmarkIndex, FactorSpec } from '../types/api'
+import type { IndustryIndexSummary } from '../api/industry'
 import FactorPicker from './FactorPicker.vue'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
@@ -646,6 +753,15 @@ const emit = defineEmits<{
 const availableFactors = ref<FactorSpec[]>([])
 /** 可用指数列表（用于资产范围多选） */
 const availableIndexes = ref<BenchmarkIndex[]>([])
+/** 可用申万一级行业列表（行业域资产范围/基准剔除多选） */
+const availableIndustries = ref<IndustryIndexSummary[]>([])
+
+/** 按当前资产域展示的统一资产选项（code/name） */
+const scopedAssets = computed(() =>
+  domainMode.value === 'industry'
+    ? availableIndustries.value.map(i => ({ code: i.industry_code, name: i.name_cn }))
+    : availableIndexes.value.map(i => ({ code: i.index_code, name: i.index_name })),
+)
 
 onMounted(async () => {
   try {
@@ -658,13 +774,32 @@ onMounted(async () => {
   } catch {
     availableIndexes.value = []
   }
+  try {
+    availableIndustries.value = await fetchIndustryIndexes()
+  } catch {
+    availableIndustries.value = []
+  }
 })
 
-/** 按 category 分组（供过滤模块使用） */
-const groupedFactors = computed(() => {
+/** 因子是否可用于指定消费模块（usage 元数据过滤，未声明 usage 时按可用处理） */
+function usableFor(f: FactorSpec, moduleKey: string): boolean {
+  if (!f.is_active) return false
+  return !f.usage || f.usage.length === 0 || f.usage.includes(moduleKey)
+}
+
+/** 按模块过滤后的因子列表（评分/择时下拉） */
+const scoreModuleFactors = computed(() =>
+  availableFactors.value.filter(f => usableFor(f, 'score')),
+)
+const timingModuleFactors = computed(() =>
+  availableFactors.value.filter(f => usableFor(f, 'timing')),
+)
+
+/** 按 category 分组（过滤模块使用，只含 filter 适用因子） */
+const filterGroupedFactors = computed(() => {
   const groups = new Map<string, FactorSpec[]>()
   for (const f of availableFactors.value) {
-    if (!f.is_active) continue
+    if (!usableFor(f, 'filter')) continue
     const cat = f.category || '其他'
     if (!groups.has(cat)) groups.set(cat, [])
     groups.get(cat)!.push(f)
@@ -675,6 +810,8 @@ const groupedFactors = computed(() => {
 // ── 模块展开状态 ──────────────────────────────────────────────────
 const expanded = reactive({
   scope: false,
+  domain: false,
+  rotation: false,
   score: true,
   timing: false,
   filter: false,
@@ -712,6 +849,97 @@ function toggleIndexCode(code: string): void {
 function initScope(): void {
   const codes = props.modelValue.index_codes as string[] | undefined
   indexCodesInput.value = codes && codes.length > 0 ? codes.join(', ') : ''
+}
+
+// ── 策略模式/资产域 + 轮动模块 ─────────────────────────────────────
+const domainMode = ref<'index' | 'industry'>('index')
+const rotationEnabled = ref(false)
+const rotationSignal = ref('diffusion_rrg')
+const rotationTopN = ref(6)
+const rotationKeepQuadrants = ref<number[]>([1, 2])
+const rotationBenchmarkExcluded = ref<string[]>(['801230'])
+const rotationLookbackRatio = ref(220)
+const rotationLookbackMom = ref(60)
+const rotationSmoothWindow = ref(20)
+const rotationDiffusionLookback = ref(220)
+
+function initDomain(): void {
+  const cfg = props.modelValue
+  const rotation = cfg.rotation as Record<string, unknown> | undefined
+  rotationEnabled.value = Boolean(rotation)
+  domainMode.value =
+    (cfg.asset_domain as string) === 'industry' || rotationEnabled.value ? 'industry' : 'index'
+  rotationSignal.value = (rotation?.signal as string) || 'diffusion_rrg'
+  rotationTopN.value = (rotation?.top_n as number) || 6
+  rotationKeepQuadrants.value = Array.isArray(rotation?.keep_quadrants)
+    ? [...(rotation!.keep_quadrants as number[])]
+    : [1, 2]
+  rotationLookbackRatio.value = (rotation?.lookback_ratio as number) || 220
+  rotationLookbackMom.value = (rotation?.lookback_mom as number) || 60
+  rotationSmoothWindow.value = (rotation?.smooth_window as number) || 20
+  rotationDiffusionLookback.value = (rotation?.diffusion_lookback as number) || 220
+  const excluded = rotation?.benchmark_exclude as string[] | undefined
+  rotationBenchmarkExcluded.value = Array.isArray(excluded)
+    ? [...excluded]
+    : availableIndustries.value
+      .filter(i => i.is_benchmark_excluded)
+      .map(i => i.industry_code)
+}
+
+function onDomainModeChange(mode: 'index' | 'industry'): void {
+  domainMode.value = mode
+  if (mode === 'industry') {
+    const industrySet = new Set(availableIndustries.value.map(i => i.industry_code))
+    const current = selectedIndexCodes.value
+    const valid = current.every(c => industrySet.has(c))
+    if (current.length === 0 || !valid) {
+      // 行业域默认选择全部可交易行业（剔除基准综合），便于直接启用轮动
+      const defaults = availableIndustries.value
+        .filter(i => !i.is_benchmark_excluded)
+        .map(i => i.industry_code)
+      indexCodesInput.value = defaults.join(', ')
+    }
+  }
+  if (mode === 'index' && rotationEnabled.value) {
+    rotationEnabled.value = false
+  }
+  emitConfig()
+}
+
+function onRotationToggle(): void {
+  if (rotationEnabled.value) {
+    if (domainMode.value !== 'industry') {
+      onDomainModeChange('industry')
+    } else {
+      const industrySet = new Set(availableIndustries.value.map(i => i.industry_code))
+      const current = selectedIndexCodes.value
+      if (current.length === 0 || !current.every(c => industrySet.has(c))) {
+        onDomainModeChange('industry')
+      }
+    }
+    // 轮动模式不需要通用模块，清理其状态避免残留进入 config_json
+    scoreFactors.value = []
+    timingEnabled.value = false
+    filterEnabled.value = false
+    riskEnabled.value = false
+    portfolioEnabled.value = true
+    portfolioMethod.value = 'equal_weight'
+    portfolioDefaultExposure.value = 100
+    if (!rebalanceEnabled.value) {
+      rebalanceEnabled.value = true
+      rebalanceFrequency.value = 'monthly'
+    }
+  }
+  emitConfig()
+}
+
+function initRotation(): void {
+  // 组合与调仓在轮动模式下需要显式可用
+  if (rotationEnabled.value) {
+    portfolioEnabled.value = true
+    portfolioMethod.value = 'equal_weight'
+    portfolioDefaultExposure.value = 100
+  }
 }
 
 // ── 评分模块 ──────────────────────────────────────────────────────
@@ -907,13 +1135,24 @@ function initRebalance(): void {
 const errors = computed((): string[] => {
   const errs: string[] = []
   const validFactors = scoreFactors.value.filter(f => f.factor_id)
-  if (validFactors.length === 0) {
-    errs.push('评分模块：至少需要 1 个因子')
-  }
-  for (const f of validFactors) {
-    if (f.weight === 0) {
-      errs.push(`评分模块：因子 ${f.factor_id} 权重为 0，将不参与评分`)
+  if (!rotationEnabled.value) {
+    if (validFactors.length === 0) {
+      errs.push('评分模块：至少需要 1 个因子')
     }
+    for (const f of validFactors) {
+      if (f.weight === 0) {
+        errs.push(`评分模块：因子 ${f.factor_id} 权重为 0，将不参与评分`)
+      }
+    }
+  }
+  if (rotationEnabled.value && rotationKeepQuadrants.value.length === 0) {
+    errs.push('轮动模块：保留象限不能为空（quadrant/diffusion_rrg 信号需要）')
+  }
+  if (rotationEnabled.value && selectedIndexCodes.value.length === 0) {
+    errs.push('轮动模块：请在资产范围中选择至少 1 个申万一级行业')
+  }
+  if (domainMode.value === 'industry' && !rotationEnabled.value) {
+    errs.push('策略模式：申万一级行业域必须启用“轮动模块（RRG/扩散）”')
   }
   if (timingEnabled.value) {
     const validTiming = timingFactors.value.filter(f => f.factor_id)
@@ -941,6 +1180,9 @@ const errors = computed((): string[] => {
 // ── 构建并输出 config_json ────────────────────────────────────────
 function buildConfig(): Record<string, unknown> {
   const config: Record<string, unknown> = {}
+
+  // 资产域
+  config.asset_domain = domainMode.value
 
   // 资产范围
   const codes = indexCodesInput.value
@@ -1049,6 +1291,28 @@ function buildConfig(): Record<string, unknown> {
     config.rebalance = rebalance
   }
 
+  // 轮动模块：覆盖通用模块输出，保证与后端 rotation 校验一致
+  if (rotationEnabled.value) {
+    config.rotation = {
+      signal: rotationSignal.value,
+      top_n: rotationTopN.value,
+      keep_quadrants: [...rotationKeepQuadrants.value],
+      benchmark_exclude: [...rotationBenchmarkExcluded.value],
+      lookback_ratio: rotationLookbackRatio.value,
+      lookback_mom: rotationLookbackMom.value,
+      smooth_window: rotationSmoothWindow.value,
+      diffusion_lookback: rotationDiffusionLookback.value,
+    }
+    config.score = { factors: {} }
+    delete config.timing
+    delete config.filters
+    delete config.risk
+    config.portfolio = {
+      method: 'equal_weight',
+      default_exposure: 1,
+    }
+  }
+
   return config
 }
 
@@ -1063,6 +1327,9 @@ function emitConfig(): void {
 watch(
   [
     indexCodesInput,
+    domainMode, rotationEnabled, rotationSignal, rotationTopN, rotationKeepQuadrants,
+    rotationBenchmarkExcluded, rotationLookbackRatio, rotationLookbackMom,
+    rotationSmoothWindow, rotationDiffusionLookback,
     scoreFactors, scoreMissingStrategy, scoreScoringMode,
     timingEnabled, timingFactors, timingOffensive, timingDefensive, timingProxyIndexCodes,
     filterEnabled, filterLogic, filterRules,
@@ -1077,6 +1344,7 @@ watch(
 
 // ── 初始化：从 modelValue 解析各模块 ──────────────────────────────
 onMounted(() => {
+  initDomain()
   initScope()
   initScore()
   initTiming()
@@ -1085,12 +1353,14 @@ onMounted(() => {
   initPortfolio()
   initRisk()
   initRebalance()
+  initRotation()
 })
 
 // 外部 modelValue 变化时重新初始化（排除自身 emit 导致的循环更新）
 let selfUpdating = false
 watch(() => props.modelValue, () => {
   if (selfUpdating) return
+  initDomain()
   initScope()
   initScore()
   initTiming()
@@ -1099,6 +1369,7 @@ watch(() => props.modelValue, () => {
   initPortfolio()
   initRisk()
   initRebalance()
+  initRotation()
 }, { deep: true })
 </script>
 

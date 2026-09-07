@@ -16,9 +16,13 @@
         <div class="card-top">
           <span class="factor-id">{{ spec.factor_id }}</span>
           <div class="card-actions">
-            <span class="chip" :class="`chip-${spec.category ?? 'default'}`">
+          <span class="chip" :class="`chip-${spec.category ?? 'default'}`">
               {{ CATEGORY_LABELS[spec.category ?? ''] ?? spec.category ?? '未分类' }}
             </span>
+            <span class="chip chip-domain">
+              {{ spec.asset_domain === 'industry' ? '行业' : '指数' }}
+            </span>
+            <span v-if="(spec.usage ?? []).includes('rotation_input')" class="chip chip-rotation">轮动</span>
             <button class="edit-btn" @click="startEdit(spec)">编辑</button>
           </div>
         </div>
@@ -107,6 +111,11 @@ const CATEGORY_LABELS: Record<string, string> = {
   volatility: '波动率',
   flow: '份额流',
   valuation: '估值',
+  technical: '技术',
+  macro: '宏观',
+  price: '价格',
+  relative_strength: '相对强度',
+  breadth: '市场宽度',
 }
 
 /** 进入编辑模式 */

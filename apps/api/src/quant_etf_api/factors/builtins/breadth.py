@@ -4,6 +4,9 @@
 同一交易日所有指数返回相同值，适合用于择时（代理指数读取）或过滤阈值，
 不建议用于横截面评分。
 
+因子元数据四轴：asset_domain=index、value_shape=market、
+usage=[timing, filter]——配置校验会拒绝将其放入 score/rank。
+
 由于该因子需要全市场行情，FactorSpec.market_scope=True，
 回测服务会额外加载全市场活跃指数的日线数据作为因子上下文，
 保证回测与实时预计算（全量活跃指数）口径一致。
@@ -15,6 +18,7 @@ import bisect
 from datetime import date
 
 from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
+from quant_etf_api.factors.base import USAGE_FILTER, USAGE_TIMING, VALUE_SHAPE_MARKET
 
 
 class BreadthMA20Computer:
@@ -42,6 +46,8 @@ class BreadthMA20Computer:
             required_data=["index_bars"],
             lookback_days=40,
             market_scope=True,
+            value_shape=VALUE_SHAPE_MARKET,
+            usage=[USAGE_TIMING, USAGE_FILTER],
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:

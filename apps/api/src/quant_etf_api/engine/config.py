@@ -219,6 +219,8 @@ class StrategyConfig(BaseModel):
         risk: 风控配置，None 表示无风控。
         rebalance: 调仓配置，None 表示每日调仓。
         rotation: 行业轮动选择配置，None 表示走通用评分管线。
+        asset_domain: 策略资产域：index=宽基/行业指数域（默认），
+            industry=申万一级行业域（当前仅 rotation 轮动策略使用）。
     """
 
     strategy_id: str
@@ -227,6 +229,7 @@ class StrategyConfig(BaseModel):
     schema_version: str = "1"
     description: str = ""
     frequency: str = "daily"
+    asset_domain: str = "index"
     index_codes: list[str] = Field(
         default_factory=list, description="指定指数代码列表，非空时仅对这些指数运行策略"
     )
@@ -242,3 +245,15 @@ class StrategyConfig(BaseModel):
         default_factory=dict,
         description="regime 条件化配置，key=regime 名称（offensive/neutral/defensive），value=该 regime 下的配置覆盖",
     )
+
+    @property
+    def effective_asset_domain(self) -> str:
+        """返回策略实际资产域。
+
+        rotation 模块只作用于申万一级行业域；为兼容旧配置（未显式声明
+        asset_domain），配置了 rotation 时直接判定为 industry。
+
+        Returns:
+            "index" 或 "industry"。
+        """
+        return "industry" if self.rotation is not None else self.asset_domain

@@ -10,7 +10,6 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from quant_etf_api.engine.config import SUPPORTED_SCHEMA_VERSIONS, StrategyConfig
-from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.transforms import list_transform_names
 from quant_etf_api.factors.registry import get_default_factor_registry
 from quant_etf_api.infra.db.models.core import StrategyConfigModel
@@ -72,6 +71,7 @@ class StrategyConfigService:
                 description=r.description or "",
                 status=r.status,
                 is_starred=r.is_starred,
+                asset_domain=(r.config_json or {}).get("asset_domain", "index"),
                 index_codes=(r.config_json or {}).get("index_codes", []),
             )
             for r in rows
@@ -90,6 +90,7 @@ class StrategyConfigService:
             description=row.description or "",
             status=row.status,
             is_starred=row.is_starred,
+            asset_domain=(row.config_json or {}).get("asset_domain", "index"),
             config_json=row.config_json,
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -214,7 +215,8 @@ class StrategyConfigService:
         """校验已解析的 StrategyConfig（供运行时路径复用，避免二次解析）。
 
         在结构校验基础上，额外校验：
-        - 引用的每个因子 ID 均存在于注册表且已在 factor_definition 中启用
+        - 引用的每个因子 ID 均存在于 factor_definition 且已启用
+        - 因子资产域与策略资产域一致、因子 usage 覆盖其消费模块
         - transforms 引用的变换函数均存在于引擎变换注册表
 
         Args:
@@ -228,6 +230,8 @@ class StrategyConfigService:
         if config.rotation is None:
             errors.extend(self._factor_reference_errors(config))
             errors.extend(self._transform_validation_errors(config))
+        else:
+            errors.extend(self._rotation_module_errors(config))
         return StrategyValidationResult(
             valid=len(errors) == 0,
             errors=errors,
@@ -235,16 +239,28 @@ class StrategyConfigService:
         )
 
     def _industry_rotation_errors(self, config: StrategyConfig) -> list[str]:
-        """校验 rotation 策略的行业资产范围存在于行业目录。
+        """校验 rotation 策略的行业域与行业资产范围。
 
         Args:
             config: 已解析的策略配置。
 
         Returns:
-            错误信息列表；无 rotation 或未限定 index_codes 时返回空列表。
+            错误信息列表；无 rotation 时仅校验资产域声明合法。
         """
-        if config.rotation is None or not config.index_codes:
+        if config.asset_domain not in {"index", "industry"}:
+            return [f"asset_domain '{config.asset_domain}' 不合法，可用: index/industry"]
+        if config.rotation is None:
+            if config.asset_domain == "industry":
+                return [
+                    "行业资产域（asset_domain=industry）当前仅支持 rotation 轮动策略，"
+                    "请配置 rotation 模块"
+                ]
             return []
+        if config.asset_domain == "index" and not config.rotation:
+            return []
+        if not config.index_codes:
+            return ["rotation 策略必须通过 index_codes 指定申万一级行业代码列表"]
+        errors: list[str] = []
         try:
             from quant_etf_api.infra.db.repositories.industry import (
                 IndustryUniverseRepository,
@@ -252,15 +268,43 @@ class StrategyConfigService:
 
             available = set(IndustryUniverseRepository(self._db).find_active_codes())
         except Exception:
-            logger.warning("查询行业目录失败，跳过 rotation 资产校验", exc_info=True)
-            return []
+            logger.warning("查询行业目录失败，跳过 rotation 资产范围校验", exc_info=True)
+            available = set()
         missing = sorted(set(config.index_codes) - available)
         if missing:
-            return [
+            errors.append(
                 "rotation 策略的 index_codes 含非申万一级行业代码 "
                 f"{missing}，请先同步行业目录（industry init-universe）"
-            ]
-        return []
+            )
+        return errors
+
+    def _rotation_module_errors(self, config: StrategyConfig) -> list[str]:
+        """校验 rotation 策略的模块边界：不与通用评分/择时/过滤/风控混用。
+
+        Args:
+            config: 已解析的策略配置。
+
+        Returns:
+            错误信息列表。
+        """
+        errors: list[str] = []
+        if config.score and config.score.factors:
+            errors.append(
+                "rotation 策略由轮动模块直接选择行业，不允许配置评分因子（score.factors 必须为空）"
+            )
+        if config.timing is not None:
+            errors.append("rotation 策略不允许配置择时模块（timing）")
+        if config.filters is not None:
+            errors.append("rotation 策略不允许配置过滤模块（filters）")
+        if config.risk is not None:
+            errors.append("rotation 策略不允许配置风控模块（risk）")
+        if config.portfolio is None:
+            errors.append("rotation 策略必须配置 portfolio 模块（当前只支持 equal_weight）")
+        elif config.portfolio.method != "equal_weight":
+            errors.append(
+                f"rotation 策略 portfolio.method 只支持 equal_weight，当前为 '{config.portfolio.method}'"
+            )
+        return errors
 
     @staticmethod
     def _structural_validation(config: StrategyConfig) -> tuple[list[str], list[str]]:
@@ -369,35 +413,84 @@ class StrategyConfigService:
         return errors, warnings
 
     def _factor_reference_errors(self, config: StrategyConfig) -> list[str]:
-        """校验配置引用的全部因子 ID 存在且启用。
+        """校验指数策略引用的全部因子 ID 存在、启用且用途/资产域匹配。
 
-        合法因子集合 = 注册表存在（可计算）且 factor_definition 中 is_active=True
-        （compute_and_store 只计算已启用因子，停用因子永远无值，引用即为静默失效）。
+        除“因子存在且 is_active=True”外，本轮新增因子元数据四轴校验：
+        - 指数策略通用模块只允许引用 asset_domain=index 的因子；
+        - 引用位置必须出现在因子的 usage 中（如 breadth 不允许放入 score/rank）。
 
         Args:
             config: 已解析的策略配置。
 
         Returns:
-            错误信息列表。
+           错误信息列表。
         """
-        required_ids = FactorProvider.collect_required_factor_ids(config)
-        if not required_ids:
-            return []
+        # 各消费点 → factor_id 列表；usage 校验按消费点匹配
+        module_refs: list[tuple[str, str, list[str]]] = [
+            ("score", "评分", list((config.score.factors or {}).keys())),
+        ]
+        if config.timing:
+            module_refs.append(("timing", "择时", list(config.timing.factors.keys())))
+        if config.filters:
+            rule_ids: list[str] = []
+            for rule in config.filters.rules:
+                rule_ids.append(rule.factor)
+                if rule.compare_to:
+                    rule_ids.append(rule.compare_to)
+            module_refs.append(("filter", "过滤", rule_ids))
+        module_refs.append(
+            ("rank", "排名子因子", [config.rank.momentum_factor, config.rank.valuation_factor])
+        )
+        for regime_rule in config.regime_rules.values():
+            if regime_rule.score:
+                module_refs.append(
+                    ("score", "regime 评分", list(regime_rule.score.factors.keys()))
+                )
+            if regime_rule.filters:
+                regime_ids: list[str] = []
+                for rule in regime_rule.filters.rules:
+                    regime_ids.append(rule.factor)
+                    if rule.compare_to:
+                        regime_ids.append(rule.compare_to)
+                module_refs.append(("filter", "regime 过滤", regime_ids))
 
-        # 因子定义属于 factor_definition 表，必须使用 FactorDefinitionRepository
-        # 查询启用集合（StrategyConfigRepository 不负责因子元数据）
-        active_ids = {row.factor_id for row in FactorDefinitionRepository(self._db).find_active()}
+        active_rows = FactorDefinitionRepository(self._db).find_active()
+        active_by_id = {row.factor_id: row for row in active_rows}
         registry_ids = {spec.factor_id for spec in get_default_factor_registry().specs()}
 
         errors: list[str] = []
-        for factor_id in required_ids:
-            if factor_id not in registry_ids:
-                errors.append(f"未知因子 '{factor_id}'：请检查拼写（可用因子见 GET /factors）")
-            elif factor_id not in active_ids:
-                errors.append(
-                    f"因子 '{factor_id}' 已停用或未同步："
-                    "请运行 POST /factors/init 同步并确保 is_active=true"
-                )
+        seen: set[tuple[str, str]] = set()
+        for module_key, module_label, factor_ids in module_refs:
+            for factor_id in factor_ids:
+                if (module_key, factor_id) in seen:
+                    continue
+                seen.add((module_key, factor_id))
+                row = active_by_id.get(factor_id)
+                if row is None:
+                    if factor_id in registry_ids:
+                        errors.append(
+                            f"因子 '{factor_id}' 已停用或未同步："
+                            "请运行 POST /factors/init 同步并确保 is_active=true"
+                        )
+                    else:
+                        errors.append(
+                            f"未知因子 '{factor_id}'：请检查拼写（可用因子见 GET /factors）"
+                        )
+                    continue
+                # 元数据缺省兜底：旧库/测试替身行未带四轴字段时按 index/全位置处理
+                row_domain = getattr(row, "asset_domain", "index") or "index"
+                row_usage = list(getattr(row, "usage", None) or [])
+                if row_domain != "index":
+                    errors.append(
+                        f"因子 '{factor_id}' 资产域为 {row_domain}，"
+                        f"不能用于指数策略的{module_label}模块"
+                    )
+                    continue
+                if row_usage and module_key not in row_usage:
+                    errors.append(
+                        f"因子 '{factor_id}' 不适用于{module_label}位置"
+                        f"（usage={row_usage}），请调整配置或选择其他因子"
+                    )
         return errors
 
     @staticmethod

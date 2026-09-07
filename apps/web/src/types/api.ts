@@ -7,6 +7,8 @@ export interface StrategySummary {
   status: string
   /** 是否星标关注 */
   is_starred: boolean
+  /** 策略资产域：index=宽基/行业指数域，industry=申万一级行业域 */
+  asset_domain?: string
   /** 策略绑定的指数代码列表，空数组表示全指数通用 */
   index_codes: string[]
 }
@@ -151,6 +153,8 @@ export interface BacktestCreateRequest {
   enable_benchmark?: boolean
   /** 基准指数代码，默认 000300（沪深300） */
   benchmark_index_code?: string
+  /** 基准模式：auto/index/industry_equal_weight */
+  benchmark_mode?: 'auto' | 'index' | 'industry_equal_weight'
 }
 
 export interface BacktestMetrics {
@@ -205,6 +209,8 @@ export interface AnnualMetrics {
 export interface BacktestSummary {
   backtest_id: string
   strategy_id: string
+  /** 回测资产域：index=宽基/行业指数域，industry=申万一级行业域 */
+  asset_domain?: string
   start_date: string
   end_date: string
   status: string
@@ -467,6 +473,22 @@ export interface FactorSpec {
   description: string
   required_data: string[]
   is_active: boolean
+  /** 因子资产域：index/industry */
+  asset_domain?: string
+  /** 因子值形态：asset/market/panel */
+  value_shape?: string
+  /** 适用位置：timing/score/filter/rank/rotation_input */
+  usage?: string[]
+  /** 因子默认参数（参数化因子） */
+  default_params?: Record<string, unknown> | null
+}
+
+/** 行业因子参数变体数据状态 */
+export interface IndustryFactorStatusItem {
+  params_hash: string
+  params: Record<string, unknown> | null
+  latest_trade_date: string | null
+  industry_count: number
 }
 
 export interface FactorRow {

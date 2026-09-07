@@ -24,6 +24,14 @@
           RRG/扩散研究接口已放宽到 120 秒；若仍超时，错误区会显示 request_id，
           可到后端日志按该 ID 检索“即时计算完成”的耗时与结果。
         </div>
+        <div class="notice-item">
+          <span class="notice-label">因子中心</span>
+          本页四个指标已在因子中心登记（正式策略/回测默认参数由日频预计算维护）：
+          <a href="/factors/rrg_rs_ratio">rrg_rs_ratio</a> ·
+          <a href="/factors/rrg_rs_momentum">rrg_rs_momentum</a> ·
+          <a href="/factors/rrg_quadrant">rrg_quadrant</a> ·
+          <a href="/factors/diffusion_count_ratio">diffusion_count_ratio</a>
+        </div>
       </div>
     </div>
 

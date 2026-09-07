@@ -18,6 +18,8 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.domain.industry.constants import (
     SW_EXCLUDED_INDUSTRY_CODES,
+    canonical_industry_params,
+    industry_params_hash,
     normalize_sw_code,
 )
 from quant_etf_api.domain.industry.diffusion_panel import (
@@ -31,6 +33,7 @@ from quant_etf_api.domain.industry.factor_algo import (
     equal_weight_benchmark,
 )
 from quant_etf_api.infra.db.base import utcnow
+from quant_etf_api.infra.db.models.industry import IndustryFactorValueModel
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
     IndustryFactorValueRepository,
@@ -38,11 +41,21 @@ from quant_etf_api.infra.db.repositories.industry import (
     IndustryUniverseRepository,
     StockDailyCloseRepository,
 )
+from quant_etf_api.engine.config import RotationConfig
+from quant_etf_api.engine.rotation import IndustryRotationInput
 
 logger = logging.getLogger(__name__)
 
 # RS-Momentum 默认 warm-up 318 个交易日，折算自然日安全缓冲约 520 天
 _RRG_WARMUP_NATURAL_DAYS = 520
+
+# 行业因子 ID → IndustryRotationInput 字段映射
+_FACTOR_ID_TO_ROTATION_FIELD: dict[str, str] = {
+    "rrg_rs_ratio": "rs_ratio",
+    "rrg_rs_momentum": "rs_momentum",
+    "rrg_quadrant": "quadrant",
+    "diffusion_count_ratio": "diffusion",
+}
 
 
 def _diffusion_buffer_natural_days(lookback: int, smooth_window: int) -> int:
@@ -596,12 +609,40 @@ class IndustryFactorService:
         lookback_mom: int = 60,
         smooth_window: int = 20,
         diffusion_lookback: int = 220,
+        benchmark_exclude: list[str] | None = None,
     ) -> dict[str, int]:
         """计算区间内全部行业因子并持久化。
+
+        行携带规范化参数与参数指纹（params_hash），不同参数组合分行存储，
+        互不覆盖（P12）。
+
+        Args:
+            start: 计算区间起始日。
+            end: 计算区间结束日。
+            industry_codes: 行业代码列表，None 表示全部启用行业。
+            lookback_ratio: RS-Ratio 比率回看天数。
+            lookback_mom: RS-Momentum 比率回看天数。
+            smooth_window: MA 平滑窗口。
+            diffusion_lookback: 扩散上涨判定回看天数。
+            benchmark_exclude: RRG 行业等权基准剔除行业代码列表。
 
         Returns:
             {industry_count, date_count, factor_row_count} 统计。
         """
+        params = canonical_industry_params(
+            lookback_ratio=lookback_ratio,
+            lookback_mom=lookback_mom,
+            smooth_window=smooth_window,
+            diffusion_lookback=diffusion_lookback,
+            benchmark_exclude=benchmark_exclude,
+        )
+        params_hash = industry_params_hash(
+            lookback_ratio=lookback_ratio,
+            lookback_mom=lookback_mom,
+            smooth_window=smooth_window,
+            diffusion_lookback=diffusion_lookback,
+            benchmark_exclude=benchmark_exclude,
+        )
         panels = self.build_panels(
             start=start,
             end=end,
@@ -639,6 +680,8 @@ class IndustryFactorService:
                             "factor_id": factor_id,
                             "factor_value_numeric": (None if pd.isna(value) else float(value)),
                             "factor_payload": None,
+                            "params_hash": params_hash,
+                            "params": params,
                             "updated_at": utcnow(),
                         }
                     )
@@ -663,10 +706,19 @@ class IndustryFactorService:
         start: date,
         end: date,
         industry_codes: list[str] | None = None,
+        params_hash: str | None = None,
     ) -> pd.DataFrame:
-        """从 industry_factor_value 读取因子宽表（date × industry_code）。"""
+        """从 industry_factor_value 读取因子宽表（date × industry_code）。
+
+        Args:
+            factor_id: 行业因子 ID。
+            start: 起始日期。
+            end: 结束日期。
+            industry_codes: 行业代码列表。
+            params_hash: 参数指纹；None 表示不按参数过滤。
+        """
         codes = self.resolve_industry_codes(industry_codes)
-        rows = self._factor_repo.find_values(factor_id, start, end, codes)
+        rows = self._factor_repo.find_values(factor_id, start, end, codes, params_hash)
         data: dict[tuple[date, str], float | None] = {}
         for row in rows:
             data[(row.trade_date, row.industry_code)] = row.factor_value_numeric
@@ -682,6 +734,110 @@ class IndustryFactorService:
             ]
         ).set_index("trade_date")
         return frame.reindex(columns=codes)
+
+    def build_live_rotation_input(
+        self,
+        *,
+        rotation: RotationConfig,
+        trade_date: date,
+        industry_codes: list[str] | None = None,
+    ) -> tuple[IndustryRotationInput, dict[str, str]]:
+        """从预计算行业因子值构建单日轮动输入（实时口径，优先读库）。
+
+        按“因子值截止日期 <= 决策日”读取与策略参数指纹精确匹配的行，
+        同一行业取最近一次计算值；任一因子完全无行或无有效值时返回
+        {factor_id: MissingReason} 供服务层触发补算与告警。
+
+        Args:
+            rotation: 轮动配置（提供 lookback/smooth/扩散与基准剔除参数）。
+            trade_date: 决策日。
+            industry_codes: 行业代码列表，None 表示全部启用行业。
+
+        Returns:
+            (轮动输入, 缺失因子原因映射)。缺失映射为空表示数据就绪。
+        """
+        codes = self.resolve_industry_codes(industry_codes)
+        params_hash = industry_params_hash(
+            lookback_ratio=rotation.lookback_ratio,
+            lookback_mom=rotation.lookback_mom,
+            smooth_window=rotation.smooth_window,
+            diffusion_lookback=rotation.diffusion_lookback,
+            benchmark_exclude=rotation.benchmark_exclude,
+        )
+        values: dict[str, dict[str, float | None]] = {
+            field: {} for field in _FACTOR_ID_TO_ROTATION_FIELD.values()
+        }
+        missing: dict[str, str] = {}
+        for factor_id, field in _FACTOR_ID_TO_ROTATION_FIELD.items():
+            rows = self._factor_repo.find_values_asof(
+                factor_id,
+                params_hash,
+                trade_date,
+                codes,
+            )
+            if not rows:
+                missing[factor_id] = "not_computed"
+                continue
+            latest_by_code: dict[str, Any] = {}
+            for row in rows:
+                latest_by_code[row.industry_code] = row
+            values[field] = {
+                code: (row.factor_value_numeric if row.factor_value_numeric is not None else None)
+                for code, row in latest_by_code.items()
+            }
+            if all(v is None for v in values[field].values()):
+                missing[factor_id] = "insufficient_data"
+
+        quadrant_raw = values["quadrant"]
+        quadrant = {
+            code: (int(value) if value is not None else None)
+            for code, value in quadrant_raw.items()
+        }
+        data = IndustryRotationInput(
+            trade_date=trade_date,
+            industry_codes=codes,
+            rs_ratio=values["rs_ratio"],
+            rs_momentum=values["rs_momentum"],
+            quadrant=quadrant,
+            diffusion=values["diffusion"],
+        )
+        return data, missing
+
+    def industry_factor_status(
+        self,
+        factor_id: str,
+        industry_codes: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """返回某行业因子的参数变体与计算覆盖状态（因子中心数据状态）。
+
+        Args:
+            factor_id: 行业因子 ID。
+            industry_codes: 行业代码列表，None 表示全部。
+
+        Returns:
+            按参数指纹聚合的状态列表，每项含 params_hash/params/最新日期/覆盖行业数。
+        """
+        rows = self._factor_repo.find_latest_params_by_factor(factor_id, industry_codes)
+        return [
+            {
+                "params_hash": params_hash,
+                "params": self._load_params(params_hash),
+                "latest_trade_date": latest_date.isoformat() if latest_date else None,
+                "industry_count": industry_count,
+            }
+            for params_hash, latest_date, industry_count in rows
+        ]
+
+    def _load_params(self, params_hash: str) -> dict[str, Any] | None:
+        """按指纹读取任一行的 params（供因子中心状态展示）。"""
+        if not params_hash:
+            return None
+        row = (
+            self._db.query(IndustryFactorValueModel)
+            .filter(IndustryFactorValueModel.params_hash == params_hash)
+            .first()
+        )
+        return row.params if row is not None else None
 
 
 def _rrg_rules(

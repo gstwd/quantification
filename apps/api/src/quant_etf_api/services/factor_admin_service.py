@@ -1,8 +1,12 @@
 """因子元数据治理服务。
 
-负责 FactorRegistry（代码侧）与 factor_definition（DB 侧）的幂等同步，
+负责因子目录（代码侧）与 factor_definition（DB 侧）的幂等同步，
 与因子计算编排（FactorService）分离 —— 两者生命周期不同：
 元数据同步在部署/升级时执行，因子计算在每日调度与补算时执行。
+
+因子目录 = 指数因子（FactorRegistry specs） + 行业因子（申万 RRG/扩散
+元数据）。行业因子只登记元数据，计算走 domain/industry 的独立算法与
+IndustryFactorService，不注册进指数 FactorRegistry。
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from sqlalchemy.orm import Session
 from quant_etf_api.factors.registry import FactorRegistry
 from quant_etf_api.infra.db.models.core import FactorDefinitionModel
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
+from quant_etf_api.domain.industry.factor_defs import get_industry_factor_specs
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +42,16 @@ class FactorAdminService:
 
         同步策略：
         - 代码中有、DB 中没有 → INSERT（新因子）
-        - 代码和 DB 都有 → 仅更新 version、required_data（代码管控字段）
+        - 代码和 DB 都有 → 仅更新代码管控字段（version/required_data/
+          四轴元数据 asset_domain/value_shape/usage/default_params）
         - DB 中有、代码中没有 → 设为 is_active=False（保留历史数据关联）
 
         Returns:
             同步统计字典：new / updated / deactivated。
         """
-        specs = {s.factor_id: s for s in self._registry.specs()}
+        specs = {
+            s.factor_id: s for s in [*self._registry.specs(), *get_industry_factor_specs()]
+        }
         existing = {d.factor_id: d for d in self._repo.find_all()}
 
         new_count = 0
@@ -60,6 +68,10 @@ class FactorAdminService:
                         version=spec.version,
                         description=spec.description,
                         required_data=spec.required_data,
+                        asset_domain=spec.asset_domain,
+                        value_shape=spec.value_shape,
+                        usage=list(spec.usage),
+                        default_params=dict(spec.default_params),
                         owner_plugin=None,
                         is_active=True,
                     )
@@ -73,6 +85,20 @@ class FactorAdminService:
                     changed = True
                 if row.required_data != spec.required_data:
                     row.required_data = spec.required_data
+                    changed = True
+                # 四轴元数据为代码管控字段：代码演进后同步覆盖 DB 值，
+                # 保证因子中心展示与引擎/回测消费口径一致
+                if row.asset_domain != spec.asset_domain:
+                    row.asset_domain = spec.asset_domain
+                    changed = True
+                if row.value_shape != spec.value_shape:
+                    row.value_shape = spec.value_shape
+                    changed = True
+                if (row.usage or []) != list(spec.usage):
+                    row.usage = list(spec.usage)
+                    changed = True
+                if (row.default_params or {}) != dict(spec.default_params):
+                    row.default_params = dict(spec.default_params)
                     changed = True
                 if changed:
                     update_count += 1

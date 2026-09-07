@@ -240,7 +240,9 @@ class StrategyEngine:
             raise ValueError("rotation 策略缺少 rotation 配置")
         rotation_engine = IndustryRotationEngine()
         selected, positions = rotation_engine.select(rotation, rotation_input)
-        scores = {code: 1.0 for code in selected}
+        # 入选行业统一按“轮动入选”口径给出 100 分，与 strategy_results 一致，
+        # 保证回测/实时信号等级判定（HIGH）口径统一
+        scores = {code: 100.0 for code in selected}
         total_exposure = round(sum(positions.values()), 4)
         cash_ratio = round(1.0 - total_exposure, 4)
         strategy_tag = f"strategy={config.strategy_id} date={context.trade_date}"

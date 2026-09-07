@@ -102,6 +102,13 @@
 
 ### P04 RRG/扩散因子未纳入因子中心（用户问题 4）
 
+> 处理记录（2026-09-07）：RRG/扩散 4 因子已登记进 `factor_definition`
+> （asset_domain=industry、value_shape=panel、usage=rotation_input、
+> default_params=220/60/20/220+剔除综合），同步纳入因子中心列表/详情；
+> 因子详情行业因子显示“数据状态”（industry_factor_value 参数变体与覆盖）。
+> 策略层通过 rotation 模块消费，实时分配读预计算值，标准回测按参数指纹
+> 一次性预计算面板。
+
 现状核实：
 
 - 因子中心（Factors 列表/详情页）的数据来源是 `factor_definition` + `index_factor_value`（`apps/api/src/quant_etf_api/services/factor_admin_service.py`），只管理“基于指数数据、供通用 score/filter/timing 消费”的指数因子。
@@ -216,6 +223,9 @@
 > 处理记录（2026-09-06）：已评估，本轮不处理、留作专项。需要为
 > `industry_factor_value` 增加参数版本维度（如 params_hash/参数 JSON 列），
 > 并将默认参数消费者与自定义参数计算隔离，避免覆盖污染。
+> 处理记录（2026-09-07）：已落地。`industry_factor_value` 新增
+> params_hash/params 列，唯一键扩为 (trade_date, industry_code, factor_id,
+> params_hash)；计算与 upsert 全部带参数指纹，不同参数分行互不覆盖。
 
 现状核实：
 
@@ -261,6 +271,10 @@
 
 ### P16 独立回测逐日收益重复计算与日期错配（阻塞级）
 
+> 处理记录（2026-09-07）：独立回测模拟已随标准回测收敛删除；行业轮动回测
+> 统一走 `BacktestService` 行业域分支（T+1 开盘、账户累积、月末调仓），
+> 不再存在重复计收益/日期错配路径。
+
 现状核实（代码推演，未用真库净值复核）：
 
 - `simulate_rotation_backtest`（`domain/industry/backtest.py:29-83`）在决策日（T）那一行就计入：旧持仓 `close_T → open_{T+1}` + 新持仓 `open_{T+1} → close_{T+1}`（`backtest.py:50-58`），然后立刻把持仓切换为新目标。
@@ -276,6 +290,10 @@
 
 ### P17 独立回测无基准/行业等权对照输出
 
+> 处理记录（2026-09-07）：标准回测行业域分支默认提供“申万行业等权（剔除
+> 综合）”基准对照，创建页可切换为指数基准；绩效指标/逐日 benchmark_return
+> 与统一口径一致。
+
 现状核实：
 
 - `industry backtest` 输出只有 `stats`、`selections`，可选 `daily`/`file`（`cli.py:507-527`）；`IndustryRotationService.run_backtest` 返回 `daily/targets/stats/selections/decision_dates`（`industry_rotation_service.py:82-119`），不含行业等权组合净值、不含沪深300 等基准序列。
@@ -283,6 +301,10 @@
 - 影响：无法在回测输出中直接对比策略 vs 行业等权 vs 宽基，研究判断需自行另算。
 
 ### P18 rotation 策略无法走标准策略执行与标准回测链路（阻塞级）
+
+> 处理记录（2026-09-07）：rotation 策略已接入标准实时分配（读预计算行业
+> 因子值 → 引擎 rotation 分支）与标准回测中心（行业域分支）；定时持久化
+> 运行明确拒绝并在校验/文档/前端说明。复刻策略可直接分配与回测。
 
 现状核实：
 
@@ -297,6 +319,10 @@
 
 ### P19 标准链路打通后信号/因子持久化的指数域与行业域混用风险
 
+> 处理记录（2026-09-07）：本轮将行业轮动策略的持久化运行显式关闭（run_and_persist
+> 拒绝并提示），避免 801xxx 写入指数信号/因子快照表；后续扩展持久化时
+> 需按文档先扩展信号表资产域。
+
 现状核实：
 
 - `StrategyDecisionService.run_and_persist` 会把引擎输出的 `strategy_results` 无条件写入 `index_signal`、把因子快照写入 `index_factor_value`（`strategy_decision_service.py:404-441`），两表按“指数域”设计；rotation 输出中的 `index_code` 将是 `801xxx` 申万行业代码。
@@ -304,6 +330,9 @@
 - 现状是 P18 使该路径尚不可达，但代码上没有任何防线阻止这种混用，属于“打通标准链路时必须处理”的关联风险。
 
 ### P20 复刻策略顶层 `frequency=daily` 与调仓 `monthly` 不一致
+
+> 处理记录（2026-09-07）：create-replica-strategy 与前端策略创建已统一为
+> 顶层 frequency=monthly（与 rebalance 一致）。
 
 现状核实：
 
@@ -357,6 +386,10 @@
 - 影响：即使出现 P16 这类阻塞级口径错误，现有测试仍全绿，CI 无法把守“可回测”底线。
 
 ### P25 行业因子计算路径均每次从零重建 warm-up 面板，无增量复用
+
+> 处理记录（2026-09-07）：实时分配改为优先读日频预计算的 industry_factor_value
+> （默认参数），回测改为按策略参数一次性预计算面板并复用；研究页仍保留
+> 即时计算但不落库。
 
 现状核实：
 

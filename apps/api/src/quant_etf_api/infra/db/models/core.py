@@ -129,6 +129,32 @@ class FactorDefinitionModel(Base):
         nullable=True,
         comment="因子类别：volume/momentum/volatility/flow/valuation",
     )
+    asset_domain: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="index",
+        server_default="index",
+        comment="因子资产域：index=宽基/行业指数域，industry=申万一级行业域",
+    )
+    value_shape: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="asset",
+        server_default="asset",
+        comment="因子值形态：asset=每资产值，market=市场级值，panel=面板值",
+    )
+    usage: Mapped[list | None] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default=sa.text("'[\"timing\",\"score\",\"filter\",\"rank\"]'::json"),
+        comment="适用位置：timing/score/filter/rank/rotation_input",
+    )
+    default_params: Mapped[dict | None] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="因子默认参数（参数化因子，如行业 RRG/扩散的默认口径）",
+    )
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         default=True,
@@ -292,6 +318,13 @@ class BacktestRunModel(Base):
         String(64), primary_key=True, comment="回测唯一 ID，UUID 格式"
     )
     strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="关联策略 ID")
+    asset_domain: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="index",
+        server_default="index",
+        comment="回测资产域：index=宽基/行业指数域，industry=申万一级行业域",
+    )
     start_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="回测起始日期")
     end_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="回测结束日期")
     universe_filter: Mapped[dict] = mapped_column(
@@ -420,7 +453,9 @@ class BacktestIndexResultModel(Base):
     )
     trade_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="信号生成日期（T 日）")
     index_code: Mapped[str] = mapped_column(
-        ForeignKey("benchmark_index.index_code"), nullable=False, comment="指数代码"
+        String(16),
+        nullable=False,
+        comment="资产代码（index=宽基指数代码，industry=申万一级行业代码）",
     )
     signal_score: Mapped[float] = mapped_column(
         Float, nullable=False, comment="信号综合得分，0-100（与实时 index_signal.signal_score 同义）"

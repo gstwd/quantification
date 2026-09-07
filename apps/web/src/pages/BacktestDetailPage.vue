@@ -220,6 +220,7 @@ import { RouterLink } from 'vue-router'
 
 import type { BenchmarkIndex } from '../types/api'
 import { fetchBenchmarkIndexes } from '../api/market_data'
+import { fetchIndustryIndexes } from '../api/industry'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
 import { useBacktestStore } from '../stores/backtests'
@@ -655,6 +656,20 @@ async function loadIndexNames() {
   }
 }
 
+/** 加载申万一级行业名称，构建 industry_code → name 映射（行业轮动回测） */
+async function loadIndustryNames() {
+  try {
+    const industries = await fetchIndustryIndexes()
+    const map: Record<string, string> = {}
+    for (const item of industries) {
+      map[item.industry_code] = item.name_cn
+    }
+    indexNameMap.value = map
+  } catch {
+    // 获取行业名称失败时降级显示代码
+  }
+}
+
 watch(() => store.dailyResults, () => { if (store.dailyResults.length > 0) initCharts() })
 
 onMounted(async () => {
@@ -662,6 +677,9 @@ onMounted(async () => {
     store.loadOne(props.backtestId),
     loadIndexNames(),
   ])
+  if (store.current?.asset_domain === 'industry') {
+    await loadIndustryNames()
+  }
   // 已完成回测打开页面时也展示一次警告（无轮询）
   notifyWarnings(store.current?.warnings ?? [])
   if (store.current?.status === 'pending' || store.current?.status === 'running') {

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class FactorSpecResponse(BaseModel):
@@ -16,6 +16,10 @@ class FactorSpecResponse(BaseModel):
         description: 计算逻辑说明。
         required_data: 依赖的数据源列表。
         is_active: 是否启用。
+        asset_domain: 因子资产域：index=宽基/行业指数域，industry=申万一级行业域。
+        value_shape: 因子值形态：asset=每资产值，market=市场级值，panel=面板值。
+        usage: 适用位置数组：timing/score/filter/rank/rotation_input。
+        default_params: 因子默认参数（参数化因子）。
     """
 
     factor_id: str
@@ -25,6 +29,10 @@ class FactorSpecResponse(BaseModel):
     description: str
     required_data: list[str]
     is_active: bool
+    asset_domain: str = "index"
+    value_shape: str = "asset"
+    usage: list[str] = Field(default_factory=list)
+    default_params: dict | None = None
 
 
 class FactorUpdateRequest(BaseModel):
@@ -43,6 +51,15 @@ class FactorUpdateRequest(BaseModel):
     description: str | None = None
     category: str | None = None
     is_active: bool | None = None
+
+
+class IndustryFactorStatusItem(BaseModel):
+    """行业因子参数变体的数据状态（因子中心“数据状态”tab）。"""
+
+    params_hash: str
+    params: dict | None = None
+    latest_trade_date: str | None = None
+    industry_count: int = 0
 
 
 class CrossSectionRow(BaseModel):

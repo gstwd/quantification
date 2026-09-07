@@ -174,7 +174,8 @@ class IndustryFactorValueModel(Base):
             "trade_date",
             "industry_code",
             "factor_id",
-            name="uq_industry_factor_value",
+            "params_hash",
+            name="uq_industry_factor_value_params",
         ),
     )
 
@@ -191,6 +192,16 @@ class IndustryFactorValueModel(Base):
     factor_value_numeric: Mapped[float | None] = mapped_column(Float, comment="因子数值")
     factor_payload: Mapped[dict | None] = mapped_column(
         JSON, comment="计算中间数据（warm-up/样本数等）"
+    )
+    params_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="",
+        server_default="",
+        comment="参数指纹（规范化参数字典 sha256），区分同 factor_id 不同参数计算",
+    )
+    params: Mapped[dict | None] = mapped_column(
+        JSON, comment="计算参数字典（lookback/smooth/基准剔除等）"
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,

@@ -45,11 +45,11 @@ _DEFAULT_INDEXES: list[tuple[str, str]] = [
 
 
 def init_factors() -> None:
-    """将代码中的因子元数据同步到数据库。
+    """将代码中的因子元数据（指数 + 行业）同步到数据库。
 
     同步策略：
     - 代码中有、DB 中没有 → INSERT（新因子）
-    - 代码和 DB 都有 → 仅更新 version、required_data
+    - 代码和 DB 都有 → 仅更新代码管控字段（version/required_data/四轴元数据）
     - DB 中有、代码中没有 → 设为 is_active=False
     """
     setup_logging()
@@ -392,7 +392,7 @@ def _build_industry_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--name", dest="display_name", default="扩散+RRG行业轮动(申万)")
     _add_json_flag(p)
 
-    p = sub.add_parser("backtest", help="独立行业轮动回测（不写 backtest_* 表）")
+    p = sub.add_parser("backtest", help="行业轮动标准回测（写统一 backtest_* 表）")
     p.add_argument("--start", type=date.fromisoformat, required=True)
     p.add_argument("--end", type=date.fromisoformat, required=True)
     p.add_argument(
@@ -418,15 +418,11 @@ def _run_industry(args: argparse.Namespace) -> None:
             SW_L1_INDUSTRIES,
             SW_EXCLUDED_INDUSTRY_CODES,
         )
-        from quant_etf_api.engine.config import RotationConfig  # noqa: PLC0415
         from quant_etf_api.services.industry_data_service import (  # noqa: PLC0415
             IndustryDataService,
         )
         from quant_etf_api.services.industry_factor_service import (  # noqa: PLC0415
             IndustryFactorService,
-        )
-        from quant_etf_api.services.industry_rotation_service import (  # noqa: PLC0415
-            IndustryRotationService,
         )
         from quant_etf_api.services.strategy_config_service import (  # noqa: PLC0415
             StrategyConfigService,
@@ -530,6 +526,7 @@ def _run_industry(args: argparse.Namespace) -> None:
             codes = [code for code in SW_L1_INDUSTRIES if code not in SW_EXCLUDED_INDUSTRY_CODES]
             config_json = {
                 "schema_version": "1",
+                "asset_domain": "industry",
                 "index_codes": codes,
                 "score": {"factors": {}},
                 "portfolio": {"method": "equal_weight", "default_exposure": 1.0},
@@ -549,7 +546,7 @@ def _run_industry(args: argparse.Namespace) -> None:
                     "复刻西部证券《扩散指标+RRG 行业轮动》：扩散 top6 后剔除"
                     "三四象限（不补足），月末调仓等权，直接作用于申万一级行业指数。"
                 ),
-                frequency="daily",
+                frequency="monthly",
                 config_json=config_json,
                 status="active",
             )
@@ -562,32 +559,103 @@ def _run_industry(args: argparse.Namespace) -> None:
             keep_quadrants = [
                 int(part.strip()) for part in args.keep_quadrants.split(",") if part.strip()
             ]
-            rotation = RotationConfig(
-                signal=args.signal,
-                top_n=args.top_n,
-                keep_quadrants=keep_quadrants,
-                benchmark_exclude=sorted(SW_EXCLUDED_INDUSTRY_CODES),
-                lookback_ratio=args.lookback_ratio,
-                lookback_mom=args.lookback_mom,
-                smooth_window=args.smooth_window,
-                diffusion_lookback=args.diffusion_lookback,
-            )
             codes = _split_codes(args.industry_codes)
-            result = IndustryRotationService(db).run_backtest(
-                start=args.start,
-                end=args.end,
-                rotation=rotation,
-                industry_codes=codes,
-                monthly=True,
+            if not codes:
+                codes = [
+                    code for code in SW_L1_INDUSTRIES if code not in SW_EXCLUDED_INDUSTRY_CODES
+                ]
+            from quant_etf_api.schemas.backtest import (  # noqa: PLC0415
+                BacktestCreateRequest,
             )
+            from quant_etf_api.services.backtest_service import BacktestService  # noqa: PLC0415
+
+            config_svc = StrategyConfigService(db)
+            strategy_id = "industry_backtest_cli"
+            existing = config_svc.get_config(strategy_id)
+            if existing is not None:
+                config_svc.delete_config(strategy_id)
+            config_json = {
+                "schema_version": "1",
+                "asset_domain": "industry",
+                "index_codes": sorted(codes),
+                "score": {"factors": {}},
+                "portfolio": {"method": "equal_weight", "default_exposure": 1.0},
+                "rebalance": {"frequency": "monthly"},
+                "rotation": {
+                    "signal": args.signal,
+                    "top_n": args.top_n,
+                    "keep_quadrants": keep_quadrants,
+                    "benchmark_exclude": sorted(SW_EXCLUDED_INDUSTRY_CODES),
+                    "lookback_ratio": args.lookback_ratio,
+                    "lookback_mom": args.lookback_mom,
+                    "smooth_window": args.smooth_window,
+                    "diffusion_lookback": args.diffusion_lookback,
+                },
+            }
+            config_svc.create_config(
+                StrategyConfigCreate(
+                    strategy_id=strategy_id,
+                    display_name="行业轮动 CLI 回测",
+                    version="1.0.0",
+                    description="由 industry backtest CLI 创建的临时标准策略",
+                    frequency="monthly",
+                    config_json=config_json,
+                    status="active",
+                )
+            )
+            backtest_svc = BacktestService(db)
+            summary = backtest_svc.create_backtest(
+                BacktestCreateRequest(
+                    strategy_id=strategy_id,
+                    start_date=args.start,
+                    end_date=args.end,
+                    universe_mode="subset",
+                    index_codes=codes,
+                    enable_benchmark=True,
+                    benchmark_mode="industry_equal_weight",
+                )
+            )
+            backtest_svc.run_backtest(summary.backtest_id)
+            detail = backtest_svc.get_backtest(summary.backtest_id)
+            daily_rows = backtest_svc.get_daily_results(summary.backtest_id)
+            stats = detail.metrics.model_dump() if detail and detail.metrics else {}
             payload: dict[str, Any] = {
-                "stats": result["stats"],
-                "selections": result["selections"],
+                "backtest_id": summary.backtest_id,
+                "stats": stats,
+                "selections": [],
             }
             if args.daily:
-                payload["daily"] = result["daily"].to_dict(orient="records")
+                payload["daily"] = [
+                    {
+                        "trade_date": r.trade_date.isoformat(),
+                        "portfolio_return": r.portfolio_return,
+                        "cumulative_return": r.cumulative_return,
+                        "drawdown": r.drawdown,
+                        "total_exposure": r.total_exposure,
+                        "cash_ratio": r.cash_ratio,
+                        "positions": r.positions,
+                    }
+                    for r in daily_rows
+                ]
             if args.output_file:
-                result["daily"].to_csv(args.output_file, index=False, encoding="utf-8")
+                if daily_rows:
+                    import pandas as pd
+
+                    csv_rows = payload.get("daily") or [
+                        {
+                            "trade_date": r.trade_date.isoformat(),
+                            "portfolio_return": r.portfolio_return,
+                            "cumulative_return": r.cumulative_return,
+                            "drawdown": r.drawdown,
+                            "total_exposure": r.total_exposure,
+                            "cash_ratio": r.cash_ratio,
+                            "positions": r.positions,
+                        }
+                        for r in daily_rows
+                    ]
+                    pd.DataFrame(csv_rows).to_csv(
+                        args.output_file, index=False, encoding="utf-8"
+                    )
             _emit(payload, not args.no_json)
             return
     except ValueError as exc:

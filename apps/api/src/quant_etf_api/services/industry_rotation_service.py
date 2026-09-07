@@ -1,4 +1,8 @@
-"""行业轮动分析服务：单日决策、逐期分析与独立回测。"""
+"""行业轮动分析服务：单日决策与逐期选择分析（研究预览）。
+
+标准回测已收敛到 BacktestService 行业域分支；本服务只保留研究页需要的
+轮动选择预览（analyze_selections）与单日决策，不再维护独立净值模拟。
+"""
 
 from __future__ import annotations
 
@@ -9,11 +13,7 @@ from typing import Any
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from quant_etf_api.domain.industry.backtest import (
-    month_end_dates,
-    portfolio_stats,
-    simulate_rotation_backtest,
-)
+from quant_etf_api.domain.industry.rebalance import month_end_dates
 from quant_etf_api.engine.config import RotationConfig
 from quant_etf_api.engine.rotation import IndustryRotationEngine, IndustryRotationInput
 from quant_etf_api.infra.db.repositories.industry import IndustryDailyBarRepository
@@ -77,46 +77,6 @@ class IndustryRotationService:
             "selected_codes": selected,
             "weights": weights,
             "values": values,
-        }
-
-    def run_backtest(
-        self,
-        *,
-        start: date,
-        end: date,
-        rotation: RotationConfig,
-        industry_codes: list[str] | None = None,
-        monthly: bool = True,
-    ) -> dict[str, Any]:
-        """执行行业轮动独立回测（不写入 backtest_* 表）。
-
-        Returns:
-            {daily, targets, stats, selections}。
-        """
-        panels, decision_dates, targets, selections = self._prepare(
-            start=start,
-            end=end,
-            rotation=rotation,
-            industry_codes=industry_codes,
-            monthly=monthly,
-        )
-        close = panels["industry_close"]
-        open_frame = self._load_open_frame(
-            start,
-            end,
-            panels["industry_codes"],
-        )
-        daily = simulate_rotation_backtest(
-            close=close,
-            open_=open_frame,
-            targets=targets,
-        )
-        return {
-            "daily": daily,
-            "targets": targets,
-            "stats": portfolio_stats(daily),
-            "selections": selections,
-            "decision_dates": [d.isoformat() for d in decision_dates],
         }
 
     def analyze_selections(
@@ -183,18 +143,6 @@ class IndustryRotationService:
             )
         return panels, decision_dates, targets, selections
 
-    def _load_open_frame(self, start: date, end: date, codes: list[str]) -> pd.DataFrame:
-        """加载回测区间行业开盘价宽表。"""
-        rows = self._bar_repo.find_range(start, end, codes)
-        data: dict[date, dict[str, float]] = {}
-        for row in rows:
-            if row.open_price is None:
-                continue
-            data.setdefault(row.trade_date, {})[row.industry_code] = float(row.open_price)
-        frame = pd.DataFrame.from_dict(data, orient="index")
-        frame.index = pd.DatetimeIndex(frame.index)
-        return frame.sort_index().reindex(columns=codes)
-
     @staticmethod
     def _input_for_date(
         trade_date: date,
@@ -205,9 +153,10 @@ class IndustryRotationService:
 
         def row_values(panel: pd.DataFrame) -> dict[str, float | None]:
             result: dict[str, float | None] = {}
-            if panel.empty or trade_date not in panel.index:
+            ts = pd.Timestamp(trade_date)
+            if panel.empty or ts not in panel.index:
                 return {code: None for code in codes}
-            row = panel.loc[trade_date]
+            row = panel.loc[ts]
             for code in codes:
                 if code not in panel.columns:
                     result[code] = None

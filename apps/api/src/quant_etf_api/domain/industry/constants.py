@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date
+from typing import Any
 
 # 申万一级行业指数代码 → 中文名称（与 AkShare sw_index_first_info / 申万官网一致）
 SW_L1_NAMES: dict[str, str] = {
@@ -102,6 +105,80 @@ INDUSTRY_FACTOR_IDS: frozenset[str] = frozenset(
 # RRG 需要更久历史展示轨迹，扩散受个股逐行业加载成本约束，上限略低。
 RRG_LAB_MAX_RANGE_DAYS: int = 3700
 DIFFUSION_LAB_MAX_RANGE_DAYS: int = 2200
+
+# 行业因子默认参数（研报复刻口径）：RS-Ratio 回看/RS-Momentum 回看/
+# 平滑窗口/扩散上涨判定回看；benchmark_exclude 默认剔除"综合"。
+DEFAULT_LOOKBACK_RATIO = 220
+DEFAULT_LOOKBACK_MOM = 60
+DEFAULT_SMOOTH_WINDOW = 20
+DEFAULT_DIFFUSION_LOOKBACK = 220
+
+
+def canonical_industry_params(
+    *,
+    lookback_ratio: int = DEFAULT_LOOKBACK_RATIO,
+    lookback_mom: int = DEFAULT_LOOKBACK_MOM,
+    smooth_window: int = DEFAULT_SMOOTH_WINDOW,
+    diffusion_lookback: int = DEFAULT_DIFFUSION_LOOKBACK,
+    benchmark_exclude: list[str] | None = None,
+) -> dict[str, Any]:
+    """生成行业因子规范化参数字典（含基准剔除清单，排序稳定）。
+
+    Args:
+        lookback_ratio: RS-Ratio 比率回看天数。
+        lookback_mom: RS-Momentum 比率回看天数。
+        smooth_window: MA 平滑窗口。
+        diffusion_lookback: 扩散上涨判定回看天数。
+        benchmark_exclude: RRG 行业等权基准剔除行业代码列表。
+
+    Returns:
+        供行业因子值表 params 落库与指纹计算的规范化字典。
+    """
+    return {
+        "lookback_ratio": int(lookback_ratio),
+        "lookback_mom": int(lookback_mom),
+        "smooth_window": int(smooth_window),
+        "diffusion_lookback": int(diffusion_lookback),
+        "benchmark_exclude": sorted(
+            benchmark_exclude or list(SW_EXCLUDED_INDUSTRY_CODES)
+        ),
+    }
+
+
+def industry_params_hash(
+    *,
+    lookback_ratio: int = DEFAULT_LOOKBACK_RATIO,
+    lookback_mom: int = DEFAULT_LOOKBACK_MOM,
+    smooth_window: int = DEFAULT_SMOOTH_WINDOW,
+    diffusion_lookback: int = DEFAULT_DIFFUSION_LOOKBACK,
+    benchmark_exclude: list[str] | None = None,
+) -> str:
+    """计算行业因子参数指纹（规范化 JSON 的 sha256）。
+
+    Args:
+        lookback_ratio: RS-Ratio 比率回看天数。
+        lookback_mom: RS-Momentum 比率回看天数。
+        smooth_window: MA 平滑窗口。
+        diffusion_lookback: 扩散上涨判定回看天数。
+        benchmark_exclude: RRG 行业等权基准剔除行业代码列表。
+
+    Returns:
+        64 位十六进制 sha256 哈希。
+    """
+    params = canonical_industry_params(
+        lookback_ratio=lookback_ratio,
+        lookback_mom=lookback_mom,
+        smooth_window=smooth_window,
+        diffusion_lookback=diffusion_lookback,
+        benchmark_exclude=benchmark_exclude,
+    )
+    canonical = json.dumps(
+        params,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # 申万一级行业指数在系统内的归一化代码：去掉交易所后缀（如 801010.SI → 801010）

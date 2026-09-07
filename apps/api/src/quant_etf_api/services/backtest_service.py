@@ -14,6 +14,7 @@ from datetime import date, timedelta
 from typing import Any
 from uuid import uuid4
 
+import pandas as pd
 from sqlalchemy.orm import Session
 
 from quant_etf_api.domain.common.signal_level import determine_signal_level
@@ -224,6 +225,9 @@ class BacktestService:
         # 保存基准配置到 params，供执行时读取
         params["_enable_benchmark"] = req.enable_benchmark
         params["_benchmark_index_code"] = req.benchmark_index_code
+        params["_benchmark_mode"] = req.benchmark_mode
+        # 回测资产域：rotation 策略 = 申万行业域；其余 = 指数域
+        asset_domain = "industry" if strategy_config.rotation is not None else "index"
 
         # 创建时快照策略配置，保证回测结果与当时配置严格对应
         config_snapshot: dict[str, Any] | None = None
@@ -248,6 +252,7 @@ class BacktestService:
             row = BacktestRunModel(
                 backtest_id=backtest_id,
                 strategy_id=req.strategy_id,
+                asset_domain=asset_domain,
                 start_date=req.start_date,
                 end_date=req.end_date,
                 universe_filter=universe_filter,
@@ -267,6 +272,7 @@ class BacktestService:
         return BacktestSummary(
             backtest_id=backtest_id,
             strategy_id=req.strategy_id,
+            asset_domain=asset_domain,
             start_date=req.start_date,
             end_date=req.end_date,
             status="pending",
@@ -408,6 +414,12 @@ class BacktestService:
             if config is None:
                 raise ValueError(f"策略 {row.strategy_id} 配置不存在")
 
+            # 行业轮动策略走行业域分支（不进入指数 FactorProvider/ContextBuilder 路径）
+            if config.rotation is not None:
+                self._record_industry_data_cutoff(row)
+                self._run_industry_backtest_loop(backtest_id, row, config)
+                return
+
             self._record_data_cutoff(row)
             self._run_backtest_loop(backtest_id, row, config)
 
@@ -461,6 +473,22 @@ class BacktestService:
         except Exception:
             self._db.rollback()
             logger.warning("记录回测数据截止日期失败", exc_info=True)
+
+    def _record_industry_data_cutoff(self, row: BacktestRunModel) -> None:
+        """记录行业轮动回测的行业日线数据截止日期。"""
+        from quant_etf_api.infra.db.repositories.industry import (
+            IndustryDailyBarRepository,
+        )
+
+        try:
+            cutoff = IndustryDailyBarRepository(self._db).latest_trade_date()
+            if cutoff is None:
+                return
+            row.data_cutoff_date = cutoff
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            logger.warning("记录行业回测数据截止日期失败", exc_info=True)
 
     # ── 统一回测主循环 ────────────────────────────────────────────────────
 
@@ -807,6 +835,353 @@ class BacktestService:
             metrics,
             warnings=[w.model_dump() for w in run_warnings],
         )
+
+    # ── 行业轮动回测主循环 ────────────────────────────────────────────────
+
+    def _run_industry_backtest_loop(
+        self,
+        backtest_id: str,
+        row: BacktestRunModel,
+        config: StrategyConfig,
+    ) -> None:
+        """执行行业轮动策略的标准回测（行业域分支）。
+
+        与指数域主循环共用账户累积、T+1 开盘执行、调仓调度、缺口/预热
+        警告与绩效指标；差异点：
+        - 标的/行情来自 industry_universe/industry_daily_bar；
+        - 因子由 IndustryFactorService 按策略 rotation 参数一次性
+          预计算面板（不逐日查库、不写 industry_factor_value）；
+        - 基准默认“申万行业等权（剔除综合）”，可切换为指数基准；
+        - 结果写入统一 backtest_* 表（index_code 列存放 801xxx 行业代码）。
+        """
+        from quant_etf_api.engine.base import EngineContext
+        from quant_etf_api.infra.db.repositories.industry import (
+            IndustryDailyBarRepository,
+            IndustryUniverseRepository,
+        )
+        from quant_etf_api.services.industry_factor_service import IndustryFactorService
+
+        codes = sorted(set(config.index_codes))
+        if not codes:
+            raise ValueError("行业轮动回测缺少行业代码（策略 index_codes 为空）")
+        universe_rows = IndustryUniverseRepository(self._db).find_by_codes(codes)
+        name_by_code = {r.industry_code: r.name_cn for r in universe_rows}
+        universe = [
+            {"index_code": code, "name_cn": name_by_code[code], "category": "industry"}
+            for code in codes
+        ]
+
+        bar_repo = IndustryDailyBarRepository(self._db)
+        trading_dates = bar_repo.find_trading_dates(row.start_date, row.end_date, codes)
+        if not trading_dates:
+            raise ValueError(f"行业日线区间 {row.start_date} ~ {row.end_date} 内无交易日数据")
+        bars = bar_repo.find_range(row.start_date, row.end_date, codes)
+        all_bars: dict[tuple[str, date], Any] = {
+            (r.industry_code, r.trade_date): r for r in bars
+        }
+
+        rotation = config.rotation
+        if rotation is None:
+            raise ValueError("行业轮动回测缺少 rotation 配置")
+        panels = IndustryFactorService(self._db).build_panels(
+            start=row.start_date,
+            end=row.end_date,
+            industry_codes=codes,
+            lookback_ratio=rotation.lookback_ratio,
+            lookback_mom=rotation.lookback_mom,
+            smooth_window=rotation.smooth_window,
+            diffusion_lookback=rotation.diffusion_lookback,
+            benchmark_exclude=rotation.benchmark_exclude,
+            need_rrg=rotation.signal in {"quadrant", "diffusion_rrg"},
+            need_diffusion=rotation.signal in {"diffusion", "diffusion_rrg"},
+        )
+        warmup_days = self._industry_warmup_days(panels, trading_dates, codes)
+
+        params = dict(row.params or {})
+        enable_benchmark = params.get("_enable_benchmark", True)
+        benchmark_index_code = params.get("_benchmark_index_code", "000300")
+        benchmark_mode = params.get("_benchmark_mode", "auto")
+        if benchmark_mode == "auto":
+            benchmark_mode = "industry_equal_weight"
+        params["_benchmark_alignment"] = "decision_day"
+        params["_warmup_trading_days"] = warmup_days
+        row.params = params
+        risk_free_rate_pct = float(params.get("_annual_risk_free_rate_pct", 0.0) or 0.0)
+
+        benchmark_returns: list[float] = []
+        if enable_benchmark:
+            if benchmark_mode == "index":
+                if benchmark_index_code not in codes:
+                    benchmark_bars = self._load_all_index_bars(trading_dates, [benchmark_index_code])
+                    all_bars.update(benchmark_bars)
+                benchmark_returns = compute_buy_hold_benchmark(
+                    all_bars, benchmark_index_code, trading_dates
+                )
+            else:
+                benchmark_returns = self._industry_equal_weight_returns(
+                    all_bars, codes, trading_dates
+                )
+
+        logger.info(
+            "[backtest] 行业轮动回测启动: backtest_id=%s strategy=%s 区间=%s~%s 行业=%d "
+            "signal=%s 预热=%s 基准=%s",
+            backtest_id,
+            row.strategy_id,
+            trading_dates[0],
+            trading_dates[-1],
+            len(codes),
+            rotation.signal,
+            warmup_days,
+            benchmark_mode,
+        )
+
+        daily_results: list[BacktestDailyResultModel] = []
+        accumulator = BacktestDayAccumulator()
+        prev_positions: dict[str, float] = {}
+        last_rebalance_date: date | None = None
+        data_gap_days = 0
+        last_progress = 0
+        total_dates = len(trading_dates)
+        total_in_pos_count = 0
+        total_in_pos_positive = 0
+
+        for i, trade_date in enumerate(trading_dates):
+            rotation_input = self._industry_panel_input(
+                panels, trade_date, codes
+            )
+            context = EngineContext(
+                trade_date=trade_date,
+                universe=universe,
+                asset_metadata={code: {"name_cn": name_by_code[code]} for code in codes},
+                extra={"industry_rotation_input": rotation_input},
+            )
+            should_rebalance = self._check_rebalance(config, trade_date, last_rebalance_date)
+            result = self._engine.run(config, context, include_details=False)
+            next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
+
+            if should_rebalance:
+                new_positions = dict(result.positions) if result.positions else {}
+                portfolio_return = compute_rebalance_day_return(
+                    prev_positions, new_positions, trade_date, next_date, all_bars
+                )
+                positions = new_positions
+                day_total_exposure = round(sum(positions.values()), 4)
+                day_cash_ratio = round(1.0 - day_total_exposure, 4)
+                turnover = 0.0
+                if prev_positions and new_positions:
+                    turnover = compute_turnover(prev_positions, new_positions)
+                last_rebalance_date = trade_date
+            else:
+                positions = dict(prev_positions)
+                day_total_exposure = round(sum(positions.values()), 4)
+                day_cash_ratio = round(1.0 - day_total_exposure, 4)
+                turnover = 0.0
+                portfolio_return = compute_allocation_return(
+                    positions, trade_date, next_date, all_bars
+                )
+
+            missing_bar_count = (
+                count_missing_rebalance_assets(
+                    prev_positions, positions, trade_date, next_date, all_bars
+                )
+                if should_rebalance
+                else count_missing_allocation_assets(
+                    positions, trade_date, next_date, all_bars
+                )
+            )
+            if missing_bar_count > 0:
+                data_gap_days += 1
+
+            has_positions = bool(positions)
+            accumulator.apply_day(portfolio_return, has_positions)
+            benchmark_ret = benchmark_returns[i] if i < len(benchmark_returns) else None
+
+            daily_row = BacktestDailyResultModel(
+                backtest_id=backtest_id,
+                trade_date=trade_date,
+                portfolio_return=round(portfolio_return, 4),
+                cumulative_return=round(accumulator.cumulative_return_pct, 4),
+                drawdown=round(accumulator.drawdown_pct, 4),
+                high_signal_count=0,
+                mid_signal_count=0,
+                low_signal_count=0,
+                timing_regime=result.timing.regime if result.timing else None,
+                total_exposure=day_total_exposure,
+                cash_ratio=day_cash_ratio,
+                positions=positions if positions else None,
+                benchmark_return=round(benchmark_ret, 4) if benchmark_ret is not None else None,
+                turnover=round(turnover, 4) if turnover > 0 else None,
+                missing_bar_count=missing_bar_count,
+            )
+            self._backtest_repo.add_daily_result(daily_row)
+            daily_results.append(daily_row)
+
+            high_cnt, mid_cnt, low_cnt, day_pos_count, day_pos_positive = self._write_index_results(
+                backtest_id,
+                trade_date,
+                next_date,
+                universe,
+                result,
+                all_bars,
+                result.positions if result.positions else {},
+                timing_regime=result.timing.regime if result.timing else None,
+                scoring_mode="absolute",
+            )
+            daily_row.high_signal_count = high_cnt
+            daily_row.mid_signal_count = mid_cnt
+            daily_row.low_signal_count = low_cnt
+            total_in_pos_count += day_pos_count
+            total_in_pos_positive += day_pos_positive
+
+            prev_positions = positions
+            if total_dates > 0:
+                new_progress = int((i + 1) / total_dates * 100)
+                if new_progress - last_progress >= 10:
+                    self._backtest_repo.update_progress(backtest_id, new_progress)
+                    last_progress = new_progress
+            if (i + 1) % 100 == 0:
+                self._db.flush()
+                self._db.commit()
+                daily_results.clear()
+
+        self._db.flush()
+        metrics = self._compute_summary_metrics(
+            accumulator,
+            benchmark_returns,
+            total_in_pos_count=total_in_pos_count,
+            total_in_pos_positive=total_in_pos_positive,
+            data_gap_days=data_gap_days,
+            annual_risk_free_rate_pct=risk_free_rate_pct,
+        )
+        run_warnings: list[BacktestWarning] = []
+        if warmup_days > 0:
+            run_warnings.append(
+                BacktestWarning(
+                    level="warning",
+                    code="WARMUP",
+                    message=(
+                        f"行业因子前 {warmup_days} 个交易日 warm-up 数据不足，"
+                        "前段轮动选择与绩效参考价值有限"
+                    ),
+                )
+            )
+        run_warnings.extend(self._collect_data_gap_warnings(trading_dates, codes, all_bars))
+        if enable_benchmark and benchmark_mode == "index":
+            bench_missing = [
+                d for d in trading_dates if (benchmark_index_code, d) not in all_bars
+            ]
+            if bench_missing:
+                run_warnings.append(
+                    BacktestWarning(
+                        level="warning",
+                        code="BENCHMARK_MISSING",
+                        message=(
+                            f"基准指数 {benchmark_index_code} 有 {len(bench_missing)} 个交易日"
+                            f"缺行情数据（{bench_missing[0]}~{bench_missing[-1]}）"
+                        ),
+                        index_code=benchmark_index_code,
+                    )
+                )
+        self._backtest_repo.mark_success(
+            backtest_id,
+            metrics,
+            warnings=[w.model_dump() for w in run_warnings],
+        )
+
+    @staticmethod
+    def _industry_panel_input(
+        panels: dict[str, Any],
+        trade_date: date,
+        codes: list[str],
+    ) -> Any:
+        """从行业因子面板抽取单日轮动输入（纯函数，供行业回测循环使用）。"""
+        from quant_etf_api.engine.rotation import IndustryRotationInput
+
+        def row_values(panel: Any) -> dict[str, float | None]:
+            result: dict[str, float | None] = {code: None for code in codes}
+            if panel is None or getattr(panel, "empty", True):
+                return result
+            ts = pd.Timestamp(trade_date)
+            if ts not in panel.index:
+                return result
+            row = panel.loc[ts]
+            for code in codes:
+                if code not in panel.columns:
+                    continue
+                value = row.get(code)
+                result[code] = None if value is None or pd.isna(value) else float(value)
+            return result
+
+        quadrant_raw = row_values(panels.get("quadrant"))
+        quadrant = {
+            code: (int(value) if value is not None else None)
+            for code, value in quadrant_raw.items()
+        }
+        return IndustryRotationInput(
+            trade_date=trade_date,
+            industry_codes=codes,
+            rs_ratio=row_values(panels.get("rs_ratio")),
+            rs_momentum=row_values(panels.get("rs_momentum")),
+            quadrant=quadrant,
+            diffusion=row_values(panels.get("diffusion")),
+        )
+
+    @staticmethod
+    def _industry_warmup_days(
+        panels: dict[str, Any],
+        trading_dates: list[date],
+        codes: list[str],
+    ) -> int:
+        """估算行业因子面板前段 warm-up 不足的交易日数。"""
+        required = [
+            name
+            for name in ("rs_ratio", "rs_momentum", "quadrant", "diffusion")
+            if name in panels and panels[name] is not None and not panels[name].empty
+        ]
+        warmup = 0
+        for name in required:
+            panel = panels[name]
+            for i, d in enumerate(trading_dates):
+                ts = pd.Timestamp(d)
+                if ts not in panel.index:
+                    continue
+                row = panel.loc[ts]
+                valid = [
+                    code
+                    for code in codes
+                    if code in panel.columns and not pd.isna(row.get(code))
+                ]
+                if valid:
+                    warmup = max(warmup, i)
+                    break
+        return warmup
+
+    @staticmethod
+    def _industry_equal_weight_returns(
+        all_bars: dict,
+        codes: list[str],
+        trading_dates: list[date],
+    ) -> list[float]:
+        """计算行业等权基准日收益率（决策日归因：close_T → close_{T+1}）。"""
+        returns: list[float] = []
+        for i, trade_date in enumerate(trading_dates):
+            next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
+            if next_date is None:
+                returns.append(0.0)
+                continue
+            day_returns: list[float] = []
+            for code in codes:
+                cur = all_bars.get((code, trade_date))
+                nxt = all_bars.get((code, next_date))
+                if cur is None or nxt is None:
+                    continue
+                cur_close = getattr(cur, "close_price", None)
+                nxt_close = getattr(nxt, "close_price", None)
+                if not cur_close or not nxt_close:
+                    continue
+                day_returns.append((nxt_close / cur_close - 1.0) * 100.0)
+            returns.append(sum(day_returns) / len(day_returns) if day_returns else 0.0)
+        return returns
 
     # ── 数据准备 ───────────────────────────────────────────────────────────
 
@@ -1297,6 +1672,7 @@ class BacktestService:
         return BacktestSummary(
             backtest_id=row.backtest_id,
             strategy_id=row.strategy_id,
+            asset_domain=getattr(row, "asset_domain", "index") or "index",
             start_date=row.start_date,
             end_date=row.end_date,
             status=row.status,
