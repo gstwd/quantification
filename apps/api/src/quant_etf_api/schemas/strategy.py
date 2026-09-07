@@ -31,7 +31,6 @@ class StrategySummary(BaseModel):
     description: str
     status: str = "active"
     is_starred: bool = False
-    asset_domain: str = "index"
     index_codes: list[str] = Field(default_factory=list)
 
 

@@ -41,8 +41,6 @@ from quant_etf_api.infra.db.repositories.industry import (
     IndustryUniverseRepository,
     StockDailyCloseRepository,
 )
-from quant_etf_api.engine.config import RotationConfig
-from quant_etf_api.engine.rotation import IndustryRotationInput
 
 logger = logging.getLogger(__name__)
 
@@ -734,74 +732,6 @@ class IndustryFactorService:
             ]
         ).set_index("trade_date")
         return frame.reindex(columns=codes)
-
-    def build_live_rotation_input(
-        self,
-        *,
-        rotation: RotationConfig,
-        trade_date: date,
-        industry_codes: list[str] | None = None,
-    ) -> tuple[IndustryRotationInput, dict[str, str]]:
-        """从预计算行业因子值构建单日轮动输入（实时口径，优先读库）。
-
-        按“因子值截止日期 <= 决策日”读取与策略参数指纹精确匹配的行，
-        同一行业取最近一次计算值；任一因子完全无行或无有效值时返回
-        {factor_id: MissingReason} 供服务层触发补算与告警。
-
-        Args:
-            rotation: 轮动配置（提供 lookback/smooth/扩散与基准剔除参数）。
-            trade_date: 决策日。
-            industry_codes: 行业代码列表，None 表示全部启用行业。
-
-        Returns:
-            (轮动输入, 缺失因子原因映射)。缺失映射为空表示数据就绪。
-        """
-        codes = self.resolve_industry_codes(industry_codes)
-        params_hash = industry_params_hash(
-            lookback_ratio=rotation.lookback_ratio,
-            lookback_mom=rotation.lookback_mom,
-            smooth_window=rotation.smooth_window,
-            diffusion_lookback=rotation.diffusion_lookback,
-            benchmark_exclude=rotation.benchmark_exclude,
-        )
-        values: dict[str, dict[str, float | None]] = {
-            field: {} for field in _FACTOR_ID_TO_ROTATION_FIELD.values()
-        }
-        missing: dict[str, str] = {}
-        for factor_id, field in _FACTOR_ID_TO_ROTATION_FIELD.items():
-            rows = self._factor_repo.find_values_asof(
-                factor_id,
-                params_hash,
-                trade_date,
-                codes,
-            )
-            if not rows:
-                missing[factor_id] = "not_computed"
-                continue
-            latest_by_code: dict[str, Any] = {}
-            for row in rows:
-                latest_by_code[row.industry_code] = row
-            values[field] = {
-                code: (row.factor_value_numeric if row.factor_value_numeric is not None else None)
-                for code, row in latest_by_code.items()
-            }
-            if all(v is None for v in values[field].values()):
-                missing[factor_id] = "insufficient_data"
-
-        quadrant_raw = values["quadrant"]
-        quadrant = {
-            code: (int(value) if value is not None else None)
-            for code, value in quadrant_raw.items()
-        }
-        data = IndustryRotationInput(
-            trade_date=trade_date,
-            industry_codes=codes,
-            rs_ratio=values["rs_ratio"],
-            rs_momentum=values["rs_momentum"],
-            quadrant=quadrant,
-            diffusion=values["diffusion"],
-        )
-        return data, missing
 
     def industry_factor_status(
         self,

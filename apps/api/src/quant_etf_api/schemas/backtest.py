@@ -38,8 +38,7 @@ class BacktestCreateRequest(BaseModel):
         params: 策略参数透传。
         enable_benchmark: 是否启用基准对比。
         benchmark_index_code: 基准指数代码，默认沪深300。
-        benchmark_mode: 基准模式：auto=按资产域自动选择（行业轮动默认行业等权、
-            指数策略默认指数基准），index=指定指数基准，industry_equal_weight=行业等权基准。
+        benchmark_mode: 基准模式：auto=自动选择，index=指定指数基准。
     """
 
     strategy_id: str
@@ -50,7 +49,7 @@ class BacktestCreateRequest(BaseModel):
     params: dict[str, Any] | None = None
     enable_benchmark: bool = True
     benchmark_index_code: str = "000300"
-    benchmark_mode: Literal["auto", "index", "industry_equal_weight"] = "auto"
+    benchmark_mode: Literal["auto", "index"] = "auto"
 
 
 class BacktestMetrics(BaseModel):
@@ -95,7 +94,6 @@ class BacktestSummary(BaseModel):
 
     backtest_id: str
     strategy_id: str
-    asset_domain: str = "index"
     start_date: date
     end_date: date
     status: str

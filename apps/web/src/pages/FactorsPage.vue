@@ -20,9 +20,8 @@
               {{ CATEGORY_LABELS[spec.category ?? ''] ?? spec.category ?? '未分类' }}
             </span>
             <span class="chip chip-domain">
-              {{ spec.asset_domain === 'industry' ? '行业' : '指数' }}
+              指数资产
             </span>
-            <span v-if="(spec.usage ?? []).includes('rotation_input')" class="chip chip-rotation">轮动</span>
             <button class="edit-btn" @click="startEdit(spec)">编辑</button>
           </div>
         </div>

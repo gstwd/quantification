@@ -10,33 +10,31 @@ from datetime import date
 from typing import Any, Protocol, runtime_checkable
 
 
-# 因子元数据四轴取值常量（与 factor_definition 表、前端展示共用）。
-# 资产域：因子值作用于哪一类资产。
+# 因子元数据取值常量（与 factor_definition 表、前端展示共用）。
+# 挂载域：因子值挂载的标的类型。本系统策略资产统一为指数
+# （benchmark_index）；行业/个股只作为因子计算输入，不产生行业因子域。
 ASSET_DOMAIN_INDEX = "index"
-ASSET_DOMAIN_INDUSTRY = "industry"
 
 # 值形态：决定因子值在实时/回测中的加载与预计算方式。
 VALUE_SHAPE_ASSET = "asset"  # 每资产一个独立值（如 return_20d）
 VALUE_SHAPE_MARKET = "market"  # 市场级单一值（如市场宽度）
-VALUE_SHAPE_PANEL = "panel"  # 依赖资产集合与参数的面板值（如 RRG/扩散）
 
 # 适用位置（usage）：因子允许被策略管线中的哪些模块消费。
 USAGE_TIMING = "timing"
 USAGE_SCORE = "score"
 USAGE_FILTER = "filter"
 USAGE_RANK = "rank"
-USAGE_ROTATION_INPUT = "rotation_input"
 
 # 存量指数因子默认允许的消费位置（保持向后兼容的显式声明）；
-# 新因子应在 FactorSpec.usage 中按语义收敛，市场级/面板级因子只开放适用位置。
+# 新因子应在 FactorSpec.usage 中按语义收敛，市场级因子只开放适用位置。
 DEFAULT_INDEX_FACTOR_USAGE = [USAGE_TIMING, USAGE_SCORE, USAGE_FILTER, USAGE_RANK]
 
 
 def factor_params_hash(params: dict[str, Any]) -> str:
     """计算因子参数指纹（规范化 JSON 的 sha256）。
 
-    用于 industry_factor_value 等“参数化因子值表”区分不同参数组合，
-    避免同 factor_id 不同参数互相覆盖（P12）。
+    用于参数化因子值表（index_factor_value / industry_factor_value）区分
+    不同参数组合，避免同 factor_id 不同参数互相覆盖。
 
     Args:
         params: 因子计算参数字典。
@@ -82,11 +80,12 @@ class FactorSpec:
         market_scope: 是否需要在全市场指数范围上计算（如市场宽度类因子）。
             为 True 时，回测服务会额外加载全市场行情数据作为因子上下文，
             保证实时预计算（全市场）与回测（策略池 + 全市场补充）口径一致。
-        asset_domain: 因子资产域：index=宽基/行业指数域（benchmark_index），
-            industry=申万一级行业域（industry_universe）。
+        asset_domain: 因子值挂载的标的类型，本系统统一为 index
+            （benchmark_index）；该轴不再作为“策略资产域”参与校验。
         value_shape: 因子值形态：asset=每资产值、market=市场级值、
-            panel=依赖资产集合与参数的面板值。
-        usage: 适用位置数组：timing/score/filter/rank/rotation_input，
+            每资产可配置因子必须是 asset/market 形态（行业面板等只作
+            因子内部数据依赖，不作为可配置因子）。
+        usage: 适用位置数组：timing/score/filter/rank，
             配置校验按此限制因子在策略中的消费位置。
         default_params: 因子默认参数（参数化因子的默认口径，非参数化因子为空）。
     """
@@ -117,11 +116,15 @@ class FactorContext:
         index_bars: 指数日线映射，key=(index_code, date)。
         index_valuation: 指数估值映射，key=(index_code, date)，含 pe_percentile/pb_percentile。
         macro_indicators: 宏观指标映射，key=indicator_code，value={period_date: value}。
+        panels: 复合因子数据面板（按 required_data 名称注入），如
+            index_membership/stock_closes/industry_selection/
+            index_industry_exposure，由实时与回测两侧的装配层填充。
     """
 
     index_bars: dict[tuple[str, date], Any] = field(default_factory=dict)
     index_valuation: dict[tuple[str, date], Any] = field(default_factory=dict)
     macro_indicators: dict[str, dict[str, float]] = field(default_factory=dict)
+    panels: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

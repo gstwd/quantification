@@ -354,7 +354,7 @@ def handle_industry_factor_compute(payload: dict) -> None:
 
     trade_date_str = payload.get("trade_date") or date_cls.today().isoformat()
     trade_date = date_cls.fromisoformat(trade_date_str)
-    # 参数覆盖：策略以非默认 rotation 参数触发补算时，payload 携带参数，
+    # 参数覆盖：研究页/CLI 以非默认参数触发行业面板计算时，payload 携带参数，
     # 落库带参数指纹，job_key 也带指纹防止默认/自定义任务互相去重
     lookback_ratio = int(payload.get("lookback_ratio", 220))
     lookback_mom = int(payload.get("lookback_mom", 60))

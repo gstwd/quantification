@@ -16,9 +16,9 @@ class FactorSpecResponse(BaseModel):
         description: 计算逻辑说明。
         required_data: 依赖的数据源列表。
         is_active: 是否启用。
-        asset_domain: 因子资产域：index=宽基/行业指数域，industry=申万一级行业域。
-        value_shape: 因子值形态：asset=每资产值，market=市场级值，panel=面板值。
-        usage: 适用位置数组：timing/score/filter/rank/rotation_input。
+        asset_domain: 因子值挂载的标的类型，本系统统一为 index（benchmark_index）。
+        value_shape: 因子值形态：asset=每资产值，market=市场级值。
+        usage: 适用位置数组：timing/score/filter/rank。
         default_params: 因子默认参数（参数化因子）。
     """
 

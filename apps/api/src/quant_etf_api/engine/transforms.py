@@ -62,7 +62,7 @@ def invert_percentile(value: float) -> float:
 def momentum_score(value: float) -> float:
     """收益率映射为动量得分（0-100）。
 
-    精确复用旧 rotation.py 的分段线性映射逻辑。
+    分段线性映射：高收益得高分、负收益得低分，与引擎历史口径一致。
     """
     if value > 15:
         return 95.0

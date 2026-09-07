@@ -1,9 +1,8 @@
-"""行业轮动选择引擎（申万一级行业域专用，可选模块）。
+"""申万行业轮动纯选择逻辑（研究工作台与指数级因子共用的领域层）。
 
-仅在 StrategyConfig.rotation 非空时启用；语义对齐研报三类信号：
-- quadrant：保留象限内行业，超 top_n 按到 (100,100) 距离取最远 top_n；
-- diffusion：扩散指标 top_n；
-- diffusion_rrg：扩散 top_n 后剔除非保留象限行业，不补足。
+研报三类信号的选择规则只依赖行业因子面板输入，不依赖策略配置，
+因此从策略引擎中下沉到领域层：策略引擎不再消费行业轮动选择，
+研究工作台（/industry/rotation）与指数级 RRG 因子内部复用本模块。
 """
 
 from __future__ import annotations
@@ -12,14 +11,38 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date
 
-from quant_etf_api.engine.config import RotationConfig
-
 logger = logging.getLogger(__name__)
 
 
 @dataclass
+class IndustrySelectionConfig:
+    """行业轮动选择参数（研报三类信号，与旧 RotationConfig 语义一致）。
+
+    Attributes:
+        signal: 信号类型：quadrant=纯 RRG 象限、diffusion=纯扩散 top_n、
+            diffusion_rrg=扩散 top_n 后剔除三四象限。
+        top_n: 每日最多选中行业数。
+        keep_quadrants: 保留象限集合（1=领先/2=改善/3=滞后/4=疲软）。
+        benchmark_exclude: 从 RRG 行业等权基准中剔除的行业代码。
+        lookback_ratio: RS-Ratio 比率回看天数。
+        lookback_mom: RS-Momentum 比率回看天数。
+        smooth_window: MA 平滑窗口。
+        diffusion_lookback: 扩散指标上涨判定回看天数。
+    """
+
+    signal: str = "diffusion_rrg"
+    top_n: int = 6
+    keep_quadrants: list[int] = field(default_factory=lambda: [1, 2])
+    benchmark_exclude: list[str] = field(default_factory=list)
+    lookback_ratio: int = 220
+    lookback_mom: int = 60
+    smooth_window: int = 20
+    diffusion_lookback: int = 220
+
+
+@dataclass
 class IndustryRotationInput:
-    """单日行业轮动输入（由行业因子服务构建后注入引擎上下文）。"""
+    """单日行业轮动输入（由行业因子面板构建后供选择引擎消费）。"""
 
     trade_date: date
     industry_codes: list[str] = field(default_factory=list)
@@ -34,13 +57,13 @@ class IndustryRotationEngine:
 
     def select(
         self,
-        config: RotationConfig,
+        config: IndustrySelectionConfig,
         data: IndustryRotationInput,
     ) -> tuple[list[str], dict[str, float]]:
         """执行单日行业选择，返回 (选中行业代码, 等权权重)。
 
         Args:
-            config: rotation 配置。
+            config: 行业选择参数（signal/top_n/keep_quadrants 等）。
             data: 当日各行业因子值输入。
 
         Returns:
@@ -54,7 +77,7 @@ class IndustryRotationEngine:
         elif config.signal == "diffusion_rrg":
             selected = self._select_diffusion_with_rrg(config, data, codes)
         else:
-            raise ValueError(f"未知 rotation.signal: {config.signal}")
+            raise ValueError(f"未知 signal: {config.signal}")
         weights: dict[str, float] = {}
         if selected:
             weight = round(1.0 / len(selected), 6)
@@ -70,7 +93,7 @@ class IndustryRotationEngine:
 
     @staticmethod
     def _select_quadrant(
-        config: RotationConfig,
+        config: IndustrySelectionConfig,
         data: IndustryRotationInput,
         codes: list[str],
     ) -> list[str]:
@@ -90,7 +113,7 @@ class IndustryRotationEngine:
 
     @staticmethod
     def _select_diffusion(
-        config: RotationConfig,
+        config: IndustrySelectionConfig,
         data: IndustryRotationInput,
         codes: list[str],
     ) -> list[str]:
@@ -103,7 +126,7 @@ class IndustryRotationEngine:
 
     @staticmethod
     def _select_diffusion_with_rrg(
-        config: RotationConfig,
+        config: IndustrySelectionConfig,
         data: IndustryRotationInput,
         codes: list[str],
     ) -> list[str]:

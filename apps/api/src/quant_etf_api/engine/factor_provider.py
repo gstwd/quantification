@@ -16,7 +16,7 @@ import time
 from datetime import date
 from typing import Any, TYPE_CHECKING
 
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from quant_etf_api.factors.base import (
@@ -24,6 +24,7 @@ from quant_etf_api.factors.base import (
     FactorContext,
     FactorValue,
     MissingReason,
+    factor_params_hash,
 )
 from quant_etf_api.factors.macro_period import macro_indicators_as_of
 
@@ -129,7 +130,12 @@ class FactorProvider:
         if not factor_ids:
             return {}
 
-        return self._query_factor_values(factor_ids, trade_date, index_codes)
+        return self._query_factor_values(
+            factor_ids,
+            trade_date,
+            index_codes,
+            params_hashes=self._params_hashes(config, factor_ids),
+        )
 
     def load_asset_factor_records(
         self,
@@ -158,7 +164,12 @@ class FactorProvider:
         if not factor_ids:
             return {}
 
-        rows = self._query_factor_rows(factor_ids, trade_date, index_codes)
+        rows = self._query_factor_rows(
+            factor_ids,
+            trade_date,
+            index_codes,
+            params_hashes=self._params_hashes(config, factor_ids),
+        )
         records: dict[tuple[str, str], FactorValue] = {}
         for r in rows:
             records[(r.index_code, r.factor_id)] = FactorValue(
@@ -236,6 +247,31 @@ class FactorProvider:
 
         return result
 
+    def _params_hashes(
+        self,
+        config: "StrategyConfig",
+        factor_ids: list[str],
+    ) -> dict[str, str]:
+        """按策略 factor_params 与注册表默认参数解析每个因子的参数指纹。
+
+        Args:
+            config: 策略配置（含可选 factor_params）。
+            factor_ids: 需要解析的因子 ID 列表。
+
+        Returns:
+            {factor_id: params_hash}；非参数化因子为空串。
+        """
+        result: dict[str, str] = {}
+        for factor_id in factor_ids:
+            params = None
+            if factor_id in (config.factor_params or {}):
+                params = config.factor_params[factor_id]
+            elif self._registry is not None:
+                spec = self._registry.get(factor_id)
+                params = spec.default_params if spec is not None else None
+            result[factor_id] = factor_params_hash(params) if params else ""
+        return result
+
     def precompute_backtest_factors(
         self,
         config: "StrategyConfig",
@@ -275,6 +311,30 @@ class FactorProvider:
             logger.warning("回测因子预计算：无匹配的因子计算器，factor_ids=%s", factor_ids)
             return {}
 
+        # 复合因子面板：策略引用 index_membership/industry_selection 等
+        # 面板类因子时，在回测预计算阶段一次性装配并复用（不逐日查库）
+        panel_names = {
+            "index_membership",
+            "stock_closes",
+            "industry_selection",
+            "index_industry_exposure",
+        }
+        needs_panels = any(
+            name in set(computer.spec.required_data) for computer in computers for name in panel_names
+        )
+        panels: dict[str, Any] = {}
+        if needs_panels and self._db is not None:
+            from quant_etf_api.services.index_factor_panel_service import (
+                IndexFactorPanelService,
+            )
+
+            lookback = max((c.spec.lookback_days for c in computers), default=820)
+            panels = IndexFactorPanelService(self._db).build_panels(
+                index_codes=index_codes,
+                dates=dates,
+                lookback_natural_days=lookback,
+            )
+
         start = time.perf_counter()
 
         # 将 computers 分为批量和逐点两组
@@ -291,6 +351,7 @@ class FactorProvider:
                 index_bars=all_bars,
                 index_valuation=all_valuation or {},
                 macro_indicators=all_macro or {},
+                panels=panels,
             )
             for code in index_codes:
                 for computer in batch_computers:
@@ -321,6 +382,7 @@ class FactorProvider:
                     # 宏数据按 period <= trade_date 做时点过滤，
                     # 避免回测历史日期使用未来才公布的 LPR 等宏观数据
                     macro_indicators=macro_indicators_as_of(all_macro, trade_date),
+                    panels=panels,
                 )
                 for code in index_codes:
                     for computer in point_computers:
@@ -362,6 +424,7 @@ class FactorProvider:
         factor_ids: list[str],
         trade_date: date,
         index_codes: list[str],
+        params_hashes: dict[str, str] | None = None,
     ) -> dict[tuple[str, str], float | None]:
         """查询 index_factor_value 表，返回平铺的因子值字典。
 
@@ -375,6 +438,16 @@ class FactorProvider:
         """
         from quant_etf_api.infra.db.models.core import IndexFactorValueModel
 
+        hashes = params_hashes or {fid: "" for fid in factor_ids}
+        hash_conditions = or_(
+            *(
+                and_(
+                    IndexFactorValueModel.factor_id == fid,
+                    IndexFactorValueModel.params_hash == hashes.get(fid, ""),
+                )
+                for fid in factor_ids
+            )
+        )
         rows = (
             self._db.query(
                 IndexFactorValueModel.index_code,
@@ -383,7 +456,7 @@ class FactorProvider:
             )
             .filter(
                 and_(
-                    IndexFactorValueModel.factor_id.in_(factor_ids),
+                    hash_conditions,
                     IndexFactorValueModel.trade_date == trade_date,
                     IndexFactorValueModel.index_code.in_(index_codes),
                     IndexFactorValueModel.strategy_id.is_(None),
@@ -398,6 +471,7 @@ class FactorProvider:
         factor_ids: list[str],
         trade_date: date,
         index_codes: list[str],
+        params_hashes: dict[str, str] | None = None,
     ) -> list[Any]:
         """查询 index_factor_value 原始行（仅独立因子值，strategy_id IS NULL）。
 
@@ -411,11 +485,21 @@ class FactorProvider:
         """
         from quant_etf_api.infra.db.models.core import IndexFactorValueModel
 
+        hashes = params_hashes or {fid: "" for fid in factor_ids}
+        hash_conditions = or_(
+            *(
+                and_(
+                    IndexFactorValueModel.factor_id == fid,
+                    IndexFactorValueModel.params_hash == hashes.get(fid, ""),
+                )
+                for fid in factor_ids
+            )
+        )
         return (
             self._db.query(IndexFactorValueModel)
             .filter(
                 and_(
-                    IndexFactorValueModel.factor_id.in_(factor_ids),
+                    hash_conditions,
                     IndexFactorValueModel.trade_date == trade_date,
                     IndexFactorValueModel.index_code.in_(index_codes),
                     IndexFactorValueModel.strategy_id.is_(None),

@@ -71,7 +71,6 @@ class StrategyConfigService:
                 description=r.description or "",
                 status=r.status,
                 is_starred=r.is_starred,
-                asset_domain=(r.config_json or {}).get("asset_domain", "index"),
                 index_codes=(r.config_json or {}).get("index_codes", []),
             )
             for r in rows
@@ -90,7 +89,6 @@ class StrategyConfigService:
             description=row.description or "",
             status=row.status,
             is_starred=row.is_starred,
-            asset_domain=(row.config_json or {}).get("asset_domain", "index"),
             config_json=row.config_json,
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -190,12 +188,19 @@ class StrategyConfigService:
     def validate_config(self, config_json: dict[str, Any]) -> StrategyValidationResult:
         """校验策略配置 JSON 是否合法（含因子 ID 与变换函数校验）。
 
+        旧版行业轮动配置（asset_domain=industry / rotation 模块）已在策略层
+        退役：这里显式拒绝并给出迁移提示，避免被 Pydantic 静默忽略后按空
+        score 配置继续运行。
+
         Args:
             config_json: 策略配置 JSON（仅含引擎配置，不含 strategy_id/display_name 等元数据字段）。
 
         Returns:
             校验结果。
         """
+        legacy_error = self._legacy_domain_error(config_json)
+        if legacy_error:
+            return StrategyValidationResult(valid=False, errors=[legacy_error])
         try:
             # strategy_id 和 display_name 存储在顶层列中，校验时补入占位值
             validation_input = {
@@ -226,85 +231,14 @@ class StrategyConfigService:
             校验结果。
         """
         errors, warnings = self._structural_validation(config)
-        errors.extend(self._industry_rotation_errors(config))
-        if config.rotation is None:
-            errors.extend(self._factor_reference_errors(config))
-            errors.extend(self._transform_validation_errors(config))
-        else:
-            errors.extend(self._rotation_module_errors(config))
+        errors.extend(self._factor_params_errors(config))
+        errors.extend(self._factor_reference_errors(config))
+        errors.extend(self._transform_validation_errors(config))
         return StrategyValidationResult(
             valid=len(errors) == 0,
             errors=errors,
             warnings=warnings,
         )
-
-    def _industry_rotation_errors(self, config: StrategyConfig) -> list[str]:
-        """校验 rotation 策略的行业域与行业资产范围。
-
-        Args:
-            config: 已解析的策略配置。
-
-        Returns:
-            错误信息列表；无 rotation 时仅校验资产域声明合法。
-        """
-        if config.asset_domain not in {"index", "industry"}:
-            return [f"asset_domain '{config.asset_domain}' 不合法，可用: index/industry"]
-        if config.rotation is None:
-            if config.asset_domain == "industry":
-                return [
-                    "行业资产域（asset_domain=industry）当前仅支持 rotation 轮动策略，"
-                    "请配置 rotation 模块"
-                ]
-            return []
-        if config.asset_domain == "index" and not config.rotation:
-            return []
-        if not config.index_codes:
-            return ["rotation 策略必须通过 index_codes 指定申万一级行业代码列表"]
-        errors: list[str] = []
-        try:
-            from quant_etf_api.infra.db.repositories.industry import (
-                IndustryUniverseRepository,
-            )
-
-            available = set(IndustryUniverseRepository(self._db).find_active_codes())
-        except Exception:
-            logger.warning("查询行业目录失败，跳过 rotation 资产范围校验", exc_info=True)
-            available = set()
-        missing = sorted(set(config.index_codes) - available)
-        if missing:
-            errors.append(
-                "rotation 策略的 index_codes 含非申万一级行业代码 "
-                f"{missing}，请先同步行业目录（industry init-universe）"
-            )
-        return errors
-
-    def _rotation_module_errors(self, config: StrategyConfig) -> list[str]:
-        """校验 rotation 策略的模块边界：不与通用评分/择时/过滤/风控混用。
-
-        Args:
-            config: 已解析的策略配置。
-
-        Returns:
-            错误信息列表。
-        """
-        errors: list[str] = []
-        if config.score and config.score.factors:
-            errors.append(
-                "rotation 策略由轮动模块直接选择行业，不允许配置评分因子（score.factors 必须为空）"
-            )
-        if config.timing is not None:
-            errors.append("rotation 策略不允许配置择时模块（timing）")
-        if config.filters is not None:
-            errors.append("rotation 策略不允许配置过滤模块（filters）")
-        if config.risk is not None:
-            errors.append("rotation 策略不允许配置风控模块（risk）")
-        if config.portfolio is None:
-            errors.append("rotation 策略必须配置 portfolio 模块（当前只支持 equal_weight）")
-        elif config.portfolio.method != "equal_weight":
-            errors.append(
-                f"rotation 策略 portfolio.method 只支持 equal_weight，当前为 '{config.portfolio.method}'"
-            )
-        return errors
 
     @staticmethod
     def _structural_validation(config: StrategyConfig) -> tuple[list[str], list[str]]:
@@ -324,37 +258,13 @@ class StrategyConfigService:
             errors.append("strategy_id 不能为空")
         if not config.display_name:
             errors.append("display_name 不能为空")
-        if config.rotation is None and not config.score.factors:
+        if not config.score.factors:
             errors.append("score.factors 不能为空")
         if config.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
             errors.append(
                 f"不支持的配置 schema_version '{config.schema_version}'，"
                 f"可用: {sorted(SUPPORTED_SCHEMA_VERSIONS)}"
             )
-
-        # 行业轮动配置校验（纯静态部分）
-        if config.rotation:
-            valid_signals = {"quadrant", "diffusion", "diffusion_rrg"}
-            if config.rotation.signal not in valid_signals:
-                errors.append(
-                    f"rotation.signal '{config.rotation.signal}' 不合法，"
-                    f"可用: {sorted(valid_signals)}"
-                )
-            if config.rotation.top_n <= 0:
-                errors.append("rotation.top_n 必须为正整数")
-            if not set(config.rotation.keep_quadrants).issubset({1, 2, 3, 4}):
-                errors.append("rotation.keep_quadrants 只能包含 1/2/3/4")
-            if config.rotation.signal in {"quadrant", "diffusion_rrg"}:
-                if not config.rotation.keep_quadrants:
-                    errors.append(
-                        f"rotation.signal={config.rotation.signal} 时 keep_quadrants 不能为空"
-                    )
-            if config.rotation.lookback_ratio <= 0 or config.rotation.lookback_mom <= 0:
-                errors.append("rotation.lookback_ratio/lookback_mom 必须为正整数")
-            if config.rotation.smooth_window <= 0:
-                errors.append("rotation.smooth_window 必须为正整数")
-            if config.rotation.diffusion_lookback <= 0:
-                errors.append("rotation.diffusion_lookback 必须为正整数")
 
         # 择时代理指数校验
         if config.timing and not config.timing.proxy_index_codes:
@@ -413,10 +323,12 @@ class StrategyConfigService:
         return errors, warnings
 
     def _factor_reference_errors(self, config: StrategyConfig) -> list[str]:
-        """校验指数策略引用的全部因子 ID 存在、启用且用途/资产域匹配。
+        """校验策略引用的全部因子 ID 存在、启用且用途/挂载类型匹配。
 
-        除“因子存在且 is_active=True”外，本轮新增因子元数据四轴校验：
-        - 指数策略通用模块只允许引用 asset_domain=index 的因子；
+        除“因子存在且 is_active=True”外，继续做因子元数据校验：
+        - 因子值必须挂载在指数资产上（asset_domain=index，行业面板因子
+          不作为可直接配置的因子）；已被停用的行业轮动 4 因子会在同步后
+          is_active=False，此处按“已停用或未同步”提示；
         - 引用位置必须出现在因子的 usage 中（如 breadth 不允许放入 score/rank）。
 
         Args:
@@ -482,8 +394,8 @@ class StrategyConfigService:
                 row_usage = list(getattr(row, "usage", None) or [])
                 if row_domain != "index":
                     errors.append(
-                        f"因子 '{factor_id}' 资产域为 {row_domain}，"
-                        f"不能用于指数策略的{module_label}模块"
+                        f"因子 '{factor_id}' 值挂载域为 {row_domain}，不能用于"
+                        f"指数资产策略的{module_label}模块"
                     )
                     continue
                 if row_usage and module_key not in row_usage:
@@ -491,6 +403,67 @@ class StrategyConfigService:
                         f"因子 '{factor_id}' 不适用于{module_label}位置"
                         f"（usage={row_usage}），请调整配置或选择其他因子"
                     )
+        return errors
+
+    @staticmethod
+    def _legacy_domain_error(config_json: dict[str, Any]) -> str | None:
+        """检测旧版行业轮动配置（asset_domain=industry / rotation 模块）。
+
+        这类配置已在策略层退役：行业与个股只作为因子输入，策略资产统一为
+        benchmark_index 中的指数。配置里残留的字段若被 Pydantic 静默忽略，
+        会退化成空评分配置运行，因此在校验与解析入口显式拒绝。
+
+        Args:
+            config_json: 策略配置 JSON。
+
+        Returns:
+            迁移提示错误文本；配置不含旧字段时返回 None。
+        """
+        domain = (config_json or {}).get("asset_domain")
+        if domain == "industry" or "rotation" in (config_json or {}):
+            return (
+                "检测到已停用的行业轮动配置（asset_domain=industry 或 rotation 模块）："
+                "申万行业已不作为策略资产，请删除 rotation/asset_domain 字段，"
+                "改用指数级 RRG/扩散因子（rrg_industry_match_score / "
+                "index_diffusion_ratio）重新配置策略"
+            )
+        return None
+
+    def _factor_params_errors(self, config: StrategyConfig) -> list[str]:
+        """校验 factor_params 引用的因子存在且允许参数化、参数键合法。
+
+        Args:
+            config: 已解析的策略配置。
+
+        Returns:
+            错误信息列表；参数覆盖合法时为空。
+        """
+        if not config.factor_params:
+            return []
+        specs = {spec.factor_id: spec for spec in get_default_factor_registry().specs()}
+        errors: list[str] = []
+        for factor_id, params in config.factor_params.items():
+            spec = specs.get(factor_id)
+            if spec is None:
+                # 未知因子的具体错误由 _factor_reference_errors 给出，避免重复
+                continue
+            if not spec.default_params:
+                errors.append(
+                    f"因子 '{factor_id}' 非参数化因子，不允许配置 factor_params"
+                )
+                continue
+            unknown = sorted(set(params.keys()) - set(spec.default_params.keys()))
+            if unknown:
+                errors.append(
+                    f"因子 '{factor_id}' 存在未知参数 {unknown}，"
+                    f"可用参数: {sorted(spec.default_params.keys())}"
+                )
+                continue
+            if params != spec.default_params:
+                errors.append(
+                    f"因子 '{factor_id}' 自定义参数暂未支持，本轮仅接受默认参数"
+                    f"（default_params={spec.default_params}）"
+                )
         return errors
 
     @staticmethod
@@ -527,15 +500,24 @@ class StrategyConfigService:
     def get_parsed_config(self, strategy_id: str) -> StrategyConfig | None:
         """获取解析后的 StrategyConfig 对象。
 
+        旧版行业轮动配置（asset_domain=industry / rotation）在此显式抛错，
+        让实时分配/回测入口以明确的中文提示拒绝，而不是退化为空配置运行。
+
         Args:
             strategy_id: 策略标识。
 
         Returns:
             解析后的配置对象，不存在返回 None。
+
+        Raises:
+            ValueError: 配置为已停用的行业轮动旧格式时抛出迁移提示。
         """
         row = self._repo.find_by_id(strategy_id)
         if row is None:
             return None
+        legacy_error = self._legacy_domain_error(row.config_json or {})
+        if legacy_error:
+            raise ValueError(legacy_error)
         try:
             full_config = {
                 "strategy_id": row.strategy_id,
@@ -562,9 +544,15 @@ class StrategyConfigService:
 
         Returns:
             解析后的配置对象，失败返回 None。
+
+        Raises:
+            ValueError: 快照为已停用的行业轮动旧格式时抛出迁移提示。
         """
+        config_json = snapshot.get("config_json") or {}
+        legacy_error = StrategyConfigService._legacy_domain_error(config_json)
+        if legacy_error:
+            raise ValueError(legacy_error)
         try:
-            config_json = snapshot.get("config_json") or {}
             full_config = {
                 "strategy_id": snapshot.get("strategy_id", "_snapshot_"),
                 "display_name": snapshot.get("display_name", ""),

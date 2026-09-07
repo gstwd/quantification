@@ -387,45 +387,15 @@ def _build_industry_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--diffusion-lookback", type=int, default=220)
     _add_json_flag(p)
 
-    p = sub.add_parser("create-replica-strategy", help="创建扩散+RRG 行业轮动复刻策略")
-    p.add_argument("--id", dest="strategy_id", default="sw_diffusion_rrg_rotation")
-    p.add_argument("--name", dest="display_name", default="扩散+RRG行业轮动(申万)")
-    _add_json_flag(p)
-
-    p = sub.add_parser("backtest", help="行业轮动标准回测（写统一 backtest_* 表）")
-    p.add_argument("--start", type=date.fromisoformat, required=True)
-    p.add_argument("--end", type=date.fromisoformat, required=True)
-    p.add_argument(
-        "--signal", default="diffusion_rrg", choices=["quadrant", "diffusion", "diffusion_rrg"]
-    )
-    p.add_argument("--top-n", type=int, default=6)
-    p.add_argument("--keep-quadrants", default="1,2", help="逗号分隔，如 1,2")
-    p.add_argument("--codes", dest="industry_codes", help="逗号分隔的行业代码，默认全部")
-    p.add_argument("--lookback-ratio", type=int, default=220)
-    p.add_argument("--lookback-mom", type=int, default=60)
-    p.add_argument("--smooth-window", type=int, default=20)
-    p.add_argument("--diffusion-lookback", type=int, default=220)
-    p.add_argument("--daily", action="store_true", help="JSON 输出包含逐日明细")
-    p.add_argument("--file", dest="output_file", help="另存逐日明细 CSV 文件")
-    _add_json_flag(p)
-
-
 def _run_industry(args: argparse.Namespace) -> None:
     """执行 industry 命令组。"""
     db = SessionLocal()
     try:
-        from quant_etf_api.domain.industry.constants import (  # noqa: PLC0415
-            SW_L1_INDUSTRIES,
-            SW_EXCLUDED_INDUSTRY_CODES,
-        )
         from quant_etf_api.services.industry_data_service import (  # noqa: PLC0415
             IndustryDataService,
         )
         from quant_etf_api.services.industry_factor_service import (  # noqa: PLC0415
             IndustryFactorService,
-        )
-        from quant_etf_api.services.strategy_config_service import (  # noqa: PLC0415
-            StrategyConfigService,
         )
 
         if args.subcommand == "init-universe":
@@ -522,144 +492,67 @@ def _run_industry(args: argparse.Namespace) -> None:
             )
             _emit(result, not args.no_json)
             return
-        if args.subcommand == "create-replica-strategy":
-            codes = [code for code in SW_L1_INDUSTRIES if code not in SW_EXCLUDED_INDUSTRY_CODES]
-            config_json = {
-                "schema_version": "1",
-                "asset_domain": "industry",
-                "index_codes": codes,
-                "score": {"factors": {}},
-                "portfolio": {"method": "equal_weight", "default_exposure": 1.0},
-                "rebalance": {"frequency": "monthly"},
-                "rotation": {
-                    "signal": "diffusion_rrg",
-                    "top_n": 6,
-                    "keep_quadrants": [1, 2],
-                    "benchmark_exclude": sorted(SW_EXCLUDED_INDUSTRY_CODES),
-                },
-            }
-            req = StrategyConfigCreate(
-                strategy_id=args.strategy_id,
-                display_name=args.display_name,
-                version="1.0.0",
-                description=(
-                    "复刻西部证券《扩散指标+RRG 行业轮动》：扩散 top6 后剔除"
-                    "三四象限（不补足），月末调仓等权，直接作用于申万一级行业指数。"
-                ),
-                frequency="monthly",
-                config_json=config_json,
-                status="active",
-            )
-            detail = StrategyConfigService(db).create_config(req)
-            _emit(detail.model_dump(), not args.no_json)
-            return
-        if args.subcommand == "backtest":
-            if args.start > args.end:
-                _fail("--start 不能晚于 --end")
-            keep_quadrants = [
-                int(part.strip()) for part in args.keep_quadrants.split(",") if part.strip()
-            ]
-            codes = _split_codes(args.industry_codes)
-            if not codes:
-                codes = [
-                    code for code in SW_L1_INDUSTRIES if code not in SW_EXCLUDED_INDUSTRY_CODES
-                ]
-            from quant_etf_api.schemas.backtest import (  # noqa: PLC0415
-                BacktestCreateRequest,
-            )
-            from quant_etf_api.services.backtest_service import BacktestService  # noqa: PLC0415
-
-            config_svc = StrategyConfigService(db)
-            strategy_id = "industry_backtest_cli"
-            existing = config_svc.get_config(strategy_id)
-            if existing is not None:
-                config_svc.delete_config(strategy_id)
-            config_json = {
-                "schema_version": "1",
-                "asset_domain": "industry",
-                "index_codes": sorted(codes),
-                "score": {"factors": {}},
-                "portfolio": {"method": "equal_weight", "default_exposure": 1.0},
-                "rebalance": {"frequency": "monthly"},
-                "rotation": {
-                    "signal": args.signal,
-                    "top_n": args.top_n,
-                    "keep_quadrants": keep_quadrants,
-                    "benchmark_exclude": sorted(SW_EXCLUDED_INDUSTRY_CODES),
-                    "lookback_ratio": args.lookback_ratio,
-                    "lookback_mom": args.lookback_mom,
-                    "smooth_window": args.smooth_window,
-                    "diffusion_lookback": args.diffusion_lookback,
-                },
-            }
-            config_svc.create_config(
-                StrategyConfigCreate(
-                    strategy_id=strategy_id,
-                    display_name="行业轮动 CLI 回测",
-                    version="1.0.0",
-                    description="由 industry backtest CLI 创建的临时标准策略",
-                    frequency="monthly",
-                    config_json=config_json,
-                    status="active",
-                )
-            )
-            backtest_svc = BacktestService(db)
-            summary = backtest_svc.create_backtest(
-                BacktestCreateRequest(
-                    strategy_id=strategy_id,
-                    start_date=args.start,
-                    end_date=args.end,
-                    universe_mode="subset",
-                    index_codes=codes,
-                    enable_benchmark=True,
-                    benchmark_mode="industry_equal_weight",
-                )
-            )
-            backtest_svc.run_backtest(summary.backtest_id)
-            detail = backtest_svc.get_backtest(summary.backtest_id)
-            daily_rows = backtest_svc.get_daily_results(summary.backtest_id)
-            stats = detail.metrics.model_dump() if detail and detail.metrics else {}
-            payload: dict[str, Any] = {
-                "backtest_id": summary.backtest_id,
-                "stats": stats,
-                "selections": [],
-            }
-            if args.daily:
-                payload["daily"] = [
-                    {
-                        "trade_date": r.trade_date.isoformat(),
-                        "portfolio_return": r.portfolio_return,
-                        "cumulative_return": r.cumulative_return,
-                        "drawdown": r.drawdown,
-                        "total_exposure": r.total_exposure,
-                        "cash_ratio": r.cash_ratio,
-                        "positions": r.positions,
-                    }
-                    for r in daily_rows
-                ]
-            if args.output_file:
-                if daily_rows:
-                    import pandas as pd
-
-                    csv_rows = payload.get("daily") or [
-                        {
-                            "trade_date": r.trade_date.isoformat(),
-                            "portfolio_return": r.portfolio_return,
-                            "cumulative_return": r.cumulative_return,
-                            "drawdown": r.drawdown,
-                            "total_exposure": r.total_exposure,
-                            "cash_ratio": r.cash_ratio,
-                            "positions": r.positions,
-                        }
-                        for r in daily_rows
-                    ]
-                    pd.DataFrame(csv_rows).to_csv(
-                        args.output_file, index=False, encoding="utf-8"
-                    )
-            _emit(payload, not args.no_json)
-            return
     except ValueError as exc:
         _fail(str(exc))
+    finally:
+        db.close()
+
+
+def _build_index_group(subparsers: argparse._SubParsersAction) -> None:
+    """注册 index 命令组（指数成分数据管理）。"""
+    group = subparsers.add_parser("index", help="指数成分数据（PIT/当前快照）")
+    sub = group.add_subparsers(dest="subcommand", required=True)
+    members = sub.add_parser("members", help="指数成分管理")
+    msub = members.add_subparsers(dest="member_action", required=True)
+
+    p = msub.add_parser("refresh", help="拉取并替换指数当前成分/权重快照")
+    p.add_argument("--index-codes", dest="index_codes", help="逗号分隔指数代码，默认全部启用指数")
+    _add_json_flag(p)
+
+    p = msub.add_parser("backfill-pit", help="按月末取样回填历史 PIT 成分（baostock）")
+    p.add_argument("--index-codes", dest="index_codes", default="000300,000905,000016")
+    p.add_argument("--start", type=date.fromisoformat, default="2013-01-01")
+    p.add_argument("--end", type=date.fromisoformat, default=None)
+    _add_json_flag(p)
+
+    p = msub.add_parser("status", help="查看各指数成分事件覆盖状态")
+    p.add_argument("--index-codes", dest="index_codes", help="逗号分隔指数代码，默认全部启用指数")
+    _add_json_flag(p)
+
+
+def _run_index(args: argparse.Namespace) -> None:
+    """执行 index 命令组。"""
+    db = SessionLocal()
+    try:
+        from quant_etf_api.infra.db.repositories.benchmark_index import (  # noqa: PLC0415
+            BenchmarkIndexRepository,
+        )
+        from quant_etf_api.services.index_membership_data_service import (  # noqa: PLC0415
+            IndexMembershipDataService,
+        )
+
+        codes = _split_codes(args.index_codes)
+        if codes is None:
+            codes = [row.index_code for row in BenchmarkIndexRepository(db).find_active()]
+        service = IndexMembershipDataService(db)
+        if args.member_action == "refresh":
+            result = service.refresh_current_snapshots(codes)
+            _emit(result, not args.no_json)
+            if result["errors"]:
+                sys.exit(1)
+            return
+        if args.member_action == "backfill-pit":
+            end = args.end or date.today()
+            if args.start > end:
+                _fail("--start 不能晚于 --end")
+            result = service.backfill_pit(codes, args.start, end)
+            _emit(result, not args.no_json)
+            if result["errors"]:
+                sys.exit(1)
+            return
+        if args.member_action == "status":
+            _emit(service.status(codes), not args.no_json)
+            return
     finally:
         db.close()
 
@@ -960,6 +853,7 @@ def main() -> None:
     _build_backtest_group(subparsers)
     _build_optimization_group(subparsers)
     _build_industry_group(subparsers)
+    _build_index_group(subparsers)
     _build_stock_group(subparsers)
 
     args = parser.parse_args()
@@ -972,6 +866,8 @@ def main() -> None:
         _run_optimization(args)
     elif args.command == "industry":
         _run_industry(args)
+    elif args.command == "index":
+        _run_index(args)
     elif args.command == "stock":
         _run_stock(args)
     elif args.command == "init-factors":

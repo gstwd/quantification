@@ -55,7 +55,7 @@
           <div class="config-header">资产范围</div>
           <div class="config-body">
             <div class="config-row">
-              <span class="config-key">{{ rotationConfig ? '目标行业' : '指定指数' }}</span>
+              <span class="config-key">指定指数</span>
               <div class="factor-weights">
                 <span v-for="code in indexCodesList" :key="code" class="factor-tag">
                   <span class="factor-name">{{ code }}</span>
@@ -65,44 +65,8 @@
           </div>
         </div>
 
-        <!-- 轮动模块 -->
-        <div v-if="rotationConfig" class="config-card">
-          <div class="config-header">轮动模块 (Rotation: RRG/扩散)</div>
-          <div class="config-body">
-            <div class="config-section">
-              <div class="config-row">
-                <span class="config-key">信号类型</span>
-                <span class="config-val">{{ rotationConfig.signal }}</span>
-              </div>
-              <div class="config-row">
-                <span class="config-key">Top N</span>
-                <span class="config-val">{{ rotationConfig.top_n }}</span>
-              </div>
-              <div class="config-row">
-                <span class="config-key">保留象限</span>
-                <span class="config-val">{{ (rotationConfig.keep_quadrants ?? []).join(', ') || '—' }}</span>
-              </div>
-              <div class="config-row">
-                <span class="config-key">基准剔除</span>
-                <span class="config-val">{{ (rotationConfig.benchmark_exclude ?? []).join(', ') || '—' }}</span>
-              </div>
-              <div class="config-row">
-                <span class="config-key">参数</span>
-                <span class="config-val mono">
-                  ratio={{ rotationConfig.lookback_ratio }} mom={{ rotationConfig.lookback_mom }}
-                  smooth={{ rotationConfig.smooth_window }} diffusion={{ rotationConfig.diffusion_lookback }}
-                </span>
-              </div>
-              <div class="config-row">
-                <span class="config-key">消费因子</span>
-                <span class="config-val">rrg_rs_ratio / rrg_rs_momentum / rrg_quadrant / diffusion_count_ratio</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
         <!-- 评分模块 -->
-        <div v-if="!rotationConfig" class="config-card">
+        <div class="config-card">
           <div class="config-header">评分模块 (Score)</div>
           <div class="config-body">
             <div v-if="scoreConfig" class="config-section">
@@ -138,7 +102,7 @@
         </div>
 
         <!-- 择时模块 -->
-        <div v-if="!rotationConfig" class="config-card">
+        <div class="config-card">
           <div class="config-header">择时模块 (Timing)</div>
           <div class="config-body">
             <div v-if="timingConfig" class="config-section">
@@ -167,7 +131,7 @@
         </div>
 
         <!-- 过滤模块 -->
-        <div v-if="!rotationConfig" class="config-card">
+        <div class="config-card">
           <div class="config-header">过滤模块 (Filter)</div>
           <div class="config-body">
             <div v-if="filterConfig && filterConfig.rules && filterConfig.rules.length > 0" class="config-section">
@@ -191,7 +155,7 @@
         </div>
 
         <!-- 排名模块 -->
-        <div v-if="!rotationConfig" class="config-card">
+        <div class="config-card">
           <div class="config-header">排名模块 (Rank)</div>
           <div class="config-body">
             <div v-if="rankConfig" class="config-section">
@@ -240,7 +204,7 @@
         </div>
 
         <!-- 风控模块 -->
-        <div v-if="!rotationConfig" class="config-card">
+        <div class="config-card">
           <div class="config-header">风控模块 (Risk)</div>
           <div class="config-body">
             <div v-if="riskConfig" class="config-section">
@@ -718,7 +682,6 @@ const rankConfig = computed(() => configJson.value.rank as { sort_by?: string; o
 const portfolioConfig = computed(() => configJson.value.portfolio as { method?: string; timing_exposure?: Record<string, number>; default_exposure?: number } | undefined)
 const riskConfig = computed(() => configJson.value.risk as { max_asset_weight?: number; max_portfolio_exposure?: number; min_cash_ratio?: number } | undefined)
 const rebalanceConfig = computed(() => configJson.value.rebalance as { frequency?: string; day_of_week?: number; day_of_month?: number } | undefined)
-const rotationConfig = computed(() => configJson.value.rotation as { signal?: string; top_n?: number; keep_quadrants?: number[]; benchmark_exclude?: string[]; lookback_ratio?: number; lookback_mom?: number; smooth_window?: number; diffusion_lookback?: number } | undefined)
 
 /** 格式化 JSON 用于展示 */
 const formattedJson = computed(() => {

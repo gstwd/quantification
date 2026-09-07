@@ -64,6 +64,10 @@ def build_default_factor_registry() -> FactorRegistry:
     """
     from quant_etf_api.factors.builtins.breadth import BreadthMA20Computer
     from quant_etf_api.factors.builtins.erp import ERPComputer, ERPPercentileComputer
+    from quant_etf_api.factors.builtins.index_panel_factors import (
+        IndexDiffusionRatioComputer,
+        RRGIndustryMatchComputer,
+    )
     from quant_etf_api.factors.builtins.macro import PMIMomentumComputer
     from quant_etf_api.factors.builtins.monthly import (
         MonthlyMAComputer,
@@ -111,6 +115,9 @@ def build_default_factor_registry() -> FactorRegistry:
     # 量能
     registry.register(VolumeRatio17dComputer())
     registry.register(VolumeRatio20dComputer())
+    # 指数成分扩散 / RRG 行业匹配（消费行业面板与指数成分数据的指数级因子）
+    registry.register(IndexDiffusionRatioComputer())
+    registry.register(RRGIndustryMatchComputer())
     # 动量
     registry.register(Return5dComputer())
     registry.register(Return17dComputer())

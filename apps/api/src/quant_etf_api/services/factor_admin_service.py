@@ -4,9 +4,9 @@
 与因子计算编排（FactorService）分离 —— 两者生命周期不同：
 元数据同步在部署/升级时执行，因子计算在每日调度与补算时执行。
 
-因子目录 = 指数因子（FactorRegistry specs） + 行业因子（申万 RRG/扩散
-元数据）。行业因子只登记元数据，计算走 domain/industry 的独立算法与
-IndustryFactorService，不注册进指数 FactorRegistry。
+因子目录 = 已注册进 FactorRegistry 的全部因子（FactorSpec）。行业面板
+（申万 RRG/扩散）只作为指数级因子的内部数据依赖，由 domain/industry
+纯算法与 IndustryFactorService 维护，不再登记为可配置的正式因子。
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from sqlalchemy.orm import Session
 from quant_etf_api.factors.registry import FactorRegistry
 from quant_etf_api.infra.db.models.core import FactorDefinitionModel
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
-from quant_etf_api.domain.industry.factor_defs import get_industry_factor_specs
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +48,7 @@ class FactorAdminService:
         Returns:
             同步统计字典：new / updated / deactivated。
         """
-        specs = {
-            s.factor_id: s for s in [*self._registry.specs(), *get_industry_factor_specs()]
-        }
+        specs = {s.factor_id: s for s in self._registry.specs()}
         existing = {d.factor_id: d for d in self._repo.find_all()}
 
         new_count = 0

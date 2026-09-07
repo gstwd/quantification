@@ -1,7 +1,8 @@
 """行业轮动分析服务：单日决策与逐期选择分析（研究预览）。
 
-标准回测已收敛到 BacktestService 行业域分支；本服务只保留研究页需要的
-轮动选择预览（analyze_selections）与单日决策，不再维护独立净值模拟。
+行业轮动已退化为研究工作台与数据输入：策略资产统一为指数，不再存在
+行业域回测。本服务只保留研究页需要的轮动选择预览（analyze_selections）
+与单日决策，供 /industry/rotation 与 RRG 研究页消费。
 """
 
 from __future__ import annotations
@@ -14,8 +15,11 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from quant_etf_api.domain.industry.rebalance import month_end_dates
-from quant_etf_api.engine.config import RotationConfig
-from quant_etf_api.engine.rotation import IndustryRotationEngine, IndustryRotationInput
+from quant_etf_api.domain.industry.selection import (
+    IndustryRotationEngine,
+    IndustryRotationInput,
+    IndustrySelectionConfig,
+)
 from quant_etf_api.infra.db.repositories.industry import IndustryDailyBarRepository
 from quant_etf_api.services.industry_factor_service import IndustryFactorService
 
@@ -40,7 +44,7 @@ class IndustryRotationService:
         self,
         *,
         trade_date: date,
-        rotation: RotationConfig,
+        rotation: IndustrySelectionConfig,
         industry_codes: list[str] | None = None,
     ) -> dict[str, Any]:
         """计算单日轮动决策（实时口径）。
@@ -84,7 +88,7 @@ class IndustryRotationService:
         *,
         start: date,
         end: date,
-        rotation: RotationConfig,
+        rotation: IndustrySelectionConfig,
         industry_codes: list[str] | None = None,
         monthly: bool = True,
     ) -> dict[str, Any]:
@@ -107,7 +111,7 @@ class IndustryRotationService:
         *,
         start: date,
         end: date,
-        rotation: RotationConfig,
+        rotation: IndustrySelectionConfig,
         industry_codes: list[str] | None,
         monthly: bool,
     ) -> tuple[dict[str, Any], list[date], dict[date, dict[str, float]], list[dict[str, Any]]]:

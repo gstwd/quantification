@@ -12,7 +12,7 @@
               {{ CATEGORY_LABELS[spec.category ?? ''] ?? spec.category ?? '未分类' }}
             </span>
             <span class="chip chip-ver">v{{ spec.version }}</span>
-            <span class="chip chip-domain">{{ spec.asset_domain === 'industry' ? '行业域' : '指数域' }}</span>
+            <span class="chip chip-domain">指数资产</span>
             <span class="status-tag" :class="spec.is_active ? 'active' : 'disabled'">
               {{ spec.is_active ? '启用' : '禁用' }}
             </span>
@@ -34,41 +34,10 @@
 
       <!-- Tab 切换 -->
       <div class="tabs">
-        <button v-if="isIndustry" class="tab-btn" :class="{ active: tab === 'status' }" @click="tab = 'status'; loadIndustryStatus()">数据状态</button>
-        <button v-if="!isIndustry" class="tab-btn" :class="{ active: tab === 'cross' }" @click="tab = 'cross'">横截面</button>
-        <button v-if="!isIndustry" class="tab-btn" :class="{ active: tab === 'series' }" @click="tab = 'series'">时间序列</button>
-        <button v-if="!isIndustry" class="tab-btn" :class="{ active: tab === 'ic' }" @click="tab = 'ic'; loadIC()">IC 分析</button>
-        <button v-if="!isIndustry" class="tab-btn" :class="{ active: tab === 'correlation' }" @click="tab = 'correlation'; loadCorrelation()">相关性</button>
-      </div>
-
-      <!-- 行业因子数据状态 Tab -->
-      <div v-show="isIndustry && tab === 'status'" class="card">
-        <div class="card-header">
-          <span class="card-title">预计算数据状态（industry_factor_value）</span>
-          <span class="card-subtitle">按参数指纹分行展示：默认参数行由日频任务维护，策略/回测按参数精确读取</span>
-        </div>
-        <div v-if="industryStatusLoading" class="empty">加载中...</div>
-        <div v-else-if="industryStatusItems.length === 0" class="empty">
-          暂无预计算数据，请先运行 industry compute-factors（默认参数）或等待日频任务
-        </div>
-        <table v-else class="data-table">
-          <thead>
-            <tr>
-              <th>参数指纹</th>
-              <th>参数</th>
-              <th>最新日期</th>
-              <th>覆盖行业数</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="item in industryStatusItems" :key="item.params_hash">
-              <td class="mono">{{ item.params_hash.slice(0, 12) }}…</td>
-              <td class="mono">{{ JSON.stringify(item.params ?? {}) }}</td>
-              <td>{{ item.latest_trade_date ?? '—' }}</td>
-              <td>{{ item.industry_count }}</td>
-            </tr>
-          </tbody>
-        </table>
+        <button class="tab-btn" :class="{ active: tab === 'cross' }" @click="tab = 'cross'">横截面</button>
+        <button class="tab-btn" :class="{ active: tab === 'series' }" @click="tab = 'series'">时间序列</button>
+        <button class="tab-btn" :class="{ active: tab === 'ic' }" @click="tab = 'ic'; loadIC()">IC 分析</button>
+        <button class="tab-btn" :class="{ active: tab === 'correlation' }" @click="tab = 'correlation'; loadCorrelation()">相关性</button>
       </div>
 
       <!-- 横截面 Tab -->
@@ -259,8 +228,8 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import { fetchFactorCrossSection, fetchFactorCorrelation, fetchFactorIC, fetchFactorSpecs, fetchFactorTimeSeries, fetchIndustryFactorStatus } from '../api/factors'
-import type { CorrelationResponse, CrossSectionRow, FactorRow, FactorSpec, ICPoint, ICSummary, IndustryFactorStatusItem } from '../types/api'
+import { fetchFactorCrossSection, fetchFactorCorrelation, fetchFactorIC, fetchFactorSpecs, fetchFactorTimeSeries } from '../api/factors'
+import type { CorrelationResponse, CrossSectionRow, FactorRow, FactorSpec, ICPoint, ICSummary } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
 
@@ -274,26 +243,7 @@ const props = defineProps<{ factorId: string }>()
 const spec = ref<FactorSpec | null>(null)
 const specLoading = ref(false)
 
-const tab = ref<'cross' | 'series' | 'ic' | 'correlation' | 'status'>('cross')
-
-/** 是否行业域因子（展示数据状态 tab，隐藏指数域分析 tab） */
-const isIndustry = computed(() => spec.value?.asset_domain === 'industry')
-
-/** 行业因子预计算数据状态 */
-const industryStatusItems = ref<IndustryFactorStatusItem[]>([])
-const industryStatusLoading = ref(false)
-
-async function loadIndustryStatus(): Promise<void> {
-  if (!spec.value) return
-  industryStatusLoading.value = true
-  try {
-    industryStatusItems.value = await fetchIndustryFactorStatus(spec.value.factor_id)
-  } catch {
-    industryStatusItems.value = []
-  } finally {
-    industryStatusLoading.value = false
-  }
-}
+const tab = ref<'cross' | 'series' | 'ic' | 'correlation'>('cross')
 
 /** 横截面状态 */
 const crossDate = ref('')
@@ -630,12 +580,7 @@ onMounted(async () => {
   } finally {
     specLoading.value = false
   }
-  if (spec.value?.asset_domain === 'industry') {
-    tab.value = 'status'
-    await loadIndustryStatus()
-  } else {
-    await loadCross()
-  }
+  await loadCross()
 })
 
 onUnmounted(() => {

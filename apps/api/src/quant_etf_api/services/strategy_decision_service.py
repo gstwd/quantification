@@ -234,10 +234,6 @@ class StrategyDecisionService:
         if not validation.valid:
             raise ValueError(f"策略 {strategy_id} 配置校验失败: {'; '.join(validation.errors)}")
 
-        # 行业轮动策略走专用实时路径（industry_factor_value 预计算值 → 引擎 rotation 分支）
-        if config.rotation is not None:
-            return self._run_industry_allocation(config, trade_date)
-
         start = time.perf_counter()
         logger.info("[strategy] 实时分配启动: strategy=%s trade_date=%s", strategy_id, trade_date)
         context = self.build_live_context(config, trade_date)
@@ -293,122 +289,6 @@ class StrategyDecisionService:
             warnings=warnings,
         )
 
-    def _run_industry_allocation(
-        self,
-        config: StrategyConfig,
-        trade_date: date | None = None,
-    ) -> AllocationResponse:
-        """执行行业轮动策略的实时分配（读取预计算行业因子值，不写库）。
-
-        因子值按策略 rotation 参数指纹从 industry_factor_value 读取；
-        缺失因子入队 industry_factor_compute 异步补算，本次返回带警告结果，
-        与指数因子“缺失即入队、本次不阻塞”的口径一致。
-
-        Args:
-            config: 已校验的轮动策略配置。
-            trade_date: 指定交易日，None 时对齐到今天。
-
-        Returns:
-            AllocationResponse（持仓为申万一级行业代码 → 等权权重）。
-        """
-        from quant_etf_api.engine.base import EngineContext
-        from quant_etf_api.infra.db.repositories.industry import (
-            IndustryUniverseRepository,
-        )
-        from quant_etf_api.services.industry_factor_service import IndustryFactorService
-
-        effective_date = resolve_effective_date(trade_date)
-        industry_codes = sorted(set(config.index_codes))
-        universe_rows = IndustryUniverseRepository(self._db).find_by_codes(industry_codes)
-        if not universe_rows:
-            raise ValueError(
-                f"策略 {config.strategy_id} 行业范围 {industry_codes} 无行业目录记录，"
-                "请先同步行业目录（industry init-universe）"
-            )
-        name_by_code = {r.industry_code: r.name_cn for r in universe_rows}
-        universe = [
-            {"index_code": code, "name_cn": name_by_code[code], "category": "industry"}
-            for code in industry_codes
-        ]
-
-        rotation_input, missing = IndustryFactorService(self._db).build_live_rotation_input(
-            rotation=config.rotation,
-            trade_date=effective_date,
-            industry_codes=industry_codes,
-        )
-        self._enqueue_industry_factor_compute(config, effective_date, missing)
-
-        context = EngineContext(
-            trade_date=effective_date,
-            universe=universe,
-            asset_factors={},
-            asset_metadata={code: {"name_cn": name_by_code[code]} for code in industry_codes},
-            extra={"industry_rotation_input": rotation_input},
-        )
-        result = self._engine.run(config, context, include_details=True)
-
-        warnings: list[BacktestWarning] = []
-        for factor_id, reason in missing.items():
-            label = "当日未计算" if reason == "not_computed" else "数据不足"
-            warnings.append(
-                BacktestWarning(
-                    level="warning",
-                    code="MISSING_FACTOR",
-                    message=(
-                        f"行业因子 {factor_id} 缺失（{label}），已入队异步计算，"
-                        "本次决策按缺失处理"
-                    ),
-                    trade_date=effective_date,
-                )
-            )
-
-        return AllocationResponse(
-            timing=asdict(result.timing) if result.timing else {},
-            rankings=[asdict(r) for r in result.rankings],
-            plan={
-                "positions": result.positions,
-                "total_exposure": result.total_exposure,
-                "cash_ratio": result.cash_ratio,
-                "method": "equal_weight",
-            },
-            data_date=effective_date,
-            pipeline_detail=asdict(result.pipeline_detail) if result.pipeline_detail else None,
-            warnings=warnings,
-        )
-
-    @staticmethod
-    def _enqueue_industry_factor_compute(
-        config: StrategyConfig,
-        trade_date: date,
-        missing: dict[str, str],
-    ) -> None:
-        """行业因子缺失时入队异步补算（参数覆盖 + 指纹去重）。"""
-        if not missing or config.rotation is None:
-            return
-        from quant_etf_api.domain.industry.constants import industry_params_hash
-        from quant_etf_api.infra.job_queue.queue import get_job_queue
-
-        params_hash = industry_params_hash(
-            lookback_ratio=config.rotation.lookback_ratio,
-            lookback_mom=config.rotation.lookback_mom,
-            smooth_window=config.rotation.smooth_window,
-            diffusion_lookback=config.rotation.diffusion_lookback,
-            benchmark_exclude=config.rotation.benchmark_exclude,
-        )
-        payload = {
-            "trade_date": trade_date.isoformat(),
-            "lookback_ratio": config.rotation.lookback_ratio,
-            "lookback_mom": config.rotation.lookback_mom,
-            "smooth_window": config.rotation.smooth_window,
-            "diffusion_lookback": config.rotation.diffusion_lookback,
-            "benchmark_exclude": sorted(config.rotation.benchmark_exclude or []),
-        }
-        get_job_queue().enqueue(
-            "industry_factor_compute",
-            payload,
-            job_key=f"industry_factor_compute:{trade_date.isoformat()}:{params_hash}",
-        )
-
     # ==================================================================
     # 持久化执行（策略运行任务）
     # ==================================================================
@@ -428,12 +308,6 @@ class StrategyDecisionService:
             run_id: 研究运行 ID。
             params: 策略参数覆盖（暂未使用）。
         """
-        # 行业轮动策略只支持实时分配与标准回测，不做信号/因子快照持久化；
-        # 持久化表按指数域外键设计（P19 关联风险），本轮显式拒绝而非混写
-        if config.rotation is not None or config.effective_asset_domain == "industry":
-            raise ValueError(
-                "行业轮动策略暂不支持持久化运行，请使用实时分配或标准回测"
-            )
         context = self.build_live_context(config, trade_date)
         if not context.universe:
             logger.warning("run_and_persist: 无活跃资产，跳过策略运行")

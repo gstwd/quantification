@@ -134,7 +134,10 @@ class FactorDefinitionModel(Base):
         nullable=False,
         default="index",
         server_default="index",
-        comment="因子资产域：index=宽基/行业指数域，industry=申万一级行业域",
+        comment=(
+            "因子值挂载域：index=指数资产（本系统策略资产统一为 index）；"
+            "industry 为历史遗留行（已停用）"
+        ),
     )
     value_shape: Mapped[str] = mapped_column(
         String(16),
@@ -148,7 +151,7 @@ class FactorDefinitionModel(Base):
         nullable=False,
         default=list,
         server_default=sa.text("'[\"timing\",\"score\",\"filter\",\"rank\"]'::json"),
-        comment="适用位置：timing/score/filter/rank/rotation_input",
+        comment="适用位置：timing/score/filter/rank（rotation_input 为历史遗留值）",
     )
     default_params: Mapped[dict | None] = mapped_column(
         JSON,
@@ -178,6 +181,23 @@ class IndexFactorValueModel(Base):
             "strategy_id",
             name="uq_index_factor_value",
         ),
+        Index(
+            "uq_index_factor_value_builtin",
+            "trade_date",
+            "index_code",
+            "factor_id",
+            unique=True,
+            postgresql_where=sa.text("strategy_id IS NULL AND params_hash = ''"),
+        ),
+        Index(
+            "uq_index_factor_value_params",
+            "trade_date",
+            "index_code",
+            "factor_id",
+            "params_hash",
+            unique=True,
+            postgresql_where=sa.text("strategy_id IS NULL AND params_hash <> ''"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -205,6 +225,71 @@ class IndexFactorValueModel(Base):
     )
     strategy_id: Mapped[str | None] = mapped_column(
         String(64), comment="产生该因子值的策略 ID，NULL 表示通用因子"
+    )
+    params_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="",
+        server_default="",
+        comment="参数指纹（规范化参数字典 sha256），非参数化因子为空串",
+    )
+    params: Mapped[dict | None] = mapped_column(
+        JSON, comment="计算参数字典（lookback/smooth 等），非参数化因子为 NULL"
+    )
+
+
+class IndexMemberEventModel(Base):
+    """指数成分股事件表（PIT 取样或当前快照，供指数级因子消费）。
+
+    start_date 语义：
+    - snapshot_type=pit：按日期取样（如 baostock 月末成分），取样点之间
+      前向沿用；
+    - snapshot_type=current_snapshot：当前成分/权重快照，只允许在快照
+      日期之后参与计算，避免向历史回填造成未来函数。
+    """
+
+    __tablename__ = "index_member_event"
+    __table_args__ = (
+        UniqueConstraint(
+            "index_code",
+            "stock_code",
+            "start_date",
+            name="uq_index_member_event",
+        ),
+        Index("ix_index_member_event_index_date", "index_code", "start_date"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="自增主键"
+    )
+    index_code: Mapped[str] = mapped_column(
+        ForeignKey("benchmark_index.index_code"),
+        nullable=False,
+        comment="指数代码",
+    )
+    stock_code: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="个股代码，如 600000"
+    )
+    start_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="成分生效起始日（PIT 取样日或当前快照日）"
+    )
+    end_date: Mapped[date | None] = mapped_column(
+        Date, nullable=True, comment="成分失效日，NULL=截至最新仍有效"
+    )
+    weight: Mapped[float | None] = mapped_column(
+        Float, comment="成分权重（0-1），无权重数据时为 NULL（等权处理）"
+    )
+    source: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="数据来源，如 baostock/akshare_csindex"
+    )
+    snapshot_type: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="current_snapshot",
+        comment="pit=按日期取样的历史成分，current_snapshot=当前快照",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, comment="最后更新时间（UTC）"
     )
 
 
@@ -323,7 +408,7 @@ class BacktestRunModel(Base):
         nullable=False,
         default="index",
         server_default="index",
-        comment="回测资产域：index=宽基/行业指数域，industry=申万一级行业域",
+        comment="历史遗留列：始终为 index（行业域回测已移除）",
     )
     start_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="回测起始日期")
     end_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="回测结束日期")
@@ -455,7 +540,7 @@ class BacktestIndexResultModel(Base):
     index_code: Mapped[str] = mapped_column(
         String(16),
         nullable=False,
-        comment="资产代码（index=宽基指数代码，industry=申万一级行业代码）",
+        comment="资产代码（统一为 benchmark_index 指数代码）",
     )
     signal_score: Mapped[float] = mapped_column(
         Float, nullable=False, comment="信号综合得分，0-100（与实时 index_signal.signal_score 同义）"

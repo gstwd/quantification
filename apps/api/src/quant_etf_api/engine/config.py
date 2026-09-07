@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 # 引擎配置 schema 版本：配置模型演进时递增并做兼容迁移检测（7.4#3）
@@ -176,31 +178,6 @@ class RegimeRuleConfig(BaseModel):
     portfolio: PortfolioConfig | None = None
 
 
-class RotationConfig(BaseModel):
-    """行业轮动选择模块配置（研报三类信号，仅申万一级行业域可用）。
-
-    Attributes:
-        signal: 信号类型：quadrant=纯 RRG 象限、
-            diffusion=纯扩散 top_n、diffusion_rrg=扩散 top_n 后剔除三四象限。
-        top_n: 每日最多选中行业数。
-        keep_quadrants: 保留象限集合（1=领先/2=改善/3=滞后/4=疲软）。
-        benchmark_exclude: 从 RRG 行业等权基准中剔除的行业代码。
-        lookback_ratio: RS-Ratio 比率回看天数。
-        lookback_mom: RS-Momentum 比率回看天数。
-        smooth_window: MA 平滑窗口。
-        diffusion_lookback: 扩散指标上涨判定回看天数。
-    """
-
-    signal: str = "diffusion_rrg"
-    top_n: int = 6
-    keep_quadrants: list[int] = Field(default_factory=lambda: [1, 2])
-    benchmark_exclude: list[str] = Field(default_factory=list)
-    lookback_ratio: int = 220
-    lookback_mom: int = 60
-    smooth_window: int = 20
-    diffusion_lookback: int = 220
-
-
 class StrategyConfig(BaseModel):
     """完整策略配置。
 
@@ -218,9 +195,9 @@ class StrategyConfig(BaseModel):
         portfolio: 组合配置，None 表示信号模式。
         risk: 风控配置，None 表示无风控。
         rebalance: 调仓配置，None 表示每日调仓。
-        rotation: 行业轮动选择配置，None 表示走通用评分管线。
-        asset_domain: 策略资产域：index=宽基/行业指数域（默认），
-            industry=申万一级行业域（当前仅 rotation 轮动策略使用）。
+        factor_params: 参数化因子的参数覆盖，key=factor_id, value=参数
+            dict。本轮仅接受与 FactorSpec.default_params 完全一致的默认
+            参数；自定义参数能力预留（校验层会拒绝非默认组合）。
     """
 
     strategy_id: str
@@ -229,9 +206,16 @@ class StrategyConfig(BaseModel):
     schema_version: str = "1"
     description: str = ""
     frequency: str = "daily"
-    asset_domain: str = "index"
     index_codes: list[str] = Field(
-        default_factory=list, description="指定指数代码列表，非空时仅对这些指数运行策略"
+        default_factory=list,
+        description=(
+            "指定指数代码列表（benchmark_index 中由用户添加、存在实际 ETF 对应物"
+            "的指数），非空时仅对这些指数运行策略"
+        ),
+    )
+    factor_params: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description="参数化因子参数覆盖，key=factor_id，缺省使用因子默认参数",
     )
     timing: TimingConfig | None = None
     score: ScoreConfig
@@ -240,20 +224,7 @@ class StrategyConfig(BaseModel):
     portfolio: PortfolioConfig | None = None
     risk: RiskConfig | None = None
     rebalance: RebalanceConfig | None = None
-    rotation: RotationConfig | None = None
     regime_rules: dict[str, RegimeRuleConfig] = Field(
         default_factory=dict,
         description="regime 条件化配置，key=regime 名称（offensive/neutral/defensive），value=该 regime 下的配置覆盖",
     )
-
-    @property
-    def effective_asset_domain(self) -> str:
-        """返回策略实际资产域。
-
-        rotation 模块只作用于申万一级行业域；为兼容旧配置（未显式声明
-        asset_domain），配置了 rotation 时直接判定为 industry。
-
-        Returns:
-            "index" 或 "industry"。
-        """
-        return "industry" if self.rotation is not None else self.asset_domain

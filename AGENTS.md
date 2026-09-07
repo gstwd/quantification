@@ -6,7 +6,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 Quant Index Asset Allocation System — an asset allocation decision system for A-share indexes (daily frequency only, no individual stocks, no ETF, no trading execution). Full-stack: FastAPI backend + PostgreSQL + Vue 3 frontend. Uses a **component-based, configuration-driven** strategy engine: new strategies are created via JSON config stored in the database, no Python code needed.
 
-> **系统范围：本系统只研究 A 股指数，不研究 ETF。** 代码库中不含任何 ETF 数据源、数据表、接口或前端页面（`quant_etf_api` 等包名/环境变量为历史命名保留）。
+> **系统范围：本系统只研究 A 股指数，不研究 ETF。** 代码库中不含任何 ETF 数据源、数据表、接口或前端页面（`quant_etf_api` 等包名/环境变量为历史命名保留）。**策略资产原则：策略可配置资产只能是用户自行添加、且市场上存在实际 ETF 对应物的 A 股指数（`benchmark_index`）；申万 801xxx 行业与个股永不作为策略资产或回测标的，只作为因子输入与研究数据。**
 
 ## Commands
 
@@ -138,7 +138,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, UniverseAsset dataclasses)、`rebalance.py`（纯调仓规则，engine/rebalance.py 为兼容转发层）
   - `portfolio/` — `turnover.py`（换手率）、`returns.py`（T+1 收益）、`accounting.py`（`BacktestDayAccumulator` 累计/回撤记账）、`universe.py`（universe 构建与 subset 过滤）
   - `market_data/`、`research/` — 预留包目录
-- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `normalization.py` (zscore/rank/minmax/winsorize/MAD 横截面标准化), `builtins/` (18 built-in computers: volume×1, momentum×3, volatility×1, valuation×2, ma×4, atr×1, donchian×2, rsi×1). **所有因子基于指数数据计算**（`index_factor_value` 表）。**架构原则：因子层只使用指数数据**。
+- **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `normalization.py` (zscore/rank/minmax/winsorize/MAD 横截面标准化), `builtins/`（价格/动量/波动/估值/量能/技术/月线等指数因子 + `index_panel_factors.py` 的指数成分扩散与 RRG 行业匹配两类面板因子）。**指数因子值写入 `index_factor_value` 表；行业/个股数据只作为面板因子的内部输入，不出现在策略资产域**。
 - **`config/`** — Pydantic settings loaded from `.env`
 - **`schemas/`** — 10 个 Pydantic schema 文件：`factor.py`、`market_data.py`、`pagination.py`、`run.py`、`signal.py`、`strategy.py`、`system.py`、`types.py`、`backtest.py`、`__init__.py`
 
@@ -217,9 +217,9 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 
 **Strategy Engine**: `engine/` 包实现组件化策略执行管线。策略通过 `strategy_config` 表的 JSON 配置驱动，`StrategyConfigService` 管理 CRUD，`StrategyEngine` 执行管线。`FactorProvider` 桥接因子层与引擎层，`ContextBuilder` 统一构建实时和回测上下文。`BacktestService` 和 `StrategyExecutionService` 统一使用引擎执行。
 
-**因子系统**: 18 个内置因子（7 基础 + 4 均线 ma_5d/10d/20d/60d + atr_14d + donchian_20d_high/low + rsi_14d），通过 `FactorRegistry` 注册，`FactorService` 编排计算和持久化。所有因子基于指数数据计算（`index_factor_value` 表）。`FactorSpec` 增加 `lookback_days` 字段，`FactorService._load_context()` 动态使用所有因子的最大 lookback。`FactorContext` 增加 `macro_indicators` 字段。`normalization.py` 提供 zscore/rank/minmax/winsorize/MAD 横截面标准化。`evaluation.py` 提供 IC/IR 分析和因子相关性矩阵。
+**因子系统**: 内置指数因子通过 `FactorRegistry` 注册，`FactorService` 编排计算和持久化（`index_factor_value` 表）；指数级面板因子（`index_diffusion_ratio`、`rrg_industry_match_score`）由 `IndexFactorPanelService` 按 required_data 组装行业面板/成分数据后计算。`FactorSpec` 增加 `lookback_days` 字段，`FactorService._load_context()` 动态使用所有因子的最大 lookback。`FactorContext` 增加 `macro_indicators` 与 `panels` 字段。`normalization.py` 提供 zscore/rank/minmax/winsorize/MAD 横截面标准化。`evaluation.py` 提供 IC/IR 分析和因子相关性矩阵。
 
-> 因子元数据四轴（asset_domain/value_shape/usage/default_params）与“因子中心=正式因子、研究页=独立实验”的研发流程见 [`docs/architecture/因子研发与集成指引.md`](docs/architecture/因子研发与集成指引.md)；行业 RRG/扩散 4 因子已登记为 industry/panel/rotation_input 因子，行业轮动策略走标准分配与回测中心。
+> 因子元数据轴（asset_domain/value_shape/usage/default_params）与“因子中心=正式因子、研究页=独立实验”的研发流程见 [`docs/architecture/因子研发与集成指引.md`](docs/architecture/因子研发与集成指引.md)；行业 RRG/扩散面板仅作为指数级因子的内部数据输入（`rrg_industry_match_score` / `index_diffusion_ratio`），策略配置不含 rotation 模块或行业资产域。
 
 **Backtesting**: `BacktestService` 使用统一 `_run_backtest_loop`。集成 `FactorProvider` 预计算因子、`ContextBuilder` 构建上下文、专业绩效指标（`metrics.py`）、基准对比（`benchmark.py`）。回测收益为**毛收益**：系统当前阶段不考虑实盘交易与交易成本，仅研究策略理想效果。支持调仓频率控制和换手率计算。回测仅支持配置模式（策略需配置 portfolio 模块）。
 

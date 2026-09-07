@@ -16,7 +16,7 @@ from quant_etf_api.domain.industry.constants import (
     RRG_LAB_MAX_RANGE_DAYS,
     normalize_sw_code,
 )
-from quant_etf_api.engine.config import RotationConfig
+from quant_etf_api.domain.industry.selection import IndustrySelectionConfig
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
     IndustryUniverseRepository,
@@ -469,7 +469,7 @@ def get_rotation_selections(
     _validate_max_days(start, end, RRG_LAB_MAX_RANGE_DAYS, "轮动选择")
     try:
         quadrants = [int(p) for p in keep_quadrants.split(",") if p.strip()]
-        rotation = RotationConfig(
+        rotation = IndustrySelectionConfig(
             signal=signal,
             top_n=top_n,
             keep_quadrants=quadrants,

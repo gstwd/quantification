@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy.orm import Session
 
 from quant_etf_api.factors.base import FactorContext
+from quant_etf_api.factors.base import factor_params_hash
 from quant_etf_api.factors.registry import max_lookback_days
 from quant_etf_api.infra.db.models.core import (
     BenchmarkIndexModel,
@@ -107,7 +108,8 @@ class FactorService:
             logger.warning("compute_and_store: 无已启用的因子，跳过计算")
             return {"index_count": len(indexes), "factor_count": 0, "upsert_count": 0, "errors": 0}
 
-        rows_to_upsert: list[dict] = []
+        builtin_rows: list[dict] = []
+        param_rows: list[dict] = []
         errors = 0
         missing_count = 0
         start = time.perf_counter()
@@ -126,17 +128,23 @@ class FactorService:
                         fv.numeric,
                         fv.payload,
                     )
-                    rows_to_upsert.append(
-                        {
-                            "trade_date": trade_date,
-                            "index_code": idx.index_code,
-                            "factor_id": fv.factor_id,
-                            "factor_value_numeric": fv.numeric,
-                            "factor_value_text": fv.text,
-                            "factor_payload": fv.payload or None,
-                            "strategy_id": None,
-                        }
-                    )
+                    params = dict(computer.spec.default_params or {})
+                    params_hash = factor_params_hash(params) if params else ""
+                    row_payload = {
+                        "trade_date": trade_date,
+                        "index_code": idx.index_code,
+                        "factor_id": fv.factor_id,
+                        "factor_value_numeric": fv.numeric,
+                        "factor_value_text": fv.text,
+                        "factor_payload": fv.payload or None,
+                        "strategy_id": None,
+                        "params_hash": params_hash,
+                        "params": params or None,
+                    }
+                    if params_hash:
+                        param_rows.append(row_payload)
+                    else:
+                        builtin_rows.append(row_payload)
                 except Exception:
                     errors += 1
                     logger.warning(
@@ -146,7 +154,8 @@ class FactorService:
                         exc_info=True,
                     )
 
-        upsert_count = self._index_repo.bulk_upsert_builtin(rows_to_upsert)
+        upsert_count = self._index_repo.bulk_upsert_builtin(builtin_rows)
+        upsert_count += self._index_repo.bulk_upsert_params(param_rows)
         elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
         logger.info(
             "[factor] 因子计算完成: trade_date=%s index=%d factor=%d upsert=%d missing=%d errors=%d 耗时=%sms",
@@ -310,11 +319,39 @@ class FactorService:
             # 与 FactorContext 的 {period_date: value} 契约保持一致
             macro_indicators[code][str(row.period_date or row.period)] = row.value
 
-        return FactorContext(
+        ctx = FactorContext(
             index_bars={(r.index_code, r.trade_date): r for r in index_bar_rows},
             index_valuation={(r.index_code, r.trade_date): r for r in valuation_rows},
             macro_indicators=macro_indicators,
         )
+        # 复合因子数据面板：注册表出现消费 index_membership / stock_closes /
+        # industry_selection 等面板的因子时，由装配服务按当日注入
+        panel_factor_ids = {
+            spec.factor_id
+            for spec in self._registry.specs()
+            if spec.required_data
+            and any(
+                name
+                in {
+                    "index_membership",
+                    "stock_closes",
+                    "industry_selection",
+                    "index_industry_exposure",
+                }
+                for name in spec.required_data
+            )
+        }
+        if panel_factor_ids and index_codes:
+            from quant_etf_api.services.index_factor_panel_service import (
+                IndexFactorPanelService,
+            )
+
+            ctx.panels = IndexFactorPanelService(self._db).build_panels(
+                index_codes=index_codes,
+                dates=[trade_date],
+                lookback_natural_days=lookback_days,
+            )
+        return ctx
 
 
 def _row_to_factor_row(row: IndexFactorValueModel) -> FactorRow:

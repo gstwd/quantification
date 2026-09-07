@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from sqlalchemy import delete, func
+from sqlalchemy import and_, delete, func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -238,14 +238,59 @@ class IndexFactorValueRepository(BaseRepository):
         """
         if not rows:
             return 0
+
         stmt = insert(IndexFactorValueModel).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=["trade_date", "index_code", "factor_id"],
-            index_where=IndexFactorValueModel.strategy_id.is_(None),
+            index_where=and_(
+                IndexFactorValueModel.strategy_id.is_(None),
+                IndexFactorValueModel.params_hash == "",
+            ),
             set_={
                 "factor_value_numeric": stmt.excluded.factor_value_numeric,
                 "factor_value_text": stmt.excluded.factor_value_text,
                 "factor_payload": stmt.excluded.factor_payload,
+            },
+        )
+        try:
+            result = self._db.execute(stmt)
+            self._db.commit()
+            return result.rowcount
+        except Exception:
+            self._db.rollback()
+            return 0
+
+    def bulk_upsert_params(self, rows: list[dict[str, Any]]) -> int:
+        """批量 upsert 参数化独立因子值（strategy_id=NULL 且 params_hash 非空）。
+
+        与 bulk_upsert_builtin 的区别：冲突目标使用包含 params_hash 的部分
+        唯一索引，同一因子在不同参数组合下分行存储（与行业因子表口径一致）。
+
+        Args:
+            rows: 待写入的字典列表（必须含非空 params_hash）。
+
+        Returns:
+            实际写入（insert + update）的记录数，异常时返回 0。
+        """
+        if not rows:
+            return 0
+        stmt = insert(IndexFactorValueModel).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                "trade_date",
+                "index_code",
+                "factor_id",
+                "params_hash",
+            ],
+            index_where=and_(
+                IndexFactorValueModel.strategy_id.is_(None),
+                IndexFactorValueModel.params_hash != "",
+            ),
+            set_={
+                "factor_value_numeric": stmt.excluded.factor_value_numeric,
+                "factor_value_text": stmt.excluded.factor_value_text,
+                "factor_payload": stmt.excluded.factor_payload,
+                "params": stmt.excluded.params,
             },
         )
         try:

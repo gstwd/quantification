@@ -48,7 +48,7 @@
         <!-- 策略限定指数范围提示 -->
         <div v-if="isUniverseLocked" class="scope-notice">
           <span class="scope-icon">🔒</span>
-          <span>{{ isIndustryStrategy ? '此行业轮动策略专为以下申万一级行业设计，标的范围已锁定：' : '此策略专为以下指数设计，标的范围已锁定：' }}</span>
+          <span>此策略已限定资产范围（仅以下指数）：</span>
           <span class="scope-codes">{{ strategyIndexCodes.join(', ') }}</span>
         </div>
 
@@ -97,7 +97,7 @@
           <div class="form-section">
             <label class="form-label">基准模式</label>
             <select v-model="form.benchmark_mode" class="form-select">
-              <option v-if="isIndustryStrategy" value="auto">行业等权（自动，剔除综合）</option>
+              <option value="auto">自动（买入持有基准指数）</option>
               <option value="index">指定指数基准</option>
             </select>
           </div>
@@ -156,7 +156,7 @@ const form = reactive({
   index_codes: [] as string[],
   enable_benchmark: true,
   benchmark_index_code: '000300',
-  benchmark_mode: 'auto' as 'auto' | 'index' | 'industry_equal_weight',
+  benchmark_mode: 'auto' as 'auto' | 'index',
 })
 
 const submitting = ref(false)
@@ -175,8 +175,6 @@ function applyPreset(p: DatePreset) {
 const strategyIndexCodes = ref<string[]>([])
 /** 策略是否限定了标的范围 */
 const isUniverseLocked = computed(() => strategyIndexCodes.value.length > 0)
-/** 当前策略是否为行业轮动策略 */
-const isIndustryStrategy = ref(false)
 
 const isValid = computed(() =>
   form.strategy_id !== '' &&
@@ -202,10 +200,6 @@ watch(
 
     const strategy = strategyStore.items.find((s) => s.strategy_id === strategyId)
     const codes = strategy?.index_codes ?? []
-    isIndustryStrategy.value = strategy?.asset_domain === 'industry'
-    if (isIndustryStrategy.value) {
-      form.benchmark_mode = 'auto'
-    }
     if (codes.length > 0) {
       strategyIndexCodes.value = codes
       // 强制设为子集模式，使用策略限定的指数
