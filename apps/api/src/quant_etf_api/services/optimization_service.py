@@ -127,25 +127,19 @@ class OptimizationService:
         baseline_parsed = self._config_svc.get_parsed_config(strategy_id)
         if baseline_parsed is None:
             raise ValueError(f"基线策略 {strategy_id} 配置解析失败")
-        if baseline_parsed.portfolio is None:
-            raise ValueError("基线策略未配置 portfolio 模块，无法回测优化")
-
         validation = self._config_svc.validate_config(candidate_config)
         if not validation.valid:
             raise ValueError(f"候选配置校验失败: {'; '.join(validation.errors)}")
         candidate_config = dict(candidate_config)
         candidate_config.setdefault("schema_version", "1")
         try:
-            candidate_parsed = StrategyConfig(
+            StrategyConfig(
                 strategy_id="_candidate_",
                 display_name="_candidate_",
                 **candidate_config,
             )
         except Exception as exc:
             raise ValueError(f"候选配置解析失败: {exc}") from exc
-        if candidate_parsed.portfolio is None:
-            raise ValueError("候选策略未配置 portfolio 模块，无法回测")
-
         optimization_id = uuid4().hex
         cand_id = candidate_strategy_id or f"{strategy_id}__opt_{optimization_id[:8]}"
         if self._config_svc.get_config(cand_id) is not None:

@@ -231,9 +231,6 @@ export interface BacktestDailyResult {
   portfolio_return: number
   cumulative_return: number
   drawdown: number
-  high_signal_count: number
-  mid_signal_count: number
-  low_signal_count: number
   timing_regime?: string | null
   total_exposure?: number | null
   cash_ratio?: number | null

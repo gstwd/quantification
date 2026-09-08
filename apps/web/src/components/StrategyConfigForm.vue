@@ -368,22 +368,14 @@
       </div>
     </div>
 
-    <!-- ═══ 组合模块（可选） ═══ -->
+    <!-- ═══ 组合模块 ═══ -->
     <div class="module-card">
       <div class="module-header" @click="toggleModule('portfolio')">
         <span class="module-title">组合模块 (Portfolio) <HelpTip :text="scHelp('portfolio')" /></span>
-        <span class="module-badge optional">可选</span>
-        <label class="toggle-switch" @click.stop>
-          <input type="checkbox" v-model="portfolioEnabled" />
-          <span class="toggle-track"></span>
-        </label>
         <span :class="['arrow', expanded.portfolio ? 'open' : '']">▾</span>
       </div>
-      <div v-if="!portfolioEnabled" class="portfolio-warn">
-        未启用组合模块，此策略<strong>无法用于回测</strong>。如需回测，请开启此模块并配置仓位参数。
-      </div>
-      <div v-show="portfolioEnabled && expanded.portfolio" class="module-body">
-        <div class="module-desc">配置权重分配方法，决定各资产的仓位比例。<strong>回测功能要求策略必须配置此模块。</strong></div>
+      <div v-show="expanded.portfolio" class="module-body">
+        <div class="module-desc">配置权重分配方法，决定各资产的目标仓位比例。</div>
 
         <div class="sub-field">
           <label class="sub-label">分配方法</label>
@@ -880,7 +872,6 @@ function initRank(): void {
 }
 
 // ── 组合模块 ──────────────────────────────────────────────────────
-const portfolioEnabled = ref(false)
 const portfolioMethod = ref('equal_weight')
 const portfolioDefaultExposure = ref(50)
 const exposureOffensive = ref(80)
@@ -889,8 +880,7 @@ const exposureDefensive = ref(20)
 
 function initPortfolio(): void {
   const portfolio = props.modelValue.portfolio as Record<string, unknown> | undefined
-  if (!portfolio) { portfolioEnabled.value = false; return }
-  portfolioEnabled.value = true
+  if (!portfolio) return
   portfolioMethod.value = (portfolio.method as string) || 'equal_weight'
   portfolioDefaultExposure.value = Math.round(((portfolio.default_exposure as number) ?? 0.5) * 100)
   const te = (portfolio.timing_exposure ?? {}) as Record<string, number>
@@ -1043,16 +1033,14 @@ function buildConfig(): Record<string, unknown> {
   config.rank = rank
 
   // 组合
-  if (portfolioEnabled.value) {
-    const portfolio: Record<string, unknown> = { method: portfolioMethod.value }
-    portfolio.timing_exposure = {
-      offensive: exposureOffensive.value / 100,
-      neutral: exposureNeutral.value / 100,
-      defensive: exposureDefensive.value / 100,
-    }
-    if (portfolioDefaultExposure.value !== 50) portfolio.default_exposure = portfolioDefaultExposure.value / 100
-    config.portfolio = portfolio
+  const portfolio: Record<string, unknown> = { method: portfolioMethod.value }
+  portfolio.timing_exposure = {
+    offensive: exposureOffensive.value / 100,
+    neutral: exposureNeutral.value / 100,
+    defensive: exposureDefensive.value / 100,
   }
+  if (portfolioDefaultExposure.value !== 50) portfolio.default_exposure = portfolioDefaultExposure.value / 100
+  config.portfolio = portfolio
 
   // 风控
   if (riskEnabled.value) {
@@ -1093,7 +1081,7 @@ watch(
     timingEnabled, timingFactors, timingOffensive, timingDefensive, timingProxyIndexCodes,
     filterEnabled, filterLogic, filterRules,
     rankSortBy, rankOrder, rankTopN, rankBottomN,
-    portfolioEnabled, portfolioMethod, portfolioDefaultExposure, exposureOffensive, exposureNeutral, exposureDefensive,
+    portfolioMethod, portfolioDefaultExposure, exposureOffensive, exposureNeutral, exposureDefensive,
     riskEnabled, riskMaxAssetWeight, riskMaxPortfolioExposure, riskMinCashRatio,
     rebalanceEnabled, rebalanceFrequency, rebalanceDayOfWeek, rebalanceDayOfMonth,
   ],

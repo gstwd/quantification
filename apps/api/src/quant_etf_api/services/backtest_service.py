@@ -180,7 +180,7 @@ class BacktestService:
             回测摘要。
 
         Raises:
-            ValueError: 策略不存在、未配置 portfolio 或配置校验失败。
+            ValueError: 策略不存在或配置校验失败。
         """
         backtest_id = str(uuid4())
         now = utcnow()
@@ -190,11 +190,6 @@ class BacktestService:
         strategy_config = config_svc.get_parsed_config(req.strategy_id)
         if strategy_config is None:
             raise ValueError(f"策略 {req.strategy_id} 配置不存在或解析失败，无法执行回测")
-
-        if strategy_config.portfolio is None:
-            raise ValueError(
-                "策略未配置 portfolio 模块，无法执行回测。请在策略配置中添加 portfolio。"
-            )
 
         # P4：回测创建前复用配置校验，未知/停用因子或非法变换函数直接拒绝
         config_validation = config_svc.validate_parsed(strategy_config)
@@ -330,9 +325,6 @@ class BacktestService:
                     portfolio_return=r.portfolio_return,
                     cumulative_return=r.cumulative_return,
                     drawdown=r.drawdown,
-                    high_signal_count=r.high_signal_count,
-                    mid_signal_count=r.mid_signal_count,
-                    low_signal_count=r.low_signal_count,
                     timing_regime=r.timing_regime,
                     total_exposure=r.total_exposure,
                     cash_ratio=r.cash_ratio,
@@ -650,7 +642,6 @@ class BacktestService:
                 data_gap_days += 1
 
             # 持仓统计
-            high_cnt = mid_cnt = low_cnt = 0
             has_positions = bool(positions)
             # 更新累计净值、峰值与回撤（领域对象记账）
             accumulator.apply_day(portfolio_return, has_positions)
@@ -666,9 +657,6 @@ class BacktestService:
                 portfolio_return=round(portfolio_return, 4),
                 cumulative_return=round(cumulative_return_pct, 4),
                 drawdown=round(drawdown, 4),
-                high_signal_count=0,  # 占位，下面从 _write_index_results 获取实际值
-                mid_signal_count=0,
-                low_signal_count=0,
                 timing_regime=result.timing.regime if result.timing else None,
                 total_exposure=day_total_exposure,
                 cash_ratio=day_cash_ratio,
@@ -680,8 +668,8 @@ class BacktestService:
             self._backtest_repo.add_daily_result(daily_row)
             daily_results.append(daily_row)
 
-            # 写入指数结果并获取信号计数
-            high_cnt, mid_cnt, low_cnt, day_pos_count, day_pos_positive = self._write_index_results(
+            # 写入指数结果并获取持仓统计
+            day_pos_count, day_pos_positive = self._write_index_results(
                 backtest_id,
                 trade_date,
                 next_date,
@@ -692,25 +680,18 @@ class BacktestService:
                 timing_regime=result.timing.regime if result.timing else None,
                 scoring_mode=config.score.scoring_mode,
             )
-            # 更新每日行的信号计数
-            daily_row.high_signal_count = high_cnt
-            daily_row.mid_signal_count = mid_cnt
-            daily_row.low_signal_count = low_cnt
             total_in_pos_count += day_pos_count
             total_in_pos_positive += day_pos_positive
 
             logger.debug(
                 "[backtest] 日结果: backtest_id=%s date=%s regime=%s exposure=%s "
-                "持仓=%s 收益=%s%% 高/中/低=%s/%s/%s",
+                "持仓=%s 收益=%s%%",
                 backtest_id,
                 trade_date,
                 result.timing.regime if result.timing else None,
                 day_total_exposure,
                 {k: round(v, 4) for k, v in positions.items()},
                 round(portfolio_return, 4),
-                high_cnt,
-                mid_cnt,
-                low_cnt,
             )
 
             prev_positions = positions
@@ -723,16 +704,13 @@ class BacktestService:
                     last_progress = new_progress
                     logger.info(
                         "[backtest] 进度: backtest_id=%s %s/%s (%s%%) date=%s "
-                        "累计收益=%s%% 高/中/低=%s/%s/%s",
+                        "累计收益=%s%%",
                         backtest_id,
                         i + 1,
                         total_dates,
                         new_progress,
                         trade_date,
                         round(cumulative_return_pct, 2),
-                        high_cnt,
-                        mid_cnt,
-                        low_cnt,
                     )
 
             # 每 100 天 checkpoint 提交一次：
@@ -882,7 +860,7 @@ class BacktestService:
         signal_positions: dict[str, float],
         timing_regime: str | None = None,
         scoring_mode: str = "absolute",
-    ) -> tuple[int, int, int, int, int]:
+    ) -> tuple[int, int]:
         """写入每日每指数的回测结果，使用与实时一致的信号等级判定逻辑。
 
         与实时 `_build_strategy_results` 共用同一 `determine_signal_level` 输入：
@@ -890,10 +868,9 @@ class BacktestService:
         timing_regime=当日择时 regime、scoring_mode=策略评分模式。
 
         Returns:
-            (high_cnt, mid_cnt, low_cnt, in_portfolio_count, in_portfolio_positive_count) 元组。
+            (in_portfolio_count, in_portfolio_positive_count) 元组。
         """
         score_map = result.scores
-        high = mid = low = 0
         in_pos_count = 0
         in_pos_positive = 0
 
@@ -905,17 +882,9 @@ class BacktestService:
             level, _ = determine_signal_level(
                 score=score,
                 target_weight=target_weight,
-                has_positions=bool(signal_positions),
                 timing_regime=timing_regime,
                 scoring_mode=scoring_mode,
             )
-            if level == "HIGH":
-                high += 1
-            elif level == "MID":
-                mid += 1
-            else:
-                low += 1
-
             in_portfolio = target_weight > 0
             signal_score = round(score, 2)
 
@@ -939,7 +908,7 @@ class BacktestService:
                 )
             )
 
-        return high, mid, low, in_pos_count, in_pos_positive
+        return in_pos_count, in_pos_positive
 
     # ── 收益计算 ───────────────────────────────────────────────────────────
 
@@ -1340,7 +1309,7 @@ class BacktestService:
             BacktestComparisonSummary 对比摘要。
 
         Raises:
-            ValueError: 策略不存在、未配置 portfolio 或两策略相同。
+            ValueError: 策略不存在或两策略相同。
         """
         comparison_id = str(uuid4())
         now = utcnow()
@@ -1355,9 +1324,6 @@ class BacktestService:
             cfg = config_svc.get_parsed_config(sid)
             if cfg is None:
                 raise ValueError(f"策略 {sid} 配置不存在")
-            if cfg.portfolio is None:
-                raise ValueError(f"策略 {sid} 未配置 portfolio 模块，无法执行回测")
-
         # 创建子回测 A（create_backtest 内部会处理策略自身的 index_codes 限定）
         a_mode = "subset" if req.a_index_codes else "all"
         bt_a_summary = self.create_backtest(

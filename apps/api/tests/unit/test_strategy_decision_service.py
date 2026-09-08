@@ -119,7 +119,7 @@ class TestRunAllocation:
 
         assert resp is not None
         assert resp.data_date == date(2025, 1, 15)
-        assert resp.plan["method"] == "signal_only"
+        assert resp.plan["method"] == "equal_weight"
         svc.ensure_live_factors.assert_called_once_with(config, context)
 
     def test_run_allocation_raises_on_invalid_config(self) -> None:

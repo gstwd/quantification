@@ -282,7 +282,7 @@ class StrategyDecisionService:
                 "positions": result.positions,
                 "total_exposure": result.total_exposure,
                 "cash_ratio": result.cash_ratio,
-                "method": config.portfolio.method if config.portfolio else "signal_only",
+                "method": config.portfolio.method,
             },
             data_date=context.trade_date,
             pipeline_detail=asdict(result.pipeline_detail) if result.pipeline_detail else None,

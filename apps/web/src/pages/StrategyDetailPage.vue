@@ -180,7 +180,7 @@
         <div class="config-card">
           <div class="config-header">组合模块 (Portfolio)</div>
           <div class="config-body">
-            <div v-if="portfolioConfig" class="config-section">
+            <div class="config-section">
               <div class="config-row">
                 <span class="config-key">分配方法</span>
                 <span class="config-val">{{ portfolioConfig.method }}</span>
@@ -199,7 +199,6 @@
                 <span class="config-val">{{ (portfolioConfig.default_exposure * 100).toFixed(0) }}%（无择时信号时）</span>
               </div>
             </div>
-            <div v-else class="config-empty">未配置（无法用于回测）</div>
           </div>
         </div>
 
@@ -679,7 +678,9 @@ const scoreConfig = computed(() => configJson.value.score as { factors?: Record<
 const timingConfig = computed(() => configJson.value.timing as { factors?: Record<string, number>; transforms?: Record<string, string>; thresholds?: { offensive?: number; defensive?: number }; proxy_index_codes?: string[] } | undefined)
 const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string; missing_strategy?: string }> } | undefined)
 const rankConfig = computed(() => configJson.value.rank as { sort_by?: string; order?: string; top_n?: number; bottom_n?: number } | undefined)
-const portfolioConfig = computed(() => configJson.value.portfolio as { method?: string; timing_exposure?: Record<string, number>; default_exposure?: number } | undefined)
+const portfolioConfig = computed(() => (
+  configJson.value.portfolio ?? { method: 'equal_weight', default_exposure: 0.5 }
+) as { method?: string; timing_exposure?: Record<string, number>; default_exposure?: number })
 const riskConfig = computed(() => configJson.value.risk as { max_asset_weight?: number; max_portfolio_exposure?: number; min_cash_ratio?: number } | undefined)
 const rebalanceConfig = computed(() => configJson.value.rebalance as { frequency?: string; day_of_week?: number; day_of_month?: number } | undefined)
 

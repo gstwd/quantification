@@ -2,7 +2,7 @@
 
 覆盖 StrategyEngine 的核心逻辑：
 - 完整管线执行
-- 信号模式 vs 配置模式
+- 默认组合配置与显式组合配置
 - 择时集成
 """
 
@@ -48,12 +48,12 @@ def _make_context(
 class TestStrategyEngine:
     """策略引擎测试。"""
 
-    def test_signal_mode(self) -> None:
-        """无 portfolio 配置时：只输出得分和排名，无仓位。"""
+    def test_default_portfolio_config(self) -> None:
+        """缺失 portfolio 时兼容补充默认等权组合并输出仓位。"""
         engine = StrategyEngine()
         config = StrategyConfig(
-            strategy_id="test_signal",
-            display_name="测试信号策略",
+            strategy_id="test_default_portfolio",
+            display_name="测试默认组合策略",
             score=ScoreConfig(
                 factors={"momentum": 0.6, "valuation": 0.4},
             ),
@@ -72,16 +72,16 @@ class TestStrategyEngine:
 
         result = engine.run(config, context)
 
-        assert result.strategy_id == "test_signal"
+        assert result.strategy_id == "test_default_portfolio"
         assert result.timing is None
         assert len(result.scores) == 3
         assert len(result.rankings) == 3
-        assert result.positions == {}  # 无仓位
-        assert result.total_exposure == 0.0
-        assert result.cash_ratio == 1.0
+        assert len(result.positions) == 3
+        assert result.total_exposure == pytest.approx(0.5, abs=0.0001)
+        assert result.cash_ratio == pytest.approx(0.5, abs=0.0001)
 
-    def test_allocation_mode(self) -> None:
-        """配置模式：有 portfolio 配置，输出仓位。"""
+    def test_explicit_portfolio_config(self) -> None:
+        """显式组合配置按配置方法输出仓位。"""
         engine = StrategyEngine()
         config = StrategyConfig(
             strategy_id="test_alloc",

@@ -306,12 +306,11 @@ class StrategyConfigService:
             warnings.append("top_n 和 bottom_n 同时设置，top_n 优先")
 
         # 组合配置校验
-        if config.portfolio:
-            valid_methods = {"equal_weight", "score_weight", "winner_take_all"}
-            if config.portfolio.method not in valid_methods:
-                errors.append(
-                    f"权重分配方法 '{config.portfolio.method}' 不合法，可用: {valid_methods}"
-                )
+        valid_methods = {"equal_weight", "score_weight", "winner_take_all"}
+        if config.portfolio.method not in valid_methods:
+            errors.append(
+                f"权重分配方法 '{config.portfolio.method}' 不合法，可用: {valid_methods}"
+            )
 
         # 风控配置校验
         if config.risk:

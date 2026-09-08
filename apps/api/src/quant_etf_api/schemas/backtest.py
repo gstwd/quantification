@@ -125,9 +125,6 @@ class BacktestDailyResult(BaseModel):
         portfolio_return: 当日组合收益率（%）。
         cumulative_return: 累计收益率（%）。
         drawdown: 回撤（%）。
-        high_signal_count: HIGH 信号数量（信号模式）。
-        mid_signal_count: MID 信号数量（信号模式）。
-        low_signal_count: LOW 信号数量（信号模式）。
         timing_regime: 择时状态（资产配置模式）。
         total_exposure: 总仓位比例（资产配置模式）。
         cash_ratio: 现金比例（资产配置模式）。
@@ -143,9 +140,6 @@ class BacktestDailyResult(BaseModel):
     portfolio_return: float
     cumulative_return: float
     drawdown: float
-    high_signal_count: int = 0
-    mid_signal_count: int = 0
-    low_signal_count: int = 0
     timing_regime: str | None = None
     total_exposure: float | None = None
     cash_ratio: float | None = None
@@ -288,7 +282,7 @@ class ComparisonDailyPoint(BaseModel):
 
     相比 BacktestDailyResult：
     - 保留：trade_date, portfolio_return, cumulative_return, drawdown
-    - 移除：signal counts (high/mid/low), timing_regime, total_exposure,
+    - 移除：timing_regime, total_exposure,
       cash_ratio, positions (JSON dict 通常较大), benchmark_return, turnover
     """
 

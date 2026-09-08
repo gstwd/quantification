@@ -488,15 +488,6 @@ class BacktestDailyResultModel(Base):
     drawdown: Mapped[float] = mapped_column(
         Float, nullable=False, comment="当日回撤幅度，单位 %，负值"
     )
-    high_signal_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="当日 HIGH 信号指数数量"
-    )
-    mid_signal_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="当日 MID 信号指数数量"
-    )
-    low_signal_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="当日 LOW 信号指数数量"
-    )
     timing_regime: Mapped[str | None] = mapped_column(
         String(32), comment="择时状态：offensive/neutral/defensive（配置模式）"
     )

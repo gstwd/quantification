@@ -1,7 +1,7 @@
 """策略引擎核心数据结构：EngineContext 和 EngineResult。
 
 EngineContext 替代旧的 StrategyContextData，使用结构化字段取代无类型 dict。
-EngineResult 统一输出信号模式和配置模式的结果。
+EngineResult 统一输出策略评分、排名和目标仓位结果。
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ class EngineResult:
         timing: 择时信号，无择时配置时为 None。
         scores: 每资产综合得分，key=index_code。
         rankings: 资产排名列表（已排序）。
-        positions: 目标仓位权重，key=index_code。信号模式下为空 dict。
+        positions: 目标仓位权重，key=index_code；无入选资产时为空 dict。
         total_exposure: 总仓位比例。
         cash_ratio: 现金比例。
         strategy_results: 兼容旧接口的 StrategyResult 列表。

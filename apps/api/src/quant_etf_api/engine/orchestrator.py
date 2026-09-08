@@ -32,8 +32,7 @@ class StrategyEngine:
     """策略引擎编排器。
 
     执行管线：Timing → Score → Filter → Rank → Portfolio → Risk → Output。
-    无 portfolio 配置时为信号模式（只输出得分/排名），
-    有 portfolio 配置时为配置模式（输出仓位）。
+    组合模块始终构建目标仓位；若无资产入选，输出空仓计划。
     """
 
     def __init__(
@@ -129,55 +128,49 @@ class StrategyEngine:
         )
 
         # 5. 仓位分配（必选）
-        positions: dict[str, float] = {}
-        total_exposure = 0.0
-        cash_ratio = 1.0
-        if effective.portfolio:
-            allocator = build_allocator(effective.portfolio.method)
-            positions = allocator.allocate(effective.portfolio, rankings, timing)
-            pre_risk_positions = dict(positions)
+        allocator = build_allocator(effective.portfolio.method)
+        positions = allocator.allocate(effective.portfolio, rankings, timing)
+        pre_risk_positions = dict(positions)
 
-            # 6. 风控裁剪（可选）
-            if effective.risk:
-                positions = self._risk.apply_constraints(effective.risk, positions)
-                changed = {
-                    code
-                    for code in set(pre_risk_positions) | set(positions)
-                    if abs(pre_risk_positions.get(code, 0.0) - positions.get(code, 0.0)) > 1e-9
-                }
-                if changed:
-                    logger.info(
-                        "[pipeline] 风控裁剪: %s 调整 %s 个仓位 %s",
-                        strategy_tag,
-                        len(changed),
-                        sorted(changed)[:5],
-                    )
-                    logger.debug(
-                        "[pipeline] 风控明细: %s %s",
-                        strategy_tag,
-                        {
-                            k: (round(pre_risk_positions.get(k, 0.0), 4), round(v, 4))
-                            for k, v in positions.items()
-                        },
-                    )
+        # 6. 风控裁剪（可选）
+        if effective.risk:
+            positions = self._risk.apply_constraints(effective.risk, positions)
+            changed = {
+                code
+                for code in set(pre_risk_positions) | set(positions)
+                if abs(pre_risk_positions.get(code, 0.0) - positions.get(code, 0.0)) > 1e-9
+            }
+            if changed:
+                logger.info(
+                    "[pipeline] 风控裁剪: %s 调整 %s 个仓位 %s",
+                    strategy_tag,
+                    len(changed),
+                    sorted(changed)[:5],
+                )
+                logger.debug(
+                    "[pipeline] 风控明细: %s %s",
+                    strategy_tag,
+                    {
+                        k: (round(pre_risk_positions.get(k, 0.0), 4), round(v, 4))
+                        for k, v in positions.items()
+                    },
+                )
 
-            total_exposure = round(sum(positions.values()), 4)
-            cash_ratio = round(1.0 - total_exposure, 4)
-            logger.info(
-                "[pipeline] 组合构建: %s method=%s 持仓数=%s total_exposure=%s cash_ratio=%s",
-                strategy_tag,
-                effective.portfolio.method,
-                len(positions),
-                total_exposure,
-                cash_ratio,
-            )
-            logger.debug(
-                "[pipeline] 仓位明细: %s positions=%s",
-                strategy_tag,
-                {k: round(v, 4) for k, v in positions.items()},
-            )
-        else:
-            logger.info("[pipeline] 组合构建: %s 信号模式（无 portfolio 配置）", strategy_tag)
+        total_exposure = round(sum(positions.values()), 4)
+        cash_ratio = round(1.0 - total_exposure, 4)
+        logger.info(
+            "[pipeline] 组合构建: %s method=%s 持仓数=%s total_exposure=%s cash_ratio=%s",
+            strategy_tag,
+            effective.portfolio.method,
+            len(positions),
+            total_exposure,
+            cash_ratio,
+        )
+        logger.debug(
+            "[pipeline] 仓位明细: %s positions=%s",
+            strategy_tag,
+            {k: round(v, 4) for k, v in positions.items()},
+        )
 
         # 7. 构建兼容旧接口的 StrategyResult 列表（回测模式下跳过以提升性能）
         strategy_results: list[StrategyResult] = []
@@ -306,7 +299,6 @@ class StrategyEngine:
             level, label = determine_signal_level(
                 score=score,
                 target_weight=target_weight,
-                has_positions=bool(positions),
                 timing_regime=timing.regime if timing else None,
                 scoring_mode=config.score.scoring_mode,
             )

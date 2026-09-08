@@ -118,7 +118,7 @@ class RankConfig(BaseModel):
 
 
 class PortfolioConfig(BaseModel):
-    """组合构建配置（可选模块，缺失时为信号模式）。
+    """组合构建配置。
 
     Attributes:
         method: 权重分配方法，equal_weight / score_weight / winner_take_all。
@@ -192,7 +192,7 @@ class StrategyConfig(BaseModel):
         score: 评分配置（必填）。
         filters: 过滤配置，None 表示无过滤。
         rank: 排名配置。
-        portfolio: 组合配置，None 表示信号模式。
+        portfolio: 组合配置；兼容旧配置时缺失字段自动补为默认等权配置。
         risk: 风控配置，None 表示无风控。
         rebalance: 调仓配置，None 表示每日调仓。
         factor_params: 参数化因子的参数覆盖，key=factor_id, value=参数
@@ -221,7 +221,9 @@ class StrategyConfig(BaseModel):
     score: ScoreConfig
     filters: FilterConfig | None = None
     rank: RankConfig = Field(default_factory=RankConfig)
-    portfolio: PortfolioConfig | None = None
+    portfolio: PortfolioConfig = Field(
+        default_factory=lambda: PortfolioConfig(method="equal_weight"),
+    )
     risk: RiskConfig | None = None
     rebalance: RebalanceConfig | None = None
     regime_rules: dict[str, RegimeRuleConfig] = Field(

@@ -261,7 +261,7 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
     },
     portfolio: {
       label: '组合模块',
-      description: '配置权重分配方法，不启用时为"信号模式"（只输出得分/排名）。<br>启用后为"配置模式"（输出仓位分配方案）。<br>分配方法：等权分配（入选资产权重相同）或得分加权（按得分比例分配）。<br>择时仓位控制：不同 regime 下的总仓位上限（进攻默认 80%、中性 50%、防守 20%）。',
+      description: '配置权重分配方法，输出入选资产的目标仓位方案。<br>分配方法：等权分配（入选资产权重相同）或得分加权（按得分比例分配）。<br>择时仓位控制：不同 regime 下的总仓位上限（进攻默认 80%、中性 50%、防守 20%）。',
     },
     risk: {
       label: '风控模块',
