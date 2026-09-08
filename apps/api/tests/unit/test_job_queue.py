@@ -117,6 +117,22 @@ class TestJobQueue:
         assert first == second
         assert len(repo.jobs) == 1
 
+    def test_enqueue_with_status_reports_deduplicated_request(self) -> None:
+        """验证调用方可识别未新建的去重任务，避免遗留 pending 运行记录。"""
+        repo = FakeJobRepository()
+        queue = _make_queue(repo)
+
+        first_id, first_created = queue.enqueue_with_status(
+            "data_manage_operation", {"run_id": "run-1"}, job_key="data_manage:check:all:all"
+        )
+        second_id, second_created = queue.enqueue_with_status(
+            "data_manage_operation", {"run_id": "run-2"}, job_key="data_manage:check:all:all"
+        )
+
+        assert first_created is True
+        assert second_created is False
+        assert first_id == second_id
+
     def test_execute_success(self, monkeypatch) -> None:
         """处理器执行成功后任务应标记为 success。"""
         repo = FakeJobRepository()

@@ -91,8 +91,10 @@
           </div>
         </div>
         <div class="quality-actions">
-          <button class="btn-secondary" :disabled="taskActive" @click="triggerIncrementalFill">增量补数据</button>
-          <button class="btn-danger" :disabled="taskActive" @click="triggerRebuild">全量覆盖重拉</button>
+          <RouterLink
+            :to="{ path: '/data-management', query: { dataset: 'index_daily_bar', partition: props.indexCode } }"
+            class="btn-secondary"
+          >数据维护</RouterLink>
           <span v-if="taskMessage || taskStatus" class="task-status" :class="taskStatusClass">{{ taskStatusText }}</span>
         </div>
       </div>

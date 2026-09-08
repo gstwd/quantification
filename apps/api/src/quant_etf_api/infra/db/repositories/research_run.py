@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from quant_etf_api.infra.db.base import utcnow
@@ -38,6 +39,37 @@ class ResearchRunRepository(BaseRepository):
             .order_by(ResearchRunModel.started_at.desc())
             .limit(limit)
             .all()
+        )
+
+    def find_latest_successful_by_type_and_date(
+        self,
+        run_type: str,
+        trade_date: date,
+    ) -> ResearchRunModel | None:
+        """查询指定运行类型与交易日最近一次成功运行。
+
+        用于实时分配补算门控：判断某个交易日是否已经完成过因子计算，
+        避免浏览页面反复触发无结果的重复计算。
+
+        Args:
+            run_type: 运行类型，如 factor_computation。
+            trade_date: 交易日。
+
+        Returns:
+            最近一次成功运行记录，不存在时返回 None。
+        """
+        return (
+            self._db.query(ResearchRunModel)
+            .filter(
+                ResearchRunModel.run_type == run_type,
+                ResearchRunModel.trade_date == trade_date,
+                ResearchRunModel.status == "success",
+            )
+            .order_by(
+                ResearchRunModel.finished_at.desc().nullslast(),
+                ResearchRunModel.started_at.desc(),
+            )
+            .first()
         )
 
     def find_items_by_run_id(self, run_id: str) -> list[ResearchRunItemModel]:
@@ -80,6 +112,19 @@ class ResearchRunRepository(BaseRepository):
         if run is None:
             return
         run.status = "success"
+        run.finished_at = utcnow()
+        if metrics:
+            run.metrics = metrics
+        self._db.commit()
+
+    def mark_partial_success(self, run_id: str, metrics: dict[str, Any] | None = None) -> None:
+        """将运行标记为部分成功并记录已完成与失败子项。"""
+        if self._db.is_active is False:
+            self._db.rollback()
+        run = self.find_by_id(run_id)
+        if run is None:
+            return
+        run.status = "partial_success"
         run.finished_at = utcnow()
         if metrics:
             run.metrics = metrics
@@ -143,5 +188,11 @@ class ResearchRunRepository(BaseRepository):
             message=message or None,
             metrics=metrics,
         )
-        self._db.add(item)
-        self._db.commit()
+        try:
+            self._db.add(item)
+            self._db.commit()
+        except Exception:
+            # commit 失败后会话处于回滚待定状态，必须先回滚，
+            # 否则同一会话后续任何查询都会抛 PendingRollbackError。
+            self._db.rollback()
+            raise

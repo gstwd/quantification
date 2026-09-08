@@ -79,27 +79,10 @@
               {{ item.missing_day_count ?? '—' }}
             </td>
             <td class="action-cell">
-              <button
+              <RouterLink
+                :to="{ path: '/data-management', query: { dataset: 'stock_daily_close', partition: item.stock_code } }"
                 class="btn-mini"
-                :disabled="isRunning(item.stock_code)"
-                @click="runQuality(item.stock_code)"
-              >
-                {{ runningLabel(item.stock_code, 'stock_quality_check') || '质量检查' }}
-              </button>
-              <button
-                class="btn-mini"
-                :disabled="isRunning(item.stock_code)"
-                @click="runFill(item.stock_code)"
-              >
-                {{ runningLabel(item.stock_code, 'stock_data_fill') || '日线补全' }}
-              </button>
-              <button
-                class="btn-mini btn-danger"
-                :disabled="isRunning(item.stock_code)"
-                @click="runRebuild(item.stock_code)"
-              >
-                {{ runningLabel(item.stock_code, 'stock_data_rebuild') || '全量重拉' }}
-              </button>
+              >数据维护</RouterLink>
             </td>
           </tr>
         </tbody>
@@ -127,10 +110,11 @@
 <script setup lang="ts">
 /**
  * 个股数据列表页：展示个股元数据与日线质量快照，
- * 支持单股“质量检查 / 日线补全 / 全量重拉”，不提供批量操作入口。
+ * 单股维护统一由数据管理页承接，不提供批量操作入口。
  */
 
 import { onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 
 import { fetchIndustryIndexes, type IndustryIndexSummary } from '../api/industry'
 import { fetchRunDetail } from '../api/runs'

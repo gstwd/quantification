@@ -24,14 +24,7 @@
         ></span>
       </div>
       <div class="header-actions">
-        <button class="btn btn-ghost" :disabled="triggeringColdStart" @click="triggerColdStartFn">
-          <span class="btn-icon">↻</span>
-          {{ triggeringColdStart ? '执行中...' : '历史回补' }}
-        </button>
-        <button class="btn btn-primary" :disabled="triggering" @click="triggerIngest">
-          <span class="btn-icon">⚡</span>
-          {{ triggering ? '触发中...' : '数据摄取' }}
-        </button>
+        <RouterLink to="/data-management" class="btn btn-primary">数据管理</RouterLink>
       </div>
     </header>
 
@@ -331,16 +324,17 @@
       </template>
     </section>
 
-    <!-- 数据源状态 -->
-    <section v-if="systemStatus" class="section animate-in stagger-4">
+    <!-- 数据健康摘要 -->
+    <section v-if="dataHealth" class="section animate-in stagger-4">
       <div class="section-header">
-        <h2 class="section-title">数据源状态</h2>
+        <h2 class="section-title">数据健康</h2>
+        <RouterLink to="/data-management" class="link-accent section-link">管理全部数据 →</RouterLink>
       </div>
       <div class="source-grid">
-        <div v-for="src in systemStatus.data_sources" :key="src.table_name" class="source-card">
+        <div v-for="src in dataHealth.datasets" :key="src.dataset_key" class="source-card">
           <div class="source-top">
-            <div class="source-name">{{ src.source_name }}</div>
-            <div class="source-table mono">{{ src.table_name }}</div>
+            <div class="source-name">{{ src.display_name }}</div>
+            <div class="source-table mono" :title="formatHealthIssue(src)">{{ healthStatusText(src.health_status) }}</div>
           </div>
           <div class="source-stats">
             <div class="source-stat">
@@ -348,54 +342,13 @@
               <span class="source-stat-val">{{ src.record_count.toLocaleString() }}</span>
             </div>
             <div class="source-stat">
-              <span class="source-stat-label">最新日期</span>
-              <span class="source-stat-val">{{ src.latest_trade_date ?? '—' }}</span>
+              <span class="source-stat-label">实际 / 目标</span>
+              <span class="source-stat-val">{{ src.latest_date ?? '—' }} / {{ src.expected_date ?? '—' }}</span>
             </div>
             <div class="source-stat">
-              <span class="source-stat-label">最近入库</span>
-              <span class="source-stat-val mono">{{ formatTime(src.latest_ingested_at) }}</span>
+              <span class="source-stat-label">质量问题</span>
+              <span class="source-stat-val mono">{{ formatHealthIssue(src) }}</span>
             </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 数据质量 -->
-    <section class="section animate-in stagger-5">
-      <div class="section-header">
-        <h2 class="section-title">数据质量</h2>
-        <div class="section-header-right">
-          <span v-if="quality" class="section-badge">{{ formatTime(quality.checked_at) }} 检查</span>
-          <span v-if="qualityLoading" class="section-badge badge-pulse">检查中...</span>
-        </div>
-      </div>
-      <div v-if="qualityLoading" class="loading-state">
-        <div class="loading-spinner"></div>
-        <span>检查数据质量...</span>
-      </div>
-      <div v-else-if="quality" class="quality-grid">
-        <div
-          v-for="group in qualityGroups"
-          :key="group.key"
-          class="quality-card"
-          :class="{ 'quality-card-warn': staleCount(group.data) > 0 || missingCount(group.data) > 0 }"
-        >
-          <div class="quality-card-header">
-            <span class="quality-name">{{ group.label }}</span>
-            <span class="quality-ratio" :class="group.data.up_to_date === group.data.total ? 'ratio-ok' : 'ratio-warn'">
-              {{ group.data.up_to_date }}/{{ group.data.total }}
-            </span>
-          </div>
-          <div class="quality-date">最新: {{ group.data.latest_date ?? '—' }}</div>
-          <div v-if="group.data.stale.length" class="quality-issues">
-            <span class="issue-label warn">过期 {{ staleCount(group.data) }}</span>
-            <span v-for="item in group.data.stale.slice(0, 3)" :key="item.code" class="issue-item" :title="item.name + ' ' + item.latest_date">{{ item.code }}</span>
-            <span v-if="staleCount(group.data) > 3" class="issue-more">+{{ staleCount(group.data) - 3 }}</span>
-          </div>
-          <div v-if="group.data.missing.length" class="quality-issues">
-            <span class="issue-label danger">缺失 {{ missingCount(group.data) }}</span>
-            <span v-for="item in group.data.missing.slice(0, 3)" :key="item.code" class="issue-item" :title="item.name">{{ item.code }}</span>
-            <span v-if="missingCount(group.data) > 3" class="issue-more">+{{ missingCount(group.data) - 3 }}</span>
           </div>
         </div>
       </div>
@@ -452,21 +405,21 @@
 /**
  * 研究总览页面（合并自原 DashboardPage + DataStatusPage）。
  *
- * 展示平台统计概览、最新信号、数据源状态、数据质量、最近运行记录。
- * 支持手动触发数据摄取和历史回补。
+ * 展示平台统计概览、最新信号、数据健康、最近运行记录。
+ * 数据维护统一入口在"数据管理"页；本页只做状态浏览。
  */
 
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import type { DailySentimentResponse, DataFreshnessGroup, DataQualityResponse, MarketSynthesisResponse, StarredSummaryResponse, SystemStatusResponse, TagNewsItem } from '../types/api'
-import { fetchDataQuality, fetchSystemStatus, triggerColdStart, triggerDailyIngest } from '../api/runs'
+import type { DailySentimentResponse, DataManagementOverview, MarketSynthesisResponse, StarredSummaryResponse, SystemStatusResponse, TagNewsItem } from '../types/api'
+import { fetchSystemStatus } from '../api/runs'
 import { fetchDailySentiment, fetchMarketSynthesis, fetchPreviousTradingDay, fetchSentimentNews } from '../api/aiFactors'
 import { fetchStarredSummary } from '../api/strategies'
 import { useStrategyStore } from '../stores/strategies'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
-import { notifySkippedRun } from '../composables/useRunSkipToast'
+import { fetchDataManagementOverview } from '../api/dataManagement'
 
 /** 获取因子指标描述的快捷方法 */
 function fh(key: string): string {
@@ -474,12 +427,9 @@ function fh(key: string): string {
 }
 
 const systemStatus = ref<SystemStatusResponse | null>(null)
-const quality = ref<DataQualityResponse | null>(null)
+const dataHealth = ref<DataManagementOverview | null>(null)
 const statusLoading = ref(false)
-const qualityLoading = ref(false)
 const error = ref<string | null>(null)
-const triggering = ref(false)
-const triggeringColdStart = ref(false)
 
 const strategyStore = useStrategyStore()
 
@@ -567,28 +517,6 @@ async function loadSentimentOverview() {
   }
 }
 
-/** 数据质量分组配置 */
-const qualityGroups = computed(() => {
-  if (!quality.value) return []
-  return [
-    { key: 'index_bars', label: '指数日线', data: quality.value.index_bars },
-    { key: 'index_valuation', label: '指数估值', data: quality.value.index_valuation },
-    ...(quality.value.stock_bars ? [{ key: 'stock_bars', label: '个股日线', data: quality.value.stock_bars }] : []),
-    ...(quality.value.industry_bars ? [{ key: 'industry_bars', label: '行业日线', data: quality.value.industry_bars }] : []),
-  ]
-})
-
-/** 数据质量组的过期总数（大数据量表使用 *_total，其余回退数组长度） */
-function staleCount(group: DataFreshnessGroup): number {
-  return group.stale_total ?? group.stale.length
-}
-
-/** 数据质量组的缺失总数 */
-function missingCount(group: DataFreshnessGroup): number {
-  return group.missing_total ?? group.missing.length
-}
-
-
 /** 格式化 ISO 时间戳为简短中文友好格式（北京时间） */
 function formatTime(ts: string | null | undefined): string {
   if (!ts) return '—'
@@ -605,6 +533,8 @@ function formatTime(ts: string | null | undefined): string {
 function formatRunType(runType: string): string {
   const map: Record<string, string> = {
     daily_ingest: '日频入库',
+    data_sync_all: '全局数据同步',
+    data_manage_operation: '数据维护',
     strategy_run: '策略运行',
     cold_start: '历史回补',
     index_refresh: '指数数据刷新',
@@ -630,6 +560,8 @@ function formatStatus(status: string): string {
     pending: '待执行',
     running: '执行中',
     success: '成功',
+    partial_success: '部分成功',
+    skipped: '跳过',
     failed: '失败',
   }
   return map[status] ?? status
@@ -707,50 +639,46 @@ async function loadStatus() {
   }
 }
 
-/** 加载数据质量报告 */
-async function loadQuality() {
-  qualityLoading.value = true
+/** 将健康状态转换为总览使用的中文标签。 */
+function healthStatusText(status: string): string {
+  const labels: Record<string, string> = {
+    healthy: '健康', warning: '需关注', error: '异常', unknown: '检查中', unsupported: '不支持',
+  }
+  return labels[status] ?? status
+}
+
+/** 将健康快照中的结构化问题压缩为卡片可展示的说明。 */
+function formatHealthIssue(item: DataManagementOverview['datasets'][number]): string {
+  const summary = item.issue_summary
+  const lastError = summary?.last_error
+  if (typeof lastError === 'string') return lastError
+  const reasons = summary?.reasons
+  if (Array.isArray(reasons)) {
+    const labels: Record<string, string> = {
+      empty: '无数据', stale: '已过期', missing_dates: '有缺口',
+      invalid_values: '有异常值', warnings: '有告警',
+    }
+    const readable = reasons.filter((reason): reason is string => typeof reason === 'string')
+      .map((reason) => labels[reason] ?? reason)
+    if (readable.length > 0) return readable.join(' / ')
+  }
+  const warnings = summary?.warning_count
+  return `缺 ${item.missing_count} / 错 ${item.invalid_count}${typeof warnings === 'number' && warnings > 0 ? ` / 告 ${warnings}` : ''}`
+}
+
+/** 加载统一数据健康摘要。 */
+async function loadDataHealth(): Promise<void> {
   try {
-    quality.value = await fetchDataQuality()
+    dataHealth.value = await fetchDataManagementOverview()
   } catch {
-    // 数据质量检查失败不影响主页面
-  } finally {
-    qualityLoading.value = false
-  }
-}
-
-/** 触发全量历史回补（cold_start），完成后自动刷新 */
-async function triggerColdStartFn() {
-  triggeringColdStart.value = true
-  try {
-    const res = await triggerColdStart()
-    notifySkippedRun(res.run_id)
-    await Promise.all([loadStatus(), loadQuality()])
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : '触发历史回补失败'
-  } finally {
-    triggeringColdStart.value = false
-  }
-}
-
-/** 触发数据摄取，完成后自动刷新状态和质量 */
-async function triggerIngest() {
-  triggering.value = true
-  try {
-    const res = await triggerDailyIngest()
-    notifySkippedRun(res.run_id)
-    await Promise.all([loadStatus(), loadQuality()])
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : '触发摄取失败'
-  } finally {
-    triggering.value = false
+    // 数据管理服务未迁移或暂不可用时不影响研究总览其他内容
   }
 }
 
 onMounted(() =>
   Promise.all([
     loadStatus(),
-    loadQuality(),
+    loadDataHealth(),
     strategyStore.loadAll(),
     loadStarredSummary(),
     loadSentimentOverview(),
@@ -1545,6 +1473,9 @@ onMounted(() =>
 
 .status-success  { background: rgba(34, 197, 94, 0.12); color: var(--success); }
 .status-success .status-dot  { background: var(--success); }
+
+.status-partial_success { background: rgba(245, 158, 11, 0.12); color: var(--warning); }
+.status-partial_success .status-dot { background: var(--warning); }
 
 .status-failed   { background: rgba(239, 68, 68, 0.12); color: var(--danger); }
 .status-failed .status-dot   { background: var(--danger); }

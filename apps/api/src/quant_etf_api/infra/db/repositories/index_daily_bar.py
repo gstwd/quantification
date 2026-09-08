@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import and_, func
 
@@ -58,6 +58,30 @@ class IndexDailyBarRepository(BaseRepository):
             最新交易日，无任何行情数据时返回 None。
         """
         return self._db.query(func.max(IndexDailyBarModel.trade_date)).scalar()
+
+    def find_latest_ingested_at_for_date(
+        self,
+        trade_date: date,
+        index_codes: list[str] | None = None,
+    ) -> datetime | None:
+        """查询指定交易日日线的最新入库时间（可选限定指数范围）。
+
+        用于判断因子计算是否已覆盖最新落库的行情输入：若入库时间晚于
+        最近一次成功计算，说明重算仍可能产出新值，反之则重复计算无意义。
+
+        Args:
+            trade_date: 交易日。
+            index_codes: 指数代码列表，None 时查询全部。
+
+        Returns:
+            最新入库时间，无记录时返回 None。
+        """
+        query = self._db.query(func.max(IndexDailyBarModel.ingested_at)).filter(
+            IndexDailyBarModel.trade_date == trade_date
+        )
+        if index_codes:
+            query = query.filter(IndexDailyBarModel.index_code.in_(index_codes))
+        return query.scalar()
 
     def find_latest_trade_date_before(self, trade_date: date) -> date | None:
         """查询不超过指定日期的最大交易日。

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest import mock
 
+import quant_etf_api.services.strategy_decision_service as strategy_decision_service
 from quant_etf_api.engine.config import ScoreConfig, StrategyConfig
 from quant_etf_api.factors.base import MissingReason
 from quant_etf_api.schemas.strategy import StrategyValidationResult
@@ -38,6 +39,7 @@ class TestEnsureLiveFactors:
         """NOT_COMPUTED 与 INSUFFICIENT_DATA 应入队 factor_computation。"""
         db = mock.MagicMock()
         svc = StrategyDecisionService(db=db)
+        svc._is_factor_computation_current = mock.MagicMock(return_value=False)
         fake_queue = mock.MagicMock()
         monkeypatch.setattr("quant_etf_api.infra.job_queue.queue.get_job_queue", lambda: fake_queue)
 
@@ -58,10 +60,29 @@ class TestEnsureLiveFactors:
         assert payload == {"trade_date": "2025-01-15"}
         assert fake_queue.enqueue.call_args.kwargs["job_key"] == "factor_computation:2025-01-15"
 
+    def test_skips_when_computation_already_current(self, monkeypatch) -> None:
+        """该交易日已有成功计算且输入无更新时应跳过重复补算。"""
+        db = mock.MagicMock()
+        svc = StrategyDecisionService(db=db)
+        svc._is_factor_computation_current = mock.MagicMock(return_value=True)
+        fake_queue = mock.MagicMock()
+        monkeypatch.setattr("quant_etf_api.infra.job_queue.queue.get_job_queue", lambda: fake_queue)
+
+        context = _make_context()
+        svc._context_builder.detect_missing_factors = mock.MagicMock(
+            return_value={"pe_percentile": MissingReason.INSUFFICIENT_DATA.value}
+        )
+
+        triggered = svc.ensure_live_factors(_make_config(), context)
+
+        assert triggered == []
+        fake_queue.enqueue.assert_not_called()
+
     def test_skips_factor_unknown(self, monkeypatch) -> None:
         """FACTOR_UNKNOWN 不应触发补算（配置校验期快速失败兜底）。"""
         db = mock.MagicMock()
         svc = StrategyDecisionService(db=db)
+        svc._is_factor_computation_current = mock.MagicMock(return_value=False)
         fake_queue = mock.MagicMock()
         monkeypatch.setattr("quant_etf_api.infra.job_queue.queue.get_job_queue", lambda: fake_queue)
 
@@ -79,6 +100,7 @@ class TestEnsureLiveFactors:
         """因子全部可用时不应入队。"""
         db = mock.MagicMock()
         svc = StrategyDecisionService(db=db)
+        svc._is_factor_computation_current = mock.MagicMock(return_value=False)
         fake_queue = mock.MagicMock()
         monkeypatch.setattr("quant_etf_api.infra.job_queue.queue.get_job_queue", lambda: fake_queue)
 
@@ -89,6 +111,61 @@ class TestEnsureLiveFactors:
 
         assert triggered == []
         fake_queue.enqueue.assert_not_called()
+
+
+class TestFactorComputationFreshnessGate:
+    """因子补算门控（结果是否已覆盖最新输入）测试。"""
+
+    def test_false_when_no_successful_run(self) -> None:
+        """从未成功计算过时应放行补算。"""
+        db = mock.MagicMock()
+        run_repo = mock.MagicMock()
+        run_repo.find_latest_successful_by_type_and_date.return_value = None
+        svc = StrategyDecisionService(db=db, run_repo=run_repo)
+
+        assert svc._is_factor_computation_current(date(2025, 1, 15), ["000300"]) is False
+
+    def test_false_when_new_input_arrived_after_last_run(self, monkeypatch) -> None:
+        """成功计算之后又有新输入入库时应放行重算。"""
+        db = mock.MagicMock()
+        run_repo = mock.MagicMock()
+        run_repo.find_latest_successful_by_type_and_date.return_value = SimpleNamespace(
+            finished_at=datetime(2025, 1, 15, 10, 0)
+        )
+        svc = StrategyDecisionService(db=db, run_repo=run_repo)
+        bar_repo = mock.MagicMock()
+        bar_repo.find_latest_ingested_at_for_date.return_value = datetime(2025, 1, 16, 9, 0)
+        valuation_repo = mock.MagicMock()
+        valuation_repo.find_latest_ingested_at_for_date.return_value = None
+        monkeypatch.setattr(
+            strategy_decision_service, "IndexDailyBarRepository", lambda _db: bar_repo
+        )
+        monkeypatch.setattr(
+            strategy_decision_service, "IndexValuationRepository", lambda _db: valuation_repo
+        )
+
+        assert svc._is_factor_computation_current(date(2025, 1, 15), ["000300"]) is False
+
+    def test_true_when_last_run_after_inputs(self, monkeypatch) -> None:
+        """成功计算晚于输入入库时应视为已覆盖并跳过补算。"""
+        db = mock.MagicMock()
+        run_repo = mock.MagicMock()
+        run_repo.find_latest_successful_by_type_and_date.return_value = SimpleNamespace(
+            finished_at=datetime(2025, 1, 16, 10, 0)
+        )
+        svc = StrategyDecisionService(db=db, run_repo=run_repo)
+        bar_repo = mock.MagicMock()
+        bar_repo.find_latest_ingested_at_for_date.return_value = datetime(2025, 1, 15, 9, 0)
+        valuation_repo = mock.MagicMock()
+        valuation_repo.find_latest_ingested_at_for_date.return_value = None
+        monkeypatch.setattr(
+            strategy_decision_service, "IndexDailyBarRepository", lambda _db: bar_repo
+        )
+        monkeypatch.setattr(
+            strategy_decision_service, "IndexValuationRepository", lambda _db: valuation_repo
+        )
+
+        assert svc._is_factor_computation_current(date(2025, 1, 15), ["000300"]) is True
 
 
 class TestRunAllocation:

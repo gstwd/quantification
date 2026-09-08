@@ -110,6 +110,19 @@ def _enqueue_for_run(
             {"run_id": run_id, "industry_code": (params or {}).get("industry_code", "")},
             job_key=f"industry_data_rebuild:{(params or {}).get('industry_code', '')}",
         )
+    elif run_type == "data_sync_all":
+        queue.enqueue("data_sync_all", {"run_id": run_id}, job_key="data_sync_all")
+    elif run_type == "data_manage_operation":
+        operation_params = params or {}
+        queue.enqueue(
+            "data_manage_operation",
+            {"run_id": run_id, **operation_params},
+            job_key=(
+                f"data_manage:{operation_params.get('operation', 'check')}:"
+                f"{operation_params.get('dataset_key', 'all')}:"
+                f"{operation_params.get('partition_key', 'all')}"
+            ),
+        )
     else:
         return False
     return True
@@ -361,17 +374,20 @@ def retry_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     detail = svc.get_run_detail(run_id)
     if detail is None:
         raise HTTPException(status_code=404, detail=f"运行记录不存在: {run_id}")
-    if detail.status not in ("failed", "success"):
+    if detail.status not in ("failed", "partial_success", "success"):
         raise HTTPException(
             status_code=400, detail=f"只能重试已完成的运行记录，当前状态: {detail.status}"
         )
 
     # 创建新的 run 并入队对应后台任务
     new_summary = svc.create_run(
-        detail.run_type, detail.strategy_id, detail.trade_date or date.today()
+        detail.run_type,
+        detail.strategy_id,
+        detail.trade_date or today_cn(),
+        params=detail.params,
     )
 
-    trade_date = new_summary.trade_date or date.today()
+    trade_date = new_summary.trade_date or today_cn()
     if not _enqueue_for_run(
         detail.run_type, new_summary.run_id, detail.strategy_id, detail.params, trade_date
     ):

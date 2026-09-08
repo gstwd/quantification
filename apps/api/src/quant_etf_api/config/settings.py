@@ -20,9 +20,9 @@ class Settings(BaseSettings):
     )
 
     # 定时调度
-    schedule_enabled: bool = Field(default=True, description="是否启用每日收盘后自动数据摄取")
+    schedule_enabled: bool = Field(default=True, description="是否启用每日自动全局数据同步")
     schedule_time: str = Field(
-        default="02:30", description="每日自动摄取触发时间（HH:MM），默认收盘后 02:30"
+        default="17:30", description="每日全局数据自动同步触发时间（HH:MM），默认收盘后 17:30"
     )
     ai_analysis_enabled: bool = Field(
         default=True, description="是否在日频调度中自动触发 AI 舆情分析"

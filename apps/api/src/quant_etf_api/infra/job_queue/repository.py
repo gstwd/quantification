@@ -86,6 +86,29 @@ class JobRepository:
         finally:
             db.close()
 
+    def find_active_payload_by_key(self, job_key: str) -> dict | None:
+        """查询去重任务的载荷，用于关联其所属运行记录。
+
+        Args:
+            job_key: 去重键。
+
+        Returns:
+            未完成任务的载荷副本；不存在时返回 None。
+        """
+        db = self._session_factory()
+        try:
+            row = (
+                db.query(BackgroundJobModel)
+                .filter(
+                    BackgroundJobModel.job_key == job_key,
+                    BackgroundJobModel.status.in_(["pending", "running"]),
+                )
+                .first()
+            )
+            return dict(row.payload or {}) if row is not None else None
+        finally:
+            db.close()
+
     def claim_pending(self, limit: int = 1) -> list[ClaimedJob]:
         """原子认领待执行任务，置为 running 并累计尝试次数。
 

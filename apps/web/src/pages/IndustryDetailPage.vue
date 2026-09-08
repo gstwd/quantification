@@ -99,15 +99,10 @@
         </div>
         <div v-else class="chart-placeholder">质量数据加载失败或无数据</div>
         <div class="quality-actions">
-          <button class="btn-secondary" :disabled="taskActive" @click="triggerTask('industry_data_fill')">
-            {{ taskRunning('industry_data_fill', '日线补全') }}
-          </button>
-          <button class="btn-secondary" :disabled="taskActive" @click="triggerTask('industry_quality_check')">
-            {{ taskRunning('industry_quality_check', '质量检查') }}
-          </button>
-          <button class="btn-danger" :disabled="taskActive" @click="triggerTask('industry_data_rebuild')">
-            {{ taskRunning('industry_data_rebuild', '全量重拉') }}
-          </button>
+          <RouterLink
+            :to="{ path: '/data-management', query: { dataset: 'industry_daily_bar', partition: props.industryCode } }"
+            class="btn-secondary"
+          >数据维护</RouterLink>
           <span v-if="taskMessage || taskStatus" class="task-status" :class="taskStatusClass">
             {{ taskMessage || taskStatusText }}
           </span>
@@ -156,7 +151,7 @@
  * 申万一级行业详情页。
  *
  * 展示行业基本信息、数据质量快照（含 OHLC/change_pct 字段完整性）与
- * K 线图；支持单行业“质量检查 / 日线补全 / 全量重拉”，并链向 RRG 调试页。
+ * K 线图；单行业维护统一由数据管理页承接，并链向 RRG 调试页。
  */
 
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'

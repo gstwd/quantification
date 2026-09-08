@@ -2,12 +2,10 @@
   <div class="page">
     <div class="page-header">
       <h1 class="page-title">宏观指标</h1>
-      <button class="btn-secondary" :disabled="refreshing" @click="handleRefreshData">{{ refreshing ? '刷新中...' : '刷新数据' }}</button>
+      <RouterLink to="/data-management?dataset=macro_indicator" class="btn-secondary">维护数据</RouterLink>
     </div>
 
     <!-- 刷新提示 -->
-    <div v-if="refreshMsg" class="refresh-banner" :class="refreshOk ? 'banner-ok' : 'banner-err'">{{ refreshMsg }}</div>
-
     <div v-if="loading" class="loading">加载中...</div>
     <template v-else>
       <!-- CPI -->
@@ -48,13 +46,12 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { RouterLink } from 'vue-router'
 
-import { triggerMacroRefresh } from '../api/runs'
 import { fetchMacroIndicator } from '../api/market_data'
 import type { MacroIndicator } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
-import { notifySkippedRun } from '../composables/useRunSkipToast'
 
 /** 获取宏观指标描述的快捷方法 */
 function macroHelp(key: string): string {
@@ -66,9 +63,6 @@ const pmi = ref<MacroIndicator[]>([])
 const lpr1y = ref<MacroIndicator[]>([])
 const lpr5y = ref<MacroIndicator[]>([])
 const loading = ref(true)
-const refreshing = ref(false)
-const refreshMsg = ref('')
-const refreshOk = ref(true)
 
 const cpiChartEl = ref<HTMLElement | null>(null)
 const pmiChartEl = ref<HTMLElement | null>(null)
@@ -79,25 +73,6 @@ let cpiChart: any = null
 let pmiChart: any = null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let lprChart: any = null
-
-/** 触发宏观数据刷新 */
-async function handleRefreshData() {
-  refreshing.value = true
-  refreshMsg.value = ''
-  try {
-    const res = await triggerMacroRefresh()
-    notifySkippedRun(res.run_id)
-    await loadData()
-    refreshMsg.value = `宏观数据刷新完成 (${res.run_id.slice(0, 8)}…)`
-    refreshOk.value = true
-  } catch {
-    refreshMsg.value = '触发失败，请重试'
-    refreshOk.value = false
-  } finally {
-    refreshing.value = false
-    setTimeout(() => { refreshMsg.value = '' }, 5000)
-  }
-}
 
 async function loadData() {
   try {

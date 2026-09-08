@@ -66,10 +66,28 @@ class JobQueue:
         Returns:
             任务 ID（已存在时返回既有任务 ID）。
         """
+        job_id, _ = self.enqueue_with_status(
+            job_type, payload, job_key, priority, max_attempts
+        )
+        return job_id
+
+    def enqueue_with_status(
+        self,
+        job_type: str,
+        payload: dict | None = None,
+        job_key: str | None = None,
+        priority: int = 0,
+        max_attempts: int = 1,
+    ) -> tuple[str, bool]:
+        """入队并返回任务是否由本次请求新建。
+
+        调用方在创建 research_run 后可据此把未实际入队的运行标记为跳过，
+        防止任务去重后遗留永远 pending 的运行记录。
+        """
         if job_key:
             existing = self._repo.find_active_by_key(job_key)
             if existing is not None:
-                return existing
+                return existing, False
 
         job_id = str(uuid4())
         job = BackgroundJobModel(
@@ -89,9 +107,13 @@ class JobQueue:
             if job_key:
                 existing = self._repo.find_active_by_key(job_key)
                 if existing is not None:
-                    return existing
+                    return existing, False
             raise
-        return job_id
+        return job_id, True
+
+    def find_active_payload(self, job_key: str) -> dict | None:
+        """返回指定去重键当前运行任务的载荷副本。"""
+        return self._repo.find_active_payload_by_key(job_key)
 
     def start(self) -> None:
         """启动固定数量的 worker 线程。"""

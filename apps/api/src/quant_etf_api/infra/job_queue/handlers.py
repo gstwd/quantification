@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import date
+from typing import Any
 
 from quant_etf_api.infra.time import today_cn
 
@@ -266,6 +267,104 @@ def handle_data_fill(payload: dict) -> None:
         db.close()
 
 
+def handle_data_management_operation(payload: dict) -> dict[str, Any]:
+    """执行统一数据管理操作并按子数据集结果维护运行状态。"""
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.services.data_management_service import DataManagementService
+    from quant_etf_api.services.run_service import RunService
+
+    run_id = str(payload.get("run_id") or "")
+    db = SessionLocal()
+    try:
+        run_svc = RunService(db)
+        run_svc.mark_running(run_id)
+        result = DataManagementService(db).execute(
+            str(payload.get("operation") or "check"),
+            payload.get("dataset_key"),
+            payload.get("partition_key"),
+            run_id,
+            force=bool(payload.get("force")),
+        )
+        if result["status"] == "success":
+            run_svc.mark_success(run_id, metrics=result)
+        elif result["status"] == "partial_success":
+            run_svc.mark_partial_success(run_id, metrics=result)
+        else:
+            run_svc.mark_failed(run_id, "所有数据集维护操作均失败")
+        return result
+    except Exception as exc:
+        logger.exception("统一数据管理任务异常: run_id=%s", run_id)
+        db.rollback()
+        RunService(db).mark_failed(run_id, f"数据管理异常: {type(exc).__name__}: {exc}")
+        raise
+    finally:
+        db.close()
+
+
+def handle_data_sync_all(payload: dict) -> None:
+    """执行每日全局同步并驱动后续因子链路。
+
+    同步完成后：行业日线/成分/个股收盘三项关键输入全部成功时按库内实际
+    最新行业交易日入队行业面板因子；指数日线或估值有新记录时按实际最新
+    指数交易日入队通用因子计算。
+    """
+    result = handle_data_management_operation({**payload, "operation": "sync_latest"})
+    try:
+        from sqlalchemy import func
+
+        from quant_etf_api.infra.db.base import SessionLocal
+        from quant_etf_api.infra.db.models.core import IndexDailyBarModel
+        from quant_etf_api.infra.db.models.industry import IndustryDailyBarModel
+        from quant_etf_api.infra.job_queue.queue import get_job_queue
+
+        items = {item["dataset_key"]: item for item in result["items"]}
+        critical_inputs = {"industry_daily_bar", "industry_membership", "stock_daily_close"}
+        db = SessionLocal()
+        try:
+            industry_bar_records = int(items.get("industry_daily_bar", {}).get("records") or 0)
+            industry_close_records = int(items.get("stock_daily_close", {}).get("records") or 0)
+            if (
+                all(items.get(key, {}).get("status") == "success" for key in critical_inputs)
+                and (industry_bar_records > 0 or industry_close_records > 0)
+            ):
+                latest_industry = db.query(func.max(IndustryDailyBarModel.trade_date)).scalar()
+                if latest_industry is not None:
+                    get_job_queue().enqueue(
+                        "industry_factor_compute",
+                        {"trade_date": latest_industry.isoformat()},
+                        job_key=f"industry_factor_compute:{latest_industry.isoformat()}",
+                    )
+            else:
+                failed = [
+                    key for key in critical_inputs
+                    if items.get(key, {}).get("status") != "success"
+                ]
+                logger.warning("全局同步未满足行业因子前置数据（%s），跳过行业因子计算", ",".join(failed))
+
+            bar_item = items.get("index_daily_bar", {})
+            valuation_item = items.get("index_valuation", {})
+            if (
+                bar_item.get("status") == "success"
+                and valuation_item.get("status") == "success"
+                and (
+                    int(bar_item.get("records") or 0) > 0
+                    or int(valuation_item.get("records") or 0) > 0
+                )
+            ):
+                data_date = db.query(func.max(IndexDailyBarModel.trade_date)).scalar()
+                if data_date is not None:
+                    get_job_queue().enqueue(
+                        "factor_computation",
+                        {"trade_date": data_date.isoformat()},
+                        job_key=f"factor_computation:{data_date.isoformat()}",
+                    )
+        finally:
+            db.close()
+    except Exception:
+        # 同步本身已成功并落库，后续因子入队失败不应把运行改写为失败
+        logger.exception("全局同步完成，但后续因子任务入队失败")
+
+
 def handle_factor_computation(payload: dict) -> None:
     """执行指定交易日的因子计算并入库。"""
     from quant_etf_api.infra.db.base import SessionLocal
@@ -337,6 +436,28 @@ def handle_industry_daily_ingest(payload: dict) -> None:
                 "stock_snapshot_error": bool(snapshot_error),
             }
         RunService(db).mark_success(run_id, metrics=_json_safe(result))
+        # 行业凌晨补拉会补齐前一日缺口；结束后入队全局质量检查，
+        # 让统一健康快照在早上即反映补拉后的真实状态（幂等去重）。
+        try:
+            check_db = SessionLocal()
+            try:
+                check_run = RunService(check_db).create_run(
+                    "data_manage_operation", None, today_cn(), params={"operation": "check"}
+                )
+                _, check_created = get_job_queue().enqueue_with_status(
+                    "data_manage_operation",
+                    {"run_id": check_run.run_id, "operation": "check"},
+                    job_key="data_manage:check:all:all",
+                )
+                if not check_created:
+                    RunService(check_db).mark_skipped(
+                        check_run.run_id,
+                        {"reason": "已有健康检查任务正在执行"},
+                    )
+            finally:
+                check_db.close()
+        except Exception:
+            logger.warning("行业日频摄取后健康检查入队失败", exc_info=True)
     except Exception as e:
         logger.exception("行业日频摄取任务异常: run_id=%s", run_id)
         db.rollback()
@@ -586,6 +707,8 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "backtest": handle_backtest,
     "comparison": handle_comparison,
     "data_fill": handle_data_fill,
+    "data_manage_operation": handle_data_management_operation,
+    "data_sync_all": handle_data_sync_all,
     "factor_computation": handle_factor_computation,
     "warm_calendar": handle_warm_calendar,
     "industry_daily_ingest": handle_industry_daily_ingest,

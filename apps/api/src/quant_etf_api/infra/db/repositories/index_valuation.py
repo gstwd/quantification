@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import and_, func
 
@@ -75,6 +75,29 @@ class IndexValuationRepository(BaseRepository):
             .filter(IndexValuationModel.index_code == code)
             .scalar()
         )
+
+    def find_latest_ingested_at_for_date(
+        self,
+        trade_date: date,
+        index_codes: list[str] | None = None,
+    ) -> datetime | None:
+        """查询指定交易日估值的最新入库时间（可选限定指数范围）。
+
+        与日线仓库的同名方法配套，供因子补算门控判断输入数据是否已更新。
+
+        Args:
+            trade_date: 交易日。
+            index_codes: 指数代码列表，None 时查询全部。
+
+        Returns:
+            最新入库时间，无记录时返回 None。
+        """
+        query = self._db.query(func.max(IndexValuationModel.ingested_at)).filter(
+            IndexValuationModel.trade_date == trade_date
+        )
+        if index_codes:
+            query = query.filter(IndexValuationModel.index_code.in_(index_codes))
+        return query.scalar()
 
     def get_date_range(self, code: str) -> tuple[date | None, date | None]:
         """获取某指数估值的最早和最晚日期。"""

@@ -159,6 +159,32 @@ class RunService:
             for item in items
         ]
 
+    def add_item(
+        self,
+        run_id: str,
+        item_key: str,
+        status: str,
+        message: str | None = None,
+        metrics: dict | None = None,
+    ) -> None:
+        """写入一条运行明细。
+
+        ``research_run_item.index_code`` 是历史字段名；统一数据管理将其
+        作为通用明细键保存数据集键，避免绕过服务层直接访问仓库。
+
+        Args:
+            run_id: 父运行记录 ID。
+            item_key: 明细对象键，例如数据集键或指数代码。
+            status: 明细执行状态。
+            message: 可选失败或跳过原因。
+            metrics: 可选结构化指标。
+        """
+        try:
+            self._run_repo.add_item(run_id, item_key, status, message, metrics)
+        except Exception:
+            self._db.rollback()
+            logger.warning("add_item 写入失败: run_id=%s, item_key=%s", run_id, item_key, exc_info=True)
+
     def mark_running(self, run_id: str) -> None:
         """将指定运行标记为执行中状态。
 
@@ -181,6 +207,18 @@ class RunService:
             self._run_repo.mark_success(run_id, metrics)
         except Exception:
             logger.warning("mark_success 更新失败", exc_info=True)
+
+    def mark_partial_success(self, run_id: str, metrics: dict | None = None) -> None:
+        """将指定运行标记为部分成功状态。
+
+        Args:
+            run_id: 运行 ID。
+            metrics: 已完成与失败子项的汇总指标。
+        """
+        try:
+            self._run_repo.mark_partial_success(run_id, metrics)
+        except Exception:
+            logger.warning("mark_partial_success 更新失败", exc_info=True)
 
     def mark_failed(self, run_id: str, error_message: str) -> None:
         """将指定运行标记为失败状态。

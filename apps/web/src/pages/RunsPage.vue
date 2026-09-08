@@ -41,7 +41,7 @@
               <td class="text-muted">{{ formatTime(item.started_at) }}</td>
               <td>
                 <button
-                  v-if="item.status === 'failed'"
+                  v-if="item.status === 'failed' || item.status === 'partial_success'"
                   class="btn btn-sm btn-accent"
                   :disabled="retryingId === item.run_id"
                   @click.stop="handleRetry(item.run_id)"
@@ -171,6 +171,7 @@ function statusLabel(status: string): string {
     pending: '待执行',
     running: '执行中',
     success: '成功',
+    partial_success: '部分成功',
     skipped: '已跳过',
     failed: '失败',
     completed: '完成',
@@ -362,6 +363,7 @@ onMounted(async () => {
 .status-pending { background: rgba(148,163,184,0.15); color: var(--text-muted); }
 .status-running { background: rgba(59,130,246,0.15); color: #60a5fa; }
 .status-success { background: rgba(34,197,94,0.15); color: var(--success); }
+.status-partial_success { background: rgba(245,158,11,0.15); color: var(--warning); }
 .status-failed { background: rgba(239,68,68,0.15); color: var(--danger); }
 .status-completed { background: rgba(34,197,94,0.15); color: var(--success); }
 .status-skipped { background: rgba(148,163,184,0.1); color: var(--text-muted); }

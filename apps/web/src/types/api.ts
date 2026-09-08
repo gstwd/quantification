@@ -126,6 +126,80 @@ export interface DataQualityResponse {
   checked_at: string
 }
 
+// =============================================================================
+// 统一数据管理
+// =============================================================================
+
+/** 受管逻辑数据集的当前健康摘要。 */
+export interface DataSetHealthSummary {
+  dataset_key: string
+  display_name: string
+  frequency: string
+  partition_label: string | null
+  source_label: string
+  source_name: string | null
+  supported_operations: string[]
+  health_status: 'healthy' | 'warning' | 'error' | 'unknown' | 'unsupported'
+  earliest_date: string | null
+  latest_date: string | null
+  expected_date: string | null
+  record_count: number
+  missing_count: number
+  invalid_count: number
+  issue_summary: Record<string, unknown> | null
+  last_run_id: string | null
+  last_run_status: string | null
+  last_checked_at: string | null
+  last_synced_at: string | null
+  last_success_at: string | null
+}
+
+/** 单个可维护数据分区的当前健康状态。 */
+export interface DataPartitionHealth extends DataSetHealthSummary {
+  partition_key: string
+  partition_name: string | null
+}
+
+/** 数据集详情及其分区分页响应。 */
+export interface DataSetDetailResponse {
+  dataset: DataSetHealthSummary
+  quality_rules: string[]
+  items: DataPartitionHealth[]
+  total: number
+  offset: number
+  limit: number
+}
+
+/** 数据管理首页总览。 */
+export interface DataManagementOverview {
+  schedule_time: string
+  datasets: DataSetHealthSummary[]
+  healthy_count: number
+  warning_count: number
+  error_count: number
+  unknown_count: number
+}
+
+/** 数据维护操作名称。 */
+export type DataManagementOperation = 'sync_latest' | 'check' | 'repair_gaps' | 'rebuild'
+
+/** 提交数据维护操作的请求体。 */
+export interface DataManagementOperationRequest {
+  operation: DataManagementOperation
+  dataset_key?: string
+  partition_key?: string
+  force?: boolean
+  confirmation_token?: string
+}
+
+/** 数据维护任务已入队响应。 */
+export interface DataManagementOperationAccepted {
+  status: string
+  run_id: string
+  run_type: string
+  operation: DataManagementOperation
+}
+
 export interface DailyBar {
   trade_date: string
   code: string

@@ -6,14 +6,12 @@
         <span class="count-badge">{{ summaries.length }} 个</span>
       </div>
       <div class="header-actions">
-        <button class="btn-secondary" :disabled="refreshing" @click="handleRefreshData">{{ refreshing ? '刷新中...' : '刷新数据' }}</button>
+        <RouterLink to="/data-management?dataset=index_daily_bar" class="btn-secondary">维护数据</RouterLink>
         <button class="btn-add" @click="openAddModal">+ 添加指数</button>
       </div>
     </div>
 
     <!-- 刷新提示 -->
-    <div v-if="refreshMsg" class="refresh-banner" :class="refreshOk ? 'banner-ok' : 'banner-err'">{{ refreshMsg }}</div>
-
     <div v-if="loading" class="loading">加载中...</div>
     <div v-else-if="summaries.length === 0" class="empty">暂无指数数据</div>
     <div v-else class="table-wrap">
@@ -98,8 +96,8 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 
-import { triggerIndexRefresh } from '../api/runs'
 import {
   createIndex,
   deleteIndex,
@@ -119,28 +117,6 @@ function factorHelp(key: string): string {
 
 const summaries = ref<IndexSummary[]>([])
 const loading = ref(false)
-const refreshing = ref(false)
-const refreshMsg = ref('')
-const refreshOk = ref(true)
-
-/** 触发指数数据刷新 */
-async function handleRefreshData() {
-  refreshing.value = true
-  refreshMsg.value = ''
-  try {
-    const res = await triggerIndexRefresh()
-    await loadIndexes()
-    refreshMsg.value = `指数数据刷新完成 (${res.run_id.slice(0, 8)}…)`
-    refreshOk.value = true
-  } catch {
-    refreshMsg.value = '触发失败，请重试'
-    refreshOk.value = false
-  } finally {
-    refreshing.value = false
-    setTimeout(() => { refreshMsg.value = '' }, 5000)
-  }
-}
-
 /** 加载指数汇总数据（单次请求替代原有的 1+2N 次请求） */
 async function loadIndexes() {
   loading.value = true

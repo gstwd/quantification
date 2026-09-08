@@ -54,7 +54,10 @@ class BenchmarkIndexModel(Base):
 
 class IndexDailyBarModel(Base):
     __tablename__ = "index_daily_bar"
-    __table_args__ = (UniqueConstraint("trade_date", "index_code", name="uq_index_daily_bar"),)
+    __table_args__ = (
+        UniqueConstraint("trade_date", "index_code", name="uq_index_daily_bar"),
+        Index("ix_index_daily_bar_code_date", "index_code", "trade_date"),
+    )
 
     id: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True, comment="自增主键"
@@ -378,7 +381,9 @@ class ResearchRunItemModel(Base):
         comment="所属运行 ID，外键关联 research_run",
     )
     index_code: Mapped[str] = mapped_column(
-        String(16), nullable=False, comment="处理的指数代码"
+        String(64),
+        nullable=False,
+        comment="处理的标的代码；数据管理运行明细复用为数据集/分区键",
     )
     status: Mapped[str] = mapped_column(
         String(32),
@@ -612,7 +617,10 @@ class IndexValuationModel(Base):
     """
 
     __tablename__ = "index_valuation"
-    __table_args__ = (UniqueConstraint("trade_date", "index_code", name="uq_index_valuation"),)
+    __table_args__ = (
+        UniqueConstraint("trade_date", "index_code", name="uq_index_valuation"),
+        Index("ix_index_valuation_code_date", "index_code", "trade_date"),
+    )
 
     id: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True, comment="自增主键"
@@ -821,6 +829,50 @@ class TradingCalendarModel(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, comment="记录创建时间（UTC）"
+    )
+
+
+class DataHealthSnapshotModel(Base):
+    """数据管理体系的当前健康快照。
+
+    每行对应一个逻辑数据集或其一个可维护分区。分区为空串表示数据集级
+    汇总行；本表只保留当前状态，历史操作与故障仍由 research_run 追溯。
+    """
+
+    __tablename__ = "data_health_snapshot"
+    __table_args__ = (
+        UniqueConstraint("dataset_key", "partition_key", name="uq_data_health_snapshot_scope"),
+        Index("ix_data_health_snapshot_dataset", "dataset_key"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="自增主键"
+    )
+    dataset_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="静态数据集键，如 index_daily_bar"
+    )
+    partition_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="", server_default="", comment="分区键，空串表示汇总"
+    )
+    partition_name: Mapped[str | None] = mapped_column(String(128), comment="分区展示名称")
+    health_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="unknown", comment="healthy/warning/error/unknown/unsupported"
+    )
+    source_name: Mapped[str | None] = mapped_column(String(128), comment="最近实际提供数据的来源")
+    earliest_date: Mapped[date | None] = mapped_column(Date, comment="库内最早业务日期")
+    latest_date: Mapped[date | None] = mapped_column(Date, comment="库内最新业务日期")
+    expected_date: Mapped[date | None] = mapped_column(Date, comment="按数据集规则计算的目标日期")
+    record_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="记录数量")
+    missing_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="缺口数量")
+    invalid_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="字段异常数量")
+    issue_summary: Mapped[dict | None] = mapped_column(JSON, comment="当前问题摘要与样例")
+    last_run_id: Mapped[str | None] = mapped_column(String(64), comment="最近维护运行 ID")
+    last_run_status: Mapped[str | None] = mapped_column(String(32), comment="最近维护运行状态")
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最近检查时间（UTC）")
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最近同步尝试时间（UTC）")
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最近成功同步时间（UTC）")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, comment="快照更新时间（UTC）"
     )
 
 

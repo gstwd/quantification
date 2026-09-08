@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     UniqueConstraint,
@@ -85,6 +86,7 @@ class IndustryDailyBarModel(Base):
     __tablename__ = "industry_daily_bar"
     __table_args__ = (
         UniqueConstraint("trade_date", "industry_code", name="uq_industry_daily_bar"),
+        Index("ix_industry_daily_bar_code_date", "industry_code", "trade_date"),
     )
 
     id: Mapped[int] = mapped_column(
@@ -149,7 +151,10 @@ class StockDailyCloseModel(Base):
     """个股收盘价（仅用于数量占比扩散，不保存 OHLC）。"""
 
     __tablename__ = "stock_daily_close"
-    __table_args__ = (UniqueConstraint("trade_date", "stock_code", name="uq_stock_daily_close"),)
+    __table_args__ = (
+        UniqueConstraint("trade_date", "stock_code", name="uq_stock_daily_close"),
+        Index("ix_stock_daily_close_code_date", "stock_code", "trade_date"),
+    )
 
     id: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True, comment="自增主键"

@@ -11,6 +11,7 @@ from quant_etf_api.api.middleware import RequestIdMiddleware, RequestLoggingMidd
 from quant_etf_api.api.routers import (
     ai_factors,
     backtests,
+    data_management,
     factors,
     health,
     indexes,
@@ -61,8 +62,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         # 预热交易日历缓存，防止首个请求触发慢速加载/并发崩溃
         job_queue.enqueue("warm_calendar", {}, job_key="warm_calendar")
+        # 健康快照由后台聚合初始化，避免新迁移后总览长期只显示 unknown。
+        from quant_etf_api.infra.db.base import SessionLocal  # noqa: PLC0415
+        from quant_etf_api.infra.time import today_cn  # noqa: PLC0415
+        from quant_etf_api.services.run_service import RunService  # noqa: PLC0415
+
+        health_db = SessionLocal()
+        try:
+            health_run = RunService(health_db).create_run(
+                "data_manage_operation", None, today_cn(), params={"operation": "check"}
+            )
+            _, health_created = job_queue.enqueue_with_status(
+                "data_manage_operation",
+                {"run_id": health_run.run_id, "operation": "check"},
+                job_key="data_manage:check:all:all",
+            )
+            if not health_created:
+                RunService(health_db).mark_skipped(
+                    health_run.run_id, {"reason": "已有健康检查任务正在执行"}
+                )
+        finally:
+            health_db.close()
     except Exception:
-        logger.warning("日历预热任务入队失败，服务继续启动", exc_info=True)
+        logger.warning("启动预热任务入队失败，服务继续启动", exc_info=True)
     yield
     get_scheduler().stop()
     if settings.ai_analysis_enabled:
@@ -86,6 +108,7 @@ app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(health.router, prefix=settings.api_prefix)
 app.include_router(system.router, prefix=settings.api_prefix)
+app.include_router(data_management.router, prefix=settings.api_prefix)
 app.include_router(indexes.router, prefix=settings.api_prefix)
 app.include_router(industry.router, prefix=settings.api_prefix)
 app.include_router(market_data.router, prefix=settings.api_prefix)

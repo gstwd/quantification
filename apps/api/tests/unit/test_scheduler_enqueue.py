@@ -1,6 +1,6 @@
 """调度器入队行为单元测试。
 
-验证数据摄取与 AI 分析调度器只将任务入队（纯定时器），
+验证数据同步与 AI 分析调度器只将任务入队（纯定时器），
 不在调度线程内同步执行外部调用。
 """
 
@@ -21,10 +21,10 @@ def _make_run_summary(run_id: str = "run-1") -> MagicMock:
 
 
 class TestDailyIngestScheduler:
-    """日频摄取调度器测试。"""
+    """日频数据调度器测试（统一全局同步入口）。"""
 
-    def test_execute_enqueues_daily_ingest(self, monkeypatch) -> None:
-        """应创建 run 并入队 daily_ingest，不执行摄取（不做交易日判断）。"""
+    def test_execute_enqueues_data_sync_all(self, monkeypatch) -> None:
+        """应创建 data_sync_all 运行并入队全局同步任务。"""
         fake_db = MagicMock()
         monkeypatch.setattr(
             "quant_etf_api.infra.db.base.SessionLocal", lambda: fake_db
@@ -38,15 +38,16 @@ class TestDailyIngestScheduler:
         monkeypatch.setattr(
             "quant_etf_api.infra.scheduler.get_job_queue", lambda: fake_queue
         )
+        fake_queue.enqueue_with_status.return_value = ("job-1", True)
         scheduler = DailyIngestScheduler()
 
-        scheduler._execute_daily_ingest()
+        scheduler._execute_daily_sync()
 
-        fake_run_svc.create_run.assert_called_once_with("daily_ingest", None, date.today())
-        fake_queue.enqueue.assert_called_once_with(
-            "daily_ingest",
+        fake_run_svc.create_run.assert_called_once_with("data_sync_all", None, date.today())
+        fake_queue.enqueue_with_status.assert_called_once_with(
+            "data_sync_all",
             {"run_id": "run-1"},
-            job_key="daily_ingest",
+            job_key="data_sync_all",
         )
 
     def test_non_trading_day_still_enqueues(self, monkeypatch) -> None:
@@ -69,15 +70,16 @@ class TestDailyIngestScheduler:
         monkeypatch.setattr(
             "quant_etf_api.infra.scheduler.get_job_queue", lambda: fake_queue
         )
+        fake_queue.enqueue_with_status.return_value = ("job-1", True)
         scheduler = DailyIngestScheduler()
 
-        scheduler._execute_daily_ingest()
+        scheduler._execute_daily_sync()
 
-        fake_run_svc.create_run.assert_called_once_with("daily_ingest", None, date.today())
-        fake_queue.enqueue.assert_called_once_with(
-            "daily_ingest",
+        fake_run_svc.create_run.assert_called_once_with("data_sync_all", None, date.today())
+        fake_queue.enqueue_with_status.assert_called_once_with(
+            "data_sync_all",
             {"run_id": "run-1"},
-            job_key="daily_ingest",
+            job_key="data_sync_all",
         )
         # 调度器不再自行按交易日跳过，交易日判断交给摄取服务按数据缺口处理
         fake_cal.is_trading_day.assert_not_called()

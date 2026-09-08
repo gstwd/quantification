@@ -31,8 +31,10 @@ from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.orchestrator import StrategyEngine
 from quant_etf_api.factors.base import MissingReason
 from quant_etf_api.factors.registry import get_default_factor_registry
+from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.infra.db.repositories.index_factor_value import IndexFactorValueRepository
 from quant_etf_api.infra.db.repositories.index_signal import IndexSignalRepository
+from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.schemas.backtest import BacktestWarning
@@ -153,7 +155,8 @@ class StrategyDecisionService:
 
         三种缺失语义中，FACTOR_UNKNOWN（配置引用未知因子）不做补算，
         由配置校验期快速失败兜底；NOT_COMPUTED 与 INSUFFICIENT_DATA
-        入队 factor_computation（按交易日去重）。
+        入队 factor_computation（按交易日去重）。当该交易日已有覆盖最新
+        入库数据的成功计算时跳过补算，避免浏览页面反复触发空转任务。
 
         Args:
             config: 策略配置。
@@ -174,6 +177,15 @@ class StrategyDecisionService:
         if not actionable:
             return []
 
+        if self._is_factor_computation_current(context.trade_date, index_codes):
+            logger.info(
+                "因子缺失但该交易日已存在覆盖最新入库数据的成功计算，"
+                "跳过重复补算: trade_date=%s missing=%s",
+                context.trade_date,
+                actionable[:5],
+            )
+            return []
+
         logger.info(
             "因子数据缺失，入队异步计算: trade_date=%s missing=%s",
             context.trade_date,
@@ -187,6 +199,43 @@ class StrategyDecisionService:
             job_key=f"factor_computation:{context.trade_date}",
         )
         return actionable
+
+    def _is_factor_computation_current(self, trade_date: date, index_codes: list[str]) -> bool:
+        """判断目标交易日是否已有覆盖最新输入数据的成功因子计算。
+
+        实时分配检测到因子值缺失时，INSUFFICIENT_DATA 可能来自数据源本身
+        不支持（如 legulegu 估值仅少数指数有值），这类 NULL 无论重算多少次
+        都不会消失。若最近一次成功计算晚于该交易日日线/估值的最后入库时间，
+        说明重算无法产出新结果，应跳过补算；若之后又有新数据补入，门控会
+        自动放行重算，保证迟到数据仍可回填因子值。
+
+        Args:
+            trade_date: 目标交易日。
+            index_codes: 当前策略资产范围的指数代码。
+
+        Returns:
+            True 表示已存在覆盖最新输入数据的成功计算，无需重复补算。
+        """
+        last_run = self._run_repo.find_latest_successful_by_type_and_date(
+            "factor_computation", trade_date
+        )
+        if last_run is None or last_run.finished_at is None:
+            return False
+
+        bar_repo = IndexDailyBarRepository(self._db)
+        valuation_repo = IndexValuationRepository(self._db)
+        input_times = [
+            ts
+            for ts in (
+                bar_repo.find_latest_ingested_at_for_date(trade_date, index_codes),
+                valuation_repo.find_latest_ingested_at_for_date(trade_date, index_codes),
+            )
+            if ts is not None
+        ]
+        if not input_times:
+            # 该交易日无任何行情/估值输入，重算只会得到 NULL，视为已覆盖
+            return True
+        return max(input_times) <= last_run.finished_at
 
     def run(
         self,

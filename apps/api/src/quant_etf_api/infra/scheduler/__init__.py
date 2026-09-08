@@ -15,13 +15,14 @@ logger = logging.getLogger(__name__)
 
 
 class DailyIngestScheduler:
-    """日频数据自动调度器。
+    """日频数据自动调度器（统一数据管理入口）。
 
-    使用 daemon 线程 + Event 循环，在预定的时间点触发每日数据摄取。
-    无论当天是否交易日都会入队：周末/节假日触发时由摄取服务按"最近
-    交易日缺口"决定是否补拉，避免节假日错过上一交易日数据后无法补齐。
-    调度线程仅作为定时器：将摄取任务入队后立即返回，
-    实际执行由后台任务队列的固定 worker 完成。
+    使用 daemon 线程 + Event 循环，在预定的时间点触发全局数据同步
+    （data_sync_all），覆盖指数/宏观/行业/个股等全部受管数据集并刷新
+    健康快照。无论当天是否交易日都会入队：任务内部按"最近交易日缺口"
+    决定补拉范围，避免节假日错过上一交易日数据后无法补齐。
+    调度线程仅作为定时器：将任务入队后立即返回，实际执行由后台任务
+    队列的固定 worker 完成。
     """
 
     def __init__(self, target_time: time | None = None) -> None:
@@ -53,7 +54,7 @@ class DailyIngestScheduler:
                 self._shutdown_event.wait(delay)
             if self._shutdown_event.is_set():
                 break
-            self._execute_daily_ingest()
+            self._execute_daily_sync()
 
     def _seconds_until_target(self) -> float:
         """计算距离下一次触发时间的秒数。"""
@@ -70,24 +71,31 @@ class DailyIngestScheduler:
             target = target + timedelta(days=1)
         return (target - now).total_seconds()
 
-    def _execute_daily_ingest(self) -> None:
-        """触发一次每日数据摄取任务（与手动触发走同一入队链路）。
+    def _execute_daily_sync(self) -> None:
+        """触发一次每日全局数据同步任务（与手动触发走同一入队链路）。
 
-        不做交易日判断：摄取服务内部以最近交易日为目标检查缺口，
+        不做交易日判断：数据管理服务内部以最近交易日为目标检查缺口，
         非交易日触发时自动补拉缺失的最近交易日数据。
         """
         db = SessionLocal()
         try:
             today = today_cn()
-            summary = RunService(db).create_run("daily_ingest", None, today)
-            get_job_queue().enqueue(
-                "daily_ingest",
+            summary = RunService(db).create_run("data_sync_all", None, today)
+            job_id, created = get_job_queue().enqueue_with_status(
+                "data_sync_all",
                 {"run_id": summary.run_id},
-                job_key="daily_ingest",
+                job_key="data_sync_all",
             )
-            logger.info("调度器: 日频入库任务已入队 run_id=%s", summary.run_id)
+            if not created:
+                RunService(db).mark_skipped(
+                    summary.run_id,
+                    {"reason": "已有全局数据同步任务正在执行", "active_job_id": job_id},
+                )
+                logger.info("调度器: 全局同步已在执行，本次运行标记跳过 run_id=%s", summary.run_id)
+            else:
+                logger.info("调度器: 全局数据同步任务已入队 run_id=%s", summary.run_id)
         except Exception:
-            logger.exception("调度器: 日频入库任务入队失败")
+            logger.exception("调度器: 全局数据同步任务入队失败")
         finally:
             db.close()
 
@@ -96,7 +104,7 @@ _scheduler: DailyIngestScheduler | None = None
 
 
 def get_scheduler() -> DailyIngestScheduler:
-    """获取全局调度器单例（数据摄取 + 因子计算）。
+    """获取全局数据同步调度器单例。
 
     首次调用时根据 settings.schedule_time 配置创建调度器实例。
     """

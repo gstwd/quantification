@@ -6,20 +6,8 @@
         <span class="count-badge">{{ items.length }} 个一级行业</span>
       </div>
       <div class="header-actions">
-        <button
-          class="btn-secondary"
-          :disabled="globalBusy('industry_universe_refresh') || loading"
-          @click="runGlobal('industry_universe_refresh')"
-        >
-          {{ globalLabel('industry_universe_refresh', '更新行业信息') }}
-        </button>
-        <button
-          class="btn-secondary"
-          :disabled="globalBusy('industry_bars_refresh') || loading"
-          @click="runGlobal('industry_bars_refresh')"
-        >
-          {{ globalLabel('industry_bars_refresh', '增量刷新日线') }}
-        </button>
+        <RouterLink to="/data-management?dataset=industry_universe" class="btn-secondary">维护行业信息</RouterLink>
+        <RouterLink to="/data-management?dataset=industry_daily_bar" class="btn-secondary">维护行业日线</RouterLink>
       </div>
     </div>
 
@@ -92,27 +80,10 @@
               {{ item.missing_day_count ?? '—' }}
             </td>
             <td class="action-cell" @click.stop>
-              <button
+              <RouterLink
+                :to="{ path: '/data-management', query: { dataset: 'industry_daily_bar', partition: item.industry_code } }"
                 class="btn-mini"
-                :disabled="isRunning(item.industry_code)"
-                @click="runRow(item.industry_code, 'industry_quality_check')"
-              >
-                {{ rowLabel(item.industry_code, 'industry_quality_check', '质量检查') }}
-              </button>
-              <button
-                class="btn-mini"
-                :disabled="isRunning(item.industry_code)"
-                @click="runRow(item.industry_code, 'industry_data_fill')"
-              >
-                {{ rowLabel(item.industry_code, 'industry_data_fill', '日线补全') }}
-              </button>
-              <button
-                class="btn-mini btn-danger"
-                :disabled="isRunning(item.industry_code)"
-                @click="runRow(item.industry_code, 'industry_data_rebuild')"
-              >
-                {{ rowLabel(item.industry_code, 'industry_data_rebuild', '全量重拉') }}
-              </button>
+              >数据维护</RouterLink>
             </td>
           </tr>
         </tbody>
@@ -126,12 +97,11 @@
  * 申万行业数据管理列表页。
  *
  * 展示 31 个申万一级行业的成分股数量、日线质量快照与最新行情；
- * 支持顶部全局“更新行业信息 / 增量刷新日线”与行级
- * “质量检查 / 日线补全 / 全量重拉”，全部通过 Runs 后台任务轮询反馈。
+ * 数据维护统一跳转至数据管理页，按数据集或单行业执行质量检查、补数和重拉。
  */
 
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 
 import {
   fetchIndustrySummaries,

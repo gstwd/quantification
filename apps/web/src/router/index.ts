@@ -7,6 +7,7 @@ import BacktestComparisonDetailPage from '../pages/BacktestComparisonDetailPage.
 import BacktestDetailPage from '../pages/BacktestDetailPage.vue'
 import BacktestListPage from '../pages/BacktestListPage.vue'
 import DashboardPage from '../pages/DashboardPage.vue'
+import DataManagementPage from '../pages/DataManagementPage.vue'
 import FactorDetailPage from '../pages/FactorDetailPage.vue'
 import FactorsPage from '../pages/FactorsPage.vue'
 import KeywordTagsPage from '../pages/KeywordTagsPage.vue'
@@ -25,6 +26,7 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', component: DashboardPage },
+    { path: '/data-management', component: DataManagementPage },
     { path: '/indexes', component: IndexListPage },
     { path: '/industries', component: IndustryListPage },
     { path: '/stocks', component: StockListPage },
