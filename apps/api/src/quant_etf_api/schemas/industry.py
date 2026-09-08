@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 
 from pydantic import BaseModel, Field
+
+from quant_etf_api.schemas.types import UtcDatetime
 
 
 class IndustryIndexSummary(BaseModel):
@@ -154,7 +156,7 @@ class IndustrySummaryItem(BaseModel):
     data_end_date: date | None = None
     bar_count: int | None = None
     missing_day_count: int | None = None
-    quality_checked_at: datetime | None = None
+    quality_checked_at: UtcDatetime | None = None
     latest_trade_date: date | None = None
     latest_close: float | None = None
     latest_change_pct: float | None = None
@@ -168,7 +170,7 @@ class IndustryQualityDetail(BaseModel):
     data_end_date: date | None = None
     bar_count: int | None = None
     missing_day_count: int | None = None
-    quality_checked_at: datetime | None = None
+    quality_checked_at: UtcDatetime | None = None
     total: int = 0
     min_date: date | None = None
     max_date: date | None = None

@@ -11,6 +11,8 @@ import logging
 from collections.abc import Callable
 from datetime import date
 
+from quant_etf_api.infra.time import today_cn
+
 logger = logging.getLogger(__name__)
 
 
@@ -61,7 +63,7 @@ def handle_strategy_run(payload: dict) -> None:
         if config is None:
             RunService(db).mark_failed(run_id, f"未找到策略配置: {strategy_id}")
             return
-        StrategyExecutionService(db).execute(config, date.today(), run_id, params)
+        StrategyExecutionService(db).execute(config, today_cn(), run_id, params)
     except Exception as e:
         logger.exception("策略执行任务异常: run_id=%s strategy_id=%s", run_id, strategy_id)
         RunService(db).mark_failed(run_id, f"策略执行异常: {type(e).__name__}: {e}")
@@ -182,7 +184,7 @@ def handle_ai_analysis(payload: dict) -> None:
         settings = get_settings()
         client = AIClient.from_settings(settings)
         service = AIFactorService(db, client)
-        stats = service.run_full_pipeline(target_date=date.today())
+        stats = service.run_full_pipeline(target_date=today_cn())
         RunService(db).mark_success(run_id, metrics=stats)
     except Exception as e:
         logger.exception("AI 分析任务异常: run_id=%s", run_id)
@@ -270,7 +272,7 @@ def handle_factor_computation(payload: dict) -> None:
     from quant_etf_api.main import factor_registry  # noqa: PLC0415
     from quant_etf_api.services.run_service import RunService
 
-    trade_date_str = payload.get("trade_date") or date.today().isoformat()
+    trade_date_str = payload.get("trade_date") or today_cn().isoformat()
     trade_date = date.fromisoformat(trade_date_str)
     db = SessionLocal()
     run_id = ""

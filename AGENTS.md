@@ -235,6 +235,8 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 
 ## Gotchas
 
+- **时间与日期统一规则**: 时间戳统一按 UTC 生成、存储和 API 传输；后端使用 `utcnow()`，API 使用 `UtcDatetime`；交易日/回测日期等业务日期统一按北京时间 `Asia/Shanghai` 计算，使用 `today_cn()`。调度器配置时间也解释为北京时间。前端时间戳展示显式指定北京时间，日期字符串使用 `src/utils/date.ts`，禁止直接使用 `date.today()`、`datetime.now()` 或 `toISOString().slice(0, 10)` 处理业务日期。
+
 - **Alembic**: `alembic/versions/` was empty on init — autogenerate requires a live DB connection. Hand-write the first migration if the DB is blank.
 - **SQLAlchemy**: Stack is fully **sync** (`create_engine`, `sessionmaker`). Do not introduce async.
 - **DB session injection**: Services take `db: Session` in `__init__`. Routers use `Depends(get_db)` from `api/deps.py` and construct services per-request (no module-level singletons).

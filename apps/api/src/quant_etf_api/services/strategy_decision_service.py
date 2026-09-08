@@ -24,6 +24,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from quant_etf_api.infra.time import today_cn
+
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.orchestrator import StrategyEngine
@@ -60,7 +62,7 @@ def resolve_effective_date(trade_date: date | None = None) -> date:
     if trade_date is not None:
         return trade_date
     cal = TradingCalendar()
-    today = date.today()
+    today = today_cn()
     if cal.is_trading_day(today):
         return today
     return cal.latest_trading_day(today)

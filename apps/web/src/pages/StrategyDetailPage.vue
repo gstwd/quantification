@@ -626,13 +626,14 @@ import StrategyConfigForm from '../components/StrategyConfigForm.vue'
 import { useStrategyStore } from '../stores/strategies'
 import { toast } from '../stores/toast'
 import type { AllocationResponse, DailyBar } from '../types/api'
+import { shiftDateCn, todayCn } from '../utils/date'
 
 const props = defineProps<{ strategyId: string }>()
 const store = useStrategyStore()
 const router = useRouter()
 
 /** 今天日期字符串，用于日期选择器上限 */
-const todayStr = new Date().toISOString().slice(0, 10)
+const todayStr = todayCn()
 /** 用户选择的交易日，默认今天 */
 const selectedDate = ref(todayStr)
 const allocating = ref(false)
@@ -655,12 +656,9 @@ function setChartRef(code: string, el: HTMLElement): void {
 
 /** 根据决策日期计算起止日期（前60后20个交易日 ≈ 前90后30个自然日） */
 function calcDateRange(centerDate: string): { startDate: string; endDate: string } {
-  const d = new Date(centerDate)
-  const start = new Date(d.getTime() - 90 * 86400000)
-  const end = new Date(d.getTime() + 30 * 86400000)
   return {
-    startDate: start.toISOString().slice(0, 10),
-    endDate: end.toISOString().slice(0, 10),
+    startDate: shiftDateCn(centerDate, -90),
+    endDate: shiftDateCn(centerDate, 30),
   }
 }
 

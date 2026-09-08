@@ -15,14 +15,12 @@ export interface DatePreset {
 
 /** 获取日期预设选项列表 */
 export function getDatePresets(): DatePreset[] {
-  const today = new Date()
-  const end = toDateStr(today)
+  const end = todayCn()
 
   /** 偏移年份（粗略，后端会精确对齐到最近交易日） */
   const yearsAgo = (n: number): string => {
-    const d = new Date(today)
-    d.setFullYear(d.getFullYear() - n)
-    return toDateStr(d)
+    const [year, month, day] = end.split('-').map(Number)
+    return `${year - n}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
   }
 
   return [
@@ -33,10 +31,4 @@ export function getDatePresets(): DatePreset[] {
   ]
 }
 
-/** 将 Date 转为 yyyy-mm-dd 格式 */
-function toDateStr(d: Date): string {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
-}
+import { todayCn } from './date'

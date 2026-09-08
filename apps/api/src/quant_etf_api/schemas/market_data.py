@@ -1,7 +1,9 @@
 from __future__ import annotations
-from datetime import date, datetime
+from datetime import date
 
 from pydantic import BaseModel
+
+from quant_etf_api.schemas.types import UtcDatetime
 
 
 class DailyBar(BaseModel):
@@ -16,7 +18,7 @@ class DailyBar(BaseModel):
     volume: float | None = None
     turnover: float | None = None
     source: str = "stub"
-    ingested_at: datetime | None = None
+    ingested_at: UtcDatetime | None = None
 
 
 class IndexValuation(BaseModel):

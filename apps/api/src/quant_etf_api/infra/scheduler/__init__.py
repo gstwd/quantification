@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import date, datetime, time
+from datetime import time
 
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.infra.job_queue.queue import get_job_queue
 from quant_etf_api.infra.trading_calendar import TradingCalendar
+from quant_etf_api.infra.time import now_cn, today_cn
 from quant_etf_api.services.run_service import RunService
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ class DailyIngestScheduler:
 
     def _seconds_until_target(self) -> float:
         """计算距离下一次触发时间的秒数。"""
-        now = datetime.now()
+        now = now_cn()
         target = now.replace(
             hour=self._target_time.hour,
             minute=self._target_time.minute,
@@ -77,7 +78,7 @@ class DailyIngestScheduler:
         """
         db = SessionLocal()
         try:
-            today = date.today()
+            today = today_cn()
             summary = RunService(db).create_run("daily_ingest", None, today)
             get_job_queue().enqueue(
                 "daily_ingest",
@@ -161,7 +162,7 @@ class AIAnalysisScheduler:
 
     def _seconds_until_target(self) -> float:
         """计算距离下一次 AI 分析触发时间的秒数。"""
-        now = datetime.now()
+        now = now_cn()
         target = now.replace(
             hour=self._target_time.hour,
             minute=self._target_time.minute,
@@ -178,7 +179,7 @@ class AIAnalysisScheduler:
         """触发一次 AI 舆情分析任务（入队后立即返回，独立于数据摄取链路）。"""
         db = SessionLocal()
         try:
-            today = date.today()
+            today = today_cn()
             if not TradingCalendar().is_trading_day(today):
                 logger.info("AI 调度器: 非交易日跳过 %s", today)
                 return
@@ -284,7 +285,7 @@ class IndustryIngestScheduler:
         """计算距离下一次触发时间的秒数。"""
         from datetime import timedelta
 
-        now = datetime.now()
+        now = now_cn()
         target = now.replace(
             hour=self._target_time.hour,
             minute=self._target_time.minute,
@@ -299,7 +300,7 @@ class IndustryIngestScheduler:
         """触发一次行业日频摄取任务（入队后立即返回）。"""
         db = SessionLocal()
         try:
-            today = date.today()
+            today = today_cn()
             summary = RunService(db).create_run("industry_ingest", None, today)
             get_job_queue().enqueue(
                 "industry_daily_ingest",

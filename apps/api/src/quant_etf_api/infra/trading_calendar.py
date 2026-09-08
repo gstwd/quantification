@@ -12,6 +12,8 @@ import threading
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from quant_etf_api.infra.time import today_cn
+
 logger = logging.getLogger(__name__)
 
 # 缓存 TTL：1 天
@@ -117,7 +119,7 @@ class TradingCalendar:
     用法::
 
         cal = TradingCalendar()
-        cal.is_trading_day(date.today())
+        cal.is_trading_day(today_cn())
         cal.latest_trading_day()
     """
 
@@ -145,7 +147,7 @@ class TradingCalendar:
         Returns:
             最近的交易日日期。
         """
-        target = reference or date.today()
+        target = reference or today_cn()
         trading_days = _get_cached_trading_days()
 
         if trading_days is not None:
@@ -174,7 +176,7 @@ class TradingCalendar:
         Returns:
             下一个交易日日期。
         """
-        target = (reference or date.today()) + timedelta(days=1)
+        target = (reference or today_cn()) + timedelta(days=1)
         trading_days = _get_cached_trading_days()
 
         if trading_days is not None:

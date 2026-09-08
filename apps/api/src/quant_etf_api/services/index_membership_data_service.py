@@ -8,6 +8,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from quant_etf_api.infra.time import today_cn
+
 from quant_etf_api.infra.clients.index_member_client import (
     AkShareIndexMemberClient,
     BaostockIndexMemberClient,
@@ -34,7 +36,7 @@ class IndexMembershipDataService:
 
     def refresh_current_snapshots(self, index_codes: list[str]) -> dict[str, Any]:
         """拉取并替换指数当前成分/权重快照（幂等）。"""
-        snapshot_date = date.today()
+        snapshot_date = today_cn()
         cal = TradingCalendar()
         if not cal.is_trading_day(snapshot_date):
             snapshot_date = cal.latest_trading_day(snapshot_date)

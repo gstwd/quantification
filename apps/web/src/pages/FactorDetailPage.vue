@@ -232,6 +232,7 @@ import { fetchFactorCrossSection, fetchFactorCorrelation, fetchFactorIC, fetchFa
 import type { CorrelationResponse, CrossSectionRow, FactorRow, FactorSpec, ICPoint, ICSummary } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
+import { shiftDateCn, todayCn } from '../utils/date'
 
 /** 获取因子分析指标描述的快捷方法 */
 function faHelp(key: string): string {
@@ -261,11 +262,9 @@ let chartInstance: any = null
 
 /** IC 分析状态 */
 const icStart = ref((() => {
-  const d = new Date()
-  d.setDate(d.getDate() - 180)
-  return d.toISOString().slice(0, 10)
+  return shiftDateCn(todayCn(), -180)
 })())
-const icEnd = ref(new Date().toISOString().slice(0, 10))
+const icEnd = ref(todayCn())
 const icSummary = ref<ICSummary | null>(null)
 const icSeries = ref<ICPoint[]>([])
 const icLoading = ref(false)
@@ -274,7 +273,7 @@ const icChartEl = ref<HTMLElement | null>(null)
 let icChartInstance: any = null
 
 /** 相关性状态 */
-const corrDate = ref(new Date().toISOString().slice(0, 10))
+const corrDate = ref(todayCn())
 const corrData = ref<CorrelationResponse | null>(null)
 const corrLoading = ref(false)
 const corrChartEl = ref<HTMLElement | null>(null)
@@ -296,11 +295,9 @@ const CATEGORY_LABELS: Record<string, string> = {
 
 /** 默认时间序列日期范围：最近 90 天 */
 const seriesStart = ref((() => {
-  const d = new Date()
-  d.setDate(d.getDate() - 90)
-  return d.toISOString().slice(0, 10)
+  return shiftDateCn(todayCn(), -90)
 })())
-const seriesEnd = ref(new Date().toISOString().slice(0, 10))
+const seriesEnd = ref(todayCn())
 
 /** 横截面 bar 宽度：归一化到 [0, 100] */
 const crossMin = computed(() =>

@@ -10,6 +10,8 @@ from datetime import date, datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from quant_etf_api.infra.time import today_cn
+
 from quant_etf_api.ai_factors.analysis.classifier import TagClassifier
 from quant_etf_api.ai_factors.analysis.scorer import TrendScorer
 from quant_etf_api.ai_factors.analysis.sentiment import SentimentAnalyzer
@@ -133,7 +135,7 @@ class AIFactorService:
             统计字典 {"collected": N, "saved": N, "analyzed": N, "aggregated": N}。
         """
         if target_date is None:
-            target_date = date.today()
+            target_date = today_cn()
 
         # 1. 采集
         raw_items = self._collector.fetch_all(platform_ids)

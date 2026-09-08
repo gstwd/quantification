@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from quant_etf_api.schemas.backtest import BacktestWarning
+from quant_etf_api.schemas.types import UtcDatetime
 
 
 class StrategySummary(BaseModel):
@@ -44,8 +45,8 @@ class StrategyDetail(StrategySummary):
     """
 
     config_json: dict[str, Any]
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+    created_at: UtcDatetime | None = None
+    updated_at: UtcDatetime | None = None
 
 
 class StrategyConfigCreate(BaseModel):

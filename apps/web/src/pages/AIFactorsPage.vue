@@ -271,28 +271,25 @@ import {
 } from '../api/aiFactors'
 import type { DailySentimentResponse, MarketSynthesisResponse } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
+import { shiftDateCn, todayCn } from '../utils/date'
 
 /** 今天的日期字符串（YYYY-MM-DD） */
 function todayStr(): string {
-  return new Date().toISOString().slice(0, 10)
+  return todayCn()
 }
 
 /** 日期偏移 helper */
 function shiftDate(dateStr: string, days: number): string {
-  const d = new Date(dateStr)
-  d.setDate(d.getDate() + days)
-  return d.toISOString().slice(0, 10)
+  return shiftDateCn(dateStr, days)
 }
 
 /** 最近 5 个交易日（用于对比日期选择器） */
 const recentDates = ref<string[]>([])
 function refreshRecentDates() {
-  const today = new Date()
+  const today = todayCn()
   const dates: string[] = []
   for (let i = 0; i < 5; i++) {
-    const d = new Date(today)
-    d.setDate(d.getDate() - i)
-    dates.push(d.toISOString().slice(0, 10))
+    dates.push(shiftDateCn(today, -i))
   }
   recentDates.value = dates
 }

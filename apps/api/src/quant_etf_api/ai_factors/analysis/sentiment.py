@@ -25,6 +25,7 @@ from quant_etf_api.ai_factors.base import NewsSentimentItem, RawNewsItem
 from quant_etf_api.ai_factors.analysis.scorer import TrendScorer
 from quant_etf_api.infra.ai.client import AIClient
 from quant_etf_api.infra.ai.prompt_loader import PromptLoader
+from quant_etf_api.infra.time import today_cn
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +230,7 @@ class SentimentAnalyzer:
         system_prompt, user_prompt = self._prompt_loader.render(
             PROMPT_NAME,
             variables={
-                "current_date": datetime.now().strftime("%Y-%m-%d"),
+                "current_date": today_cn().isoformat(),
                 "available_tags": ", ".join(available_tags),
                 "news_list": self._format_news(items),
             },

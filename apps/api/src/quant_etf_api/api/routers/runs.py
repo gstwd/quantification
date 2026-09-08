@@ -9,6 +9,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from quant_etf_api.infra.time import today_cn
+
 from quant_etf_api.api.deps import get_db
 from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.infra.job_queue.queue import get_job_queue
@@ -163,7 +165,7 @@ def get_run_items(run_id: str, db: Session = Depends(get_db)) -> list[ResearchRu
 @router.post("/runs/daily-ingest")
 def daily_ingest(db: Session = Depends(get_db)) -> dict[str, str]:
     """触发增量日频数据摄取（指数 + 宏观），入队后台任务执行。"""
-    summary = RunService(db).create_run("daily_ingest", None, date.today())
+    summary = RunService(db).create_run("daily_ingest", None, today_cn())
     _enqueue_for_run("daily_ingest", summary.run_id, None, None, summary.trade_date or date.today())
     return {"status": "accepted", "run_type": "daily_ingest", "run_id": summary.run_id}
 

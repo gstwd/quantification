@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+
+from quant_etf_api.infra.time import today_cn
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -130,7 +132,7 @@ class StrategyService:
             StarredSummaryResponse。
         """
         if self._db is None:
-            return StarredSummaryResponse(trade_date=trade_date or date.today(), items=[])
+            return StarredSummaryResponse(trade_date=trade_date or today_cn(), items=[])
         return self._decision_svc().get_starred_summary(trade_date=trade_date)
 
     # ── 配置管理委托 ──────────────────────────────────────────────────────

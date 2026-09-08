@@ -12,6 +12,28 @@
 - **类型标注**：所有公开函数/方法必须标注参数类型和返回类型，禁止使用 `any`（前端）
 - **行长度**：Python 100 字符（ruff 已配置），TypeScript/Vue 120 字符
 
+## 时间与日期规范
+
+系统必须明确区分“时间戳”和“业务日期”，不得混用：
+
+- **时间戳**表示一个全球绝对时刻，统一使用 UTC。后端生成时间戳必须使用
+  `quant_etf_api.infra.time.utcnow()`；禁止使用 `datetime.now()`、`datetime.utcnow()`
+  或依赖服务器本地时区的时间函数。
+- 数据库连接时区固定为 UTC。现有 `timestamp without time zone` 字段按“存储 UTC
+  naive datetime”的兼容约定使用；新增 API 时间字段必须使用
+  `quant_etf_api.schemas.types.UtcDatetime`，确保 JSON 输出带 `+00:00`。
+- **业务日期**（交易日、行情日期、回测起止日期、数据截止日期）属于 A 股市场日期，
+  统一按北京时间 `Asia/Shanghai` 计算。后端使用
+  `quant_etf_api.infra.time.today_cn()`，禁止直接使用 `date.today()`。
+- 调度器的配置时间（如 `schedule_time`、`ai_schedule_time`）解释为北京时间，
+  不得依赖操作系统本地时区。
+- 前端展示后端时间戳时必须显式指定 `timeZone: 'Asia/Shanghai'`。日期字符串
+  `YYYY-MM-DD` 不得直接交给 `new Date(value)` 解析，也不得用
+  `toISOString().slice(0, 10)` 生成业务日期；统一使用 `src/utils/date.ts` 中的
+  `todayCn`、`shiftDateCn`、`parseDateCn` 和 `formatCnTime`。
+- 时间戳接口字段、业务日期接口字段应保持语义清晰：前者使用 ISO datetime，后者使用
+  `YYYY-MM-DD`，不要在接口中用 datetime 承载交易日。
+
 ---
 
 ## Python 后端规范
