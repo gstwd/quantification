@@ -56,6 +56,10 @@ def _asof_members(
     return list(rows.get(trade_date) or [])
 
 
+_UNMAPPED_INDUSTRY = "__unmapped__"
+_CALCULATION_VERSION = "2026-09-rrg-diffusion-strict-v1"
+
+
 class IndexDiffusionRatioComputer:
     """指数成分扩散占比（每指数独立，默认参数 220/20）。"""
 
@@ -81,7 +85,8 @@ class IndexDiffusionRatioComputer:
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
         """计算单日指数成分扩散占比。"""
-        values = self.compute_batch(index_code, [trade_date], ctx)
+        dates = list(ctx.panels.get("calculation_dates") or [trade_date])
+        values = self.compute_batch(index_code, dates, ctx)
         return values.get(trade_date, FactorValue(factor_id=self.spec.factor_id, numeric=None))
 
     def compute_batch(
@@ -97,46 +102,65 @@ class IndexDiffusionRatioComputer:
         closes = ctx.panels.get("stock_closes") or {}
         membership = ctx.panels.get("index_membership") or {}
 
-        ratio_by_date: dict[date, float] = {}
-        for trade_date in dates:
+        ordered_dates = sorted(set(dates))
+        position = {trade_date: i for i, trade_date in enumerate(ordered_dates)}
+        ratio_by_date: dict[date, float | None] = {}
+        diagnostics: dict[date, dict[str, int]] = {}
+        for trade_date in ordered_dates:
             members = _asof_members(membership, index_code, trade_date)
-            if not members:
-                continue
+            member_count = len(members)
             valid = 0
             rising = 0
+            if not members:
+                ratio_by_date[trade_date] = None
+                diagnostics[trade_date] = {
+                    "member_count": 0,
+                    "valid_sample_count": 0,
+                    "missing_sample_count": 0,
+                }
+                continue
+            base_date = (
+                ordered_dates[position[trade_date] - lookback]
+                if position[trade_date] >= lookback
+                else None
+            )
             for member in members:
                 code = member["stock_code"]
                 series = closes.get(code)
-                if not series:
+                if not series or base_date is None:
                     continue
-                sorted_dates = sorted(d for d in series if d <= trade_date)
-                if len(sorted_dates) < lookback + 1:
-                    continue
-                latest = series[sorted_dates[-1]]
-                base = series[sorted_dates[-lookback - 1]]
+                # 必须精确命中交易日，禁止停牌/缺口时回退到上一条可用收盘。
+                latest = series.get(trade_date)
+                base = series.get(base_date)
                 if latest is None or base is None:
                     continue
                 valid += 1
                 if latest > base:
                     rising += 1
-            if valid > 0:
-                ratio_by_date[trade_date] = rising / valid
+            ratio_by_date[trade_date] = rising / valid if valid > 0 else None
+            diagnostics[trade_date] = {
+                "member_count": member_count,
+                "valid_sample_count": valid,
+                "missing_sample_count": member_count - valid,
+            }
 
         result: dict[date, FactorValue] = {}
-        ordered = [d for d in dates if d in ratio_by_date]
-        for i, trade_date in enumerate(ordered):
-            window_dates = ordered[max(0, i - smooth + 1) : i + 1]
-            window = [ratio_by_date[d] for d in window_dates]
-            if len(window) < smooth:
-                continue
-            avg = sum(window) / len(window)
+        for i, trade_date in enumerate(ordered_dates):
+            window_dates = ordered_dates[max(0, i - smooth + 1) : i + 1]
+            window = [ratio_by_date[day] for day in window_dates]
+            window_complete = len(window) == smooth and all(value is not None for value in window)
+            numeric = round(sum(window) / len(window) * 100.0, 4) if window_complete else None
+            current = diagnostics[trade_date]
             result[trade_date] = FactorValue(
                 factor_id=self.spec.factor_id,
-                numeric=round(avg * 100.0, 4),
+                numeric=numeric,
                 payload={
-                    "valid_days": len(window),
+                    **current,
+                    "valid_days": sum(value is not None for value in window),
+                    "window_complete": window_complete,
                     "lookback": lookback,
                     "smooth_window": smooth,
+                    "calculation_version": _CALCULATION_VERSION,
                 },
             )
         return result
@@ -174,7 +198,8 @@ class RRGIndustryMatchComputer:
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
         """计算单日 RRG 行业轮动匹配度。"""
-        values = self.compute_batch(index_code, [trade_date], ctx)
+        dates = list(ctx.panels.get("calculation_dates") or [trade_date])
+        values = self.compute_batch(index_code, dates, ctx)
         return values.get(trade_date, FactorValue(factor_id=self.spec.factor_id, numeric=None))
 
     def compute_batch(
@@ -186,10 +211,12 @@ class RRGIndustryMatchComputer:
         """批量计算多个交易日的 RRG 行业轮动匹配度。"""
         selections = ctx.panels.get("industry_selection") or {}
         exposures = ctx.panels.get("index_industry_exposure") or {}
+        exposure_meta = ctx.panels.get("index_industry_exposure_meta") or {}
         result: dict[date, FactorValue] = {}
         for trade_date in dates:
             selected = selections.get(trade_date) or {}
             exposure = (exposures.get(index_code) or {}).get(trade_date) or {}
+            meta = (exposure_meta.get(index_code) or {}).get(trade_date) or {}
             if not selected or not exposure:
                 continue
             total = sum(value for value in exposure.values() if value is not None)
@@ -207,6 +234,12 @@ class RRGIndustryMatchComputer:
                     "selected_count": len(selected),
                     "matched_exposure": round(matched, 6),
                     "total_exposure": round(total, 6),
+                    "member_count": meta.get("member_count"),
+                    "mapped_member_count": meta.get("mapped_member_count"),
+                    "unmapped_member_count": meta.get("unmapped_member_count"),
+                    "industry_coverage": meta.get("industry_coverage"),
+                    "weighting_mode": meta.get("weighting_mode"),
+                    "calculation_version": _CALCULATION_VERSION,
                 },
             )
         return result

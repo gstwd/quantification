@@ -47,6 +47,30 @@ def test_compute_rrg_returns_both_axis_and_warmup() -> None:
     assert momentum.index.get_loc(mom_first) > ratio.index.get_loc(ratio_first)
 
 
+def test_rrg_gap_strictly_invalidates_affected_window() -> None:
+    """任一行业缺日时 RRG 不前填，缺口影响窗口后才允许恢复。"""
+    price = _make_panel(90, ["801010", "801030"])
+    gap_date = price.index[30]
+    price.loc[gap_date, "801030"] = np.nan
+    benchmark = equal_weight_benchmark(price)
+    ratio, momentum = compute_rrg(
+        price,
+        benchmark,
+        lookback_ratio=20,
+        lookback_mom=10,
+        smooth_window=3,
+    )
+
+    assert benchmark.loc[gap_date] != benchmark.loc[gap_date]
+    assert ratio.loc[gap_date, "801010"] != ratio.loc[gap_date, "801010"]
+    assert ratio.loc[gap_date + pd.offsets.BDay(3), "801010"] != ratio.loc[
+        gap_date + pd.offsets.BDay(3), "801010"
+    ]
+    assert momentum.loc[gap_date + pd.offsets.BDay(20), "801010"] != momentum.loc[
+        gap_date + pd.offsets.BDay(20), "801010"
+    ]
+
+
 def test_quadrant_boundary_does_not_classify() -> None:
     """恰为 100 或 NaN 的值不归入任何象限。"""
     ratio = pd.DataFrame(

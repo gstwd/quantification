@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 import pandas as pd
 
@@ -27,7 +25,16 @@ def _smooth_ratio_shift(x: pd.DataFrame, lookback: int, smooth: int) -> pd.DataF
     Returns:
         平滑后的比率宽表。
     """
-    return (100.0 * x / x.shift(lookback)).rolling(window=smooth).mean()
+    # 比较窗口跨越任一缺口即不可比；否则缺口后数日会错误地与缺口前数据相除。
+    complete = (
+        x.notna()
+        .all(axis=1)
+        .rolling(window=lookback + 1, min_periods=lookback + 1)
+        .sum()
+        .eq(lookback + 1)
+    )
+    raw = (100.0 * x / x.shift(lookback)).where(complete, axis=0)
+    return raw.rolling(window=smooth, min_periods=smooth).mean()
 
 
 def equal_weight_benchmark(price: pd.DataFrame) -> pd.Series:
@@ -42,15 +49,30 @@ def equal_weight_benchmark(price: pd.DataFrame) -> pd.Series:
     Returns:
         等权组合 NAV Series，index=price.index。
     """
-    rets = price.pct_change().mean(axis=1)
-    return (1.0 + rets.fillna(0.0)).cumprod()
+    # 行业缺口不能通过跳过该行业重配基准，否则同一基准在不同日期的成分不一致。
+    valid = price.notna().all(axis=1)
+    result = pd.Series(np.nan, index=price.index, dtype=float)
+    previous: pd.Series | None = None
+    nav = 1.0
+    for trade_date, row in price.iterrows():
+        if not bool(valid.loc[trade_date]):
+            previous = None
+            continue
+        if previous is None:
+            # 缺口后的首个完整日重新归一化；跨缺口的 RRG 窗口仍会保持 NaN。
+            nav = 1.0
+        else:
+            nav *= 1.0 + float((row / previous - 1.0).mean())
+        result.loc[trade_date] = nav
+        previous = row
+    return result
 
 
 def compute_rs(price: pd.DataFrame, benchmark: pd.Series) -> pd.DataFrame:
     """计算相对强度 RS = price / benchmark * 100。
 
-    price 会被 reindex 到 benchmark.index；若 price 缺失若干交易日，
-    发出告警并做整表 ffill（与复现工程一致的兜底口径）。
+    price 会被 reindex 到 benchmark.index。行业日线或基准任一缺失时严格
+    返回 NaN，不做 ffill，也不通过动态剔除行业改变基准成分。
 
     Args:
         price: 行业收盘价宽表，index=date，columns=industry_code。
@@ -60,18 +82,8 @@ def compute_rs(price: pd.DataFrame, benchmark: pd.Series) -> pd.DataFrame:
         RS 宽表，index=benchmark.index，columns=price.columns。
     """
     aligned = price.reindex(benchmark.index)
-    missing = benchmark.index.difference(price.index)
-    if len(missing) > 0:
-        sample = [d.strftime("%Y-%m-%d") for d in missing[:5]]
-        suffix = "..." if len(missing) > 5 else ""
-        warnings.warn(
-            f"行业日线在基准日历上缺 {len(missing)} 个交易日"
-            f"（前 5: {sample}{suffix}），已自动 ffill 兜底",
-            UserWarning,
-            stacklevel=2,
-        )
-        aligned = aligned.ffill()
-    return aligned.div(benchmark, axis=0) * 100.0
+    complete_row = aligned.notna().all(axis=1) & benchmark.notna()
+    return aligned.div(benchmark, axis=0).where(complete_row, axis=0) * 100.0
 
 
 def _require_min_len(price: pd.DataFrame, benchmark: pd.Series, min_len: int) -> None:

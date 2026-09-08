@@ -80,6 +80,25 @@ class IndustryRRGResponse(BaseModel):
     meta: IndustryRRGMeta | None = None
 
 
+class IndustryIndexCorrelationItem(BaseModel):
+    """一个行业与指定指数的日收益相关度。"""
+
+    industry_code: str
+    name_cn: str = ""
+    correlation: float | None = None
+    sample_count: int = 0
+
+
+class IndustryIndexCorrelationResponse(BaseModel):
+    """指定指数与多个行业的相关度查询响应。"""
+
+    index_code: str
+    start: date
+    end: date
+    index_close_days: int = 0
+    items: list[IndustryIndexCorrelationItem] = Field(default_factory=list)
+
+
 class IndustryDiffusionPoint(BaseModel):
     """单行业单日扩散指标值。"""
 

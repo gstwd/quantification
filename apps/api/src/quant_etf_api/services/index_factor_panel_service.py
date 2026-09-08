@@ -26,6 +26,7 @@ from quant_etf_api.domain.industry.selection import (
     IndustryRotationInput,
     IndustrySelectionConfig,
 )
+from quant_etf_api.factors.builtins.index_panel_factors import _UNMAPPED_INDUSTRY
 from quant_etf_api.infra.db.models.core import IndexMemberEventModel
 from quant_etf_api.infra.db.models.industry import (
     IndustryFactorValueModel,
@@ -102,11 +103,25 @@ class IndexFactorPanelService:
         closes = self._build_stock_closes(membership, dates, lookback_natural_days)
         selection = self._build_industry_selection(dates)
         exposure = self._build_industry_exposure(membership, dates)
+        membership_rows = sum(
+            len(members) for daily in membership.values() for members in daily.values()
+        )
+        stock_close_points = sum(len(series) for series in closes.values())
         return {
+            "calculation_dates": dates,
             "index_membership": membership,
             "stock_closes": closes,
             "industry_selection": selection,
             "index_industry_exposure": exposure,
+            "index_industry_exposure_meta": self._build_industry_exposure_meta(membership, dates),
+            # 记录真实加载规模，便于后台任务监控成本，实时链路不应出现该面板。
+            "panel_metrics": {
+                "calculation_date_count": len(dates),
+                "index_count": len(index_codes),
+                "membership_row_count": membership_rows,
+                "stock_count": len(closes),
+                "stock_close_point_count": stock_close_points,
+            },
         }
 
     def _build_membership(
@@ -263,17 +278,55 @@ class IndexFactorPanelService:
             by_date: dict[date, dict[str, float]] = {}
             for trade_date, members in daily.items():
                 industries: dict[str, float] = {}
-                weighted = any(member.get("weight") is not None for member in members)
+                # 仅全部权重可用时按权重聚合，避免权重与等权混合造成量纲错误。
+                weighted = all(member.get("weight") is not None for member in members)
                 for member in members:
                     industry = industry_asof(member["stock_code"], trade_date)
-                    if industry is None:
-                        continue
-                    industry = normalize_sw_code(industry)
                     value = member.get("weight") if weighted else None
                     if value is None:
                         value = 1.0 / len(members)
+                    if industry is None:
+                        industries[_UNMAPPED_INDUSTRY] = (
+                            industries.get(_UNMAPPED_INDUSTRY, 0.0) + float(value)
+                        )
+                        continue
+                    industry = normalize_sw_code(industry)
                     industries[industry] = industries.get(industry, 0.0) + float(value)
                 if industries:
                     by_date[trade_date] = industries
             exposure[index_code] = by_date
         return exposure
+
+    def _build_industry_exposure_meta(
+        self,
+        membership: dict[str, dict[date, list[dict[str, Any]]]],
+        dates: list[date],
+    ) -> dict[str, dict[date, dict[str, int | float | str]]]:
+        """统计指数成分行业归属覆盖与权重口径，供匹配因子解释。"""
+        stock_rows = (
+            self._db.query(IndustryMembershipEventModel)
+            .filter(IndustryMembershipEventModel.start_date <= dates[-1])
+            .all()
+        )
+        by_stock: dict[str, list[date]] = {}
+        for row in stock_rows:
+            by_stock.setdefault(row.stock_code, []).append(row.start_date)
+        result: dict[str, dict[date, dict[str, int | float | str]]] = {}
+        for index_code, daily in membership.items():
+            result[index_code] = {}
+            for trade_date, members in daily.items():
+                member_count = len(members)
+                mapped = sum(
+                    any(start <= trade_date for start in by_stock.get(member["stock_code"], []))
+                    for member in members
+                )
+                result[index_code][trade_date] = {
+                    "member_count": member_count,
+                    "mapped_member_count": mapped,
+                    "unmapped_member_count": member_count - mapped,
+                    "industry_coverage": round(mapped / member_count, 6) if member_count else 0.0,
+                    "weighting_mode": (
+                        "index_weight" if all(member.get("weight") is not None for member in members) else "equal"
+                    ),
+                }
+        return result

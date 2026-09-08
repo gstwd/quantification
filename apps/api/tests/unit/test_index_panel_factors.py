@@ -36,18 +36,70 @@ def test_index_diffusion_ratio_basic() -> None:
     ctx = FactorContext(
         index_bars={},
         panels={
+            "calculation_dates": dates,
             "index_membership": membership,
             "stock_closes": closes,
         },
     )
     computer = IndexDiffusionRatioComputer()
     result = computer.compute_batch("000300", dates, ctx)
-    # warm-up 不足（前 220 日）无输出
-    assert dates[100] not in result
+    # warm-up 不足（前 220 日）保留带诊断信息的空值。
+    assert result[dates[100]].numeric is None
     # 220 日窗口 + 20 日平滑后才首次输出，A 涨 B 跌 → 占比 0.5
-    assert dates[238] not in result
+    assert result[dates[238]].numeric is None
     assert result[dates[239]].numeric == 50.0
     assert result[dates[-1]].numeric == 50.0
+
+
+def test_index_diffusion_excludes_missing_current_close_from_denominator() -> None:
+    """当日缺收盘成分不计分子和分母，2 涨 / 8 有效样本应为 25%。"""
+    dates = _dates(240)
+    members = [f"stock_{i}" for i in range(10)]
+    membership = {"000300": {d: [{"stock_code": code} for code in members] for d in dates}}
+    closes = {
+        code: _closes_series(10.0, 0.1 if index < 2 else -0.1, len(dates))
+        for index, code in enumerate(members)
+    }
+    for code in members[-2:]:
+        for trade_date in dates[-20:]:
+            closes[code].pop(trade_date)
+    ctx = FactorContext(
+        index_bars={},
+        panels={
+            "calculation_dates": dates,
+            "index_membership": membership,
+            "stock_closes": closes,
+        },
+    )
+
+    result = IndexDiffusionRatioComputer().compute("000300", dates[-1], ctx)
+
+    assert result.numeric == 25.0
+    assert result.payload["member_count"] == 10
+    assert result.payload["valid_sample_count"] == 8
+    assert result.payload["missing_sample_count"] == 2
+    assert result.payload["window_complete"] is True
+
+
+def test_index_diffusion_missing_close_invalidates_smoothing_window() -> None:
+    """平滑窗口内任一日无有效样本时不得跳日压缩计算。"""
+    dates = _dates(240)
+    membership = {"000300": {d: [{"stock_code": "stock_a"}] for d in dates}}
+    closes = {"stock_a": _closes_series(10.0, 0.1, len(dates))}
+    closes["stock_a"].pop(dates[-10])
+    ctx = FactorContext(
+        index_bars={},
+        panels={
+            "calculation_dates": dates,
+            "index_membership": membership,
+            "stock_closes": closes,
+        },
+    )
+
+    result = IndexDiffusionRatioComputer().compute("000300", dates[-1], ctx)
+
+    assert result.numeric is None
+    assert result.payload["window_complete"] is False
 
 
 def test_index_diffusion_ratio_no_membership_none() -> None:
@@ -78,6 +130,37 @@ def test_rrg_industry_match_score() -> None:
     value = computer.compute("000300", dates[0], ctx)
     assert value.numeric is not None
     assert value.numeric == 75.0
+
+
+def test_rrg_industry_match_unmapped_member_stays_in_denominator() -> None:
+    """未映射行业成分不能命中，但必须保留在匹配分母。"""
+    trade_date = _dates(1)[0]
+    ctx = FactorContext(
+        index_bars={},
+        panels={
+            "industry_selection": {trade_date: {"801010": 1.0}},
+            "index_industry_exposure": {
+                "000300": {trade_date: {"801010": 0.5, "__unmapped__": 0.5}}
+            },
+            "index_industry_exposure_meta": {
+                "000300": {
+                    trade_date: {
+                        "member_count": 2,
+                        "mapped_member_count": 1,
+                        "unmapped_member_count": 1,
+                        "industry_coverage": 0.5,
+                        "weighting_mode": "equal",
+                    }
+                }
+            },
+        },
+    )
+
+    value = RRGIndustryMatchComputer().compute("000300", trade_date, ctx)
+
+    assert value.numeric == 50.0
+    assert value.payload["unmapped_member_count"] == 1
+    assert value.payload["industry_coverage"] == 0.5
 
 
 def test_rrg_industry_match_missing_exposure_none() -> None:

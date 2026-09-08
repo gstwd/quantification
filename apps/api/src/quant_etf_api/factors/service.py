@@ -39,6 +39,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 指数扩散的 220 日比较与 20 日平滑需要 240 个连续交易日（含目标日）。
+_PANEL_FACTOR_WINDOW_DAYS = 240
+_BACKGROUND_ONLY_FACTOR_IDS = {"index_diffusion_ratio", "rrg_industry_match_score"}
+
 
 def _get_max_lookback_days(registry: "FactorRegistry") -> int:
     """从注册表中获取所有因子所需的最大回望自然日数。
@@ -99,14 +103,27 @@ class FactorService:
             return {"index_count": 0, "factor_count": 0, "upsert_count": 0, "errors": 0}
 
         index_codes = [idx.index_code for idx in indexes]
-        ctx = self._load_context(trade_date, index_codes)
-
         active_ids = {d.factor_id for d in self._repo.find_active()}
         computers = [c for c in self._registry.all() if c.spec.factor_id in active_ids]
 
         if not computers:
             logger.warning("compute_and_store: 无已启用的因子，跳过计算")
             return {"index_count": len(indexes), "factor_count": 0, "upsert_count": 0, "errors": 0}
+
+        include_composite_panels = any(
+            computer.spec.factor_id in _BACKGROUND_ONLY_FACTOR_IDS for computer in computers
+        )
+        panel_dates = (
+            self._panel_calculation_dates(trade_date)
+            if include_composite_panels
+            else [trade_date]
+        )
+        ctx = self._load_context(
+            trade_date,
+            index_codes,
+            panel_dates=panel_dates,
+            include_composite_panels=include_composite_panels,
+        )
 
         builtin_rows: list[dict] = []
         param_rows: list[dict] = []
@@ -157,14 +174,17 @@ class FactorService:
         upsert_count = self._index_repo.bulk_upsert_builtin(builtin_rows)
         upsert_count += self._index_repo.bulk_upsert_params(param_rows)
         elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
+        panel_metrics = ctx.panels.get("panel_metrics") or {}
         logger.info(
-            "[factor] 因子计算完成: trade_date=%s index=%d factor=%d upsert=%d missing=%d errors=%d 耗时=%sms",
+            "[factor] 因子计算完成: trade_date=%s index=%d factor=%d upsert=%d missing=%d errors=%d "
+            "面板=%s 耗时=%sms",
             trade_date,
             len(indexes),
             len(computers),
             upsert_count,
             missing_count,
             errors,
+            panel_metrics,
             elapsed_ms,
         )
 
@@ -173,6 +193,7 @@ class FactorService:
             "factor_count": len(computers),
             "upsert_count": upsert_count,
             "errors": errors,
+            "panel_metrics": panel_metrics,
         }
 
     def get_or_compute_cross_section(
@@ -192,7 +213,12 @@ class FactorService:
         """
         latest = self._index_repo.find_latest_date(factor_id)
 
-        if latest is None or force_recompute:
+        if factor_id in _BACKGROUND_ONLY_FACTOR_IDS:
+            if force_recompute or latest is None:
+                self._enqueue_latest_factor_computation()
+            if latest is None:
+                raise ValueError("复合因子尚未由后台任务计算，请稍后重试")
+        elif latest is None or force_recompute:
             bar_latest = self._index_repo.find_latest_bar_date()
             if bar_latest is None:
                 raise ValueError("无任何指数行情数据，无法计算因子")
@@ -230,6 +256,12 @@ class FactorService:
         Returns:
             按 trade_date 升序排列的 FactorRow 列表。
         """
+        if factor_id in _BACKGROUND_ONLY_FACTOR_IDS:
+            if force_recompute:
+                self._enqueue_latest_factor_computation()
+            rows = self._index_repo.find_factor_values(factor_id, index_code, start_date, end_date)
+            return [_row_to_factor_row(row) for row in rows]
+
         if force_recompute:
             dates_to_compute = self._index_repo.find_all_bar_dates(index_code, start_date, end_date)
         else:
@@ -274,7 +306,13 @@ class FactorService:
     # 内部方法
     # ==================================================================
 
-    def _load_context(self, trade_date: date, index_codes: list[str]) -> FactorContext:
+    def _load_context(
+        self,
+        trade_date: date,
+        index_codes: list[str],
+        panel_dates: list[date] | None = None,
+        include_composite_panels: bool = True,
+    ) -> FactorContext:
         """批量加载回望数据，构建 FactorContext。
 
         回望窗口由注册表中所有因子的 lookback_days 最大值动态决定。
@@ -282,6 +320,8 @@ class FactorService:
         Args:
             trade_date: 目标交易日。
             index_codes: 指数代码列表。
+            panel_dates: 复合因子的连续交易日计算轴；仅后台计算路径传入。
+            include_composite_panels: 是否装配成分股、行业归属等高成本复合因子面板。
 
         Returns:
             填充了 index_bars / index_valuation / macro_indicators 的 FactorContext。
@@ -341,17 +381,47 @@ class FactorService:
                 for name in spec.required_data
             )
         }
-        if panel_factor_ids and index_codes:
+        if include_composite_panels and panel_factor_ids and index_codes:
             from quant_etf_api.services.index_factor_panel_service import (
                 IndexFactorPanelService,
             )
 
             ctx.panels = IndexFactorPanelService(self._db).build_panels(
                 index_codes=index_codes,
-                dates=[trade_date],
+                dates=panel_dates or [trade_date],
                 lookback_natural_days=lookback_days,
             )
         return ctx
+
+    def _panel_calculation_dates(self, trade_date: date) -> list[date]:
+        """获取复合因子目标日前所需的连续指数交易日计算轴。
+
+        交易日以已落库的指数日线为准，避免请求线程调用外部交易日历；数据不足时
+        返回可得日期，扩散计算器会按严格窗口规则产出 NULL。
+
+        Args:
+            trade_date: 本次后台任务的目标交易日。
+
+        Returns:
+            升序交易日列表，最多包含目标日及此前 240 个交易日。
+        """
+        dates = IndexDailyBarRepository(self._db).find_all_trading_dates(
+            trade_date - timedelta(days=800), trade_date
+        )
+        return dates[-_PANEL_FACTOR_WINDOW_DAYS:]
+
+    def _enqueue_latest_factor_computation(self) -> None:
+        """将最新日全量因子计算入队，避免复合因子在请求线程加载大面板。"""
+        latest = self._index_repo.find_latest_bar_date()
+        if latest is None:
+            return
+        from quant_etf_api.infra.job_queue.queue import get_job_queue
+
+        get_job_queue().enqueue(
+            "factor_computation",
+            {"trade_date": latest.isoformat()},
+            job_key=f"factor_computation:{latest.isoformat()}",
+        )
 
 
 def _row_to_factor_row(row: IndexFactorValueModel) -> FactorRow:

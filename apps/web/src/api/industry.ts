@@ -102,6 +102,23 @@ export interface IndustryRRGResponse {
   meta: IndustryRRGMeta | null
 }
 
+/** 单行业与指定指数的日收益相关度 */
+export interface IndustryIndexCorrelationItem {
+  industry_code: string
+  name_cn: string
+  correlation: number | null
+  sample_count: number
+}
+
+/** 行业与指定指数相关度响应 */
+export interface IndustryIndexCorrelationResponse {
+  index_code: string
+  start: string
+  end: string
+  index_close_days: number
+  items: IndustryIndexCorrelationItem[]
+}
+
 /** 扩散单点数据 */
 export interface IndustryDiffusionPoint {
   trade_date: string
@@ -250,6 +267,32 @@ export async function fetchRRG(
       smooth_window: params.smoothWindow,
     },
     timeout: options.timeout ?? 120_000,
+  })
+  return data
+}
+
+/**
+ * 拉取指定指数与行业的严格日收益相关度。
+ *
+ * @param indexCode - 指数代码
+ * @param start - 起始日期 YYYY-MM-DD
+ * @param end - 截止日期 YYYY-MM-DD
+ * @param codes - 行业代码列表
+ * @returns 按相关度降序排列的行业相关度结果
+ */
+export async function fetchIndustryIndexCorrelation(
+  indexCode: string,
+  start: string,
+  end: string,
+  codes: string[],
+): Promise<IndustryIndexCorrelationResponse> {
+  const { data } = await apiClient.get<IndustryIndexCorrelationResponse>('/industry/correlation', {
+    params: {
+      index_code: indexCode,
+      start,
+      end,
+      industry_codes: codes.join(','),
+    },
   })
   return data
 }

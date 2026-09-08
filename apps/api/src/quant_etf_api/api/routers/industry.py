@@ -8,6 +8,7 @@ from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+import pandas as pd
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
@@ -16,17 +17,22 @@ from quant_etf_api.domain.industry.constants import (
     RRG_LAB_MAX_RANGE_DAYS,
     normalize_sw_code,
 )
+from quant_etf_api.domain.industry.correlation import compute_industry_index_correlations
 from quant_etf_api.domain.industry.selection import IndustrySelectionConfig
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
     IndustryUniverseRepository,
 )
+from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
+from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.schemas.market_data import DailyBar
 from quant_etf_api.schemas.industry import (
     IndustryDiffusionMeta,
     IndustryDiffusionPoint,
     IndustryDiffusionResponse,
     IndustryIndexSummary,
+    IndustryIndexCorrelationItem,
+    IndustryIndexCorrelationResponse,
     IndustryQualityDetail,
     IndustryRRGMeta,
     IndustryRRGPoint,
@@ -214,6 +220,79 @@ def industry_quality_detail(
         return IndustryDataService(db).industry_quality_detail(code)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/correlation", response_model=IndustryIndexCorrelationResponse)
+def get_industry_index_correlation(
+    index_code: str = Query(..., min_length=1, description="待比较的活跃指数代码"),
+    start: date = Query(..., description="起始日期"),
+    end: date = Query(..., description="截止日期"),
+    industry_codes: str | None = Query(default=None, description="逗号分隔行业代码"),
+    db: Session = Depends(get_db),
+) -> IndustryIndexCorrelationResponse:
+    """计算指定指数与行业的严格日收益 Pearson 相关度。
+
+    只读取已入库的指数与行业日线。缺少收盘价不会前填，且会使该资产紧随的
+    收益也失效，避免将跨停牌或数据断档的价格变化混入相关度样本。
+    """
+    _validate_range(start, end)
+    _validate_max_days(start, end, RRG_LAB_MAX_RANGE_DAYS, "行业相关度")
+    index = BenchmarkIndexRepository(db).find_by_code(index_code)
+    if index is None or not index.is_active:
+        raise HTTPException(status_code=404, detail=f"活跃指数 {index_code} 不存在")
+
+    universe_repo = IndustryUniverseRepository(db)
+    requested_codes = _split_codes(industry_codes)
+    codes = universe_repo.find_active_codes(requested_codes)
+    if not codes:
+        raise HTTPException(status_code=422, detail="未选择有效行业")
+    index_bars = IndexDailyBarRepository(db).find_by_code_date_range(index_code, start, end)
+    industry_bars = IndustryDailyBarRepository(db).find_range(start, end, codes)
+    index_close = pd.Series(
+        {row.trade_date: row.close_price for row in index_bars if row.close_price is not None},
+        dtype=float,
+    )
+    industry_close = pd.DataFrame(
+        [
+            {
+                "trade_date": row.trade_date,
+                "industry_code": row.industry_code,
+                "close_price": row.close_price,
+            }
+            for row in industry_bars
+            if row.close_price is not None
+        ]
+    )
+    if industry_close.empty:
+        close_panel = pd.DataFrame(columns=codes, dtype=float)
+    else:
+        close_panel = industry_close.pivot(
+            index="trade_date", columns="industry_code", values="close_price"
+        ).reindex(columns=codes)
+    correlations = compute_industry_index_correlations(index_close, close_panel)
+    names = {row.industry_code: row.name_cn for row in universe_repo.find_by_codes(codes)}
+    items = [
+        IndustryIndexCorrelationItem(
+            industry_code=code,
+            name_cn=names.get(code, ""),
+            correlation=_num(correlations.loc[code, "correlation"]),
+            sample_count=int(correlations.loc[code, "sample_count"]),
+        )
+        for code in codes
+    ]
+    items.sort(
+        key=lambda item: (
+            item.correlation is None,
+            -(item.correlation if item.correlation is not None else 0.0),
+        )
+    )
+    return IndustryIndexCorrelationResponse(
+        index_code=index_code,
+        start=start,
+        end=end,
+        index_close_days=len(index_close),
+        items=items,
+    )
 
 
 def _rrg_warmup_days(lookback_ratio: int, lookback_mom: int, smooth_window: int) -> int:
