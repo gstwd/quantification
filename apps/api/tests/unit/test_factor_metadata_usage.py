@@ -1,4 +1,4 @@
-"""因子元数据（usage/asset_domain）校验与旧行业域配置退役测试。"""
+"""因子元数据（usage/asset_domain）校验测试。"""
 
 from __future__ import annotations
 
@@ -56,27 +56,6 @@ def test_breadth_factor_usage_restricted() -> None:
     result = svc.validate_config(config)
     assert not result.valid
     assert any("不适用于评分位置" in e for e in result.errors)
-
-
-def test_legacy_industry_rotation_config_rejected() -> None:
-    """旧行业轮动配置（asset_domain=industry / rotation）被显式拒绝并提示迁移。"""
-    svc = _make_service([])
-    config = {
-        "asset_domain": "industry",
-        "index_codes": ["801010", "801120"],
-        "score": {"factors": {}},
-        "portfolio": {"method": "equal_weight", "default_exposure": 1.0},
-        "rebalance": {"frequency": "monthly"},
-        "rotation": {
-            "signal": "diffusion_rrg",
-            "top_n": 6,
-            "keep_quadrants": [1, 2],
-            "benchmark_exclude": ["801230"],
-        },
-    }
-    result = svc.validate_config(config)
-    assert not result.valid
-    assert any("已停用的行业轮动配置" in e for e in result.errors)
 
 
 def test_industry_domain_row_cannot_be_used_in_generic_score() -> None:

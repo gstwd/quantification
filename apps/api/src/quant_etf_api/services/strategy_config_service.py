@@ -188,19 +188,12 @@ class StrategyConfigService:
     def validate_config(self, config_json: dict[str, Any]) -> StrategyValidationResult:
         """校验策略配置 JSON 是否合法（含因子 ID 与变换函数校验）。
 
-        旧版行业轮动配置（asset_domain=industry / rotation 模块）已在策略层
-        退役：这里显式拒绝并给出迁移提示，避免被 Pydantic 静默忽略后按空
-        score 配置继续运行。
-
         Args:
             config_json: 策略配置 JSON（仅含引擎配置，不含 strategy_id/display_name 等元数据字段）。
 
         Returns:
             校验结果。
         """
-        legacy_error = self._legacy_domain_error(config_json)
-        if legacy_error:
-            return StrategyValidationResult(valid=False, errors=[legacy_error])
         try:
             # strategy_id 和 display_name 存储在顶层列中，校验时补入占位值
             validation_input = {
@@ -404,30 +397,6 @@ class StrategyConfigService:
                     )
         return errors
 
-    @staticmethod
-    def _legacy_domain_error(config_json: dict[str, Any]) -> str | None:
-        """检测旧版行业轮动配置（asset_domain=industry / rotation 模块）。
-
-        这类配置已在策略层退役：行业与个股只作为因子输入，策略资产统一为
-        benchmark_index 中的指数。配置里残留的字段若被 Pydantic 静默忽略，
-        会退化成空评分配置运行，因此在校验与解析入口显式拒绝。
-
-        Args:
-            config_json: 策略配置 JSON。
-
-        Returns:
-            迁移提示错误文本；配置不含旧字段时返回 None。
-        """
-        domain = (config_json or {}).get("asset_domain")
-        if domain == "industry" or "rotation" in (config_json or {}):
-            return (
-                "检测到已停用的行业轮动配置（asset_domain=industry 或 rotation 模块）："
-                "申万行业已不作为策略资产，请删除 rotation/asset_domain 字段，"
-                "改用指数级 RRG/扩散因子（rrg_industry_match_score / "
-                "index_diffusion_ratio）重新配置策略"
-            )
-        return None
-
     def _factor_params_errors(self, config: StrategyConfig) -> list[str]:
         """校验 factor_params 引用的因子存在且允许参数化、参数键合法。
 
@@ -499,24 +468,16 @@ class StrategyConfigService:
     def get_parsed_config(self, strategy_id: str) -> StrategyConfig | None:
         """获取解析后的 StrategyConfig 对象。
 
-        旧版行业轮动配置（asset_domain=industry / rotation）在此显式抛错，
-        让实时分配/回测入口以明确的中文提示拒绝，而不是退化为空配置运行。
-
         Args:
             strategy_id: 策略标识。
 
         Returns:
             解析后的配置对象，不存在返回 None。
 
-        Raises:
-            ValueError: 配置为已停用的行业轮动旧格式时抛出迁移提示。
         """
         row = self._repo.find_by_id(strategy_id)
         if row is None:
             return None
-        legacy_error = self._legacy_domain_error(row.config_json or {})
-        if legacy_error:
-            raise ValueError(legacy_error)
         try:
             full_config = {
                 "strategy_id": row.strategy_id,
@@ -544,13 +505,8 @@ class StrategyConfigService:
         Returns:
             解析后的配置对象，失败返回 None。
 
-        Raises:
-            ValueError: 快照为已停用的行业轮动旧格式时抛出迁移提示。
         """
         config_json = snapshot.get("config_json") or {}
-        legacy_error = StrategyConfigService._legacy_domain_error(config_json)
-        if legacy_error:
-            raise ValueError(legacy_error)
         try:
             full_config = {
                 "strategy_id": snapshot.get("strategy_id", "_snapshot_"),
