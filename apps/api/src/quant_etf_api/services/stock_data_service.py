@@ -23,6 +23,7 @@ from quant_etf_api.infra.db.repositories.industry import (
 )
 from quant_etf_api.infra.db.repositories.stock import StockUniverseRepository
 from quant_etf_api.infra.trading_calendar import TradingCalendar
+from quant_etf_api.infra.time import today_cn
 from quant_etf_api.schemas.stock import StockSummary
 
 logger = logging.getLogger(__name__)
@@ -136,7 +137,7 @@ class StockDataService:
 
     def _current_industry_map(self) -> dict[str, str]:
         """返回股票代码 → 当前有效申万一级行业（start_date 不大于今天的最新事件）。"""
-        events = self._membership_repo.find_events_until(date.today())
+        events = self._membership_repo.find_events_until(today_cn())
         best: dict[str, tuple[date, str]] = {}
         for event in events:
             current = best.get(event.stock_code)
@@ -175,10 +176,10 @@ class StockDataService:
         """获取不晚于今天的最近交易日（严格模式，不做周末近似）。"""
         trading_set = self._calendar.get_trading_days_set()
         if trading_set is not None:
-            candidates = sorted(d for d in trading_set if d <= date.today())
+            candidates = sorted(d for d in trading_set if d <= today_cn())
             if candidates:
                 return candidates[-1]
-        days = self._bar_repo.find_market_trading_dates(_STOCK_FETCH_EPOCH, date.today())
+        days = self._bar_repo.find_market_trading_dates(_STOCK_FETCH_EPOCH, today_cn())
         if days:
             return days[-1]
         raise ValueError("交易日历不可用，无法确定最近交易日")

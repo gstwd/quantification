@@ -7,11 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from quant_etf_api.services.benchmark import (
+from quant_etf_api.domain.portfolio.benchmark import (
     compute_buy_hold_benchmark,
     compute_equal_weight_benchmark,
 )
-from quant_etf_api.services.metrics import compute_performance_metrics
+from quant_etf_api.domain.research.metrics import compute_performance_metrics
 
 
 def _bar(close_price: float) -> SimpleNamespace:

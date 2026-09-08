@@ -6,7 +6,7 @@ from datetime import date
 
 import pytest
 
-from quant_etf_api.services.metrics import (
+from quant_etf_api.domain.research.metrics import (
     _calc_alpha_beta,
     _calc_annualized_return,
     _calc_sharpe_ratio,

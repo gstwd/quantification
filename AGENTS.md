@@ -113,7 +113,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 
 - **`api/routers/`** — 10 route groups: `health`, `system`, `indexes`, `market_data`, `strategies`, `factors`, `runs`, `backtests`, `ai_factors`, `keyword_tags`
 - **`api/middleware.py`** — `RequestIdMiddleware`：为每个请求注入唯一 request_id，写入响应头和日志 ContextVar
-- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. New services: `metrics.py`（专业绩效指标，含 VaR/CVaR/连续亏损天数）、`benchmark.py`（基准收益计算）、`index_service.py`、`data_quality.py`（日线/估值异常检测 + 连续性缺口检测）、`factor_admin_service.py`（因子定义同步，与 FactorService 计算编排分离）、`strategy_decision_service.py`（统一策略执行入口：加载配置→校验→构建上下文→补算触发→引擎执行→可选持久化）.
+- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. `DataFreshnessService` 独立负责数据新鲜度汇总，`IngestService` 只保留摄取编排门面。其他服务包括 `index_service.py`、`factor_admin_service.py`（因子定义同步，与 FactorService 计算编排分离）、`strategy_decision_service.py`（统一策略执行入口：加载配置→校验→构建上下文→补算触发→引擎执行→可选持久化）。基准收益、数据质量和绩效指标规则位于 `domain/`，`services/benchmark.py`、`services/data_quality.py`、`services/metrics.py` 仅保留历史导入兼容转发。
 - **`engine/`** — **策略引擎核心**：组件化、配置驱动的策略执行管线（11 个文件）：
   - `config.py` — Pydantic 配置模型（含 `TimingConfig`、`ScoreConfig`、`FilterConfig`、`RankConfig`、`PortfolioConfig`、`RiskConfig`、`RebalanceConfig`）
   - `base.py` — `EngineContext`、`EngineResult` 数据结构
@@ -134,10 +134,11 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - **`infra/job_queue/`** — **统一后台任务队列**：`background_job` 表（迁移 0023）+ `JobRepository`（`FOR UPDATE SKIP LOCKED` 认领）+ `JobQueue`（固定 worker 线程池，`settings.job_queue_workers` 默认 4）+ `handlers.py`（`JOB_HANDLERS` 分发表）。所有后台任务（摄取/因子/回测/对比/AI/日历预热/GET 补数）统一 `enqueue(job_type, payload, job_key=...)`，支持 `job_key` 幂等去重与 `max_attempts` 重试。进程重启后 `recover_stuck_jobs()` 将 running 任务标记失败。
 - **`infra/scheduler/`** — `DailyIngestScheduler` / `AIAnalysisScheduler`: daemon `Thread` + `Event` 定时器，仅负责在预定时间将任务入队（`job_key="daily_ingest"` / `ai_analysis:{date}`），实际执行在任务队列 worker 中，调度线程不做任何同步外部调用。数据摄取调度器不做交易日判断：周末/节假日也会入队，由摄取任务按"最近交易日缺口"决定是否补拉。
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
-  - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）、`trading_calendar.py`（`TradingCalendarLike` 协议 + 周末兜底实现）
+  - `common/` — `bar_metrics.py` (BAR computation), `numeric.py`（NaN/Inf 和价格字段容错）、`enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）、`trading_calendar.py`（`TradingCalendarLike` 协议 + 周末兜底实现）
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, UniverseAsset dataclasses)、`rebalance.py`（纯调仓规则，engine/rebalance.py 为兼容转发层）
-  - `portfolio/` — `turnover.py`（换手率）、`returns.py`（T+1 收益）、`accounting.py`（`BacktestDayAccumulator` 累计/回撤记账）、`universe.py`（universe 构建与 subset 过滤）
-  - `market_data/`、`research/` — 预留包目录
+  - `portfolio/` — `turnover.py`（换手率）、`returns.py`（T+1 收益）、`benchmark.py`（回测基准收益）、`accounting.py`（`BacktestDayAccumulator` 累计/回撤记账）、`universe.py`（universe 构建与 subset 过滤）
+  - `market_data/` — `quality.py`（日线、估值与连续性质量规则）
+  - `research/` — 研究评估领域规则（绩效指标、walk-forward 窗口切分）
 - **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `normalization.py` (zscore/rank/minmax/winsorize/MAD 横截面标准化), `builtins/`（价格/动量/波动/估值/量能/技术/月线等指数因子 + `index_panel_factors.py` 的指数成分扩散与 RRG 行业匹配两类面板因子）。**指数因子值写入 `index_factor_value` 表；行业/个股数据只作为面板因子的内部输入，不出现在策略资产域**。
 - **`config/`** — Pydantic settings loaded from `.env`
 - **`schemas/`** — 10 个 Pydantic schema 文件：`factor.py`、`market_data.py`、`pagination.py`、`run.py`、`signal.py`、`strategy.py`、`system.py`、`types.py`、`backtest.py`、`__init__.py`

@@ -29,6 +29,7 @@ from quant_etf_api.infra.db.repositories.industry import (
     StockDailyCloseRepository,
 )
 from quant_etf_api.infra.trading_calendar import TradingCalendar
+from quant_etf_api.infra.time import today_cn
 from quant_etf_api.schemas.industry import IndustryQualityDetail, IndustrySummaryItem
 
 logger = logging.getLogger(__name__)
@@ -362,7 +363,7 @@ class IndustryDataService:
             return {"codes": 0, "records": 0, "errors": []}
         total = 0
         errors: list[str] = []
-        end = date.today().strftime("%Y%m%d")
+        end = today_cn().strftime("%Y%m%d")
         for i, code in enumerate(codes, start=1):
             try:
                 rows = self._close_client.fetch_history_baostock(code, start_date, end)
@@ -489,11 +490,11 @@ class IndustryDataService:
         """获取不晚于今天的最近交易日（严格模式，不做周末近似）。"""
         trading_set = self._calendar.get_trading_days_set()
         if trading_set is not None:
-            candidates = sorted(d for d in trading_set if d <= date.today())
+            candidates = sorted(d for d in trading_set if d <= today_cn())
             if candidates:
                 return candidates[-1]
         epoch = date(2013, 1, 1)
-        days = self._bar_repo.find_market_trading_dates(epoch, date.today())
+        days = self._bar_repo.find_market_trading_dates(epoch, today_cn())
         if days:
             return days[-1]
         raise ValueError("交易日历不可用，无法确定最近交易日")
@@ -590,7 +591,7 @@ class IndustryDataService:
 
     def _membership_ref_date(self) -> date:
         """返回成分计数参考日：优先行业日线最新交易日，缺数据时用今天。"""
-        return self._bar_repo.latest_trade_date() or date.today()
+        return self._bar_repo.latest_trade_date() or today_cn()
 
     def list_summary(self) -> list[IndustrySummaryItem]:
         """聚合行业目录、当前成分数、质量快照与最新一根行情，供管理列表页。"""

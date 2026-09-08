@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from quant_etf_api.services.data_quality import check_daily_bar_anomalies
+from quant_etf_api.domain.market_data.quality import check_daily_bar_anomalies
 
 
 class _FakeBar:

@@ -97,7 +97,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 
 - **`api/routers/`** — 10 route groups: `health`, `system`, `indexes`, `market_data`, `strategies`, `factors`, `runs`, `backtests`, `ai_factors`, `keyword_tags`
 - **`api/middleware.py`** — `RequestIdMiddleware`：为每个请求注入唯一 request_id，写入响应头和日志 ContextVar
-- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. New services: `metrics.py`（专业绩效指标，含 VaR/CVaR/连续亏损天数）、`benchmark.py`（基准收益计算）、`index_service.py`、`data_quality.py`（日线/估值异常检测 + 连续性缺口检测）.
+- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. `DataFreshnessService` 独立负责数据新鲜度汇总，`IngestService` 只保留摄取编排门面。其他服务包括 `index_service.py`。基准收益、数据质量和绩效指标规则位于 `domain/`，`services/benchmark.py`、`services/data_quality.py`、`services/metrics.py` 仅保留历史导入兼容转发。
 - **`engine/`** — **策略引擎核心**：组件化、配置驱动的策略执行管线（11 个文件）：
   - `config.py` — Pydantic 配置模型（含 `TimingConfig`、`ScoreConfig`、`FilterConfig`、`RankConfig`、`PortfolioConfig`、`RiskConfig`、`RebalanceConfig`）
   - `base.py` — `EngineContext`、`EngineResult` 数据结构
@@ -118,9 +118,10 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - **`infra/scheduler/`** — `DailyIngestScheduler` / `AIAnalysisScheduler`: daemon `Thread` + `Event` 定时器，仅将任务入队（`job_key="daily_ingest"` / `ai_analysis:{date}`），不执行外部调用；数据摄取调度器不做交易日判断（周末/节假日也入队，由摄取侧按最近交易日缺口补拉），任务由 `background_job` worker 执行。
 - **`api/executor.py`** — 共享后台任务线程池。所有 bg 路由（runs、backtests）通过 `get_bg_executor()` 获取统一 executor，`main.py` lifespan 统一 shutdown。所有 bg 函数统一 `mark_running` → `mark_success/failed` 状态流转，外层 try/except 兜底。
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
-  - `common/` — `bar_metrics.py` (BAR computation), `enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）
+  - `common/` — `bar_metrics.py` (BAR computation), `numeric.py`（NaN/Inf 和价格字段容错）、`enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, AllocationPlan dataclasses)
-  - `market_data/`、`research/` — 预留包目录
+  - `market_data/` — `quality.py`（日线、估值与连续性质量规则）
+  - `research/` — 研究评估领域规则（绩效指标、walk-forward 窗口切分）
 - **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `normalization.py` (zscore/rank/minmax/winsorize/MAD 横截面标准化), `builtins/` (18 built-in computers: volume×1, momentum×3, volatility×1, valuation×2, ma×4, atr×1, donchian×2, rsi×1). **所有因子基于指数数据计算**（`index_factor_value` 表）。**架构原则：因子层只使用指数数据**。
 - **`config/`** — Pydantic settings loaded from `.env`
 - **`schemas/`** — 10 个 Pydantic schema 文件：`factor.py`、`market_data.py`、`pagination.py`、`run.py`、`signal.py`、`strategy.py`、`system.py`、`types.py`、`backtest.py`、`__init__.py`

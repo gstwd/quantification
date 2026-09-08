@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 from sqlalchemy import func
@@ -24,6 +24,7 @@ from quant_etf_api.infra.clients.tickflow_index import TickFlowIndexClient
 from quant_etf_api.infra.clients.tushare_index import TushareIndexClient
 from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.infra.db.base import utcnow
+from quant_etf_api.infra.time import today_cn
 from quant_etf_api.infra.db.models.core import (
     BenchmarkIndexModel,
     IndexDailyBarModel,
@@ -46,6 +47,7 @@ from quant_etf_api.schemas.market_data import (
     ValuationQuality,
 )
 from quant_etf_api.services.run_service import RunService
+from quant_etf_api.services.data_freshness_service import DataFreshnessService
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +149,7 @@ class IngestService:
         self._valuation_repo = IndexValuationRepository(db)
         self._macro_repo = MacroIndicatorRepository(db)
         self._index_repo = BenchmarkIndexRepository(db)
+        self._freshness_svc = DataFreshnessService(db)
 
     def _enqueue_data_fill(self, resource: str, code: str | None = None) -> None:
         """查询未命中时入队后台补数任务，不在请求线程同步抓取。
@@ -759,201 +762,8 @@ class IngestService:
     # ==================================================================
 
     def check_data_freshness(self) -> dict[str, Any]:
-        """检查各数据表的新鲜度和覆盖率。
-
-        针对每个基准指数，检查对应数据表中是否有记录、
-        最新数据日期距今是否超过 3 个自然日（节假日容忍），返回汇总结果。
-        """
-        today = date.today()
-        cal = TradingCalendar()
-        # 使用最近交易日作为新鲜度基准，容忍 1 个交易日间隔
-        latest_td = cal.latest_trading_day(today)
-        stale_threshold = latest_td - timedelta(days=1)
-        result: dict = {}
-
-        # --- 指数日线 ---
-        indexes = self._index_repo.find_all()
-        idx_bar_stale = []
-        idx_bar_missing = []
-        idx_bar_latest: date | None = None
-        for idx in indexes:
-            max_d = self._index_bar_repo.get_latest_date(idx.index_code)
-            if max_d is None:
-                idx_bar_missing.append(
-                    {
-                        "code": idx.index_code,
-                        "name": idx.name_cn,
-                        "latest_date": None,
-                        "is_stale": True,
-                    }
-                )
-            else:
-                if idx_bar_latest is None or max_d > idx_bar_latest:
-                    idx_bar_latest = max_d
-                if max_d < stale_threshold:
-                    idx_bar_stale.append(
-                        {
-                            "code": idx.index_code,
-                            "name": idx.name_cn,
-                            "latest_date": str(max_d),
-                            "is_stale": True,
-                        }
-                    )
-
-        result["index_bars"] = {
-            "total": len(indexes),
-            "up_to_date": len(indexes) - len(idx_bar_stale) - len(idx_bar_missing),
-            "stale": idx_bar_stale,
-            "missing": idx_bar_missing,
-            "latest_date": str(idx_bar_latest) if idx_bar_latest else None,
-        }
-
-        # --- 指数估值 ---
-        idx_val_stale = []
-        idx_val_missing = []
-        idx_val_latest: date | None = None
-        for idx in indexes:
-            max_d = self._valuation_repo.get_latest_date(idx.index_code)
-            if max_d is None:
-                idx_val_missing.append(
-                    {
-                        "code": idx.index_code,
-                        "name": idx.name_cn,
-                        "latest_date": None,
-                        "is_stale": True,
-                    }
-                )
-            else:
-                if idx_val_latest is None or max_d > idx_val_latest:
-                    idx_val_latest = max_d
-                if max_d < stale_threshold:
-                    idx_val_stale.append(
-                        {
-                            "code": idx.index_code,
-                            "name": idx.name_cn,
-                            "latest_date": str(max_d),
-                            "is_stale": True,
-                        }
-                    )
-
-        result["index_valuation"] = {
-            "total": len(indexes),
-            "up_to_date": len(indexes) - len(idx_val_stale) - len(idx_val_missing),
-            "stale": idx_val_stale,
-            "missing": idx_val_missing,
-            "latest_date": str(idx_val_latest) if idx_val_latest else None,
-        }
-
-        # --- 个股日线（基于 stock_universe 质量快照聚合） ---
-        from quant_etf_api.infra.db.models.industry import StockDailyCloseModel  # noqa: PLC0415
-        from quant_etf_api.infra.db.models.stock import StockUniverseModel  # noqa: PLC0415
-
-        stock_rows = self._db.query(StockUniverseModel).all()
-        stock_stale: list[dict[str, Any]] = []
-        stock_missing: list[dict[str, Any]] = []
-        for stock in stock_rows:
-            if (
-                stock.quality_checked_at is None
-                or stock.bar_count is None
-                or stock.bar_count == 0
-                or stock.data_end_date is None
-            ):
-                stock_missing.append(
-                    {
-                        "code": stock.stock_code,
-                        "name": stock.name_cn,
-                        "latest_date": None,
-                        "is_stale": True,
-                    }
-                )
-                continue
-            if stock.data_end_date < stale_threshold:
-                stock_stale.append(
-                    {
-                        "code": stock.stock_code,
-                        "name": stock.name_cn,
-                        "latest_date": str(stock.data_end_date),
-                        "is_stale": True,
-                    }
-                )
-        stock_latest_db = self._db.query(func.max(StockDailyCloseModel.trade_date)).scalar()
-        result["stock_bars"] = {
-            "total": len(stock_rows),
-            "up_to_date": len(stock_rows) - len(stock_stale) - len(stock_missing),
-            "stale": stock_stale[:3],
-            "missing": stock_missing[:3],
-            "stale_total": len(stock_stale),
-            "missing_total": len(stock_missing),
-            "latest_date": str(stock_latest_db) if stock_latest_db else None,
-        }
-
-        # --- 行业日线（基于 industry_universe 质量快照聚合） ---
-        from quant_etf_api.infra.db.models.industry import (  # noqa: PLC0415
-            IndustryDailyBarModel,
-            IndustryUniverseModel,
-        )
-
-        industry_rows = self._db.query(IndustryUniverseModel).all()
-        industry_stale: list[dict[str, Any]] = []
-        industry_missing: list[dict[str, Any]] = []
-        for industry in industry_rows:
-            if (
-                industry.quality_checked_at is None
-                or industry.bar_count is None
-                or industry.bar_count == 0
-                or industry.data_end_date is None
-            ):
-                industry_missing.append(
-                    {
-                        "code": industry.industry_code,
-                        "name": industry.name_cn,
-                        "latest_date": None,
-                        "is_stale": True,
-                    }
-                )
-                continue
-            if industry.data_end_date < stale_threshold:
-                industry_stale.append(
-                    {
-                        "code": industry.industry_code,
-                        "name": industry.name_cn,
-                        "latest_date": str(industry.data_end_date),
-                        "is_stale": True,
-                    }
-                )
-        industry_latest_db = self._db.query(
-            func.max(IndustryDailyBarModel.trade_date)
-        ).scalar()
-        result["industry_bars"] = {
-            "total": len(industry_rows),
-            "up_to_date": len(industry_rows) - len(industry_stale) - len(industry_missing),
-            "stale": industry_stale[:3],
-            "missing": industry_missing[:3],
-            "stale_total": len(industry_stale),
-            "missing_total": len(industry_missing),
-            "latest_date": str(industry_latest_db) if industry_latest_db else None,
-        }
-
-        # --- 字段级质量 ---
-        total_index_bars = self._db.query(func.count(IndexDailyBarModel.id)).scalar() or 0
-        null_index_change_pct = (
-            self._db.query(func.count(IndexDailyBarModel.id))
-            .filter(IndexDailyBarModel.change_pct.is_(None))
-            .scalar()
-            or 0
-        )
-        result["field_quality"] = {
-            "index_bars": {
-                "total_records": total_index_bars,
-                "change_pct_null": null_index_change_pct,
-                "change_pct_null_rate": round(null_index_change_pct / total_index_bars, 4)
-                if total_index_bars
-                else 0,
-            },
-        }
-
-        result["checked_at"] = utcnow().isoformat()
-        return result
+        """返回各类行情数据的新鲜度和覆盖率汇总。"""
+        return self._freshness_svc.check_data_freshness()
 
     # ==================================================================
     # 共享私有方法
@@ -1031,7 +841,7 @@ class IngestService:
         Returns:
             quality 统计字典：{scope: 异常数量}。
         """
-        from quant_etf_api.services.data_quality import (
+        from quant_etf_api.domain.market_data.quality import (
             check_continuity,
             check_daily_bar_anomalies,
             check_valuation_anomalies,
@@ -1040,8 +850,14 @@ class IngestService:
         stats: dict[str, Any] = {}
         try:
             index_bars = self._index_bar_repo.find_by_date_range(trade_date, trade_date)
-            stats["index_bar_anomalies"] = len(check_daily_bar_anomalies(index_bars))
-            stats["index_bar_gaps"] = len(check_continuity(index_bars))
+            bar_anomalies = check_daily_bar_anomalies(index_bars)
+            bar_gaps = check_continuity(index_bars)
+            stats["index_bar_anomalies"] = len(bar_anomalies)
+            stats["index_bar_gaps"] = len(bar_gaps)
+            if bar_anomalies:
+                logger.warning("日线异常检测发现 %d 个问题", len(bar_anomalies))
+            if bar_gaps:
+                logger.warning("连续性检测发现 %d 个缺口", len(bar_gaps))
         except Exception:
             logger.warning("指数日线质量检测失败", exc_info=True)
             stats["index_bar_anomalies"] = 0
@@ -1049,7 +865,10 @@ class IngestService:
 
         try:
             valuation_rows = self._valuation_repo.find_by_date_range(trade_date, trade_date)
-            stats["valuation_anomalies"] = len(check_valuation_anomalies(valuation_rows))
+            valuation_anomalies = check_valuation_anomalies(valuation_rows)
+            stats["valuation_anomalies"] = len(valuation_anomalies)
+            if valuation_anomalies:
+                logger.warning("估值异常检测发现 %d 个问题", len(valuation_anomalies))
         except Exception:
             logger.warning("估值质量检测失败", exc_info=True)
             stats["valuation_anomalies"] = 0
@@ -1089,7 +908,7 @@ class IngestService:
 
             # 以最近交易日为补拉目标：非交易日（周末/节假日）也能把缺失的
             # 上一交易日数据补上，而不是按"今天是否交易日"一刀切跳过
-            target_date = TradingCalendar().latest_trading_day(date.today())
+            target_date = TradingCalendar().latest_trading_day(today_cn())
 
             # ------------------------------ 1. 指数日线 + 估值 ------------------------------
             indexes = self._index_repo.find_all()
@@ -1172,7 +991,7 @@ class IngestService:
             self._run_svc.mark_running(run_id)
 
             # 补拉目标 = 最近交易日；非交易日触发时自动补上一交易日
-            target_date = TradingCalendar().latest_trading_day(date.today())
+            target_date = TradingCalendar().latest_trading_day(today_cn())
 
             indexes = self._index_repo.find_all()
             index_bar_count = 0
@@ -1229,7 +1048,7 @@ class IngestService:
         try:
             self._run_svc.mark_running(run_id)
 
-            today = date.today()
+            today = today_cn()
             cal = TradingCalendar()
             if not cal.is_trading_day(today):
                 self._run_svc.mark_skipped(
@@ -1346,7 +1165,7 @@ class IngestService:
         try:
             self._run_svc.mark_running(run_id)
 
-            today = date.today()
+            today = today_cn()
             if not TradingCalendar().is_trading_day(today):
                 self._run_svc.mark_skipped(
                     run_id,

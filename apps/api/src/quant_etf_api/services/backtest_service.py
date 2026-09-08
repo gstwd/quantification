@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from datetime import date, timedelta
 from typing import Any
 from uuid import uuid4
@@ -17,6 +16,11 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from quant_etf_api.domain.common.signal_level import determine_signal_level
+from quant_etf_api.domain.common.numeric import (
+    price_invalid as _price_invalid,
+    safe_metric_diff as _safe_metric_diff,
+    sanitize_metric_value as _sanitize_metric_value,
+)
 from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
 from quant_etf_api.domain.portfolio.returns import (
     compute_allocation_return,
@@ -64,8 +68,8 @@ from quant_etf_api.schemas.backtest import (
     ComparisonDailyResponse,
     ComparisonMetrics,
 )
-from quant_etf_api.services.benchmark import compute_buy_hold_benchmark
-from quant_etf_api.services.metrics import (
+from quant_etf_api.domain.portfolio.benchmark import compute_buy_hold_benchmark
+from quant_etf_api.domain.research.metrics import (
     compute_annual_breakdown,
     compute_performance_metrics,
     compute_rolling_metrics,
@@ -76,61 +80,6 @@ from quant_etf_api.services.strategy_config_service import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _sanitize_metric_value(value: Any) -> Any:
-    """将 NaN/Inf 指标值转为 None，避免写入 JSON 列失败。
-
-    PostgreSQL JSON 类型不允许 NaN/Infinity token，Python json 序列化
-    NaN 会直接报 invalid input syntax for type json。指标层任何除法
-    （如零波动 Sharpe、负累计年化）都可能产生 NaN，统一在此兜底。
-
-    Args:
-        value: 指标值。
-
-    Returns:
-        有限数值原样返回，NaN/Inf 转为 None。
-    """
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    return value
-
-
-def _safe_metric_diff(a: Any, b: Any, digits: int = 2) -> Any:
-    """计算两个指标差值的容错版本。
-
-    Args:
-        a: 策略 A 指标值。
-        b: 策略 B 指标值。
-        digits: 保留小数位。
-
-    Returns:
-        差值；任一输入为 None/NaN/Inf 时返回 None。
-    """
-    if a is None or b is None:
-        return None
-    if isinstance(a, float) and not math.isfinite(a):
-        return None
-    if isinstance(b, float) and not math.isfinite(b):
-        return None
-    return round(a - b, digits)
-
-
-def _price_invalid(value: Any) -> bool:
-    """判断价格字段是否不可用（None / 0 / NaN）。
-
-    Args:
-        value: 价格或 None。
-
-    Returns:
-        value 为 None、0 或 NaN 时返回 True。
-    """
-    if value is None or value == 0:
-        return True
-    try:
-        return math.isnan(value)
-    except TypeError:
-        return False
 
 
 class BacktestService:
