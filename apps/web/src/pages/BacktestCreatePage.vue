@@ -95,13 +95,6 @@
         </div>
         <div v-if="form.enable_benchmark" class="form-row" style="margin-top: 8px;">
           <div class="form-section">
-            <label class="form-label">基准模式</label>
-            <select v-model="form.benchmark_mode" class="form-select">
-              <option value="auto">自动（买入持有基准指数）</option>
-              <option value="index">指定指数基准</option>
-            </select>
-          </div>
-          <div v-if="form.benchmark_mode === 'index'" class="form-section">
             <label class="form-label">基准指数</label>
             <select v-model="form.benchmark_index_code" class="form-select">
               <option v-for="idx in indexes" :key="idx.index_code" :value="idx.index_code">
@@ -156,7 +149,6 @@ const form = reactive({
   index_codes: [] as string[],
   enable_benchmark: true,
   benchmark_index_code: '000300',
-  benchmark_mode: 'auto' as 'auto' | 'index',
 })
 
 const submitting = ref(false)
@@ -222,7 +214,6 @@ async function submit() {
       index_codes: form.index_codes,
       enable_benchmark: form.enable_benchmark,
       benchmark_index_code: form.benchmark_index_code,
-      benchmark_mode: form.benchmark_mode,
     })
     router.push(`/backtests/${summary.backtest_id}`)
   } catch (e: unknown) {

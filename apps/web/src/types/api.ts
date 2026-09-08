@@ -151,8 +151,6 @@ export interface BacktestCreateRequest {
   enable_benchmark?: boolean
   /** 基准指数代码，默认 000300（沪深300） */
   benchmark_index_code?: string
-  /** 基准模式：auto/index/industry_equal_weight */
-  benchmark_mode?: 'auto' | 'index' | 'industry_equal_weight'
 }
 
 export interface BacktestMetrics {

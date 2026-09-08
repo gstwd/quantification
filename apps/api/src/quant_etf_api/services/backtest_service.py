@@ -221,10 +221,9 @@ class BacktestService:
             )
 
         params = dict(req.params) if req.params else {}
-        # 保存基准配置到 params，供执行时读取
+        # 保存基准配置到 params，供执行时读取；基准统一采用买入持有口径。
         params["_enable_benchmark"] = req.enable_benchmark
         params["_benchmark_index_code"] = req.benchmark_index_code
-        params["_benchmark_mode"] = req.benchmark_mode
 
         # 创建时快照策略配置，保证回测结果与当时配置严格对应
         config_snapshot: dict[str, Any] | None = None
