@@ -121,9 +121,6 @@ class FactorDefinitionModel(Base):
     version: Mapped[str] = mapped_column(
         String(32), default="1.0.0", comment="因子版本号，遵循语义化版本"
     )
-    owner_plugin: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, comment="历史遗留字段，所有内置因子均为 NULL"
-    )
     category: Mapped[str | None] = mapped_column(
         String(32),
         nullable=True,
@@ -403,13 +400,6 @@ class BacktestRunModel(Base):
         String(64), primary_key=True, comment="回测唯一 ID，UUID 格式"
     )
     strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="关联策略 ID")
-    asset_domain: Mapped[str] = mapped_column(
-        String(16),
-        nullable=False,
-        default="index",
-        server_default="index",
-        comment="历史遗留列：始终为 index（行业域回测已移除）",
-    )
     start_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="回测起始日期")
     end_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="回测结束日期")
     universe_filter: Mapped[dict] = mapped_column(

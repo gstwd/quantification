@@ -69,7 +69,6 @@ class FactorAdminService:
                         value_shape=spec.value_shape,
                         usage=list(spec.usage),
                         default_params=dict(spec.default_params),
-                        owner_plugin=None,
                         is_active=True,
                     )
                 )
