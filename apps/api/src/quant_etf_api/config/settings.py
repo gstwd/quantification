@@ -105,13 +105,15 @@ class Settings(BaseSettings):
     )
     tushare_token: str | None = Field(
         default=None,
-        description="Tushare Pro API Token，配置后启用 tushare 指数日线数据源",
+        description=(
+            "Tushare Pro API Token，配置后指数日线/估值/宏观/成分/个股等数据源优先走 tushare"
+        ),
     )
     index_daily_source_order: str = Field(
-        default="akshare,tickflow,tushare,baostock",
+        default="tushare,akshare,tickflow,baostock",
         description=(
             "指数日线多数据源优先级（逗号分隔），可选 akshare/tickflow/tushare/baostock；"
-            "tickflow 默认使用免费服务（无需 Key），tushare 未配置 Token 时自动跳过"
+            "tushare 未配置 Token 时自动跳过，akshare 内部仍有五级降级链"
         ),
     )
 

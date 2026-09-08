@@ -85,19 +85,19 @@ class DataSetDefinition:
 
 
 DATASETS: tuple[DataSetDefinition, ...] = (
-    DataSetDefinition("trading_calendar", "A 股交易日历", "日历", "AkShare / 新浪", None,
+    DataSetDefinition("trading_calendar", "A 股交易日历", "日历", "Tushare / AkShare 兜底", None,
                       ("sync_latest", "check", "repair_gaps", "rebuild"),
                       ("日期连续性", "最近交易日可用性")),
-    DataSetDefinition("index_daily_bar", "指数日线行情", "日频", "多源指数行情", "指数",
+    DataSetDefinition("index_daily_bar", "指数日线行情", "日频", "Tushare 优先 · 多源兜底", "指数",
                       ("sync_latest", "check", "repair_gaps", "rebuild"),
                       ("交易日连续性", "OHLC 与收盘价合法性", "最近交易日覆盖")),
-    DataSetDefinition("index_valuation", "指数估值", "日频", "AkShare / 乐咕乐股", "指数",
+    DataSetDefinition("index_valuation", "指数估值", "日频", "Tushare / AkShare 兜底", "指数",
                       ("sync_latest", "check", "repair_gaps", "rebuild"),
                       ("估值覆盖率", "PE/PB 与百分位合法性", "最近可用日期")),
-    DataSetDefinition("macro_indicator", "宏观指标", "月频/事件", "AkShare", "指标",
+    DataSetDefinition("macro_indicator", "宏观指标", "月频/事件", "Tushare / AkShare 兜底", "指标",
                       ("sync_latest", "check", "repair_gaps", "rebuild"),
                       ("发布周期新鲜度", "数值字段完整性")),
-    DataSetDefinition("index_membership", "指数成分", "月频/快照", "AkShare / Baostock", "指数",
+    DataSetDefinition("index_membership", "指数成分", "月频/快照", "Tushare / AkShare / Baostock", "指数",
                       ("sync_latest", "check", "repair_gaps", "rebuild"),
                       ("当前快照新鲜度", "成员代码与生效日期完整性")),
     DataSetDefinition("industry_universe", "申万行业基础信息", "低频", "申万官网", None,
@@ -109,10 +109,10 @@ DATASETS: tuple[DataSetDefinition, ...] = (
     DataSetDefinition("industry_membership", "申万行业成分", "低频", "申万官网", "行业",
                       ("sync_latest", "check", "repair_gaps", "rebuild"),
                       ("刷新期限", "股票、行业与生效日期完整性")),
-    DataSetDefinition("stock_universe", "证券基础信息", "低频", "交易所 / AkShare", None,
+    DataSetDefinition("stock_universe", "证券基础信息", "低频", "Tushare / 交易所 / AkShare", None,
                       ("sync_latest", "check", "repair_gaps", "rebuild"),
                       ("代码、名称与状态完整性")),
-    DataSetDefinition("stock_daily_close", "个股日线收盘", "日频", "Baostock / AkShare / 腾讯", "股票",
+    DataSetDefinition("stock_daily_close", "个股日线收盘", "日频", "Tushare / Baostock / AkShare", "股票",
                       ("sync_latest", "check", "repair_gaps", "rebuild"),
                       ("交易日连续性", "收盘价合法性", "最近交易日覆盖")),
 )
@@ -362,14 +362,11 @@ class DataManagementService:
                 except Exception as exc:  # noqa: PERF203
                     _fail(code, exc)
         elif dataset_key == "index_valuation":
-            from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
-
             service = IngestService(self._db)
-            client = AkShareIndexClient()
             for code in self._partitions(dataset_key) if not partition_key else [partition_key]:
                 try:
                     if operation == "rebuild":
-                        records += self._safe_replace_index_valuations(service, client, code)
+                        records += self._safe_replace_index_valuations(service, code)
                         continue
                     latest = (
                         self._db.query(func.max(IndexValuationModel.trade_date))
@@ -584,9 +581,9 @@ class DataManagementService:
         self._db.commit()
         return len(bars)
 
-    def _safe_replace_index_valuations(self, service: Any, client: Any, code: str) -> int:
-        """安全全量重拉单指数估值：先校验覆盖范围再删除写回。"""
-        values = client.fetch_index_valuation(code)
+    def _safe_replace_index_valuations(self, service: Any, code: str) -> int:
+        """安全全量重拉单指数估值（Tushare 优先）：先校验覆盖范围再删除写回。"""
+        values = service._fetch_index_valuation_preferred(code)
         if not values:
             raise RuntimeError(f"指数 {code} 未获取到可替换估值，已保留旧数据")
         existing_count, existing_min, existing_max = (

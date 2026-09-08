@@ -45,7 +45,8 @@ class TushareIndexClient(BaseDataClient):
             token: Tushare Pro Token；未传入时读取 QUANT_ETF_TUSHARE_TOKEN。
         """
         super().__init__()
-        self._token = token or get_settings().tushare_token
+        # None 表示读取配置；显式传空串则视为“未配置”，便于测试与禁用
+        self._token = token if token is not None else get_settings().tushare_token
         self._pro = None
         self._last_call_ts = 0.0
 
@@ -114,6 +115,9 @@ class TushareIndexClient(BaseDataClient):
             # 归一化单位：成交额千元 → 元
             df = df.copy()
             df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0) * 1000.0
+            # Tushare index_daily 默认按日期倒序返回；统一升序后再构造
+            # IndexDailyBar，保证 prev_close/change_pct 链条方向正确
+            df = df.sort_values("trade_date").reset_index(drop=True)
             bars = _build_index_bars(
                 df,
                 date_col="trade_date",

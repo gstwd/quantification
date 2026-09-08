@@ -509,7 +509,9 @@ def _build_index_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--index-codes", dest="index_codes", help="逗号分隔指数代码，默认全部启用指数")
     _add_json_flag(p)
 
-    p = msub.add_parser("backfill-pit", help="按月末取样回填历史 PIT 成分（baostock）")
+    p = msub.add_parser(
+        "backfill-pit", help="按月末取样回填历史 PIT 成分（Tushare 优先/baostock 兜底）"
+    )
     p.add_argument("--index-codes", dest="index_codes", default="000300,000905,000016")
     p.add_argument("--start", type=date.fromisoformat, default="2013-01-01")
     p.add_argument("--end", type=date.fromisoformat, default=None)

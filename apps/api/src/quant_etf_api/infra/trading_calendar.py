@@ -1,17 +1,19 @@
 """A 股交易日历模块。
 
-从 AkShare 获取 A 股历史交易日历，提供交易日判断、最近交易日查询等功能。
-首次调用时从 AkShare API 加载日历数据并缓存在内存中，TTL=1 天。
-API 不可用时降级为周末判断。
+优先从 Tushare Pro（trade_cal）获取 A 股历史交易日历，未配置 Token 或接口
+失败时回退 AkShare（tool_trade_date_hist_sina）。数据缓存在内存中，TTL=1 天；
+两个上游均不可用时降级为周末判断。
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from quant_etf_api.config.settings import get_settings
 from quant_etf_api.infra.time import today_cn
 
 logger = logging.getLogger(__name__)
@@ -69,6 +71,59 @@ def _load_from_akshare() -> set[date] | None:
         return None
 
 
+def _load_from_tushare() -> set[date] | None:
+    """从 Tushare Pro 加载 A 股交易日历（上交所口径）。
+
+    按 5 年窗口分页拉取，规避单次调用行数上限；返回开市日集合。
+
+    Returns:
+        交易日集合，未配置 Token 或加载失败时返回 None。
+    """
+    token = get_settings().tushare_token
+    if not token:
+        return None
+    try:
+        import tushare as ts
+
+        ts.set_token(token)
+        pro = ts.pro_api()
+        current_year = today_cn().year
+        trading_days: set[date] = set()
+        for year_start in range(1990, current_year + 1, 5):
+            year_end = min(year_start + 4, current_year)
+            df = pro.trade_cal(
+                exchange="SSE",
+                start_date=f"{year_start}0101",
+                end_date=f"{year_end}1231",
+                is_open="1",
+                fields="cal_date",
+            )
+            if df is None or df.empty:
+                continue
+            for _, row in df.iterrows():
+                try:
+                    trading_days.add(
+                        datetime.strptime(str(row["cal_date"]), "%Y%m%d").date()
+                    )
+                except (ValueError, KeyError):
+                    continue
+            # 节流：避免触发接口频次限制
+            time.sleep(0.2)
+        if not trading_days:
+            logger.warning("Tushare 交易日历解析后为空，降级到 AkShare")
+            return None
+        logger.info("从 Tushare 加载交易日历成功，共 %d 个交易日", len(trading_days))
+        return trading_days
+    except Exception:
+        logger.warning("Tushare 交易日历加载失败，降级到 AkShare", exc_info=True)
+        return None
+
+
+def _load_from_upstream() -> set[date] | None:
+    """按“Tushare 优先、AkShare 兜底”加载交易日历。"""
+    return _load_from_tushare() or _load_from_akshare()
+
+
 def _get_cached_trading_days() -> set[date] | None:
     """获取缓存的交易日集合，缓存过期时重新加载。
 
@@ -96,7 +151,7 @@ def _get_cached_trading_days() -> set[date] | None:
             if now - loaded_at < _CACHE_TTL:
                 return cached
 
-        trading_days = _load_from_akshare()
+        trading_days = _load_from_upstream()
         _cache["trading_days"] = trading_days
         _cache["loaded_at"] = now
         return trading_days
@@ -113,7 +168,7 @@ class TradingCalendar:
     """A 股交易日历。
 
     提供交易日判断、最近交易日查询、交易日区间生成等功能。
-    数据来源：AkShare tool_trade_date_hist_sina()，缓存 TTL=1 天。
+    数据来源：Tushare Pro trade_cal（优先）/ AkShare（兜底），缓存 TTL=1 天。
     API 不可用时自动降级为周末判断。
 
     用法::

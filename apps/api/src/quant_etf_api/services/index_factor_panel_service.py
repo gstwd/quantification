@@ -37,6 +37,37 @@ from quant_etf_api.infra.db.repositories.industry import (
 )
 
 
+def _merge_members_by_stock(members: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按股票去重成分列表：同一股票保留 start_date 最新的事件。
+
+    PIT 月度回填与“当前快照”可能覆盖同一区间（例如月末 PIT 事件会前向沿用
+    到最新日），同日冲突时优先当前快照，避免扩散/行业暴露把成员重复计数。
+
+    Args:
+        members: 某交易日命中的所有成分事件（含 stock_code/start_date/类型）。
+
+    Returns:
+        每只股票至多一条的去重结果（保持输入顺序）。
+    """
+    best: dict[str, dict[str, Any]] = {}
+    for member in members:
+        stock_code = member["stock_code"]
+        current = best.get(stock_code)
+        if current is None:
+            best[stock_code] = member
+            continue
+        if member["start_date"] > current["start_date"]:
+            best[stock_code] = member
+            continue
+        if (
+            member["start_date"] == current["start_date"]
+            and member.get("snapshot_type") == "current_snapshot"
+            and current.get("snapshot_type") != "current_snapshot"
+        ):
+            best[stock_code] = member
+    return list(best.values())
+
+
 class IndexFactorPanelService:
     """按指数/区间从 DB 组装复合因子数据面板（实时与回测共用）。"""
 
@@ -118,7 +149,7 @@ class IndexFactorPanelService:
                             }
                         )
                 if members:
-                    effective[trade_date] = members
+                    effective[trade_date] = _merge_members_by_stock(members)
             result[index_code] = effective
         return result
 

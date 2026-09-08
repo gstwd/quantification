@@ -14,6 +14,7 @@ from quant_etf_api.infra.clients.stock_close_client import (
     _market_prefix,
 )
 from quant_etf_api.infra.clients.stock_metadata_client import StockMetadataClient
+from quant_etf_api.infra.clients.tushare_market import TushareStockClient
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
@@ -56,6 +57,7 @@ class StockDataService:
         self._industry_repo = IndustryUniverseRepository(db)
         self._metadata_client = StockMetadataClient()
         self._close_client = StockCloseClient()
+        self._tushare_client = TushareStockClient()
         self._calendar = TradingCalendar()
         self._trading_cache: tuple[date, date, list[date]] | None = None
 
@@ -85,7 +87,7 @@ class StockDataService:
         return len(missing_codes)
 
     def sync_universe(self) -> dict[str, int]:
-        """同步个股元数据：申万成分范围 + 交易所名单 + 当前行业归属。"""
+        """同步个股元数据：申万成分范围 + 股票基础信息 + 当前行业归属。"""
         events = self._membership_repo.find_all_events()
         membership_codes = sorted({event.stock_code for event in events})
         industry_map = self._current_industry_map()
@@ -94,7 +96,7 @@ class StockDataService:
         existing_rows = {
             row.stock_code: row for row in self._universe_repo.find_all(codes=membership_codes)
         }
-        basics = self._metadata_client.fetch_exchange_basics()
+        basics = self._fetch_universe_basics()
         basics_by_code = {row["stock_code"]: row for row in basics}
 
         updates: list[dict[str, Any]] = []
@@ -134,6 +136,25 @@ class StockDataService:
         )
         self._db.commit()
         return {"codes": len(membership_codes), "added": added, "updated": len(updates)}
+
+    def _fetch_universe_basics(self) -> list[dict[str, Any]]:
+        """拉取股票基础信息：Tushare stock_basic 优先，交易所/AkShare 兜底。
+
+        Returns:
+            [{stock_code, name_cn, ipo_date, delist_date, is_active, source}]。
+        """
+        rows: list[dict[str, Any]] = []
+        if self._tushare_client.is_configured():
+            try:
+                rows = self._tushare_client.fetch_stock_basics()
+            except Exception as exc:
+                logger.warning(
+                    "tushare 股票基础信息拉取失败，回退交易所名单: %s",
+                    exc,
+                )
+        if not rows:
+            rows = self._metadata_client.fetch_exchange_basics()
+        return rows
 
     def _current_industry_map(self) -> dict[str, str]:
         """返回股票代码 → 当前有效申万一级行业（start_date 不大于今天的最新事件）。"""
@@ -388,12 +409,25 @@ class StockDataService:
         *,
         in_session: bool,
     ) -> list[dict[str, Any]]:
-        """按股票代码拉取历史收盘，主源失败后依次回退东财/腾讯 AkShare。"""
+        """按股票代码拉取历史收盘，Tushare 失败后回退 baostock/东财/腾讯。"""
         start_s = start.strftime("%Y%m%d")
         end_s = end.strftime("%Y%m%d")
         prefix = _market_prefix(stock_code)
         failures: list[str] = []
         rows: list[dict[str, Any]] = []
+
+        # 沪深京主源：Tushare（覆盖全部 A 股，含北交所）
+        try:
+            if self._tushare_client.is_configured():
+                rows = self._tushare_client.fetch_history_close(
+                    stock_code, start_s, end_s
+                )
+                if rows:
+                    return [dict(row, source="tushare") for row in rows]
+                failures.append("tushare 返回空")
+        except Exception as exc:
+            failures.append(f"tushare({type(exc).__name__}: {exc})")
+            logger.warning("个股 %s tushare 拉取失败: %s", stock_code, exc)
 
         if prefix in ("sh", "sz"):
             # 沪深主源：baostock

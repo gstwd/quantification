@@ -61,7 +61,7 @@ class TestTushareIndexClient:
 
     def test_not_configured_returns_empty(self) -> None:
         """未配置 Token 时跳过该数据源（返回空列表）。"""
-        client = TushareIndexClient(token=None)
+        client = TushareIndexClient(token="")
         assert client.is_configured() is False
         assert client.fetch_index_daily("000300") == []
 
@@ -95,3 +95,21 @@ class TestTushareIndexClient:
             client = TushareIndexClient(token="test-token")
             client.fetch_index_daily("H30269")
         assert fake.pro.calls[0]["ts_code"] == "H30269.CSI"
+
+    def test_descending_input_sorted_ascending(self) -> None:
+        """Tushare 倒序返回时统一升序，保证 prev_close/change_pct 方向正确。"""
+        df = _index_daily_df().iloc[::-1].reset_index(drop=True)
+        fake, _ = _fake_tushare(df)
+        with patch.dict(sys.modules, {"tushare": fake}):
+            client = TushareIndexClient(token="test-token")
+            bars = client.fetch_index_daily("000300", "20260101", "20260131")
+        assert [b.trade_date.isoformat() for b in bars] == [
+            "2026-01-05",
+            "2026-01-06",
+            "2026-01-07",
+        ]
+        assert bars[1].prev_close_price == bars[0].close_price
+        assert bars[1].change_pct == round(
+            (bars[1].close_price - bars[0].close_price) / bars[0].close_price * 100,
+            4,
+        )

@@ -71,19 +71,49 @@ def _make_service() -> IngestService:
     return IngestService(db)
 
 
-def _patch_settings(monkeypatch, source_order: str = "akshare,tickflow,tushare,baostock"):
+def _patch_settings(
+    monkeypatch,
+    source_order: str = "akshare,tickflow,tushare,baostock",
+    tushare_token: str = "",
+):
     """替换 get_settings 返回假配置。"""
+    fake_settings = SimpleNamespace(
+        index_daily_source_order=source_order,
+        tushare_token=tushare_token,
+    )
     monkeypatch.setattr(
         "quant_etf_api.services.ingest_service.get_settings",
-        lambda: SimpleNamespace(
-            index_daily_source_order=source_order,
-            tushare_token="",
-        ),
+        lambda: fake_settings,
+    )
+    # tushare 客户端从各自模块读取 Token，需一并置空避免依赖本地 .env
+    monkeypatch.setattr(
+        "quant_etf_api.infra.clients.tushare_index.get_settings",
+        lambda: fake_settings,
+    )
+    monkeypatch.setattr(
+        "quant_etf_api.infra.clients.tushare_market.get_settings",
+        lambda: fake_settings,
     )
 
 
 class TestBuildIndexDailySources:
     """数据源列表构建。"""
+
+    def test_tushare_first_when_token_configured(self, monkeypatch) -> None:
+        """配置 Token 后 tushare 在默认优先级中排在首位。"""
+        _patch_settings(
+            monkeypatch,
+            source_order="tushare,akshare,tickflow,baostock",
+            tushare_token="test-token",
+        )
+        svc = _make_service()
+        sources = svc._build_index_daily_sources()
+        assert [name for name, _ in sources] == [
+            "tushare",
+            "akshare",
+            "tickflow",
+            "baostock",
+        ]
 
     def test_order_and_tushare_skip(self, monkeypatch) -> None:
         """按配置顺序构建；未配置 Token 时跳过 tushare。"""

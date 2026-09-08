@@ -12,6 +12,28 @@ from quant_etf_api.schemas.market_data import BenchmarkIndex
 logger = logging.getLogger(__name__)
 
 
+def _lookup_index_name(index_code: str) -> str | None:
+    """查询指数中文名称：Tushare index_basic 优先，AkShare 兜底。
+
+    Args:
+        index_code: 指数代码，如 000300。
+
+    Returns:
+        指数中文名称；两个来源都查不到时返回 None。
+    """
+    from quant_etf_api.infra.clients.tushare_market import TushareIndexBasicClient
+
+    basic_client = TushareIndexBasicClient()
+    if basic_client.is_configured():
+        try:
+            name = basic_client.fetch_index_name(index_code)
+            if name:
+                return name
+        except Exception:
+            logger.warning("Tushare 查询指数 %s 名称失败，回退 AkShare", index_code)
+    return AkShareIndexClient().fetch_index_name(index_code)
+
+
 class IndexService:
     """基准指数管理服务，提供指数的增删查功能。"""
 
@@ -36,8 +58,8 @@ class IndexService:
     def add_index(self, index_code: str, name_cn: str | None = None) -> BenchmarkIndex:
         """添加基准指数。
 
-        先尝试从 AkShare 自动获取名称，失败时使用 name_cn 参数作为手动兜底，
-        两者都没有则拒绝添加。
+        先尝试从 Tushare/AkShare 自动获取名称，失败时使用 name_cn 参数作为
+        手动兜底，两者都没有则拒绝添加。
 
         如果指数已存在但已停用（is_active=False），则重新激活并更新名称。
 
@@ -55,10 +77,10 @@ class IndexService:
         if existing and existing.is_active:
             raise ValueError(f"指数 {index_code} 已存在")
 
-        # 尝试自动获取名称（仅在有网络或 reactivate 需要更新名称时）
+        # 尝试自动获取名称（Tushare 优先，仅在有网络或 reactivate 需要更新名称时）
         auto_name: str | None = None
         try:
-            auto_name = AkShareIndexClient().fetch_index_name(index_code)
+            auto_name = _lookup_index_name(index_code)
         except Exception:
             logger.warning("自动获取指数 %s 名称失败", index_code)
 
@@ -150,7 +172,7 @@ class IndexService:
 
         auto_name: str | None = None
         try:
-            auto_name = AkShareIndexClient().fetch_index_name(index_code)
+            auto_name = _lookup_index_name(index_code)
         except Exception:
             logger.warning("自动获取指数 %s 名称失败", index_code)
 

@@ -22,6 +22,10 @@ from quant_etf_api.infra.clients.index_daily_common import (
 )
 from quant_etf_api.infra.clients.tickflow_index import TickFlowIndexClient
 from quant_etf_api.infra.clients.tushare_index import TushareIndexClient
+from quant_etf_api.infra.clients.tushare_market import (
+    TushareIndexValuationClient,
+    TushareMacroClient,
+)
 from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.time import today_cn
@@ -531,7 +535,7 @@ class IngestService:
         return []
 
     # ==================================================================
-    # 指数估值 PE/PB（AkShare）
+    # 指数估值 PE/PB（Tushare 优先，AkShare 兜底）
     # ==================================================================
 
     def _insert_index_valuations(self, index_code: str, valuations: list[Any]) -> int:
@@ -542,7 +546,7 @@ class IngestService:
 
         Args:
             index_code: 指数代码。
-            valuations: 待写入的估值数据列表（AkShare 客户端返回）。
+            valuations: 待写入的估值数据列表（Tushare/AkShare 客户端返回）。
 
         Returns:
             写入记录数。
@@ -572,13 +576,46 @@ class IngestService:
             self._db.execute(stmt)
         return len(valuations)
 
+    def _fetch_index_valuation_preferred(self, index_code: str) -> list[Any]:
+        """按“Tushare 优先、AkShare 兜底”拉取指数估值。
+
+        Tushare index_dailybasic 仅覆盖 000300/000016/000905 等少数指数；
+        覆盖范围外的指数直接走 AkShare（乐咕乐股 → 中证官网降级链）。Tushare
+        拉取失败或返回空时同样回退 AkShare，保证多源容错。
+
+        Args:
+            index_code: 指数代码，如 000300。
+
+        Returns:
+            按日期升序排列的估值列表；两个来源都无数据时返回空列表。
+        """
+        tushare_client = TushareIndexValuationClient()
+        if tushare_client.is_configured() and tushare_client.supports(index_code):
+            try:
+                values = tushare_client.fetch_index_valuation(index_code)
+                if values:
+                    logger.info(
+                        "指数 %s 估值由 tushare 提供，共 %d 条",
+                        index_code,
+                        len(values),
+                    )
+                    return values
+                logger.info("指数 %s tushare 估值返回空，回退 AkShare", index_code)
+            except Exception as exc:
+                logger.warning(
+                    "指数 %s tushare 估值拉取失败，回退 AkShare: %s",
+                    index_code,
+                    exc,
+                )
+        return AkShareIndexClient().fetch_index_valuation(index_code)
+
     def _fetch_and_upsert_index_valuation(self, index_code: str) -> int:
-        """从 AkShare 拉取指数 PE/PB 估值并幂等写入 index_valuation。
+        """拉取指数 PE/PB 估值（Tushare 优先）并幂等写入 index_valuation。
 
         Returns:
             写入记录数
         """
-        valuations = AkShareIndexClient().fetch_index_valuation(index_code)
+        valuations = self._fetch_index_valuation_preferred(index_code)
         if not valuations:
             return 0
         count = self._insert_index_valuations(index_code, valuations)
@@ -702,16 +739,52 @@ class IngestService:
         )
 
     # ==================================================================
-    # 宏观指标（AkShare）
+    # 宏观指标（Tushare 优先，AkShare 兜底）
     # ==================================================================
 
+    def _fetch_macro_indicators_preferred(self) -> list[Any]:
+        """按数据组拉取宏观指标：每组先试 Tushare，失败或空时回退 AkShare。
+
+        CPI/PMI/LPR 三组独立降级：LPR 接口（shibor_lpr）在 2000 积分档位
+        约 1 次/小时，被限频时只影响 LPR 组，不影响 CPI/PMI。
+
+        Returns:
+            MacroIndicator 列表（source 标识实际来源）。
+        """
+        tushare_client = TushareMacroClient()
+        akshare_client = AkShareMacroClient()
+        groups: list[tuple[str, Any, Any]] = [
+            ("CPI", tushare_client.fetch_cpi_monthly, akshare_client.fetch_cpi_monthly),
+            ("PMI", tushare_client.fetch_pmi, akshare_client.fetch_pmi),
+            ("LPR", tushare_client.fetch_lpr, akshare_client.fetch_lpr),
+        ]
+        results: list[Any] = []
+        for name, tushare_fetch, akshare_fetch in groups:
+            rows: list[Any] = []
+            if tushare_client.is_configured():
+                try:
+                    rows = list(tushare_fetch() or [])
+                except Exception as exc:
+                    logger.warning(
+                        "tushare %s 拉取失败，回退 AkShare: %s",
+                        name,
+                        exc,
+                    )
+            if not rows:
+                try:
+                    rows = list(akshare_fetch() or [])
+                except Exception as exc:
+                    logger.warning("AkShare %s 拉取失败: %s", name, exc)
+            results.extend(rows)
+        return results
+
     def _fetch_and_upsert_macro(self) -> int:
-        """从 AkShare 拉取所有宏观指标（CPI/PMI/LPR）并幂等写入 macro_indicator。
+        """拉取所有宏观指标（Tushare 优先）并幂等写入 macro_indicator。
 
         Returns:
             写入记录数
         """
-        indicators = AkShareMacroClient().fetch_all()
+        indicators = self._fetch_macro_indicators_preferred()
         if not indicators:
             return 0
         stmt = (
@@ -724,7 +797,7 @@ class IngestService:
                         "period": i.period,
                         "value": i.value,
                         "unit": i.unit,
-                        "source": "akshare",
+                        "source": getattr(i, "source", None) or "akshare",
                         "period_date": i.period_date,
                         "ingested_at": utcnow(),
                     }
@@ -1100,7 +1173,8 @@ class IngestService:
             # 1. 先拉取全量数据（失败时不触碰现有数据）；
             #    日线走多数据源切换（OHLC 严格校验 + 最少缺失兜底），入库记录实际数据源
             bars, source = self._fetch_index_daily_multi_source(index_code)
-            valuations = AkShareIndexClient().fetch_index_valuation(index_code)
+            #    估值走“Tushare 优先、AkShare 兜底”，source 由客户端标识
+            valuations = self._fetch_index_valuation_preferred(index_code)
             logger.info(
                 "指数 %s 全量覆盖重拉：日线数据源 %s，共 %d 条，估值 %d 条",
                 index_code,

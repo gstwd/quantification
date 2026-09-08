@@ -19,6 +19,7 @@ class MacroIndicator:
     value: float
     unit: str | None
     period_date: str | None = None  # 标准化日期：CPI/PMI 取当月首日，LPR 取报价日 ("YYYY-MM-DD")
+    source: str = "akshare"  # 数据来源：akshare/tushare
 
 
 class AkShareMacroClient(BaseDataClient):

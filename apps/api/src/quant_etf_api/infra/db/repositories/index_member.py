@@ -88,5 +88,7 @@ class IndexMemberEventRepository(BaseRepository):
         stmt = stmt.on_conflict_do_nothing(
             index_elements=["index_code", "stock_code", "start_date"]
         )
-        result = self._db.execute(stmt)
-        return int(result.rowcount or 0)
+        self._db.execute(stmt)
+        # ON CONFLICT DO NOTHING 的 rowcount 语义随驱动不稳定，
+        # 统一按参与写入的行数返回（幂等场景与输入一致即可）
+        return len(rows)
