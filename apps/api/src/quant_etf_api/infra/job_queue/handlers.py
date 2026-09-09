@@ -468,10 +468,12 @@ def handle_industry_daily_ingest(payload: dict) -> None:
 
 
 def handle_industry_factor_compute(payload: dict) -> None:
-    """计算指定交易日申万行业因子并入库。"""
+    """计算指定交易日申万行业因子并入库，并在默认口径完成后触发复合因子重算。"""
     from datetime import date as date_cls
 
+    from quant_etf_api.domain.industry.constants import industry_params_hash
     from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.infra.job_queue.queue import get_job_queue
     from quant_etf_api.services.industry_factor_service import IndustryFactorService
     from quant_etf_api.services.run_service import RunService
 
@@ -502,7 +504,28 @@ def handle_industry_factor_compute(payload: dict) -> None:
             diffusion_lookback=diffusion_lookback,
             benchmark_exclude=benchmark_exclude,
         )
+        factor_row_count = int(metrics.get("factor_row_count") or 0)
+        if factor_row_count <= 0:
+            raise RuntimeError(
+                "行业因子计算未写入任何行；请检查行业面板日期、日线覆盖与 warm-up 数据"
+            )
         run_svc.mark_success(run_id, metrics=metrics)
+
+        # RRG 指数匹配度只消费默认参数指纹的行业因子。行业面板成功落库后，
+        # 重新计算同日指数复合因子，避免两个任务并发时先读到旧面板而留下空值。
+        task_params_hash = industry_params_hash(
+            lookback_ratio=lookback_ratio,
+            lookback_mom=lookback_mom,
+            smooth_window=smooth_window,
+            diffusion_lookback=diffusion_lookback,
+            benchmark_exclude=benchmark_exclude,
+        )
+        if task_params_hash == industry_params_hash():
+            get_job_queue().enqueue(
+                "factor_computation",
+                {"trade_date": trade_date.isoformat()},
+                job_key=f"factor_computation:{trade_date.isoformat()}",
+            )
     except Exception as e:
         logger.exception("行业因子计算任务异常: trade_date=%s", trade_date)
         if run_id:

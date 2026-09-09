@@ -26,7 +26,8 @@ from quant_etf_api.engine.config import (
     TimingConfig,
 )
 from quant_etf_api.engine.factor_provider import FactorProvider
-from quant_etf_api.factors.registry import get_default_factor_registry
+from quant_etf_api.factors.builtins.price import ClosePriceComputer
+from quant_etf_api.factors.registry import FactorRegistry, get_default_factor_registry
 from quant_etf_api.infra.db.repositories.strategy_config import StrategyConfigRepository
 from quant_etf_api.schemas.backtest import BacktestCreateRequest
 from quant_etf_api.schemas.strategy import StrategyValidationResult
@@ -121,6 +122,23 @@ class TestCollectRequiredFactorIds:
         # regime 嵌套
         assert "volume_ratio_20d" in ids
         assert "return_17d" in ids
+
+
+class TestFactorParamHashes:
+    """因子参数指纹解析测试。"""
+
+    def test_reads_default_params_from_factor_computer_spec(self) -> None:
+        """注册表返回计算器时，应从其 spec 读取无参数因子的默认配置。"""
+        registry = FactorRegistry()
+        registry.register(ClosePriceComputer())
+        provider = FactorProvider(registry=registry)
+        config = StrategyConfig(
+            strategy_id="test",
+            display_name="测试策略",
+            score=ScoreConfig(factors={"close_price": 1.0}),
+        )
+
+        assert provider._params_hashes(config, ["close_price"]) == {"close_price": ""}
 
 
 class TestValidateConfig:

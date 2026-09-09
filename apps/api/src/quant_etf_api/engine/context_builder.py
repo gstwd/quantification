@@ -50,7 +50,9 @@ class ContextBuilder:
         """
         self._db = db
         self._registry = registry
-        self._factor_provider = factor_provider or FactorProvider(db=db)
+        # 实时读取参数化因子时同样需要注册表的 default_params 来计算参数指纹；
+        # 未注入会退化为 params_hash=""，从而错误地读不到已预计算的复合因子。
+        self._factor_provider = factor_provider or FactorProvider(db=db, registry=registry)
 
     def build(
         self,

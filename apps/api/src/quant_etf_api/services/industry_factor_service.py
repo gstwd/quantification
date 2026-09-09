@@ -664,9 +664,12 @@ class IndustryFactorService:
             if panel.empty:
                 continue
             for d in date_values:
-                if d not in panel.index:
+                # 行业面板使用 DatetimeIndex，而交易日轴为 date；直接比较会导致
+                # 所有日期都不命中，使任务表面成功但实际零行落库。
+                panel_date = pd.Timestamp(d)
+                if panel_date not in panel.index:
                     continue
-                row = panel.loc[d]
+                row = panel.loc[panel_date]
                 for code in panels["industry_codes"]:
                     if code not in panel.columns:
                         continue

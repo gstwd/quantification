@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import date
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from quant_etf_api.engine.config import ScoreConfig, StrategyConfig
 from quant_etf_api.engine.context_builder import ContextBuilder
@@ -81,6 +81,15 @@ def _make_live_context(
 
 class TestContextBuilderLive:
     """实时上下文构建只读约束测试。"""
+
+    def test_default_factor_provider_receives_registry(self) -> None:
+        """默认供应器应接收注册表，以按默认参数指纹读取复合因子。"""
+        db = MagicMock()
+        registry = MagicMock()
+        with patch("quant_etf_api.engine.context_builder.FactorProvider") as provider_class:
+            ContextBuilder(db, registry=registry)
+
+        provider_class.assert_called_once_with(db=db, registry=registry)
 
     def test_build_live_is_read_only(self) -> None:
         """build 不应入队补算任务，也不应产生任何写操作。"""

@@ -267,8 +267,8 @@ class FactorProvider:
             if factor_id in (config.factor_params or {}):
                 params = config.factor_params[factor_id]
             elif self._registry is not None:
-                spec = self._registry.get(factor_id)
-                params = spec.default_params if spec is not None else None
+                computer = self._registry.get(factor_id)
+                params = computer.spec.default_params if computer is not None else None
             result[factor_id] = factor_params_hash(params) if params else ""
         return result
 
