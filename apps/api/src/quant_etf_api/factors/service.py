@@ -39,8 +39,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 指数扩散的 220 日比较与 20 日平滑需要 240 个连续交易日（含目标日）。
-_PANEL_FACTOR_WINDOW_DAYS = 240
+# 指数扩散的 160 日均线、150 日快线与 25 日慢线需要 333 个连续交易日（含目标日）。
+_PANEL_FACTOR_WINDOW_DAYS = 333
 _BACKGROUND_ONLY_FACTOR_IDS = {"index_diffusion_ratio", "rrg_industry_match_score"}
 
 
@@ -114,9 +114,7 @@ class FactorService:
             computer.spec.factor_id in _BACKGROUND_ONLY_FACTOR_IDS for computer in computers
         )
         panel_dates = (
-            self._panel_calculation_dates(trade_date)
-            if include_composite_panels
-            else [trade_date]
+            self._panel_calculation_dates(trade_date) if include_composite_panels else [trade_date]
         )
         ctx = self._load_context(
             trade_date,
@@ -211,7 +209,8 @@ class FactorService:
         Raises:
             ValueError: 无任何行情数据时抛出。
         """
-        latest = self._index_repo.find_latest_date(factor_id)
+        params_hash = self._default_params_hash(factor_id)
+        latest = self._index_repo.find_latest_date(factor_id, params_hash=params_hash)
 
         if factor_id in _BACKGROUND_ONLY_FACTOR_IDS:
             if force_recompute or latest is None:
@@ -225,7 +224,7 @@ class FactorService:
             self.compute_and_store(bar_latest)
             latest = bar_latest
 
-        rows = self._index_repo.find_cross_section(factor_id, latest)
+        rows = self._index_repo.find_cross_section(factor_id, latest, params_hash=params_hash)
         return latest, [
             CrossSectionRow(
                 index_code=r[0],
@@ -259,7 +258,13 @@ class FactorService:
         if factor_id in _BACKGROUND_ONLY_FACTOR_IDS:
             if force_recompute:
                 self._enqueue_latest_factor_computation()
-            rows = self._index_repo.find_factor_values(factor_id, index_code, start_date, end_date)
+            rows = self._index_repo.find_factor_values(
+                factor_id,
+                index_code,
+                start_date,
+                end_date,
+                params_hash=self._default_params_hash(factor_id),
+            )
             return [_row_to_factor_row(row) for row in rows]
 
         if force_recompute:
@@ -272,7 +277,13 @@ class FactorService:
         for d in dates_to_compute:
             self.compute_and_store(d)
 
-        rows = self._index_repo.find_factor_values(factor_id, index_code, start_date, end_date)
+        rows = self._index_repo.find_factor_values(
+            factor_id,
+            index_code,
+            start_date,
+            end_date,
+            params_hash=self._default_params_hash(factor_id),
+        )
         return [_row_to_factor_row(r) for r in rows]
 
     def factor_history(
@@ -296,7 +307,13 @@ class FactorService:
             按 trade_date 升序排列的 FactorRow 列表。
         """
         try:
-            rows = self._index_repo.find_factor_values(factor_id, index_code, start_date, end_date)
+            rows = self._index_repo.find_factor_values(
+                factor_id,
+                index_code,
+                start_date,
+                end_date,
+                params_hash=self._default_params_hash(factor_id),
+            )
             return [_row_to_factor_row(r) for r in rows]
         except Exception:
             logger.warning("factor_history 查询失败", exc_info=True)
@@ -393,6 +410,19 @@ class FactorService:
             )
         return ctx
 
+    def _default_params_hash(self, factor_id: str) -> str:
+        """返回注册因子默认参数的指纹，供展示查询排除历史参数口径。
+
+        Args:
+            factor_id: 因子标识。
+
+        Returns:
+            默认参数指纹；非参数化或未注册因子返回空字符串。
+        """
+        computer = self._registry.get(factor_id)
+        params = dict(computer.spec.default_params or {}) if computer is not None else {}
+        return factor_params_hash(params) if params else ""
+
     def _panel_calculation_dates(self, trade_date: date) -> list[date]:
         """获取复合因子目标日前所需的连续指数交易日计算轴。
 
@@ -403,7 +433,7 @@ class FactorService:
             trade_date: 本次后台任务的目标交易日。
 
         Returns:
-            升序交易日列表，最多包含目标日及此前 240 个交易日。
+            升序交易日列表，最多包含目标日及此前 333 个交易日。
         """
         dates = IndexDailyBarRepository(self._db).find_all_trading_dates(
             trade_date - timedelta(days=800), trade_date

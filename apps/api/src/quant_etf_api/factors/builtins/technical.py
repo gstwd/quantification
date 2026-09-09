@@ -47,7 +47,7 @@ def _get_historical_closes(
 def _get_historical_bars(
     index_code: str, trade_date: date, ctx: FactorContext, n: int
 ) -> list[tuple[date, float, float, float, float]] | None:
-    """获取指数近 n 个交易日的 OHLC 数据（含当日），升序排列。
+    """获取指数近 n 个交易日的完整 HLC 数据（含当日），升序排列。
 
     Args:
         index_code: 指数代码。
@@ -56,16 +56,25 @@ def _get_historical_bars(
         n: 需要的日线数量。
 
     Returns:
-        [(date, open, high, low, close), ...] 列表，数据不足时返回 None。
+        [(date, open, high, low, close), ...] 列表；高、低、收盘价不完整或数据不足时返回 None。
     """
     today_bar = ctx.index_bars.get((index_code, trade_date))
-    if today_bar is None or today_bar.close_price is None:
+    if (
+        today_bar is None
+        or today_bar.close_price is None
+        or today_bar.high_price is None
+        or today_bar.low_price is None
+    ):
         return None
     past = sorted(
         [
             (dt, v.open_price, v.high_price, v.low_price, v.close_price)
             for (code, dt), v in ctx.index_bars.items()
-            if code == index_code and dt <= trade_date and v.close_price is not None
+            if code == index_code
+            and dt <= trade_date
+            and v.close_price is not None
+            and v.high_price is not None
+            and v.low_price is not None
         ],
         key=lambda x: x[0],
     )

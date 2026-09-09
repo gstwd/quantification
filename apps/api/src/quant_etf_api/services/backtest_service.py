@@ -426,6 +426,15 @@ class BacktestService:
             self._prepare_backtest_data(row)
         )
 
+        # 策略显式限定资产范围时，必须在因子预计算前收窄回测池。此前仅在主循环
+        # 构建上下文时过滤，会让扩散等成分面板因子为无关指数加载数据并产生缺失告警。
+        if config.index_codes:
+            configured_codes = set(config.index_codes)
+            universe = [item for item in universe if item["index_code"] in configured_codes]
+            index_codes = [code for code in index_codes if code in configured_codes]
+            if not index_codes:
+                raise ValueError("策略 index_codes 与回测标的范围无交集")
+
         # 若策略引用了市场级因子（如市场宽度），需加载全市场活跃指数行情，
         # 保证回测口径与实时预计算（全量活跃指数）一致
         self._ensure_market_scope_bars(config, trading_dates, all_bars)

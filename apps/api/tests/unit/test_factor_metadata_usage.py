@@ -106,7 +106,12 @@ def test_factor_params_custom_values_rejected_for_now() -> None:
         "score": {"factors": {"index_diffusion_ratio": 1.0}},
         "portfolio": {"method": "equal_weight"},
         "factor_params": {
-            "index_diffusion_ratio": {"diffusion_lookback": 200, "smooth_window": 20}
+            "index_diffusion_ratio": {
+                "trend_window": 200,
+                "fast_window": 150,
+                "slow_window": 25,
+                "weighting_mode": "index_weight",
+            }
         },
     }
     result = svc.validate_config(config)

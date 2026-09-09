@@ -312,7 +312,7 @@ class FactorProvider:
             return {}
 
         # 批量因子必须使用预加载行情的完整交易日历计算。回测服务虽然会向前
-        # 预加载预热行情，但若仅传入回测区间 dates，220 日扩散等因子会从
+        # 预加载预热行情，但若仅传入回测区间 dates，160 日 MA 扩散等因子会从
         # 回测首日重新计数，导致月初调仓时全部缺值并被 exclude 策略清空。
         calculation_dates = sorted(
             {
@@ -335,6 +335,11 @@ class FactorProvider:
         needs_panels = any(
             name in set(computer.spec.required_data) for computer in computers for name in panel_names
         )
+        needs_industry_panels = any(
+            name in {"industry_selection", "index_industry_exposure"}
+            for computer in computers
+            for name in computer.spec.required_data
+        )
         panels: dict[str, Any] = {}
         if needs_panels and self._db is not None:
             from quant_etf_api.services.index_factor_panel_service import (
@@ -346,9 +351,12 @@ class FactorProvider:
                 index_codes=index_codes,
                 dates=calculation_dates,
                 lookback_natural_days=lookback,
+                # 仅扩散因子不依赖行业面板；避免为其重建无关的 RRG 行业选择，
+                # 既减少回测成本，也避免行业数据缺口干扰扩散因子的诊断。
+                include_industry_panels=needs_industry_panels,
                 # 回测必须从原始历史行业数据重建选择信号，不能依赖只物化近期的
                 # industry_factor_value，否则 RRG 匹配因子在历史区间会全部为空。
-                calculate_industry_selection=True,
+                calculate_industry_selection=needs_industry_panels,
             )
 
         start = time.perf_counter()

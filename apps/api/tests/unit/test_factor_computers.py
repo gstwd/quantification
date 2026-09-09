@@ -24,7 +24,10 @@ from quant_etf_api.factors.builtins.momentum import (
     _calc_nd_return,
 )
 from quant_etf_api.factors.builtins.technical import (
+    ATRComputer,
     DrawdownCurrentComputer,
+    DonchianHighComputer,
+    DonchianLowComputer,
     MADeviationComputer,
 )
 from quant_etf_api.factors.builtins.volatility import Volatility20dComputer
@@ -41,6 +44,8 @@ class MockBar:
 
     volume: float | None = None
     close_price: float | None = None
+    high_price: float | None = None
+    low_price: float | None = None
     change_pct: float | None = None
     turnover: float | None = None
 
@@ -79,6 +84,39 @@ def _build_index_bars(
         )
         close = close * (1 + daily_return)
     return bars
+
+
+class TestOhlcTechnicalComputers:
+    """ATR 与 Donchian 因子的 OHLC 缺失处理测试。"""
+
+    @pytest.mark.parametrize(
+        "computer",
+        [
+            ATRComputer(period=14),
+            DonchianHighComputer(period=20),
+            DonchianLowComputer(period=20),
+        ],
+    )
+    def test_returns_none_when_high_and_low_are_missing(
+        self,
+        computer: ATRComputer | DonchianHighComputer | DonchianLowComputer,
+    ) -> None:
+        """高低价缺失时应返回空因子值而非抛出计算异常。
+
+        Args:
+            computer: 需要完整高低价的技术因子计算器。
+        """
+        trade_date = date(2024, 6, 1)
+        bars = _build_index_bars("H30217", trade_date, n_days=25)
+        for bar in bars.values():
+            bar.high_price = None
+            bar.low_price = None
+
+        result = computer.compute("H30217", trade_date, FactorContext(index_bars=bars))
+
+        assert result.numeric is None
+        assert result.payload is not None
+        assert "日线数据不足" in result.payload["reason"]
 
 
 # ─── VolumeRatio20dComputer ───────────────────────────────────────────────────────

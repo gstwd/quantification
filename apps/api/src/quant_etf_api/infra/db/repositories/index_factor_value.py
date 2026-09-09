@@ -28,20 +28,22 @@ class IndexFactorValueRepository(BaseRepository):
         """
         super().__init__(db)
 
-    def find_latest_date(self, factor_id: str) -> date | None:
+    def find_latest_date(self, factor_id: str, params_hash: str | None = None) -> date | None:
         """查询指定因子在 index_factor_value 中的最大 trade_date。
 
         Args:
             factor_id: 因子标识。
+            params_hash: 参数指纹；传入时仅查询该参数口径。
 
         Returns:
             最新交易日，无数据时返回 None。
         """
-        result = (
-            self._db.query(func.max(IndexFactorValueModel.trade_date))
-            .filter(IndexFactorValueModel.factor_id == factor_id)
-            .scalar()
+        query = self._db.query(func.max(IndexFactorValueModel.trade_date)).filter(
+            IndexFactorValueModel.factor_id == factor_id
         )
+        if params_hash is not None:
+            query = query.filter(IndexFactorValueModel.params_hash == params_hash)
+        result = query.scalar()
         return result
 
     def find_latest_bar_date(self) -> date | None:
@@ -54,18 +56,19 @@ class IndexFactorValueRepository(BaseRepository):
         return result
 
     def find_cross_section(
-        self, factor_id: str, trade_date: date
+        self, factor_id: str, trade_date: date, params_hash: str | None = None
     ) -> list[tuple[str, str, float | None, str | None]]:
         """查询指定因子在指定交易日的横截面数据，JOIN 指数中文名。
 
         Args:
             factor_id: 因子标识。
             trade_date: 交易日。
+            params_hash: 参数指纹；传入时仅查询该参数口径。
 
         Returns:
             (index_code, name_cn, factor_value_numeric, factor_value_text) 元组列表。
         """
-        rows = (
+        query = (
             self._db.query(
                 IndexFactorValueModel.index_code,
                 BenchmarkIndexModel.name_cn,
@@ -81,9 +84,10 @@ class IndexFactorValueRepository(BaseRepository):
                 IndexFactorValueModel.trade_date == trade_date,
                 IndexFactorValueModel.strategy_id.is_(None),
             )
-            .order_by(IndexFactorValueModel.index_code)
-            .all()
         )
+        if params_hash is not None:
+            query = query.filter(IndexFactorValueModel.params_hash == params_hash)
+        rows = query.order_by(IndexFactorValueModel.index_code).all()
         return rows
 
     def find_factor_values(
@@ -92,6 +96,7 @@ class IndexFactorValueRepository(BaseRepository):
         index_code: str,
         start_date: date,
         end_date: date,
+        params_hash: str | None = None,
     ) -> list[IndexFactorValueModel]:
         """查询单因子在单指数上的时间序列。
 
@@ -100,22 +105,21 @@ class IndexFactorValueRepository(BaseRepository):
             index_code: 指数代码。
             start_date: 开始日期（含）。
             end_date: 截止日期（含）。
+            params_hash: 参数指纹；传入时仅查询该参数口径。
 
         Returns:
             按 trade_date 升序排列的 IndexFactorValueModel 列表。
         """
-        return (
-            self._db.query(IndexFactorValueModel)
-            .filter(
-                IndexFactorValueModel.factor_id == factor_id,
-                IndexFactorValueModel.index_code == index_code,
-                IndexFactorValueModel.trade_date >= start_date,
-                IndexFactorValueModel.trade_date <= end_date,
-                IndexFactorValueModel.strategy_id.is_(None),
-            )
-            .order_by(IndexFactorValueModel.trade_date.asc())
-            .all()
+        query = self._db.query(IndexFactorValueModel).filter(
+            IndexFactorValueModel.factor_id == factor_id,
+            IndexFactorValueModel.index_code == index_code,
+            IndexFactorValueModel.trade_date >= start_date,
+            IndexFactorValueModel.trade_date <= end_date,
+            IndexFactorValueModel.strategy_id.is_(None),
         )
+        if params_hash is not None:
+            query = query.filter(IndexFactorValueModel.params_hash == params_hash)
+        return query.order_by(IndexFactorValueModel.trade_date.asc()).all()
 
     def find_missing_dates(
         self,

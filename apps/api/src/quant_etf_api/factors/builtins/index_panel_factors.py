@@ -1,7 +1,7 @@
 """指数级 RRG/扩散因子（消费行业面板与指数成分面板，输出每指数资产值）。
 
 两个因子把申万行业与个股数据“吸收”为作用在每个指数资产上的普通因子：
-- index_diffusion_ratio：指数成分股上涨占比（个股收盘 → 每指数扩散）；
+- index_diffusion_ratio：指数成分股站上长期均线的占比（个股收盘 → 每指数扩散）；
 - rrg_industry_match_score：内部先对行业面板做研报信号选择，再按指数
   成分股的申万行业暴露计算与选中行业集合的重合匹配分。
 
@@ -25,10 +25,12 @@ from quant_etf_api.factors.base import (
 
 
 def _default_diffusion_params() -> dict[str, Any]:
-    """返回指数扩散默认参数（与研报默认口径一致）。"""
+    """返回指数扩散默认参数（与扩散指标研究的 MA 口径一致）。"""
     return {
-        "diffusion_lookback": 220,
-        "smooth_window": 20,
+        "trend_window": 160,
+        "fast_window": 150,
+        "slow_window": 25,
+        "weighting_mode": "index_weight",
     }
 
 
@@ -57,11 +59,12 @@ def _asof_members(
 
 
 _UNMAPPED_INDUSTRY = "__unmapped__"
-_CALCULATION_VERSION = "2026-09-rrg-diffusion-strict-v1"
+_INDEX_DIFFUSION_CALCULATION_VERSION = "2026-09-index-diffusion-ma-v2"
+_RRG_MATCH_CALCULATION_VERSION = "2026-09-rrg-diffusion-strict-v1"
 
 
 class IndexDiffusionRatioComputer:
-    """指数成分扩散占比（每指数独立，默认参数 220/20）。"""
+    """指数成分 MA 扩散占比（默认 160/150/25，成分权重优先）。"""
 
     @property
     def spec(self) -> FactorSpec:
@@ -70,13 +73,14 @@ class IndexDiffusionRatioComputer:
             factor_id="index_diffusion_ratio",
             name="指数成分扩散占比",
             category="breadth",
-            version="1.0.0",
+            version="2.0.0",
             description=(
-                "指数成分股 close_t > close_{t-lookback} 的数量占比按平滑窗口"
-                "取 MA（0-100）。无成分覆盖或样本不足返回 None。"
+                "指数成分股收盘价站上 160 日均线的广度，先取 150 日快线，再对"
+                "快线取 25 日慢线；numeric 为快线（0-100），payload 提供慢线与"
+                "多头交叉状态。成分权重齐全时按指数权重加权，否则等权。"
             ),
             required_data=["index_membership", "stock_closes"],
-            lookback_days=520,
+            lookback_days=650,
             asset_domain="index",
             value_shape="asset",
             usage=[USAGE_SCORE, USAGE_FILTER, USAGE_RANK],
@@ -97,8 +101,10 @@ class IndexDiffusionRatioComputer:
     ) -> dict[date, FactorValue]:
         """批量计算多个交易日的指数成分扩散占比。"""
         params = self.spec.default_params
-        lookback = int(params["diffusion_lookback"])
-        smooth = int(params["smooth_window"])
+        trend_window = int(params["trend_window"])
+        fast_window = int(params["fast_window"])
+        slow_window = int(params["slow_window"])
+        weighting_mode = str(params["weighting_mode"])
         closes = ctx.panels.get("stock_closes") or {}
         membership = ctx.panels.get("index_membership") or {}
 
@@ -110,61 +116,93 @@ class IndexDiffusionRatioComputer:
             members = _asof_members(membership, index_code, trade_date)
             member_count = len(members)
             valid = 0
-            rising = 0
+            bullish = 0
             if not members:
                 ratio_by_date[trade_date] = None
                 diagnostics[trade_date] = {
                     "member_count": 0,
                     "valid_sample_count": 0,
                     "missing_sample_count": 0,
-                    "rising_sample_count": 0,
+                    "bullish_sample_count": 0,
                     "raw_ratio": None,
+                    "weighting_mode": "equal",
                 }
                 continue
-            base_date = (
-                ordered_dates[position[trade_date] - lookback]
-                if position[trade_date] >= lookback
-                else None
+            window_start = position[trade_date] - trend_window + 1
+            ma_dates = (
+                ordered_dates[window_start : position[trade_date] + 1] if window_start >= 0 else []
             )
+            use_index_weight = weighting_mode == "index_weight" and all(
+                member.get("weight") is not None and float(member["weight"]) >= 0
+                for member in members
+            )
+            valid_weight = 0.0
+            bullish_weight = 0.0
             for member in members:
                 code = member["stock_code"]
                 series = closes.get(code)
-                if not series or base_date is None:
+                if not series or len(ma_dates) != trend_window:
                     continue
-                # 必须精确命中交易日，禁止停牌/缺口时回退到上一条可用收盘。
+                # 必须精确命中窗口内每个交易日，禁止停牌/缺口时回退或压缩均线窗口。
                 latest = series.get(trade_date)
-                base = series.get(base_date)
-                if latest is None or base is None:
+                history = [series.get(day) for day in ma_dates]
+                if latest is None or any(close is None for close in history):
                     continue
                 valid += 1
-                if latest > base:
-                    rising += 1
-            ratio_by_date[trade_date] = rising / valid if valid > 0 else None
+                member_weight = float(member["weight"]) if use_index_weight else 1.0
+                valid_weight += member_weight
+                if latest > sum(history) / trend_window:
+                    bullish += 1
+                    bullish_weight += member_weight
+            ratio_by_date[trade_date] = bullish_weight / valid_weight if valid_weight > 0 else None
             diagnostics[trade_date] = {
                 "member_count": member_count,
                 "valid_sample_count": valid,
                 "missing_sample_count": member_count - valid,
-                "rising_sample_count": rising,
+                "bullish_sample_count": bullish,
                 "raw_ratio": ratio_by_date[trade_date],
+                "weighting_mode": "index_weight" if use_index_weight else "equal",
             }
+
+        fast_by_date: dict[date, float | None] = {}
+        fast_valid_days_by_date: dict[date, int] = {}
+        for i, trade_date in enumerate(ordered_dates):
+            fast_dates = ordered_dates[max(0, i - fast_window + 1) : i + 1]
+            fast_values = [ratio_by_date[day] for day in fast_dates]
+            fast_complete = len(fast_values) == fast_window and all(
+                value is not None for value in fast_values
+            )
+            fast_by_date[trade_date] = sum(fast_values) / fast_window if fast_complete else None
+            fast_valid_days_by_date[trade_date] = sum(value is not None for value in fast_values)
 
         result: dict[date, FactorValue] = {}
         for i, trade_date in enumerate(ordered_dates):
-            window_dates = ordered_dates[max(0, i - smooth + 1) : i + 1]
-            window = [ratio_by_date[day] for day in window_dates]
-            window_complete = len(window) == smooth and all(value is not None for value in window)
-            numeric = round(sum(window) / len(window) * 100.0, 4) if window_complete else None
+            fast_value = fast_by_date[trade_date]
+            slow_dates = ordered_dates[max(0, i - slow_window + 1) : i + 1]
+            slow_values = [fast_by_date[day] for day in slow_dates]
+            slow_complete = len(slow_values) == slow_window and all(
+                value is not None for value in slow_values
+            )
+            slow_value = sum(slow_values) / slow_window if slow_complete else None
+            numeric = round(fast_value * 100.0, 4) if fast_value is not None else None
             current = diagnostics[trade_date]
             result[trade_date] = FactorValue(
                 factor_id=self.spec.factor_id,
                 numeric=numeric,
                 payload={
                     **current,
-                    "valid_days": sum(value is not None for value in window),
-                    "window_complete": window_complete,
-                    "lookback": lookback,
-                    "smooth_window": smooth,
-                    "calculation_version": _CALCULATION_VERSION,
+                    "fast_value": round(fast_value * 100.0, 4) if fast_value is not None else None,
+                    "slow_value": round(slow_value * 100.0, 4) if slow_value is not None else None,
+                    "bullish": fast_value > slow_value
+                    if slow_value is not None and fast_value is not None
+                    else None,
+                    "fast_valid_days": fast_valid_days_by_date[trade_date],
+                    "fast_window_complete": fast_value is not None,
+                    "slow_window_complete": slow_complete,
+                    "trend_window": trend_window,
+                    "fast_window": fast_window,
+                    "slow_window": slow_window,
+                    "calculation_version": _INDEX_DIFFUSION_CALCULATION_VERSION,
                 },
             )
         return result
@@ -243,7 +281,7 @@ class RRGIndustryMatchComputer:
                     "unmapped_member_count": meta.get("unmapped_member_count"),
                     "industry_coverage": meta.get("industry_coverage"),
                     "weighting_mode": meta.get("weighting_mode"),
-                    "calculation_version": _CALCULATION_VERSION,
+                    "calculation_version": _RRG_MATCH_CALCULATION_VERSION,
                 },
             )
         return result
