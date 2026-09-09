@@ -78,6 +78,8 @@ def test_index_diffusion_excludes_missing_current_close_from_denominator() -> No
     assert result.payload["member_count"] == 10
     assert result.payload["valid_sample_count"] == 8
     assert result.payload["missing_sample_count"] == 2
+    assert result.payload["rising_sample_count"] == 2
+    assert result.payload["raw_ratio"] == 0.25
     assert result.payload["window_complete"] is True
 
 

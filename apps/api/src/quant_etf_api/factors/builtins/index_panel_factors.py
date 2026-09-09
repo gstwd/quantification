@@ -105,7 +105,7 @@ class IndexDiffusionRatioComputer:
         ordered_dates = sorted(set(dates))
         position = {trade_date: i for i, trade_date in enumerate(ordered_dates)}
         ratio_by_date: dict[date, float | None] = {}
-        diagnostics: dict[date, dict[str, int]] = {}
+        diagnostics: dict[date, dict[str, int | float | None]] = {}
         for trade_date in ordered_dates:
             members = _asof_members(membership, index_code, trade_date)
             member_count = len(members)
@@ -117,6 +117,8 @@ class IndexDiffusionRatioComputer:
                     "member_count": 0,
                     "valid_sample_count": 0,
                     "missing_sample_count": 0,
+                    "rising_sample_count": 0,
+                    "raw_ratio": None,
                 }
                 continue
             base_date = (
@@ -142,6 +144,8 @@ class IndexDiffusionRatioComputer:
                 "member_count": member_count,
                 "valid_sample_count": valid,
                 "missing_sample_count": member_count - valid,
+                "rising_sample_count": rising,
+                "raw_ratio": ratio_by_date[trade_date],
             }
 
         result: dict[date, FactorValue] = {}

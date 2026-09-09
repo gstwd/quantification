@@ -99,6 +99,27 @@ class IndustryIndexCorrelationResponse(BaseModel):
     items: list[IndustryIndexCorrelationItem] = Field(default_factory=list)
 
 
+class IndexDiffusionDebugResponse(BaseModel):
+    """指定指数单个交易日的成分扩散调试结果。"""
+
+    index_code: str
+    trade_date: date
+    factor_value: float | None = None
+    raw_ratio: float | None = None
+    member_count: int = 0
+    valid_sample_count: int = 0
+    missing_sample_count: int = 0
+    rising_sample_count: int = 0
+    valid_days: int = 0
+    window_complete: bool = False
+    lookback: int = 220
+    smooth_window: int = 20
+    calculation_version: str = ""
+    calculation_date_count: int = 0
+    stock_count: int = 0
+    stock_close_point_count: int = 0
+
+
 class IndustryDiffusionPoint(BaseModel):
     """单行业单日扩散指标值。"""
 

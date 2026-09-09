@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -19,6 +19,8 @@ from quant_etf_api.domain.industry.constants import (
 )
 from quant_etf_api.domain.industry.correlation import compute_industry_index_correlations
 from quant_etf_api.domain.industry.selection import IndustrySelectionConfig
+from quant_etf_api.factors.base import FactorContext
+from quant_etf_api.factors.builtins.index_panel_factors import IndexDiffusionRatioComputer
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
     IndustryUniverseRepository,
@@ -30,6 +32,7 @@ from quant_etf_api.schemas.industry import (
     IndustryDiffusionMeta,
     IndustryDiffusionPoint,
     IndustryDiffusionResponse,
+    IndexDiffusionDebugResponse,
     IndustryIndexSummary,
     IndustryIndexCorrelationItem,
     IndustryIndexCorrelationResponse,
@@ -43,6 +46,7 @@ from quant_etf_api.schemas.industry import (
 from quant_etf_api.services.industry_factor_service import IndustryFactorService
 from quant_etf_api.services.industry_data_service import IndustryDataService
 from quant_etf_api.services.industry_rotation_service import IndustryRotationService
+from quant_etf_api.services.index_factor_panel_service import IndexFactorPanelService
 
 router = APIRouter(prefix="/industry", tags=["industry"])
 logger = logging.getLogger("quant_etf_api.api.industry")
@@ -292,6 +296,95 @@ def get_industry_index_correlation(
         end=end,
         index_close_days=len(index_close),
         items=items,
+    )
+
+
+@router.get("/index-diffusion", response_model=IndexDiffusionDebugResponse)
+def get_index_diffusion_debug(
+    index_code: str = Query(..., min_length=1, description="待计算的活跃指数代码"),
+    trade_date: date = Query(..., description="目标交易日"),
+    db: Session = Depends(get_db),
+) -> IndexDiffusionDebugResponse:
+    """即时计算指定指数在一个交易日的严格成分扩散结果。
+
+    此端点仅供研究调试页使用：读取已入库的指数交易日、成分事件与个股收盘，
+    不写入 ``index_factor_value``，也不参与实时策略计算。计算轴截取目标日前
+    最多截取目标日前 240 个已入库交易日；当数据不足或 20 日平滑窗口存在空值时因子值返回 NULL。
+
+    Args:
+        index_code: 活跃指数代码。
+        trade_date: 目标交易日。
+        db: SQLAlchemy 同步 Session。
+
+    Returns:
+        原始上涨占比、平滑因子值和有效/缺失样本诊断。
+
+    Raises:
+        HTTPException: 指数不存在或目标日不是该指数交易日时抛出。
+    """
+    index = BenchmarkIndexRepository(db).find_by_code(index_code)
+    if index is None or not index.is_active:
+        raise HTTPException(status_code=404, detail=f"活跃指数 {index_code} 不存在")
+
+    date_repo = IndexDailyBarRepository(db)
+    available_dates = [
+        row.trade_date
+        for row in date_repo.find_by_code_date_range(
+            index_code,
+            trade_date - timedelta(days=800),
+            trade_date,
+        )
+    ]
+    if trade_date not in available_dates:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{trade_date.isoformat()} 不是指数 {index_code} 的已入库交易日",
+        )
+    calculation_dates = available_dates[-240:]
+
+    started = _log_compute_start(
+        factor_label="指数单日扩散",
+        start=calculation_dates[0],
+        end=trade_date,
+        codes=None,
+        params={"index_code": index_code, "target_date": trade_date.isoformat()},
+    )
+    panels = IndexFactorPanelService(db).build_panels(
+        index_codes=[index_code],
+        dates=calculation_dates,
+        lookback_natural_days=820,
+        include_industry_panels=False,
+    )
+    value = IndexDiffusionRatioComputer().compute(
+        index_code,
+        trade_date,
+        FactorContext(index_bars={}, panels=panels),
+    )
+    payload = value.payload or {}
+    metrics = panels.get("panel_metrics") or {}
+    _log_compute_done(
+        factor_label="指数单日扩散",
+        started=started,
+        rows=1,
+        issue_count=0,
+    )
+    return IndexDiffusionDebugResponse(
+        index_code=index_code,
+        trade_date=trade_date,
+        factor_value=value.numeric,
+        raw_ratio=_num(payload.get("raw_ratio")),
+        member_count=int(payload.get("member_count", 0)),
+        valid_sample_count=int(payload.get("valid_sample_count", 0)),
+        missing_sample_count=int(payload.get("missing_sample_count", 0)),
+        rising_sample_count=int(payload.get("rising_sample_count", 0)),
+        valid_days=int(payload.get("valid_days", 0)),
+        window_complete=bool(payload.get("window_complete", False)),
+        lookback=int(payload.get("lookback", 220)),
+        smooth_window=int(payload.get("smooth_window", 20)),
+        calculation_version=str(payload.get("calculation_version", "")),
+        calculation_date_count=int(metrics.get("calculation_date_count", 0)),
+        stock_count=int(metrics.get("stock_count", 0)),
+        stock_close_point_count=int(metrics.get("stock_close_point_count", 0)),
     )
 
 

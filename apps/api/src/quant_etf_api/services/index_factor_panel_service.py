@@ -85,6 +85,7 @@ class IndexFactorPanelService:
         index_codes: list[str],
         dates: list[date],
         lookback_natural_days: int = 820,
+        include_industry_panels: bool = True,
     ) -> dict[str, Any]:
         """构建指定区间内复合因子需要的全部数据面板。
 
@@ -92,6 +93,8 @@ class IndexFactorPanelService:
             index_codes: 指数代码列表。
             dates: 需要产出的交易日（升序）。
             lookback_natural_days: 为成分扩散预留的个股收盘回看窗口。
+            include_industry_panels: 是否加载 RRG 匹配度所需的行业选择和行业暴露面板。
+                单日扩散调试只需成分与个股收盘，传 False 可避免无关的行业表查询。
 
         Returns:
             panels 字典（index_membership / stock_closes /
@@ -101,8 +104,11 @@ class IndexFactorPanelService:
             return {}
         membership = self._build_membership(index_codes, dates)
         closes = self._build_stock_closes(membership, dates, lookback_natural_days)
-        selection = self._build_industry_selection(dates)
-        exposure = self._build_industry_exposure(membership, dates)
+        selection = self._build_industry_selection(dates) if include_industry_panels else {}
+        exposure = self._build_industry_exposure(membership, dates) if include_industry_panels else {}
+        exposure_meta = (
+            self._build_industry_exposure_meta(membership, dates) if include_industry_panels else {}
+        )
         membership_rows = sum(
             len(members) for daily in membership.values() for members in daily.values()
         )
@@ -113,7 +119,7 @@ class IndexFactorPanelService:
             "stock_closes": closes,
             "industry_selection": selection,
             "index_industry_exposure": exposure,
-            "index_industry_exposure_meta": self._build_industry_exposure_meta(membership, dates),
+            "index_industry_exposure_meta": exposure_meta,
             # 记录真实加载规模，便于后台任务监控成本，实时链路不应出现该面板。
             "panel_metrics": {
                 "calculation_date_count": len(dates),

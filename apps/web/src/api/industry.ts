@@ -119,6 +119,26 @@ export interface IndustryIndexCorrelationResponse {
   items: IndustryIndexCorrelationItem[]
 }
 
+/** 指数单日成分扩散调试结果 */
+export interface IndexDiffusionDebugResponse {
+  index_code: string
+  trade_date: string
+  factor_value: number | null
+  raw_ratio: number | null
+  member_count: number
+  valid_sample_count: number
+  missing_sample_count: number
+  rising_sample_count: number
+  valid_days: number
+  window_complete: boolean
+  lookback: number
+  smooth_window: number
+  calculation_version: string
+  calculation_date_count: number
+  stock_count: number
+  stock_close_point_count: number
+}
+
 /** 扩散单点数据 */
 export interface IndustryDiffusionPoint {
   trade_date: string
@@ -293,6 +313,26 @@ export async function fetchIndustryIndexCorrelation(
       end,
       industry_codes: codes.join(','),
     },
+  })
+  return data
+}
+
+/**
+ * 即时计算指定指数在一个交易日的严格成分扩散结果。
+ *
+ * 仅用于研究调试，不写入因子值表。
+ *
+ * @param indexCode - 指数代码
+ * @param tradeDate - 目标交易日 YYYY-MM-DD
+ * @returns 原始上涨占比、平滑因子值及样本诊断
+ */
+export async function fetchIndexDiffusionDebug(
+  indexCode: string,
+  tradeDate: string,
+): Promise<IndexDiffusionDebugResponse> {
+  const { data } = await apiClient.get<IndexDiffusionDebugResponse>('/industry/index-diffusion', {
+    params: { index_code: indexCode, trade_date: tradeDate },
+    timeout: 120_000,
   })
   return data
 }

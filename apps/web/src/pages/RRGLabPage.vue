@@ -46,6 +46,16 @@
           <button class="query-btn" :disabled="diffusionLoading" @click="queryDiffusion()">
             {{ diffusionLoading ? '扩散计算中...' : '查询扩散' }}
           </button>
+          <button class="query-btn" :disabled="correlationLoading" @click="queryCorrelation()">
+            {{ correlationLoading ? '相关度计算中...' : '计算行业相关度' }}
+          </button>
+          <button
+            class="query-btn"
+            :disabled="indexDiffusionLoading || !indexDiffusionCode || !indexDiffusionDate"
+            @click="queryIndexDiffusion()"
+          >
+            {{ indexDiffusionLoading ? '指数扩散计算中...' : '计算指数扩散' }}
+          </button>
           <button
             class="query-btn"
             :disabled="rrgLoading || diffusionLoading"
@@ -143,6 +153,80 @@
       </div>
     </div>
 
+    <!-- 指数单日扩散模块 -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">指数成分扩散（单交易日）</span>
+        <div class="controls">
+          <select v-model="indexDiffusionCode" class="select-input wide" :disabled="!indexes.length">
+            <option value="" disabled>选择指数</option>
+            <option v-for="item in indexes" :key="item.index_code" :value="item.index_code">
+              {{ item.index_name }}（{{ item.index_code }}）
+            </option>
+          </select>
+          <input v-model="indexDiffusionDate" type="date" class="date-input" />
+          <button
+            class="query-btn"
+            :disabled="indexDiffusionLoading || !indexDiffusionCode || !indexDiffusionDate"
+            @click="queryIndexDiffusion()"
+          >
+            {{ indexDiffusionLoading ? '计算中...' : '计算单日扩散' }}
+          </button>
+        </div>
+      </div>
+      <div class="chart-note">
+        最多使用该指数已入库交易日轴的目标日前 240 日，按 220 日涨跌与连续 20 日均值计算。
+        成分在目标日或对应回看日缺收盘时不计分子和分母；本操作只读数据，不写入因子表。
+      </div>
+      <div v-if="indexDiffusionError" class="error-banner">{{ indexDiffusionError }}</div>
+      <div v-else-if="indexDiffusionLoading" class="empty">正在读取指数成分与个股收盘并计算...</div>
+      <div v-else-if="!indexDiffusionResp" class="empty">选择指数与已入库交易日后，点击“计算单日扩散”。</div>
+      <template v-else>
+        <div class="meta-line">
+          <span>指数 {{ indexDiffusionResp.index_code }}</span>
+          <span>目标日 {{ indexDiffusionResp.trade_date }}</span>
+          <span>计算轴 {{ indexDiffusionResp.calculation_date_count }} 个交易日</span>
+          <span>数据版本 {{ indexDiffusionResp.calculation_version || '—' }}</span>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>原始上涨占比</th>
+              <th>平滑扩散因子</th>
+              <th>上涨样本</th>
+              <th>有效样本</th>
+              <th>缺失样本</th>
+              <th>成分总数</th>
+              <th>平滑窗口</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="mono">{{ formatPercent(indexDiffusionResp.raw_ratio) }}</td>
+              <td class="mono" :class="indexDiffusionResp.factor_value === null ? 'text-warn' : 'text-ok'">
+                {{ formatPercent(indexDiffusionResp.factor_value, true) }}
+              </td>
+              <td class="mono">{{ indexDiffusionResp.rising_sample_count }}</td>
+              <td class="mono">{{ indexDiffusionResp.valid_sample_count }}</td>
+              <td class="mono" :class="indexDiffusionResp.missing_sample_count ? 'text-warn' : 'text-ok'">
+                {{ indexDiffusionResp.missing_sample_count }}
+              </td>
+              <td class="mono">{{ indexDiffusionResp.member_count }}</td>
+              <td class="mono" :class="indexDiffusionResp.window_complete ? 'text-ok' : 'text-warn'">
+                {{ indexDiffusionResp.valid_days }}/{{ indexDiffusionResp.smooth_window }} 有效日
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="!indexDiffusionResp.window_complete" class="chart-note text-warn">
+          连续 20 日窗口含无有效扩散值，严格口径下平滑因子为 NULL；未跳过缺失日压缩窗口。
+        </div>
+        <div class="chart-note">
+          本次加载 {{ indexDiffusionResp.stock_count }} 只成分股、{{ indexDiffusionResp.stock_close_point_count }} 个收盘点。
+        </div>
+      </template>
+    </div>
+
     <!-- RRG 模块 -->
     <div class="card">
       <div class="card-header">
@@ -236,6 +320,60 @@
         <div v-if="rrgMeta?.notes.length" class="rule-note">
           <div v-for="note in rrgMeta.notes" :key="note" class="rule-item">• {{ note }}</div>
         </div>
+      </template>
+    </div>
+
+    <!-- 指数行业相关度模块 -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">行业与指数日收益相关度</span>
+        <div class="controls">
+          <select v-model="correlationIndexCode" class="select-input wide" :disabled="!indexes.length">
+            <option value="" disabled>选择指数</option>
+            <option v-for="item in indexes" :key="item.index_code" :value="item.index_code">
+              {{ item.index_name }}（{{ item.index_code }}）
+            </option>
+          </select>
+          <button class="query-btn" :disabled="correlationLoading || !correlationIndexCode" @click="queryCorrelation()">
+            {{ correlationLoading ? '计算中...' : '计算相关度' }}
+          </button>
+        </div>
+      </div>
+      <div class="chart-note">
+        按查询日期范围计算 Pearson 日收益相关系数。仅使用指数与行业均有当日及前一交易日收盘的共同样本；
+        缺失收盘不前填，缺口后的跨日涨跌也不计入。
+      </div>
+      <div v-if="correlationError" class="error-banner">{{ correlationError }}</div>
+      <div v-else-if="correlationLoading" class="empty">正在读取已入库的指数与行业日线并计算相关度...</div>
+      <div v-else-if="!correlationResp" class="empty">选择指数后点击“计算相关度”查看各所选行业的结果。</div>
+      <template v-else>
+        <div class="meta-line">
+          <span>指数 {{ correlationResp.index_code }}</span>
+          <span>区间 {{ correlationResp.start }} ~ {{ correlationResp.end }}</span>
+          <span>指数收盘 {{ correlationResp.index_close_days }} 日</span>
+          <span>行业按相关度降序</span>
+        </div>
+        <div v-if="!correlationResp.items.length" class="empty">所选行业没有可用日线数据。</div>
+        <table v-else class="data-table">
+          <thead>
+            <tr>
+              <th>排名</th>
+              <th>行业</th>
+              <th>相关系数</th>
+              <th>有效收益样本</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(item, idx) in correlationResp.items" :key="item.industry_code">
+              <td>{{ idx + 1 }}</td>
+              <td>{{ item.name_cn || item.industry_code }}（{{ item.industry_code }}）</td>
+              <td class="mono" :class="item.correlation === null ? 'text-warn' : ''">
+                {{ item.correlation === null ? '—' : item.correlation.toFixed(4) }}
+              </td>
+              <td class="mono">{{ item.sample_count }}</td>
+            </tr>
+          </tbody>
+        </table>
       </template>
     </div>
 
@@ -395,7 +533,7 @@
               RS-Momentum = MA(smooth)（100 × RSR_t / RSR_{t-lookback_mom}），中枢均为 100。
             </li>
             <li>象限：1 领先（双 &gt;100）、2 改善（Ratio&lt;100、Mom&gt;100）、3 滞后（双 &lt;100）、4 疲软（Ratio&gt;100、Mom&lt;100）；恰为 100 或 NaN 不归边。</li>
-            <li>数据问题（缺交易日 ffill、warm-up 不足、请求越界）全部进入“问题区/覆盖表”，不再静默。</li>
+            <li>数据问题（缺交易日严格置空、warm-up 不足、请求越界）全部进入“问题区/覆盖表”，不再静默。</li>
           </ul>
         </section>
         <section>
@@ -435,16 +573,23 @@ import type { ECharts } from 'echarts'
 
 import {
   fetchDiffusion,
+  fetchIndexDiffusionDebug,
+  fetchIndustryIndexCorrelation,
   fetchIndustryIndexes,
   fetchRRG,
   type IndustryDiffusionPoint,
   type IndustryDiffusionResponse,
+  type IndustryIndexCorrelationResponse,
   type IndustryIndexSummary,
+  type IndexDiffusionDebugResponse,
   type IndustryLabIssue,
   type IndustryRRGResponse,
 } from '../api/industry'
+import { fetchBenchmarkIndexes } from '../api/market_data'
+import type { BenchmarkIndex } from '../types/api'
 
 const industries = ref<IndustryIndexSummary[]>([])
+const indexes = ref<BenchmarkIndex[]>([])
 const selectedCodes = ref<string[]>([])
 const startDate = ref('')
 const endDate = ref('')
@@ -455,6 +600,17 @@ const smoothWindow = ref(20)
 const diffusionLookback = ref(220)
 const diffusionSmooth = ref(20)
 const withCoverage = ref(true)
+
+const correlationIndexCode = ref('')
+const correlationResp = ref<IndustryIndexCorrelationResponse | null>(null)
+const correlationLoading = ref(false)
+const correlationError = ref('')
+
+const indexDiffusionCode = ref('')
+const indexDiffusionDate = ref('')
+const indexDiffusionResp = ref<IndexDiffusionDebugResponse | null>(null)
+const indexDiffusionLoading = ref(false)
+const indexDiffusionError = ref('')
 
 const rrgResp = ref<IndustryRRGResponse | null>(null)
 const rrgLoading = ref(false)
@@ -515,6 +671,13 @@ function rangeText(start: string | null | undefined, end: string | null | undefi
   return '—'
 }
 
+/** 格式化原始占比或已乘以 100 的因子百分数。 */
+function formatPercent(value: number | null, alreadyPercent = false): string {
+  if (value === null) return '—'
+  const percent = alreadyPercent ? value : value * 100
+  return `${percent.toFixed(2)}%`
+}
+
 function errorText(e: unknown): string {
   const err = e as AxiosError<{ detail?: unknown }>
   const detail = err?.response?.data?.detail
@@ -573,6 +736,56 @@ async function loadIndustries(): Promise<void> {
   } catch (e) {
     industries.value = []
     rrgError.value = errorText(e)
+  }
+}
+
+/** 加载可用于行业相关度对照的活跃指数目录。 */
+async function loadIndexes(): Promise<void> {
+  try {
+    indexes.value = await fetchBenchmarkIndexes()
+    correlationIndexCode.value = indexes.value[0]?.index_code ?? ''
+    indexDiffusionCode.value = indexes.value[0]?.index_code ?? ''
+  } catch (e) {
+    indexes.value = []
+    correlationError.value = errorText(e)
+  }
+}
+
+/** 计算当前日期范围内所选行业与指定指数的严格日收益相关度。 */
+async function queryCorrelation(): Promise<void> {
+  if (correlationLoading.value || !correlationIndexCode.value) return
+  correlationLoading.value = true
+  correlationError.value = ''
+  correlationResp.value = null
+  try {
+    correlationResp.value = await fetchIndustryIndexCorrelation(
+      correlationIndexCode.value,
+      startDate.value,
+      endDate.value,
+      selectedCodes.value,
+    )
+  } catch (e) {
+    correlationError.value = errorText(e)
+  } finally {
+    correlationLoading.value = false
+  }
+}
+
+/** 即时计算指定指数、指定交易日的成分扩散调试结果。 */
+async function queryIndexDiffusion(): Promise<void> {
+  if (indexDiffusionLoading.value || !indexDiffusionCode.value || !indexDiffusionDate.value) return
+  indexDiffusionLoading.value = true
+  indexDiffusionError.value = ''
+  indexDiffusionResp.value = null
+  try {
+    indexDiffusionResp.value = await fetchIndexDiffusionDebug(
+      indexDiffusionCode.value,
+      indexDiffusionDate.value,
+    )
+  } catch (e) {
+    indexDiffusionError.value = errorText(e)
+  } finally {
+    indexDiffusionLoading.value = false
   }
 }
 
@@ -1019,7 +1232,8 @@ function setupResizeObservers(): void {
 
 onMounted(async () => {
   initDates()
-  await loadIndustries()
+  indexDiffusionDate.value = endDate.value
+  await Promise.all([loadIndustries(), loadIndexes()])
   setupResizeObservers()
   await queryRRG()
 })
@@ -1161,6 +1375,9 @@ onUnmounted(() => {
 .num-input,
 .select-input {
   width: 92px;
+}
+.select-input.wide {
+  width: 210px;
 }
 .field-hint {
   color: #64748b;

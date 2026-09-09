@@ -10,11 +10,11 @@ from quant_etf_api.domain.industry.correlation import compute_industry_index_cor
 def test_correlation_uses_only_continuous_aligned_returns() -> None:
     """缺失收盘不会前填，缺口后的跨日收益也不应进入相关度样本。"""
     dates = pd.date_range("2024-01-01", periods=5, freq="D")
-    index_close = pd.Series([100.0, 110.0, 121.0, 133.1, 146.41], index=dates)
+    index_close = pd.Series([100.0, 110.0, 121.0, 108.9, 130.68], index=dates)
     industry_close = pd.DataFrame(
         {
-            "801010": [50.0, 55.0, None, 66.55, 73.205],
-            "801020": [30.0, 33.0, 36.3, 39.93, 43.923],
+            "801010": [50.0, 55.0, None, 54.45, 65.34],
+            "801020": [30.0, 33.0, 36.3, 32.67, 39.204],
         },
         index=dates,
     )
