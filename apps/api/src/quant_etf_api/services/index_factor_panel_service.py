@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
+import pandas as pd
 from sqlalchemy.orm import Session
 
 from quant_etf_api.domain.industry.constants import (
@@ -86,6 +87,7 @@ class IndexFactorPanelService:
         dates: list[date],
         lookback_natural_days: int = 820,
         include_industry_panels: bool = True,
+        calculate_industry_selection: bool = False,
     ) -> dict[str, Any]:
         """构建指定区间内复合因子需要的全部数据面板。
 
@@ -95,6 +97,9 @@ class IndexFactorPanelService:
             lookback_natural_days: 为成分扩散预留的个股收盘回看窗口。
             include_industry_panels: 是否加载 RRG 匹配度所需的行业选择和行业暴露面板。
                 单日扩散调试只需成分与个股收盘，传 False 可避免无关的行业表查询。
+            calculate_industry_selection: 是否从原始行业行情与个股收盘即时计算行业选择。
+                回测必须开启，避免历史区间依赖仅覆盖近期的预计算行业因子；实时
+                路径保持关闭，仅读取已物化的行业因子值。
 
         Returns:
             panels 字典（index_membership / stock_closes /
@@ -104,7 +109,13 @@ class IndexFactorPanelService:
             return {}
         membership = self._build_membership(index_codes, dates)
         closes = self._build_stock_closes(membership, dates, lookback_natural_days)
-        selection = self._build_industry_selection(dates) if include_industry_panels else {}
+        selection = (
+            self._build_industry_selection_from_source(dates)
+            if include_industry_panels and calculate_industry_selection
+            else self._build_industry_selection(dates)
+            if include_industry_panels
+            else {}
+        )
         exposure = self._build_industry_exposure(membership, dates) if include_industry_panels else {}
         exposure_meta = (
             self._build_industry_exposure_meta(membership, dates) if include_industry_panels else {}
@@ -247,6 +258,62 @@ class IndexFactorPanelService:
                 rs_momentum=by_field["rs_momentum"].get(trade_date) or {},
                 quadrant=quadrant,
                 diffusion=by_field["diffusion"].get(trade_date) or {},
+            )
+            selected, weights = engine.select(config, data)
+            if selected:
+                result[trade_date] = weights
+        return result
+
+    def _build_industry_selection_from_source(
+        self,
+        dates: list[date],
+    ) -> dict[date, dict[str, float]]:
+        """从原始行业数据即时构建回测所需的 RRG/扩散行业选择。
+
+        历史回测不能依赖 ``industry_factor_value`` 的物化覆盖范围：该表日常只需
+        计算最近交易日，历史区间可能没有行，若直接读取会让 RRG 匹配因子在整段
+        回测中为空。本方法仅在回测预计算路径调用，复用行业因子服务的默认口径，
+        不写数据库，保证回测可复现且不受任务调度历史影响。
+
+        Args:
+            dates: 回测交易日列表。
+
+        Returns:
+            按交易日映射的 ``{行业代码: 等权重}`` 选择结果；无有效信号的日期省略。
+        """
+        if not dates:
+            return {}
+
+        from quant_etf_api.services.industry_factor_service import IndustryFactorService
+
+        panels = IndustryFactorService(self._db).build_panels(
+            start=dates[0],
+            end=dates[-1],
+        )
+        ratio = panels["rs_ratio"]
+        momentum = panels["rs_momentum"]
+        quadrant = panels["quadrant"]
+        diffusion = panels["diffusion"]
+        engine = IndustryRotationEngine()
+        config = IndustrySelectionConfig()
+        result: dict[date, dict[str, float]] = {}
+
+        for trade_date in dates:
+            timestamp = pd.Timestamp(trade_date)
+            if timestamp not in quadrant.index:
+                continue
+            data = IndustryRotationInput(
+                trade_date=trade_date,
+                industry_codes=list(panels["industry_codes"]),
+                rs_ratio=ratio.loc[timestamp].to_dict() if timestamp in ratio.index else {},
+                rs_momentum=momentum.loc[timestamp].to_dict()
+                if timestamp in momentum.index
+                else {},
+                quadrant={
+                    code: int(value) if pd.notna(value) else None
+                    for code, value in quadrant.loc[timestamp].items()
+                },
+                diffusion=diffusion.loc[timestamp].to_dict() if timestamp in diffusion.index else {},
             )
             selected, weights = engine.select(config, data)
             if selected:

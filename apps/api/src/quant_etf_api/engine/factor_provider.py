@@ -311,6 +311,19 @@ class FactorProvider:
             logger.warning("回测因子预计算：无匹配的因子计算器，factor_ids=%s", factor_ids)
             return {}
 
+        # 批量因子必须使用预加载行情的完整交易日历计算。回测服务虽然会向前
+        # 预加载预热行情，但若仅传入回测区间 dates，220 日扩散等因子会从
+        # 回测首日重新计数，导致月初调仓时全部缺值并被 exclude 策略清空。
+        calculation_dates = sorted(
+            {
+                trade_date
+                for index_code, trade_date in all_bars
+                if index_code in index_codes
+            }
+        )
+        if not calculation_dates:
+            calculation_dates = dates
+
         # 复合因子面板：策略引用 index_membership/industry_selection 等
         # 面板类因子时，在回测预计算阶段一次性装配并复用（不逐日查库）
         panel_names = {
@@ -331,8 +344,11 @@ class FactorProvider:
             lookback = max((c.spec.lookback_days for c in computers), default=820)
             panels = IndexFactorPanelService(self._db).build_panels(
                 index_codes=index_codes,
-                dates=dates,
+                dates=calculation_dates,
                 lookback_natural_days=lookback,
+                # 回测必须从原始历史行业数据重建选择信号，不能依赖只物化近期的
+                # industry_factor_value，否则 RRG 匹配因子在历史区间会全部为空。
+                calculate_industry_selection=True,
             )
 
         start = time.perf_counter()
@@ -356,9 +372,10 @@ class FactorProvider:
             for code in index_codes:
                 for computer in batch_computers:
                     try:
-                        batch_results = computer.compute_batch(code, dates, batch_ctx)
+                        batch_results = computer.compute_batch(code, calculation_dates, batch_ctx)
                         for trade_date, fv in batch_results.items():
-                            result[trade_date][(code, fv.factor_id)] = fv.numeric
+                            if trade_date in result:
+                                result[trade_date][(code, fv.factor_id)] = fv.numeric
                     except Exception:
                         logger.warning(
                             "回测批量因子计算失败: code=%s factor=%s",
