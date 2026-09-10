@@ -493,6 +493,9 @@ class BacktestDailyResultModel(Base):
     positions: Mapped[dict | None] = mapped_column(
         JSON, comment="持仓明细，index_code → 权重（配置模式）"
     )
+    executed_positions: Mapped[dict | None] = mapped_column(
+        JSON, comment="收益窗口实际执行持仓，index_code → 权重（配置模式）"
+    )
     missing_bar_count: Mapped[int] = mapped_column(
         Integer,
         nullable=False,

@@ -38,6 +38,8 @@ class BacktestCreateRequest(BaseModel):
         params: 策略参数透传。
         enable_benchmark: 是否启用基准对比。
         benchmark_index_code: 基准指数代码，默认沪深300。
+        execution_model: 执行模型，t_plus_1_open 或 t_plus_1_close。
+        data_quality_mode: 数据质量模式，warn 或 strict。
         基准统一按所选指数的买入持有收益计算，不再区分模式。
     """
 
@@ -49,6 +51,8 @@ class BacktestCreateRequest(BaseModel):
     params: dict[str, Any] | None = None
     enable_benchmark: bool = True
     benchmark_index_code: str = "000300"
+    execution_model: Literal["t_plus_1_open", "t_plus_1_close"] = "t_plus_1_open"
+    data_quality_mode: Literal["warn", "strict"] = "warn"
 
 
 class BacktestMetrics(BaseModel):
@@ -144,6 +148,7 @@ class BacktestDailyResult(BaseModel):
     total_exposure: float | None = None
     cash_ratio: float | None = None
     positions: dict[str, float] | None = None
+    executed_positions: dict[str, float] | None = None
     benchmark_return: float | None = None
     turnover: float | None = None
     missing_bar_count: int = 0
@@ -183,6 +188,8 @@ class BacktestComparisonCreateRequest(BaseModel):
             若策略 B 已配置标的范围则忽略此字段。
         enable_benchmark: 是否启用基准对比。
         benchmark_index_code: 基准指数代码，默认沪深300。
+        execution_model: 两个子回测共用的执行模型。
+        data_quality_mode: 两个子回测共用的数据质量模式。
         name: 可选的对比名称。
     """
 
@@ -194,6 +201,8 @@ class BacktestComparisonCreateRequest(BaseModel):
     b_index_codes: list[str] = []
     enable_benchmark: bool = True
     benchmark_index_code: str = "000300"
+    execution_model: Literal["t_plus_1_open", "t_plus_1_close"] = "t_plus_1_open"
+    data_quality_mode: Literal["warn", "strict"] = "warn"
     name: str | None = None
 
 

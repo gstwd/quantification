@@ -225,6 +225,8 @@ export interface BacktestCreateRequest {
   enable_benchmark?: boolean
   /** 基准指数代码，默认 000300（沪深300） */
   benchmark_index_code?: string
+  execution_model?: 't_plus_1_open' | 't_plus_1_close'
+  data_quality_mode?: 'warn' | 'strict'
 }
 
 export interface BacktestMetrics {
@@ -309,6 +311,8 @@ export interface BacktestDailyResult {
   total_exposure?: number | null
   cash_ratio?: number | null
   positions?: Record<string, number> | null
+  /** 收益窗口实际执行持仓 */
+  executed_positions?: Record<string, number> | null
   /** 基准指数当日收益率（%） */
   benchmark_return?: number | null
   /** 当日换手率（0-1） */
@@ -360,6 +364,8 @@ export interface ComparisonCreateRequest {
   b_index_codes: string[]
   enable_benchmark?: boolean
   benchmark_index_code?: string
+  execution_model?: 't_plus_1_open' | 't_plus_1_close'
+  data_quality_mode?: 'warn' | 'strict'
   name?: string | null
 }
 

@@ -4,6 +4,7 @@
       <div class="breadcrumb">
         <RouterLink to="/backtests" class="back-link">← 回测中心</RouterLink>
       </div>
+
       <h1 class="page-title">新建回测</h1>
     </div>
 
@@ -16,6 +17,24 @@
             {{ s.display_name }} ({{ s.strategy_id }})
           </option>
         </select>
+      </div>
+
+      <div class="form-section">
+        <label class="form-label">执行模型</label>
+        <select v-model="form.execution_model" class="form-select">
+          <option value="t_plus_1_open">T+1 开盘执行（默认）</option>
+          <option value="t_plus_1_close">T+1 收盘执行</option>
+        </select>
+        <div class="form-hint">开盘执行需要开盘价；收盘执行只使用收盘价，目标仓位在下一交易日收盘生效。</div>
+      </div>
+
+      <div class="form-section">
+        <label class="form-label">数据质量</label>
+        <select v-model="form.data_quality_mode" class="form-select">
+          <option value="warn">警告并继续（默认）</option>
+          <option value="strict">严格排除缺失资产</option>
+        </select>
+        <div class="form-hint">严格模式不会前值填充，缺失因子或必要行情会使指数退出当日组合。</div>
       </div>
 
       <div class="form-section">
@@ -149,6 +168,8 @@ const form = reactive({
   index_codes: [] as string[],
   enable_benchmark: true,
   benchmark_index_code: '000300',
+  execution_model: 't_plus_1_open' as 't_plus_1_open' | 't_plus_1_close',
+  data_quality_mode: 'warn' as 'warn' | 'strict',
 })
 
 const submitting = ref(false)
@@ -214,6 +235,8 @@ async function submit() {
       index_codes: form.index_codes,
       enable_benchmark: form.enable_benchmark,
       benchmark_index_code: form.benchmark_index_code,
+      execution_model: form.execution_model,
+      data_quality_mode: form.data_quality_mode,
     })
     router.push(`/backtests/${summary.backtest_id}`)
   } catch (e: unknown) {

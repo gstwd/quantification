@@ -27,6 +27,11 @@
         </span>
       </div>
 
+      <div class="scope-notice">
+        执行模型：{{ executionModelLabel }}；数据质量：{{ dataQualityLabel }}。
+        仓位图同时区分目标仓位与收益窗口实际执行仓位。
+      </div>
+
       <!-- 结构化警告（预热期/因子缺失/数据缺口/部分结果等） -->
       <div v-if="warnings.length > 0" class="warnings-section">
         <div class="section-label">执行提示</div>
@@ -189,7 +194,7 @@
 
       <!-- 仓位变化 -->
       <div class="chart-card">
-        <div class="chart-title">仓位变化</div>
+        <div class="chart-title">实际执行仓位变化</div>
         <div ref="positionsChartEl" class="chart-container"></div>
       </div>
 
@@ -272,6 +277,16 @@ function statusLabel(status: string): string {
 
 /** 结构化警告列表（内联展示） */
 const warnings = computed(() => store.current?.warnings ?? [])
+
+const executionModelLabel = computed(() => {
+  const value = store.current?.params?.['_execution_model']
+  return value === 't_plus_1_close' ? 'T+1 收盘执行' : 'T+1 开盘执行'
+})
+
+const dataQualityLabel = computed(() => {
+  const value = store.current?.params?.['_data_quality_mode']
+  return value === 'strict' ? '严格排除缺失资产' : '警告并继续'
+})
 
 function warningLevelLabel(level: BacktestWarning['level']): string {
   const map: Record<BacktestWarning['level'], string> = { info: '信息', warning: '警告', error: '错误' }
@@ -481,8 +496,9 @@ async function initCharts() {
     // 收集所有持仓的指数代码
     const allCodes = new Set<string>()
     for (const r of store.dailyResults) {
-      if (r.positions) {
-        for (const code of Object.keys(r.positions)) allCodes.add(code)
+      const actualPositions = r.executed_positions ?? r.positions
+      if (actualPositions) {
+        for (const code of Object.keys(actualPositions)) allCodes.add(code)
       }
     }
     const codeList = Array.from(allCodes).sort()
@@ -501,7 +517,10 @@ async function initCharts() {
       symbol: 'none',
       lineStyle: { width: 0 },
       itemStyle: { color: colorPalette[idx % colorPalette.length] },
-      data: store.dailyResults.map((r) => r.positions ? ((r.positions[code] ?? 0) * 100) : 0),
+      data: store.dailyResults.map((r) => {
+        const actualPositions = r.executed_positions ?? r.positions
+        return actualPositions ? ((actualPositions[code] ?? 0) * 100) : 0
+      }),
     }))
 
     // 现金比例

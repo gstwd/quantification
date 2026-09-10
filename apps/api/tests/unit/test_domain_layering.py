@@ -17,6 +17,7 @@ import pytest
 from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
 from quant_etf_api.domain.portfolio.returns import (
     compute_allocation_return,
+    compute_close_execution_return,
     compute_rebalance_day_return,
     count_missing_allocation_assets,
     count_missing_rebalance_assets,
@@ -94,6 +95,16 @@ class TestTurnoverAndReturns:
             {"a": 0.5, "b": 0.5}, date(2025, 1, 15), date(2025, 1, 16), bars
         )
         assert ret == 5.0
+
+    def test_close_execution_ignores_missing_open(self) -> None:
+        """收盘执行模式只依赖收盘价，不应受开盘价缺失影响。"""
+        bars = {
+            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0, open_price=None),
+            ("a", date(2025, 1, 16)): SimpleNamespace(close_price=105.0, open_price=None),
+        }
+        assert compute_close_execution_return(
+            {"a": 1.0}, date(2025, 1, 15), date(2025, 1, 16), bars
+        ) == 5.0
 
     def test_compute_rebalance_day_return_split(self) -> None:
         """调仓日收益拆分为旧仓位隔夜段 + 新仓位日内段。"""

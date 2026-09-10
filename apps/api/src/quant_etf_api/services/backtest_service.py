@@ -24,6 +24,7 @@ from quant_etf_api.domain.common.numeric import (
 from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
 from quant_etf_api.domain.portfolio.returns import (
     compute_allocation_return,
+    compute_close_execution_return,
     compute_rebalance_day_return,
     count_missing_allocation_assets,
     count_missing_rebalance_assets,
@@ -165,6 +166,8 @@ class BacktestService:
             )
 
         params = dict(req.params) if req.params else {}
+        params["_execution_model"] = req.execution_model
+        params["_data_quality_mode"] = req.data_quality_mode
         # 保存基准配置到 params，供执行时读取；基准统一采用买入持有口径。
         params["_enable_benchmark"] = req.enable_benchmark
         params["_benchmark_index_code"] = req.benchmark_index_code
@@ -278,6 +281,7 @@ class BacktestService:
                     total_exposure=r.total_exposure,
                     cash_ratio=r.cash_ratio,
                     positions=r.positions,
+                    executed_positions=getattr(r, "executed_positions", None),
                     benchmark_return=getattr(r, "benchmark_return", None),
                     turnover=getattr(r, "turnover", None),
                     missing_bar_count=getattr(r, "missing_bar_count", 0),
@@ -501,7 +505,7 @@ class BacktestService:
 
         logger.info(
             "[backtest] 回测启动: backtest_id=%s strategy=%s 区间=%s~%s 标的=%d "
-            "回望=%s天 预热=%s个交易日 执行模型=T+1开盘 基准=%s",
+            "回望=%s天 预热=%s个交易日 执行模型=%s 数据质量=%s 基准=%s",
             backtest_id,
             row.strategy_id,
             trading_dates[0],
@@ -509,6 +513,8 @@ class BacktestService:
             len(index_codes),
             lookback_days,
             warmup_trading_days,
+            params.get("_execution_model", "t_plus_1_open"),
+            params.get("_data_quality_mode", "warn"),
             benchmark_index_code if enable_benchmark else "禁用",
         )
 
@@ -518,9 +524,12 @@ class BacktestService:
         # 主循环只负责生成当日持仓与收益（执行与绩效关注点分离）
         accumulator = BacktestDayAccumulator()
         prev_positions: dict[str, float] = {}
+        pending_positions: dict[str, float] | None = None
         last_rebalance_date: date | None = None
         # 数据缺口天数：至少一个持仓资产当日收益受缺失行情影响的交易日数（B10）
         data_gap_days = 0
+        strict_exclusion_dates: dict[str, list[date]] = {}
+        strict_exclusion_reasons: dict[str, set[str]] = {}
         # 进度跟踪：每完成约 10% 交易日写一次进度
         last_progress = 0
         total_dates = len(trading_dates)
@@ -534,22 +543,39 @@ class BacktestService:
         if config.index_codes:
             strategy_codes = set(config.index_codes)
             codes = [c for c in codes if c in strategy_codes]
-        cached_universe = build_universe_items([{"index_code": c, "name_cn": c} for c in codes])
         cached_metadata = {code: {"name_cn": code, "category": "broad_index"} for code in codes}
 
         for i, trade_date in enumerate(trading_dates):
             day_factors = precomputed.get(trade_date, {})
+            next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
+
+            execution_model = params.get("_execution_model", "t_plus_1_open")
+            data_quality_mode = params.get("_data_quality_mode", "warn")
+            day_codes = index_codes
+            if data_quality_mode == "strict":
+                day_codes, day_exclusion_reasons = self._strict_eligible_codes(
+                    config, trade_date, next_date, index_codes, all_bars, day_factors, execution_model
+                )
+                for excluded_code in set(index_codes) - set(day_codes):
+                    strict_exclusion_dates.setdefault(excluded_code, []).append(trade_date)
+                    strict_exclusion_reasons.setdefault(excluded_code, set()).update(
+                        day_exclusion_reasons.get(excluded_code, {"DATA_EXCLUDED"})
+                    )
+            day_universe = build_universe_items(
+                [{"index_code": c, "name_cn": c} for c in day_codes]
+            )
+            day_metadata = {code: cached_metadata[code] for code in day_codes}
 
             # 构建上下文
             context = self._context_builder.build(
                 config,
                 trade_date,
-                index_codes=index_codes,
+                index_codes=day_codes,
                 all_bars=all_bars,
                 all_valuation=all_valuation,
                 precomputed_factors=day_factors,
-                cached_universe=cached_universe,
-                cached_metadata=cached_metadata,
+                cached_universe=day_universe,
+                cached_metadata=day_metadata,
             )
 
             # 检查调仓日
@@ -558,17 +584,34 @@ class BacktestService:
             # 执行引擎（回测模式跳过详细的 StrategyResult 构建以提升性能）
             result = self._engine.run(config, context, include_details=False)
 
-            next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
+            target_positions = dict(result.positions) if result.positions else {}
+            executed_positions = dict(prev_positions)
+            next_positions = dict(prev_positions)
 
-            # 确定持仓与收益（T+1 开盘执行模型：T 日收盘出信号，T+1 日开盘成交，无滑点）
-            if should_rebalance:
+            # 确定持仓与收益。收盘模式将信号延迟到下一交易日收盘执行。
+            if execution_model == "t_plus_1_close":
+                portfolio_return = compute_close_execution_return(
+                    executed_positions, trade_date, next_date, all_bars
+                )
+                positions = target_positions
+                if pending_positions is not None:
+                    turnover = compute_turnover(executed_positions, pending_positions)
+                    next_positions = dict(pending_positions)
+                else:
+                    turnover = 0.0
+                pending_positions = target_positions if should_rebalance else None
+                day_total_exposure = round(sum(executed_positions.values()), 4)
+                day_cash_ratio = round(1.0 - day_total_exposure, 4)
+            elif should_rebalance:
                 # 调仓日：旧仓位持有至 T+1 开盘（隔夜段），新仓位自 T+1 开盘买入（日内段），
                 # 当日收益 = 旧仓位 × [close_T, open_{T+1}] + 新仓位 × [open_{T+1}, close_{T+1}]
-                new_positions = dict(result.positions) if result.positions else {}
+                new_positions = target_positions
                 portfolio_return = compute_rebalance_day_return(
                     prev_positions, new_positions, trade_date, next_date, all_bars
                 )
                 positions = new_positions
+                executed_positions = new_positions
+                next_positions = new_positions
                 day_total_exposure = round(sum(positions.values()), 4)
                 day_cash_ratio = round(1.0 - day_total_exposure, 4)
                 # 换手率基于新旧目标仓位计算
@@ -579,6 +622,8 @@ class BacktestService:
             else:
                 # 非调仓日：沿用上次持仓，按收盘对收盘计算收益
                 positions = dict(prev_positions)
+                executed_positions = positions
+                next_positions = positions
                 day_total_exposure = round(sum(positions.values()), 4)
                 day_cash_ratio = round(1.0 - day_total_exposure, 4)
                 turnover = 0.0
@@ -588,7 +633,11 @@ class BacktestService:
 
             # 统计当日受数据缺口影响的持仓资产数（B10），
             # 供逐日 missing_bar_count 记录与 data_gap_days 指标汇总
-            if should_rebalance:
+            if execution_model == "t_plus_1_close":
+                missing_bar_count = count_missing_allocation_assets(
+                    executed_positions, trade_date, next_date, all_bars
+                )
+            elif should_rebalance:
                 missing_bar_count = count_missing_rebalance_assets(
                     prev_positions, positions, trade_date, next_date, all_bars
                 )
@@ -600,7 +649,7 @@ class BacktestService:
                 data_gap_days += 1
 
             # 持仓统计
-            has_positions = bool(positions)
+            has_positions = bool(executed_positions)
             # 更新累计净值、峰值与回撤（领域对象记账）
             accumulator.apply_day(portfolio_return, has_positions)
             cumulative_return_pct = accumulator.cumulative_return_pct
@@ -619,6 +668,7 @@ class BacktestService:
                 total_exposure=day_total_exposure,
                 cash_ratio=day_cash_ratio,
                 positions=positions if positions else None,
+                executed_positions=executed_positions if executed_positions else None,
                 benchmark_return=round(benchmark_ret, 4) if benchmark_ret is not None else None,
                 turnover=round(turnover, 4) if turnover > 0 else None,
                 missing_bar_count=missing_bar_count,
@@ -652,7 +702,7 @@ class BacktestService:
                 round(portfolio_return, 4),
             )
 
-            prev_positions = positions
+            prev_positions = next_positions
 
             # 每 10% 交易日更新一次进度（最少 1 天触发）
             if total_dates > 0:
@@ -713,6 +763,20 @@ class BacktestService:
                 FactorProvider.collect_required_factor_ids(config),
             )
         )
+        if data_quality_mode == "strict":
+            for code, excluded_dates in list(strict_exclusion_dates.items())[:5]:
+                run_warnings.append(
+                    BacktestWarning(
+                        level="warning",
+                        code="DATA_EXCLUDED",
+                        message=(
+                            f"严格数据质量模式排除指数 {code} {len(excluded_dates)} 个交易日，"
+                            f"范围 {excluded_dates[0]}~{excluded_dates[-1]}；"
+                            f"原因：{','.join(sorted(strict_exclusion_reasons.get(code, set())))}"
+                        ),
+                        index_code=code,
+                    )
+                )
         run_warnings.extend(self._collect_data_gap_warnings(trading_dates, index_codes, all_bars))
         if enable_benchmark:
             bench_missing = [d for d in trading_dates if (benchmark_index_code, d) not in all_bars]
@@ -881,6 +945,89 @@ class BacktestService:
         return compute_allocation_return(positions, trade_date, next_date, all_bars)
 
     # ── 调仓检查 ───────────────────────────────────────────────────────────
+
+    def _strict_eligible_codes(
+        self,
+        config: StrategyConfig,
+        trade_date: date,
+        next_date: date | None,
+        index_codes: list[str],
+        all_bars: dict,
+        day_factors: dict[tuple[str, str], float | None],
+        execution_model: str,
+    ) -> tuple[list[str], dict[str, set[str]]]:
+        """按执行模型和因子值筛选当日严格模式可用指数。
+
+        Args:
+            config: 策略配置。
+            trade_date: 当前信号交易日。
+            next_date: 下一交易日。
+            index_codes: 候选指数代码。
+            all_bars: 预加载行情。
+            day_factors: 当前日预计算因子值。
+            execution_model: 执行模型。
+
+        Returns:
+            当日可参与策略决策和收益计算的指数代码列表，以及每个被排除指数的原因。
+        """
+        required_ids = set(config.score.factors)
+        if config.filters:
+            for rule in config.filters.rules:
+                required_ids.add(rule.factor)
+                if rule.compare_to:
+                    required_ids.add(rule.compare_to)
+        for regime_rule in config.regime_rules.values():
+            if regime_rule.score:
+                required_ids.update(regime_rule.score.factors)
+            if regime_rule.filters:
+                for rule in regime_rule.filters.rules:
+                    required_ids.add(rule.factor)
+                    if rule.compare_to:
+                        required_ids.add(rule.compare_to)
+        asset_factor_ids = {
+            spec.factor_id
+            for spec in self._registry.specs()
+            if spec.value_shape == "asset"
+        }
+        required_ids &= asset_factor_ids
+        needs_high_low = any(
+            factor_id.startswith(("atr_", "donchian_", "monthly_"))
+            for factor_id in required_ids
+        )
+        result: list[str] = []
+        reasons: dict[str, set[str]] = {}
+        for code in index_codes:
+            bar = all_bars.get((code, trade_date))
+            if bar is None or _price_invalid(getattr(bar, "close_price", None)):
+                reasons.setdefault(code, set()).add("MISSING_CLOSE")
+                continue
+            if needs_high_low and any(
+                _price_invalid(getattr(bar, field)) for field in ("high_price", "low_price")
+            ):
+                reasons.setdefault(code, set()).add("MISSING_HIGH_LOW")
+                continue
+            if any(day_factors.get((code, factor_id)) is None for factor_id in required_ids):
+                reasons.setdefault(code, set()).add("MISSING_FACTOR")
+                continue
+            if next_date is None:
+                result.append(code)
+                continue
+            next_bar = all_bars.get((code, next_date))
+            if next_bar is None or _price_invalid(getattr(next_bar, "close_price", None)):
+                reasons.setdefault(code, set()).add("MISSING_CLOSE")
+                continue
+            if needs_high_low and any(
+                _price_invalid(getattr(next_bar, field)) for field in ("high_price", "low_price")
+            ):
+                reasons.setdefault(code, set()).add("MISSING_HIGH_LOW")
+                continue
+            if execution_model == "t_plus_1_open" and _price_invalid(
+                getattr(next_bar, "open_price", None)
+            ):
+                reasons.setdefault(code, set()).add("MISSING_OPEN")
+                continue
+            result.append(code)
+        return result, reasons
 
     def _check_rebalance(
         self,
@@ -1293,6 +1440,8 @@ class BacktestService:
                 index_codes=req.a_index_codes,
                 enable_benchmark=req.enable_benchmark,
                 benchmark_index_code=req.benchmark_index_code,
+                execution_model=req.execution_model,
+                data_quality_mode=req.data_quality_mode,
             )
         )
 
@@ -1307,6 +1456,8 @@ class BacktestService:
                 index_codes=req.b_index_codes,
                 enable_benchmark=req.enable_benchmark,
                 benchmark_index_code=req.benchmark_index_code,
+                execution_model=req.execution_model,
+                data_quality_mode=req.data_quality_mode,
             )
         )
 
@@ -1324,6 +1475,8 @@ class BacktestService:
             params={
                 "_enable_benchmark": req.enable_benchmark,
                 "_benchmark_index_code": req.benchmark_index_code,
+                "_execution_model": req.execution_model,
+                "_data_quality_mode": req.data_quality_mode,
                 "a_index_codes": req.a_index_codes,
                 "b_index_codes": req.b_index_codes,
             },

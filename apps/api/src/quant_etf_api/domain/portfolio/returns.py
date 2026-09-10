@@ -83,6 +83,26 @@ def compute_allocation_return(
     return round(total_return, 4)
 
 
+def compute_close_execution_return(
+    positions: dict[str, float],
+    trade_date: date,
+    next_date: date | None,
+    all_bars: dict[tuple[str, date], Any],
+) -> float:
+    """计算 T+1 收盘执行模型下当前实际仓位的收盘到收盘收益。
+
+    Args:
+        positions: 当前收益窗口实际持有的仓位。
+        trade_date: 收益窗口起始交易日。
+        next_date: 收益窗口结束交易日，None 时返回 0。
+        all_bars: (code, date) → BarRow 的映射。
+
+    Returns:
+        组合收益率百分比，缺失资产收益按 0 处理。
+    """
+    return compute_allocation_return(positions, trade_date, next_date, all_bars)
+
+
 def get_index_rebalance_legs(
     index_code: str,
     trade_date: date,

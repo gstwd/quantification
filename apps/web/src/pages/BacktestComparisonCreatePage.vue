@@ -4,6 +4,7 @@
       <div class="breadcrumb">
         <RouterLink to="/backtests" class="back-link">← 回测中心</RouterLink>
       </div>
+
       <h1 class="page-title">新建策略对比</h1>
     </div>
 
@@ -142,6 +143,24 @@
         </div>
       </div>
 
+      <div class="form-section">
+        <label class="form-label">执行模型</label>
+        <select v-model="form.execution_model" class="form-select">
+          <option value="t_plus_1_open">T+1 开盘执行（默认）</option>
+          <option value="t_plus_1_close">T+1 收盘执行</option>
+        </select>
+        <div class="form-hint">A/B 两个子回测使用同一执行模型。</div>
+      </div>
+
+      <div class="form-section">
+        <label class="form-label">数据质量</label>
+        <select v-model="form.data_quality_mode" class="form-select">
+          <option value="warn">警告并继续（默认）</option>
+          <option value="strict">严格排除缺失资产</option>
+        </select>
+        <div class="form-hint">严格模式可能减少当日可选资产并改变组合暴露。</div>
+      </div>
+
       <!-- 基准对比 -->
       <div class="form-section">
         <label class="form-label">基准对比 <HelpTip :text="configHelp('benchmark')" /></label>
@@ -213,6 +232,8 @@ const form = reactive({
   b_index_codes: [] as string[],
   enable_benchmark: true,
   benchmark_index_code: '000300',
+  execution_model: 't_plus_1_open' as 't_plus_1_open' | 't_plus_1_close',
+  data_quality_mode: 'warn' as 'warn' | 'strict',
 })
 
 const submitting = ref(false)
@@ -309,6 +330,8 @@ async function submit() {
       b_index_codes: form.b_index_codes,
       enable_benchmark: form.enable_benchmark,
       benchmark_index_code: form.benchmark_index_code,
+      execution_model: form.execution_model,
+      data_quality_mode: form.data_quality_mode,
       name: form.name || null,
     })
     router.push(`/backtests/comparison/${summary.comparison_id}`)
