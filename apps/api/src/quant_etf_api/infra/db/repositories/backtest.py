@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import func, text
@@ -20,17 +20,33 @@ from quant_etf_api.infra.db.repositories.base import BaseRepository
 class BacktestRepository(BaseRepository):
     """回测相关表的查询与状态更新仓库。"""
 
-    def find_all(self, offset: int = 0, limit: int = 50) -> tuple[list[BacktestRunModel], int]:
+    def find_all(
+        self,
+        offset: int = 0,
+        limit: int = 50,
+        strategy_id: str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[BacktestRunModel], int]:
         """分页查询回测记录，按创建时间倒序。
 
         Args:
             offset: 偏移量。
             limit: 每页最大条数。
+            strategy_id: 策略 ID，精确匹配。
+            created_from: 创建时间起点（UTC，含）。
+            created_to: 创建时间终点（UTC，不含）。
 
         Returns:
             (items, total) 元组。
         """
         base_q = self._db.query(BacktestRunModel)
+        if strategy_id:
+            base_q = base_q.filter(BacktestRunModel.strategy_id == strategy_id)
+        if created_from is not None:
+            base_q = base_q.filter(BacktestRunModel.created_at >= created_from)
+        if created_to is not None:
+            base_q = base_q.filter(BacktestRunModel.created_at < created_to)
         total = base_q.count()
         rows = base_q.order_by(BacktestRunModel.created_at.desc()).offset(offset).limit(limit).all()
         return rows, total

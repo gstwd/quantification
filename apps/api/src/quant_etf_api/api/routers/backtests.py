@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -40,10 +42,21 @@ def create_backtest(req: BacktestCreateRequest, db: Session = Depends(get_db)) -
 def list_backtests(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
+    strategy_id: str | None = Query(default=None, description="策略 ID，精确匹配"),
+    created_from: date | None = Query(default=None, description="创建日期起点（含）"),
+    created_to: date | None = Query(default=None, description="创建日期终点（含）"),
     db: Session = Depends(get_db),
 ) -> PaginatedResponse[BacktestSummary]:
-    """分页返回回测列表，按创建时间倒序。"""
-    items, total = BacktestService(db).list_backtests(offset=offset, limit=limit)
+    """分页返回回测列表，按创建时间倒序并支持筛选。"""
+    if created_from and created_to and created_from > created_to:
+        raise HTTPException(status_code=422, detail="创建日期起点不能晚于终点")
+    items, total = BacktestService(db).list_backtests(
+        offset=offset,
+        limit=limit,
+        strategy_id=strategy_id,
+        created_from=created_from,
+        created_to=created_to,
+    )
     return PaginatedResponse(items=items, total=total, offset=offset, limit=limit)
 
 

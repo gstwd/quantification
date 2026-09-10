@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from time import perf_counter
 from typing import Any
 from uuid import uuid4
@@ -48,6 +48,7 @@ from quant_etf_api.infra.db.models.core import (
     BacktestIndexResultModel,
     BacktestRunModel,
 )
+from quant_etf_api.infra.time import CHINA_TZ
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
 from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
@@ -221,15 +222,48 @@ class BacktestService:
             created_at=now,
         )
 
-    def list_backtests(self, offset: int = 0, limit: int = 50) -> tuple[list[BacktestSummary], int]:
-        """分页返回回测列表，按创建时间倒序。"""
+    def list_backtests(
+        self,
+        offset: int = 0,
+        limit: int = 50,
+        strategy_id: str | None = None,
+        created_from: date | None = None,
+        created_to: date | None = None,
+    ) -> tuple[list[BacktestSummary], int]:
+        """分页返回回测列表，按创建时间倒序并支持筛选。
+
+        Args:
+            offset: 偏移量。
+            limit: 每页最大条数。
+            strategy_id: 策略 ID，精确匹配。
+            created_from: 创建日期起点（含，中国日期）。
+            created_to: 创建日期终点（含，中国日期）。
+
+        Returns:
+            筛选后的回测摘要和总数。
+        """
         try:
-            rows, total = self._backtest_repo.find_all(offset=offset, limit=limit)
+            start_at = self._china_day_start(created_from) if created_from else None
+            end_at = self._china_day_start(created_to + timedelta(days=1)) if created_to else None
+            rows, total = self._backtest_repo.find_all(
+                offset=offset,
+                limit=limit,
+                strategy_id=strategy_id,
+                created_from=start_at,
+                created_to=end_at,
+            )
             items = [self._row_to_summary(r) for r in rows]
             return items, total
         except Exception:
             logger.warning("list_backtests DB query failed", exc_info=True)
             return [], 0
+
+    @staticmethod
+    def _china_day_start(value: date) -> datetime:
+        """将中国业务日期的零点转换为数据库使用的 UTC naive 时间。"""
+        return datetime.combine(value, time.min, tzinfo=CHINA_TZ).astimezone(timezone.utc).replace(
+            tzinfo=None
+        )
 
     def get_backtest(self, backtest_id: str) -> BacktestDetail | None:
         """返回回测详情。"""

@@ -39,10 +39,14 @@ export const useBacktestStore = defineStore('backtests', {
     comparisonDaily: null as ComparisonDailyResponse | null,
   }),
   actions: {
-    async loadAll(offset = 0, limit = 50) {
+    async loadAll(
+      offset = 0,
+      limit = 50,
+      filters?: { strategyId?: string; createdFrom?: string; createdTo?: string },
+    ) {
       this.loading = true
       try {
-        const res = await fetchBacktests(offset, limit)
+        const res = await fetchBacktests(offset, limit, filters)
         this.items = res.items
         this.total = res.total
       } finally {

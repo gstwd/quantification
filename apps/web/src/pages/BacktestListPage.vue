@@ -28,6 +28,31 @@
 
     <!-- 单个回测列表 -->
     <template v-if="activeTab === 'single'">
+      <div class="filter-card">
+        <div class="filter-item strategy-filter">
+          <label class="form-label" for="strategy-filter">策略 ID</label>
+          <input
+            id="strategy-filter"
+            v-model.trim="strategyFilter"
+            class="form-input"
+            type="text"
+            placeholder="精确匹配策略 ID"
+            @keyup.enter="applyFilters"
+          />
+        </div>
+        <div class="filter-item">
+          <label class="form-label" for="created-from">创建日期起</label>
+          <input id="created-from" v-model="createdFrom" class="form-input" type="date" />
+        </div>
+        <div class="filter-item">
+          <label class="form-label" for="created-to">创建日期止</label>
+          <input id="created-to" v-model="createdTo" class="form-input" type="date" />
+        </div>
+        <div class="filter-actions">
+          <button class="btn btn-primary" type="button" @click="applyFilters">筛选</button>
+          <button class="btn btn-secondary" type="button" @click="clearFilters">重置</button>
+        </div>
+      </div>
       <div class="table-wrap">
         <div v-if="loading" class="loading">加载中...</div>
         <table v-else class="data-table">
@@ -160,6 +185,17 @@ const singleOffset = ref(0)
 const singlePageSize = 50
 const compOffset = ref(0)
 const compPageSize = 50
+const strategyFilter = ref('')
+const createdFrom = ref('')
+const createdTo = ref('')
+
+function currentFilters() {
+  return {
+    strategyId: strategyFilter.value || undefined,
+    createdFrom: createdFrom.value || undefined,
+    createdTo: createdTo.value || undefined,
+  }
+}
 
 function statusLabel(status: string): string {
   const map: Record<string, string> = { pending: '待执行', running: '执行中', success: '成功', failed: '失败' }
@@ -189,7 +225,23 @@ function formatTime(ts: string): string {
 async function goSinglePage(newOffset: number) {
   singleOffset.value = newOffset
   loading.value = true
-  try { await store.loadAll(newOffset, singlePageSize) } finally { loading.value = false }
+  try { await store.loadAll(newOffset, singlePageSize, currentFilters()) } finally { loading.value = false }
+}
+
+/** 按当前筛选条件重新加载回测列表。 */
+async function applyFilters() {
+  if (createdFrom.value && createdTo.value && createdFrom.value > createdTo.value) return
+  singleOffset.value = 0
+  loading.value = true
+  try { await store.loadAll(0, singlePageSize, currentFilters()) } finally { loading.value = false }
+}
+
+/** 清空回测列表筛选条件。 */
+async function clearFilters() {
+  strategyFilter.value = ''
+  createdFrom.value = ''
+  createdTo.value = ''
+  await applyFilters()
 }
 
 async function goCompPage(newOffset: number) {
@@ -215,7 +267,7 @@ async function switchTab(tab: 'single' | 'comparison') {
 
 onMounted(async () => {
   loading.value = true
-  try { await store.loadAll(0, singlePageSize) } finally { loading.value = false }
+  try { await store.loadAll(0, singlePageSize, currentFilters()) } finally { loading.value = false }
 })
 </script>
 
@@ -224,6 +276,32 @@ onMounted(async () => {
 .page-header { display: flex; align-items: center; justify-content: space-between; }
 .page-title { font-size: 22px; font-weight: 700; }
 .header-actions { display: flex; gap: 10px; }
+
+.filter-card {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  flex-wrap: wrap;
+}
+.filter-item { display: flex; flex-direction: column; gap: 6px; min-width: 150px; }
+.strategy-filter { min-width: 280px; }
+.form-label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+.form-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--text);
+  outline: none;
+}
+.form-input:focus { border-color: var(--accent); }
+.filter-actions { display: flex; gap: 8px; }
+.btn-secondary { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); }
 
 /* Tab 切换 */
 .tab-bar {

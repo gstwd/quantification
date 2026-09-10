@@ -23,11 +23,18 @@ export function getDatePresets(): DatePreset[] {
     return `${year - n}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
   }
 
+  const currentYear = Number(end.slice(0, 4))
+  const completedYearPresets: DatePreset[] = Array.from({ length: 5 }, (_, index) => {
+    const year = currentYear - index - 1
+    return { label: `${year}年`, start: `${year}-01-01`, end: `${year}-12-31` }
+  })
+
   return [
     { label: '近1年', start: yearsAgo(1), end },
     { label: '近3年', start: yearsAgo(3), end },
     { label: '近5年', start: yearsAgo(5), end },
     { label: '全部', start: ALL_START, end },
+    ...completedYearPresets,
   ]
 }
 

@@ -22,9 +22,16 @@ export async function createBacktest(req: BacktestCreateRequest): Promise<Backte
 export async function fetchBacktests(
   offset = 0,
   limit = 50,
+  filters?: { strategyId?: string; createdFrom?: string; createdTo?: string },
 ): Promise<PaginatedResponse<BacktestSummary>> {
   const { data } = await apiClient.get<PaginatedResponse<BacktestSummary>>('/backtests', {
-    params: { offset, limit },
+    params: {
+      offset,
+      limit,
+      strategy_id: filters?.strategyId || undefined,
+      created_from: filters?.createdFrom || undefined,
+      created_to: filters?.createdTo || undefined,
+    },
   })
   return data
 }
