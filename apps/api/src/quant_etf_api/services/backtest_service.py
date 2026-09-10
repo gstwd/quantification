@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, timedelta
+from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
@@ -426,6 +427,9 @@ class BacktestService:
         6. 写入每日结果和指数结果
         7. 计算汇总绩效指标
         """
+        # 回测使用一次性行情快照；关闭 checkpoint commit 后的 ORM 对象过期，
+        # 避免收尾数据质量扫描访问行情字段时逐条触发隐式 SELECT。
+        self._db.expire_on_commit = False
         universe, index_codes, trading_dates, all_bars, all_valuation, all_macro = (
             self._prepare_backtest_data(row)
         )
@@ -730,9 +734,22 @@ class BacktestService:
                 self._db.commit()
                 daily_results.clear()  # 释放 ORM 对象，账户累积器已保留关键数据
 
+        finalize_started = perf_counter()
+        logger.info(
+            "[backtest] 收尾开始: backtest_id=%s 已完成循环=%s天，准备最终 flush",
+            backtest_id,
+            total_dates,
+        )
         self._db.flush()
+        flush_elapsed = perf_counter() - finalize_started
+        logger.info(
+            "[backtest] 收尾 flush 完成: backtest_id=%s 耗时=%.3fs",
+            backtest_id,
+            flush_elapsed,
+        )
 
         # 计算汇总指标（使用账户累积器与内存中的信号准确率，避免依赖已 flush 的 ORM 对象）
+        metrics_started = perf_counter()
         metrics = self._compute_summary_metrics(
             accumulator,
             benchmark_returns,
@@ -741,8 +758,14 @@ class BacktestService:
             data_gap_days=data_gap_days,
             annual_risk_free_rate_pct=risk_free_rate_pct,
         )
+        logger.info(
+            "[backtest] 汇总指标完成: backtest_id=%s 耗时=%.3fs",
+            backtest_id,
+            perf_counter() - metrics_started,
+        )
         # 收集结构化警告：预热期 / 因子缺失 / 数据缺口 / 基准缺失，
         # 随成功状态一并持久化，前端轮询时按 key 去重弹窗。
+        warnings_started = perf_counter()
         run_warnings: list[BacktestWarning] = []
         if warmup_trading_days > 0:
             run_warnings.append(
@@ -755,15 +778,28 @@ class BacktestService:
                     ),
                 )
             )
+        missing_factor_started = perf_counter()
+        required_factor_ids = FactorProvider.collect_required_factor_ids(config)
         run_warnings.extend(
             self._collect_missing_factor_warnings(
                 precomputed,
                 trading_dates,
                 factor_index_codes,
-                FactorProvider.collect_required_factor_ids(config),
+                required_factor_ids,
             )
         )
+        logger.info(
+            "[backtest] 缺失因子告警完成: backtest_id=%s factors=%s dates=%s indexes=%s "
+            "warnings=%s 耗时=%.3fs",
+            backtest_id,
+            len(required_factor_ids),
+            len(trading_dates),
+            len(factor_index_codes),
+            len(run_warnings),
+            perf_counter() - missing_factor_started,
+        )
         if data_quality_mode == "strict":
+            strict_warning_started = perf_counter()
             for code, excluded_dates in list(strict_exclusion_dates.items())[:5]:
                 run_warnings.append(
                     BacktestWarning(
@@ -777,8 +813,27 @@ class BacktestService:
                         index_code=code,
                     )
                 )
+            logger.info(
+                "[backtest] 严格模式告警完成: backtest_id=%s excluded_indexes=%s "
+                "warnings=%s 耗时=%.3fs",
+                backtest_id,
+                len(strict_exclusion_dates),
+                len(run_warnings),
+                perf_counter() - strict_warning_started,
+            )
+        data_gap_started = perf_counter()
         run_warnings.extend(self._collect_data_gap_warnings(trading_dates, index_codes, all_bars))
+        logger.info(
+            "[backtest] 行情缺口告警完成: backtest_id=%s dates=%s indexes=%s warnings=%s "
+            "耗时=%.3fs",
+            backtest_id,
+            len(trading_dates),
+            len(index_codes),
+            len(run_warnings),
+            perf_counter() - data_gap_started,
+        )
         if enable_benchmark:
+            benchmark_warning_started = perf_counter()
             bench_missing = [d for d in trading_dates if (benchmark_index_code, d) not in all_bars]
             if bench_missing:
                 run_warnings.append(
@@ -792,6 +847,19 @@ class BacktestService:
                         index_code=benchmark_index_code,
                     )
                 )
+            logger.info(
+                "[backtest] 基准缺口告警完成: backtest_id=%s missing_dates=%s "
+                "耗时=%.3fs",
+                backtest_id,
+                len(bench_missing),
+                perf_counter() - benchmark_warning_started,
+            )
+        logger.info(
+            "[backtest] 告警收集完成: backtest_id=%s warnings=%s 耗时=%.3fs",
+            backtest_id,
+            len(run_warnings),
+            perf_counter() - warnings_started,
+        )
         logger.info(
             "[backtest] 回测完成: backtest_id=%s 累计收益=%s%% 最大回撤=%s%% 夏普=%s "
             "胜率=%s%% 信号准确率=%s%%",
@@ -802,10 +870,17 @@ class BacktestService:
             metrics.get("win_rate_pct", 0.0),
             metrics.get("signal_accuracy_pct", 0.0),
         )
+        mark_success_started = perf_counter()
         self._backtest_repo.mark_success(
             backtest_id,
             metrics,
             warnings=[w.model_dump() for w in run_warnings],
+        )
+        logger.info(
+            "[backtest] 最终状态提交完成: backtest_id=%s 耗时=%.3fs 总收尾耗时=%.3fs",
+            backtest_id,
+            perf_counter() - mark_success_started,
+            perf_counter() - finalize_started,
         )
 
     def _prepare_backtest_data(
