@@ -33,7 +33,7 @@
 | 命令 | 说明 |
 | --- | --- |
 | `optimization start --strategy <基线> --candidate-file <path> --hypothesis "<假设>" [--start] [--end] [--folds 4] [--candidate-id] [--version]` | 建草稿候选 + 会话；候选 ID 默认 `<基线>__opt_<会话前8位>`；`--version` 建议必传（promote 用） |
-| `optimization evaluate <opt_id> [--folds] [--async]` | 全区间 + 逐折回测；同步跑 2+2K 个，K=4 约 40-50 分钟 |
+| `optimization evaluate <opt_id> [--folds] [--async]` | 全区间 + 逐折回测；多方向或多段执行时按批控制跨度与并发 |
 | `optimization report <opt_id> [--file <path>]` | 生成 Markdown 报告骨架 |
 | `optimization finish <opt_id> --verdict accept\|reject [--report-file] [--promote] [--strict]` | 结束会话；accept+promote 把候选配置写回基线（strategy_id 不变、version 取候选版本） |
 | `optimization show <opt_id>` | 会话详情（含逐折指标与聚合） |
@@ -42,7 +42,7 @@
 ## 评估语义
 
 - 折叠：`[start, end]` 按交易日等分为 K 个连续验证窗，最后一折吸收余数；每折对基线与候选各跑一次回测。建议每折跨度 ≈ 1-2 年（K ≈ 总年数 ÷ 1.5，至少 3）。
-- 长跨度（> 5 年）：不要以单次全区间回测为结论依据；按 1-2 年逐段 `backtest run`（或按段分别建 optimization 会话）执行，逐段对比年化/夏普/回撤/超额/胜率。
+- 分段原则：分段用于控制单任务风险、资源峰值、失败局部重跑和跨市场阶段比较。总跨度 > 5 年时必须按 1-2 年逐段 `backtest run`（或按段分别建 optimization 会话）；较短区间在指数/候选较多时也优先按 1-2 年分段或分批执行。
 - 异步并行：`backtest run --async` 与 `optimization evaluate --async` 只把任务写入 `background_job`，由服务端 uvicorn 多 worker 进程经 `FOR UPDATE SKIP LOCKED` 并行认领执行，互不重复；实际并行度 = min(worker 数, CPU 核心数)。多方向/多段并行时用 `--async`，入队后 CLI 进程可退出，任务继续在服务端执行。
 - `fold_summary`：每个指标输出基线/候选的均值、中位数、候选胜出折数。
 - 验收清单默认阈值：验证窗平均夏普 Δ≥0；平均最大回撤劣化 ≤ 2pct；夏普胜出折数 ≥ 50%；验证窗平均累计收益 Δ≥0。`--strict` 时 accept 必须全部满足。
@@ -56,4 +56,4 @@
 
 - 数据库在远程 PostgreSQL（见 `.env` 的 DATABASE_URL）；沙箱内连库失败（`Permission denied` / `WinError 10013`）时用 require_escalated 重跑同一命令。
 - 终端中文乱码是控制台代码页问题，不影响落库数据（UTF-8）。
-- 回测耗时：2 年 × ~18 指数约 8 分钟/个；评估 K=4 共 10 个，同步执行请耐心等待，多 worker 并行时总耗时 ≈ 批数 × 单回测耗时。单次回测跨度控制在 1-2 年，长跨度按段并行执行，避免超长任务。
+- 同步执行使用 `status --wait`，异步执行按 worker 数分批；单次回测通常仍控制在 1-2 年，长跨度按段执行，便于比较、重试和控制资源。
