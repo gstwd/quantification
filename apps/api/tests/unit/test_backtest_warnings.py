@@ -103,6 +103,42 @@ class TestCollectDataGapWarnings:
         assert w.index_code == "932088"
         assert "开盘价缺失 2 个交易日" in w.message
 
+    def test_strict_mode_suppresses_excluded_open_gap_warning(self) -> None:
+        """严格模式下，开盘价缺失由 DATA_EXCLUDED 表达，不应重复生成 DATA_GAP。"""
+        svc = _make_service()
+        dates = [date(2025, 1, 2)]
+        all_bars = {
+            ("932088", dates[0]): SimpleNamespace(close_price=100.0, open_price=None),
+        }
+
+        warnings = svc._collect_data_gap_warnings(
+            dates,
+            ["932088"],
+            all_bars,
+            execution_model="t_plus_1_open",
+            data_quality_mode="strict",
+        )
+
+        assert warnings == []
+
+    def test_close_execution_does_not_warn_for_missing_open_price(self) -> None:
+        """T+1 收盘执行不依赖开盘价，不应生成开盘价缺失告警。"""
+        svc = _make_service()
+        dates = [date(2025, 1, 2)]
+        all_bars = {
+            ("932088", dates[0]): SimpleNamespace(close_price=100.0, open_price=None),
+        }
+
+        warnings = svc._collect_data_gap_warnings(
+            dates,
+            ["932088"],
+            all_bars,
+            execution_model="t_plus_1_close",
+            data_quality_mode="warn",
+        )
+
+        assert warnings == []
+
 
 class TestWarningsPersistence:
     """warnings 持久化与读取。"""

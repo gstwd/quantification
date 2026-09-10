@@ -88,9 +88,12 @@ class FactorProvider:
                 if rule.compare_to:
                     factor_ids.add(rule.compare_to)
 
-        # 排名模块引用的子因子（动量/估值子排名直接读取 asset_factors）
-        factor_ids.add(config.rank.momentum_factor)
-        factor_ids.add(config.rank.valuation_factor)
+        # 只有排名模块实际按子排名排序时，子因子才参与策略决策。
+        # 默认的动量/估值子排名仅用于结果展示，不应把展示字段缺失误报为策略因子缺失。
+        if config.rank.sort_by == "momentum_rank":
+            factor_ids.add(config.rank.momentum_factor)
+        elif config.rank.sort_by == "valuation_rank":
+            factor_ids.add(config.rank.valuation_factor)
 
         # regime 条件化配置中引用的因子
         for regime_rule in config.regime_rules.values():

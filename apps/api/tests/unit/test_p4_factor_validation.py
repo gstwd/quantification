@@ -98,7 +98,11 @@ class TestCollectRequiredFactorIds:
                     FilterRule(factor="pe_percentile", op="gt", value=30.0),
                 ]
             ),
-            rank=RankConfig(momentum_factor="return_120d", valuation_factor="pb_percentile"),
+            rank=RankConfig(
+                sort_by="valuation_rank",
+                momentum_factor="return_120d",
+                valuation_factor="pb_percentile",
+            ),
             regime_rules={
                 "offensive": RegimeRuleConfig(
                     score=ScoreConfig(factors={"volume_ratio_20d": 1.0}),
@@ -116,12 +120,31 @@ class TestCollectRequiredFactorIds:
         assert "return_20d" in ids
         assert "ma_20d" in ids
         assert "pe_percentile" in ids
-        # 排名子因子（P4 修复点，此前被遗漏）
-        assert "return_120d" in ids
+        # 当前按估值子排名排序，仅估值子因子参与策略决策。
+        assert "return_120d" not in ids
         assert "pb_percentile" in ids
         # regime 嵌套
         assert "volume_ratio_20d" in ids
         assert "return_17d" in ids
+
+    def test_ignores_display_only_sub_rank_factors(self) -> None:
+        """排名按综合得分时，不应把仅用于展示的子排名因子视为策略依赖。"""
+        config = StrategyConfig(
+            strategy_id="s1",
+            display_name="测试",
+            score=ScoreConfig(factors={"return_5d": 1.0}),
+            rank=RankConfig(
+                sort_by="score",
+                momentum_factor="return_120d",
+                valuation_factor="pe_percentile",
+            ),
+        )
+
+        ids = FactorProvider.collect_required_factor_ids(config)
+
+        assert "return_5d" in ids
+        assert "return_120d" not in ids
+        assert "pe_percentile" not in ids
 
 
 class TestFactorParamHashes:

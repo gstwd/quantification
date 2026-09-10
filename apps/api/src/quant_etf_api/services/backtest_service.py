@@ -822,7 +822,15 @@ class BacktestService:
                 perf_counter() - strict_warning_started,
             )
         data_gap_started = perf_counter()
-        run_warnings.extend(self._collect_data_gap_warnings(trading_dates, index_codes, all_bars))
+        run_warnings.extend(
+            self._collect_data_gap_warnings(
+                trading_dates,
+                index_codes,
+                all_bars,
+                execution_model=execution_model,
+                data_quality_mode=data_quality_mode,
+            )
+        )
         logger.info(
             "[backtest] 行情缺口告警完成: backtest_id=%s dates=%s indexes=%s warnings=%s "
             "耗时=%.3fs",
@@ -1333,15 +1341,21 @@ class BacktestService:
         trading_dates: list[date],
         index_codes: list[str],
         all_bars: dict,
+        execution_model: str = "t_plus_1_open",
+        data_quality_mode: str = "warn",
     ) -> list[BacktestWarning]:
         """按指数统计回测区间内缺行情数据的交易日，生成 DATA_GAP 警告。
 
-        仅透传提示，不修正组合收益（B10 的数值修复另行跟踪）。
+        兼容模式下提示实际可能影响收益的行情缺口；严格模式下，已由
+        DATA_EXCLUDED 覆盖的开盘价缺失不重复提示，避免把“已排除”误解为
+        “仍参与收益计算”。
 
         Args:
             trading_dates: 回测交易日列表。
             index_codes: 回测标的指数代码列表。
             all_bars: 预加载行情，key=(index_code, trade_date)。
+            execution_model: 执行模型，决定是否检查开盘价。
+            data_quality_mode: 数据质量模式，严格模式不重复报告已排除的开盘价缺失。
 
         Returns:
             结构化警告列表，最多 5 条（按指数）。
@@ -1356,7 +1370,11 @@ class BacktestService:
                     # 整日缺行情或收盘价不可用：该日收益无法按收盘口径计算
                     missing_days.append(d)
                     continue
-                if _price_invalid(getattr(bar, "open_price", None)):
+                if (
+                    execution_model == "t_plus_1_open"
+                    and data_quality_mode != "strict"
+                    and _price_invalid(getattr(bar, "open_price", None))
+                ):
                     # bar 存在但开盘价缺失：T+1 开盘执行模型的隔夜/日内段受影响
                     open_missing_days.append(d)
             parts: list[str] = []
