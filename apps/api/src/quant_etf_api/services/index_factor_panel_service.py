@@ -113,11 +113,11 @@ class IndexFactorPanelService:
         closes = self._build_stock_closes(membership, dates, lookback_natural_days)
         # 行业选择直接从原始行业日线计算，避免依赖独立的行业因子物化表。
         selection = (
-            self._build_industry_selection_from_source(dates)
-            if include_industry_panels
-            else {}
+            self._build_industry_selection_from_source(dates) if include_industry_panels else {}
         )
-        exposure = self._build_industry_exposure(membership, dates) if include_industry_panels else {}
+        exposure = (
+            self._build_industry_exposure(membership, dates) if include_industry_panels else {}
+        )
         exposure_meta = (
             self._build_industry_exposure_meta(membership, dates) if include_industry_panels else {}
         )
@@ -162,9 +162,7 @@ class IndexFactorPanelService:
             starts = sorted(by_start)
             ends: dict[date, date | None] = {}
             for i, start in enumerate(starts):
-                ends[start] = (
-                    starts[i + 1] - timedelta(days=1) if i + 1 < len(starts) else None
-                )
+                ends[start] = starts[i + 1] - timedelta(days=1) if i + 1 < len(starts) else None
             effective: dict[date, list[dict[str, Any]]] = {}
             for trade_date in dates:
                 members: list[dict[str, Any]] = []
@@ -233,7 +231,8 @@ class IndexFactorPanelService:
         panels = IndustryFactorService(self._db).build_panels(
             start=dates[0],
             end=dates[-1],
-            need_diffusion=False,
+            # 默认信号 diffusion_rrg 先按扩散 top_n，再按 RRG 象限过滤，必须同时构建两类面板。
+            need_diffusion=True,
         )
         logger.debug(
             "RRG行业选择面板完成: dates=%d industries=%d",
@@ -263,7 +262,9 @@ class IndexFactorPanelService:
                     code: int(value) if pd.notna(value) else None
                     for code, value in quadrant.loc[timestamp].items()
                 },
-                diffusion=diffusion.loc[timestamp].to_dict() if timestamp in diffusion.index else {},
+                diffusion=diffusion.loc[timestamp].to_dict()
+                if timestamp in diffusion.index
+                else {},
             )
             selected, weights = engine.select(config, data)
             if selected:
@@ -283,7 +284,9 @@ class IndexFactorPanelService:
         )
         industry_by_stock: dict[str, list[tuple[date, str]]] = {}
         for row in stock_rows:
-            industry_by_stock.setdefault(row.stock_code, []).append((row.start_date, row.industry_code))
+            industry_by_stock.setdefault(row.stock_code, []).append(
+                (row.start_date, row.industry_code)
+            )
         for events in industry_by_stock.values():
             events.sort(key=lambda item: item[0])
 
@@ -309,9 +312,9 @@ class IndexFactorPanelService:
                     if value is None:
                         value = 1.0 / len(members)
                     if industry is None:
-                        industries[_UNMAPPED_INDUSTRY] = (
-                            industries.get(_UNMAPPED_INDUSTRY, 0.0) + float(value)
-                        )
+                        industries[_UNMAPPED_INDUSTRY] = industries.get(
+                            _UNMAPPED_INDUSTRY, 0.0
+                        ) + float(value)
                         continue
                     industry = normalize_sw_code(industry)
                     industries[industry] = industries.get(industry, 0.0) + float(value)
@@ -349,7 +352,9 @@ class IndexFactorPanelService:
                     "unmapped_member_count": member_count - mapped,
                     "industry_coverage": round(mapped / member_count, 6) if member_count else 0.0,
                     "weighting_mode": (
-                        "index_weight" if all(member.get("weight") is not None for member in members) else "equal"
+                        "index_weight"
+                        if all(member.get("weight") is not None for member in members)
+                        else "equal"
                     ),
                 }
         return result

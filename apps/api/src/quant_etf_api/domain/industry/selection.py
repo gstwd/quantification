@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -118,9 +119,19 @@ class IndustryRotationEngine:
         codes: list[str],
     ) -> list[str]:
         """信号 B：扩散指标 top_n（warm-up/缺失行业不参与）。"""
-        scored = [
-            (value, code) for code in codes if (value := data.diffusion.get(code)) is not None
-        ]
+        scored: list[tuple[float, str]] = []
+        for code in codes:
+            value = data.diffusion.get(code)
+            if value is None:
+                continue
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            # pandas 的 NaN 也代表扩散 warm-up/缺失，不能参与排序，否则会被误当成有效 top_n。
+            if not math.isfinite(numeric):
+                continue
+            scored.append((numeric, code))
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [code for _, code in scored[: config.top_n]]
 

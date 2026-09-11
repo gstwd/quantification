@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
 
 from quant_etf_api.factors.base import FactorContext
 from quant_etf_api.factors.builtins.index_panel_factors import (
     IndexDiffusionRatioComputer,
     RRGIndustryMatchComputer,
 )
+from quant_etf_api.services.index_factor_panel_service import IndexFactorPanelService
 
 
 def _dates(count: int, start: date = date(2024, 1, 2)) -> list[date]:
@@ -162,6 +166,8 @@ def test_rrg_industry_match_score() -> None:
     value = computer.compute("000300", dates[0], ctx)
     assert value.numeric is not None
     assert value.numeric == 75.0
+    assert value.payload["selected_industries"] == ["801010", "801030"]
+    assert value.payload["exposure_industries"] == ["801010", "801030", "801080"]
 
 
 def test_rrg_industry_match_unmapped_member_stays_in_denominator() -> None:
@@ -207,3 +213,31 @@ def test_rrg_industry_match_missing_exposure_none() -> None:
     )
     value = RRGIndustryMatchComputer().compute("000300", dates[0], ctx)
     assert value.numeric is None
+    assert value.payload["missing_reason"] == "exposure_missing"
+
+
+def test_rrg_selection_builds_diffusion_panel() -> None:
+    """默认 diffusion_rrg 选择必须要求服务层计算扩散面板。"""
+    trade_date = date(2024, 1, 2)
+    timestamp = pd.Timestamp(trade_date)
+    panel = {
+        "rs_ratio": pd.DataFrame({"801010": [110.0]}, index=[timestamp]),
+        "rs_momentum": pd.DataFrame({"801010": [110.0]}, index=[timestamp]),
+        "quadrant": pd.DataFrame({"801010": [1.0]}, index=[timestamp]),
+        "diffusion": pd.DataFrame({"801010": [0.9]}, index=[timestamp]),
+        "industry_codes": ["801010"],
+        "trading_dates": [trade_date],
+    }
+    service = IndexFactorPanelService(MagicMock())
+    with patch(
+        "quant_etf_api.services.industry_factor_service.IndustryFactorService.build_panels",
+        return_value=panel,
+    ) as build_panels:
+        selected = service._build_industry_selection_from_source([trade_date])
+
+    build_panels.assert_called_once_with(
+        start=trade_date,
+        end=trade_date,
+        need_diffusion=True,
+    )
+    assert selected == {trade_date: {"801010": 1.0}}

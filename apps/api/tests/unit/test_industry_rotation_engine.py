@@ -62,3 +62,17 @@ def test_diffusion_signal_topn() -> None:
     config = _config("diffusion")
     selected, _ = IndustryRotationEngine().select(config, _input())
     assert set(selected) == {"801010", "801030"}
+
+
+def test_diffusion_signal_excludes_nan() -> None:
+    """扩散值为 NaN 时应视为缺失，不能被错误选入 top_n。"""
+    data = _input()
+    data.diffusion = {
+        "801010": float("nan"),
+        "801030": float("nan"),
+        "801050": float("nan"),
+        "801080": float("nan"),
+    }
+    selected, weights = IndustryRotationEngine().select(_config("diffusion_rrg"), data)
+    assert selected == []
+    assert weights == {}

@@ -108,7 +108,7 @@ class FactorService:
         指定 ``index_code`` 时只计算该指数，供单指数时间序列补算，避免遍历其他指数。
 
         执行流程：
-        1. 查询 benchmark_index 中所有指数
+        1. 查询 benchmark_index 中所有指数，并过滤目标日确有指数日线的指数
         2. _load_context：批量加载回望窗口内的指数数据（含多日估值，供 erp_percentile 等使用）
         3. 对每个指数 × 每个已启用因子调用 compute()
         4. upsert（partial index ON CONFLICT DO UPDATE）写入 index_factor_value
@@ -131,7 +131,19 @@ class FactorService:
             logger.warning("compute_and_store: 无指数，跳过因子计算")
             return {"index_count": 0, "factor_count": 0, "upsert_count": 0, "errors": 0}
 
-        index_codes = [idx.index_code for idx in indexes]
+        requested_index_codes = [idx.index_code for idx in indexes]
+        # 因子值以交易日为索引；没有目标日行情时不应为周末/节假日写入一批 NULL 行。
+        bars_on_date = IndexDailyBarRepository(self._db).find_all_date_range(
+            trade_date,
+            trade_date,
+            requested_index_codes,
+        )
+        index_codes = [code for code in requested_index_codes if (code, trade_date) in bars_on_date]
+        available_index_codes = set(index_codes)
+        indexes = [idx for idx in indexes if idx.index_code in available_index_codes]
+        if not indexes:
+            logger.info("compute_and_store: %s 无指数日线，跳过因子计算", trade_date)
+            return {"index_count": 0, "factor_count": 0, "upsert_count": 0, "errors": 0}
         active_ids = {d.factor_id for d in self._repo.find_active()}
         target_ids = active_ids if factor_ids is None else active_ids & factor_ids
         computers = [c for c in self._registry.all() if c.spec.factor_id in target_ids]
@@ -141,8 +153,7 @@ class FactorService:
             return {"index_count": len(indexes), "factor_count": 0, "upsert_count": 0, "errors": 0}
 
         include_composite_panels = any(
-            _PANEL_DATA_NAMES.intersection(computer.spec.required_data)
-            for computer in computers
+            _PANEL_DATA_NAMES.intersection(computer.spec.required_data) for computer in computers
         )
         panel_dates = (
             self._panel_calculation_dates(trade_date) if include_composite_panels else [trade_date]
@@ -250,9 +261,7 @@ class FactorService:
             factor_id, params_hash=params_hash
         )
         existing_rows = (
-            self._index_repo.find_cross_section(
-                factor_id, target_date, params_hash=params_hash
-            )
+            self._index_repo.find_cross_section(factor_id, target_date, params_hash=params_hash)
             if target_date is not None
             else []
         )
@@ -263,9 +272,7 @@ class FactorService:
                 raise ValueError("无任何指数行情数据，无法计算因子")
             self.compute_and_store(target_date, factor_ids={factor_id})
 
-        rows = self._index_repo.find_cross_section(
-            factor_id, target_date, params_hash=params_hash
-        )
+        rows = self._index_repo.find_cross_section(factor_id, target_date, params_hash=params_hash)
         return target_date, [
             CrossSectionRow(
                 index_code=r[0],
@@ -385,11 +392,7 @@ class FactorService:
         panel_factor_ids = {
             computer.spec.factor_id
             for computer in selected_computers
-            if any(
-                name
-                in _PANEL_DATA_NAMES
-                for name in computer.spec.required_data
-            )
+            if any(name in _PANEL_DATA_NAMES for name in computer.spec.required_data)
         }
         if include_composite_panels and panel_factor_ids and index_codes:
             from quant_etf_api.services.index_factor_panel_service import (
@@ -433,6 +436,7 @@ class FactorService:
             trade_date - timedelta(days=800), trade_date
         )
         return dates[-_PANEL_FACTOR_WINDOW_DAYS:]
+
 
 def _row_to_factor_row(row: IndexFactorValueModel) -> FactorRow:
     """将 ORM 行转换为 FactorRow schema。"""

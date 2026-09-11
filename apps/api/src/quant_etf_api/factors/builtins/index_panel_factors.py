@@ -64,7 +64,7 @@ def _asof_members(
 
 _UNMAPPED_INDUSTRY = "__unmapped__"
 _INDEX_DIFFUSION_CALCULATION_VERSION = "2026-09-index-diffusion-ma-v2"
-_RRG_MATCH_CALCULATION_VERSION = "2026-09-rrg-diffusion-strict-v1"
+_RRG_MATCH_CALCULATION_VERSION = "2026-09-rrg-diffusion-source-v2"
 
 
 class IndexDiffusionRatioComputer:
@@ -252,7 +252,7 @@ class RRGIndustryMatchComputer:
             factor_id="rrg_industry_match_score",
             name="RRG行业轮动匹配度",
             category="relative_strength",
-            version="1.0.0",
+            version="1.1.0",
             description=(
                 "先在全部活跃申万一级行业上按研报信号（默认 diffusion_rrg）"
                 "选出目标行业集合，再按指数成分股的申万行业暴露计算与选中"
@@ -307,10 +307,47 @@ class RRGIndustryMatchComputer:
                     len(selected),
                     len(exposure),
                 )
+                result[trade_date] = FactorValue(
+                    factor_id=self.spec.factor_id,
+                    numeric=None,
+                    payload={
+                        "selected_count": len(selected),
+                        "selected_industries": sorted(selected),
+                        "exposure_industries": sorted(exposure),
+                        "missing_reason": (
+                            "selection_missing" if not selected else "exposure_missing"
+                        ),
+                        "member_count": meta.get("member_count"),
+                        "mapped_member_count": meta.get("mapped_member_count"),
+                        "unmapped_member_count": meta.get("unmapped_member_count"),
+                        "industry_coverage": meta.get("industry_coverage"),
+                        "weighting_mode": meta.get("weighting_mode"),
+                        "calculation_version": _RRG_MATCH_CALCULATION_VERSION,
+                    },
+                )
                 continue
             total = sum(value for value in exposure.values() if value is not None)
             if total <= 0:
-                logger.debug("RRG匹配暴露总量无效: index=%s date=%s total=%s", index_code, trade_date, total)
+                logger.debug(
+                    "RRG匹配暴露总量无效: index=%s date=%s total=%s", index_code, trade_date, total
+                )
+                result[trade_date] = FactorValue(
+                    factor_id=self.spec.factor_id,
+                    numeric=None,
+                    payload={
+                        "selected_count": len(selected),
+                        "selected_industries": sorted(selected),
+                        "exposure_industries": sorted(exposure),
+                        "missing_reason": "invalid_exposure_total",
+                        "total_exposure": round(total, 6),
+                        "member_count": meta.get("member_count"),
+                        "mapped_member_count": meta.get("mapped_member_count"),
+                        "unmapped_member_count": meta.get("unmapped_member_count"),
+                        "industry_coverage": meta.get("industry_coverage"),
+                        "weighting_mode": meta.get("weighting_mode"),
+                        "calculation_version": _RRG_MATCH_CALCULATION_VERSION,
+                    },
+                )
                 continue
             matched = sum(
                 value
@@ -322,6 +359,8 @@ class RRGIndustryMatchComputer:
                 numeric=round(matched / total * 100.0, 4),
                 payload={
                     "selected_count": len(selected),
+                    "selected_industries": sorted(selected),
+                    "exposure_industries": sorted(exposure),
                     "matched_exposure": round(matched, 6),
                     "total_exposure": round(total, 6),
                     "member_count": meta.get("member_count"),
