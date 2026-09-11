@@ -569,34 +569,6 @@ class IndustryFactorValueRepository(BaseRepository):
             query = query.filter(IndustryFactorValueModel.industry_code.in_(industry_codes))
         return query.order_by(IndustryFactorValueModel.trade_date.asc()).all()
 
-    def find_latest_params_by_factor(
-        self,
-        factor_id: str,
-        industry_codes: list[str] | None = None,
-    ) -> list[tuple[str, date | None, int]]:
-        """按参数指纹汇总某因子的最近计算日期与覆盖行业数。
-
-        Returns:
-            [(params_hash, 该指纹最新日期, 该指纹覆盖行业数)]，按最新日期倒序。
-        """
-        query = (
-            self._db.query(
-                IndustryFactorValueModel.params_hash,
-                func.max(IndustryFactorValueModel.trade_date).label("max_date"),
-                func.count(func.distinct(IndustryFactorValueModel.industry_code)).label(
-                    "industry_count"
-                ),
-            ).filter(IndustryFactorValueModel.factor_id == factor_id)
-        )
-        if industry_codes:
-            query = query.filter(IndustryFactorValueModel.industry_code.in_(industry_codes))
-        query = query.group_by(IndustryFactorValueModel.params_hash).order_by(
-            func.max(IndustryFactorValueModel.trade_date).desc()
-        )
-        return [
-            (row.params_hash, row.max_date, row.industry_count) for row in query.all()
-        ]
-
     def bulk_upsert(self, rows: list[dict[str, Any]]) -> int:
         """批量幂等写入行业因子值（按参数指纹区分，重复行更新数值与 payload）。"""
         if not rows:

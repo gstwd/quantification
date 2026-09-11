@@ -544,22 +544,12 @@ export interface FactorSpec {
   description: string
   required_data: string[]
   is_active: boolean
-  /** 因子值挂载域：index（指数资产） */
-  asset_domain?: string
   /** 因子值形态：asset/market */
   value_shape?: string
   /** 适用位置：timing/score/filter/rank */
   usage?: string[]
   /** 因子默认参数（参数化因子） */
   default_params?: Record<string, unknown> | null
-}
-
-/** 行业因子参数变体数据状态 */
-export interface IndustryFactorStatusItem {
-  params_hash: string
-  params: Record<string, unknown> | null
-  latest_trade_date: string | null
-  industry_count: number
 }
 
 export interface FactorRow {

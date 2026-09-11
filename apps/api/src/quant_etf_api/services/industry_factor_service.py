@@ -33,7 +33,6 @@ from quant_etf_api.domain.industry.factor_algo import (
     equal_weight_benchmark,
 )
 from quant_etf_api.infra.db.base import utcnow
-from quant_etf_api.infra.db.models.industry import IndustryFactorValueModel
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
     IndustryFactorValueRepository,
@@ -735,43 +734,6 @@ class IndustryFactorService:
             ]
         ).set_index("trade_date")
         return frame.reindex(columns=codes)
-
-    def industry_factor_status(
-        self,
-        factor_id: str,
-        industry_codes: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        """返回某行业因子的参数变体与计算覆盖状态（因子中心数据状态）。
-
-        Args:
-            factor_id: 行业因子 ID。
-            industry_codes: 行业代码列表，None 表示全部。
-
-        Returns:
-            按参数指纹聚合的状态列表，每项含 params_hash/params/最新日期/覆盖行业数。
-        """
-        rows = self._factor_repo.find_latest_params_by_factor(factor_id, industry_codes)
-        return [
-            {
-                "params_hash": params_hash,
-                "params": self._load_params(params_hash),
-                "latest_trade_date": latest_date.isoformat() if latest_date else None,
-                "industry_count": industry_count,
-            }
-            for params_hash, latest_date, industry_count in rows
-        ]
-
-    def _load_params(self, params_hash: str) -> dict[str, Any] | None:
-        """按指纹读取任一行的 params（供因子中心状态展示）。"""
-        if not params_hash:
-            return None
-        row = (
-            self._db.query(IndustryFactorValueModel)
-            .filter(IndustryFactorValueModel.params_hash == params_hash)
-            .first()
-        )
-        return row.params if row is not None else None
-
 
 def _rrg_rules(
     *,

@@ -42,7 +42,7 @@ class FactorAdminService:
         同步策略：
         - 代码中有、DB 中没有 → INSERT（新因子）
         - 代码和 DB 都有 → 仅更新代码管控字段（version/required_data/
-          四轴元数据 asset_domain/value_shape/usage/default_params）
+          元数据 value_shape/usage/default_params）
         - DB 中有、代码中没有 → 设为 is_active=False（保留历史数据关联）
 
         Returns:
@@ -65,7 +65,6 @@ class FactorAdminService:
                         version=spec.version,
                         description=spec.description,
                         required_data=spec.required_data,
-                        asset_domain=spec.asset_domain,
                         value_shape=spec.value_shape,
                         usage=list(spec.usage),
                         default_params=dict(spec.default_params),
@@ -81,11 +80,6 @@ class FactorAdminService:
                     changed = True
                 if row.required_data != spec.required_data:
                     row.required_data = spec.required_data
-                    changed = True
-                # 四轴元数据为代码管控字段：代码演进后同步覆盖 DB 值，
-                # 保证因子中心展示与引擎/回测消费口径一致
-                if row.asset_domain != spec.asset_domain:
-                    row.asset_domain = spec.asset_domain
                     changed = True
                 if row.value_shape != spec.value_shape:
                     row.value_shape = spec.value_shape

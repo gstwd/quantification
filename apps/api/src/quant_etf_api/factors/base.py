@@ -10,11 +10,6 @@ from datetime import date
 from typing import Any, Protocol, runtime_checkable
 
 
-# 因子元数据取值常量（与 factor_definition 表、前端展示共用）。
-# 挂载域：因子值挂载的标的类型。本系统策略资产统一为指数
-# （benchmark_index）；行业/个股只作为因子计算输入，不产生行业因子域。
-ASSET_DOMAIN_INDEX = "index"
-
 # 值形态：决定因子值在实时/回测中的加载与预计算方式。
 VALUE_SHAPE_ASSET = "asset"  # 每资产一个独立值（如 return_20d）
 VALUE_SHAPE_MARKET = "market"  # 市场级单一值（如市场宽度）
@@ -80,8 +75,6 @@ class FactorSpec:
         market_scope: 是否需要在全市场指数范围上计算（如市场宽度类因子）。
             为 True 时，回测服务会额外加载全市场行情数据作为因子上下文，
             保证实时预计算（全市场）与回测（策略池 + 全市场补充）口径一致。
-        asset_domain: 因子值挂载的标的类型，本系统统一为 index
-            （benchmark_index）；该轴不再作为“策略资产域”参与校验。
         value_shape: 因子值形态：asset=每资产值、market=市场级值、
             每资产可配置因子必须是 asset/market 形态（行业面板等只作
             因子内部数据依赖，不作为可配置因子）。
@@ -98,7 +91,6 @@ class FactorSpec:
     required_data: list[str] = field(default_factory=list)
     lookback_days: int = 90
     market_scope: bool = False
-    asset_domain: str = ASSET_DOMAIN_INDEX
     value_shape: str = VALUE_SHAPE_ASSET
     usage: list[str] = field(default_factory=lambda: list(DEFAULT_INDEX_FACTOR_USAGE))
     default_params: dict[str, Any] = field(default_factory=dict)

@@ -23,27 +23,12 @@ from quant_etf_api.schemas.factor import (
     FactorUpdateRequest,
     ICResponse,
     ICSummary,
-    IndustryFactorStatusItem,
 )
 from quant_etf_api.schemas.signal import FactorRow
 from quant_etf_api.services.factor_admin_service import FactorAdminService
-from quant_etf_api.services.industry_factor_service import IndustryFactorService
 
 router = APIRouter(tags=["factors"])
 logger = logging.getLogger(__name__)
-
-
-def _ensure_index_domain_factor(db: Session, factor_id: str) -> None:
-    """行业域因子不允许调用指数域分析/计算接口，直接 422。"""
-    repo = FactorDefinitionRepository(db)
-    row = repo.find_by_id(factor_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"因子 {factor_id} 不存在")
-    if row.asset_domain != "index":
-        raise HTTPException(
-            status_code=422,
-            detail=f"因子 {factor_id} 是行业域因子，请使用数据状态接口查看预计算结果",
-        )
 
 
 @router.post("/factors/init")
@@ -84,7 +69,6 @@ def list_factor_specs(
             description=r.description,
             required_data=r.required_data or [],
             is_active=r.is_active,
-            asset_domain=r.asset_domain,
             value_shape=r.value_shape,
             usage=list(r.usage or []),
             default_params=r.default_params,
@@ -137,41 +121,10 @@ def update_factor(
         description=row.description,
         required_data=row.required_data or [],
         is_active=row.is_active,
-        asset_domain=row.asset_domain,
         value_shape=row.value_shape,
         usage=list(row.usage or []),
         default_params=row.default_params,
     )
-
-
-@router.get(
-    "/factors/{factor_id}/industry/status",
-    response_model=list[IndustryFactorStatusItem],
-)
-def factor_industry_status(
-    factor_id: str,
-    db: Session = Depends(get_db),
-) -> list[IndustryFactorStatusItem]:
-    """查询行业因子的参数变体与计算覆盖状态（仅资产域 industry 可用）。"""
-    repo = FactorDefinitionRepository(db)
-    row = repo.find_by_id(factor_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"因子 {factor_id} 不存在")
-    if row.asset_domain != "industry":
-        raise HTTPException(
-            status_code=422,
-            detail=f"因子 {factor_id} 不是行业域因子，无法查询行业因子数据状态",
-        )
-    items = IndustryFactorService(db).industry_factor_status(factor_id)
-    return [
-        IndustryFactorStatusItem(
-            params_hash=item["params_hash"],
-            params=item["params"],
-            latest_trade_date=item["latest_trade_date"],
-            industry_count=item["industry_count"],
-        )
-        for item in items
-    ]
 
 
 @router.get("/factors/{factor_id}/cross-section", response_model=CrossSectionResponse)
@@ -187,8 +140,6 @@ def factor_cross_section(
     不传 trade_date 时自动选择最新有数据的日期，若该日无数据则按需计算。
     设置 force_recompute=True 时强制重新计算并覆盖已有数据。
     """
-    _ensure_index_domain_factor(db, factor_id)
-
     svc = FactorService(db, registry)
     try:
         result_date, rows = svc.get_or_compute_cross_section(factor_id, force_recompute)
@@ -224,8 +175,6 @@ def factor_time_series(
 
     设置 force_recompute=True 时强制重新计算并覆盖已有数据。
     """
-    _ensure_index_domain_factor(db, factor_id)
-
     svc = FactorService(db, registry)
     return svc.get_or_compute_time_series(
         factor_id=factor_id,
@@ -249,8 +198,6 @@ def factor_ic_analysis(
     计算因子值与下期收益率的 Rank IC 时间序列及汇总统计。
     IC 均值 > 0 表示因子有正向预测力，IC_IR > 0.5 表示因子较稳定。
     """
-    _ensure_index_domain_factor(db, factor_id)
-
     try:
         from quant_etf_api.factors.evaluation import calc_ic_series
 

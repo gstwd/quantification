@@ -287,11 +287,11 @@ import type { IndexDetail } from '@/types/api'
 - **研发生命周期**：因子中心=正式因子（可配置可回测）；因子中心菜单下的
   研究页=独立实验、只共享只读数据。新因子必须遵循
   [`docs/architecture/因子研发与集成指引.md`](architecture/因子研发与集成指引.md)。
-- **元数据四轴必填**：每个 `FactorSpec`/`factor_definition` 必须声明
-  `asset_domain`（index/industry）、`value_shape`（asset/market/panel）、
+- **元数据三轴必填**：每个 `FactorSpec`/`factor_definition` 必须声明
+  `value_shape`（asset/market/panel）、
   `usage`（timing/score/filter/rank/rotation_input）；参数化因子必须声明
   `default_params` 并在值表携带 `params_hash`。
-- **位置限制生效**：配置校验按 usage/asset_domain 拒绝跨域或错位引用；
+- **位置限制生效**：配置校验按 usage 拒绝错位引用；
   前端策略表单各模块的因子下拉必须与后端 usage 同步过滤。
 - **前端同步**：后端新增任何策略配置能力时，必须同步策略表单与详情展示；
   不允许后端支持而前端无可选项。

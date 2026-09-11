@@ -6,7 +6,6 @@ import type {
   FactorSpec,
   FactorUpdatePayload,
   ICResponse,
-  IndustryFactorStatusItem,
 } from '../types/api'
 
 /** 获取所有因子元数据列表（含已禁用） */
@@ -21,16 +20,6 @@ export async function updateFactor(
   payload: FactorUpdatePayload,
 ): Promise<FactorSpec> {
   const { data } = await apiClient.patch<FactorSpec>(`/factors/${factorId}`, payload)
-  return data
-}
-
-/** 查询行业因子的参数变体与计算覆盖状态（仅行业域因子可用） */
-export async function fetchIndustryFactorStatus(
-  factorId: string,
-): Promise<IndustryFactorStatusItem[]> {
-  const { data } = await apiClient.get<IndustryFactorStatusItem[]>(
-    `/factors/${factorId}/industry/status`,
-  )
   return data
 }
 

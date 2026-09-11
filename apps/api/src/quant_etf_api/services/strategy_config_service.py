@@ -214,7 +214,7 @@ class StrategyConfigService:
 
         在结构校验基础上，额外校验：
         - 引用的每个因子 ID 均存在于 factor_definition 且已启用
-        - 因子资产域与策略资产域一致、因子 usage 覆盖其消费模块
+        - 因子 usage 覆盖其消费模块
         - transforms 引用的变换函数均存在于引擎变换注册表
 
         Args:
@@ -318,9 +318,7 @@ class StrategyConfigService:
         """校验策略引用的全部因子 ID 存在、启用且用途/挂载类型匹配。
 
         除“因子存在且 is_active=True”外，继续做因子元数据校验：
-        - 因子值必须挂载在指数资产上（asset_domain=index，行业面板因子
-          不作为可直接配置的因子）；已被停用的行业轮动 4 因子会在同步后
-          is_active=False，此处按“已停用或未同步”提示；
+        - 已被停用的行业轮动 4 因子会在同步后 is_active=False，此处按“已停用或未同步”提示；
         - 引用位置必须出现在因子的 usage 中（如 breadth 不允许放入 score/rank）。
 
         Args:
@@ -381,15 +379,7 @@ class StrategyConfigService:
                             f"未知因子 '{factor_id}'：请检查拼写（可用因子见 GET /factors）"
                         )
                     continue
-                # 元数据缺省兜底：旧库/测试替身行未带四轴字段时按 index/全位置处理
-                row_domain = getattr(row, "asset_domain", "index") or "index"
                 row_usage = list(getattr(row, "usage", None) or [])
-                if row_domain != "index":
-                    errors.append(
-                        f"因子 '{factor_id}' 值挂载域为 {row_domain}，不能用于"
-                        f"指数资产策略的{module_label}模块"
-                    )
-                    continue
                 if row_usage and module_key not in row_usage:
                     errors.append(
                         f"因子 '{factor_id}' 不适用于{module_label}位置"

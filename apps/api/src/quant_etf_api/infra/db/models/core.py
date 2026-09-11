@@ -129,16 +129,6 @@ class FactorDefinitionModel(Base):
         nullable=True,
         comment="因子类别：volume/momentum/volatility/flow/valuation",
     )
-    asset_domain: Mapped[str] = mapped_column(
-        String(16),
-        nullable=False,
-        default="index",
-        server_default="index",
-        comment=(
-            "因子值挂载域：index=指数资产（本系统策略资产统一为 index）；"
-            "industry 为历史遗留行（已停用）"
-        ),
-    )
     value_shape: Mapped[str] = mapped_column(
         String(16),
         nullable=False,

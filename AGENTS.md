@@ -220,7 +220,7 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 
 **因子系统**: 内置指数因子通过 `FactorRegistry` 注册，`FactorService` 编排计算和持久化（`index_factor_value` 表）；指数级面板因子（`index_diffusion_ratio`、`rrg_industry_match_score`）由 `IndexFactorPanelService` 按 required_data 组装行业面板/成分数据后计算。`FactorSpec` 增加 `lookback_days` 字段，`FactorService._load_context()` 动态使用所有因子的最大 lookback。`FactorContext` 增加 `macro_indicators` 与 `panels` 字段。`normalization.py` 提供 zscore/rank/minmax/winsorize/MAD 横截面标准化。`evaluation.py` 提供 IC/IR 分析和因子相关性矩阵。
 
-> 因子元数据轴（asset_domain/value_shape/usage/default_params）与“因子中心=正式因子、研究页=独立实验”的研发流程见 [`docs/architecture/因子研发与集成指引.md`](docs/architecture/因子研发与集成指引.md)；行业 RRG/扩散面板仅作为指数级因子的内部数据输入（`rrg_industry_match_score` / `index_diffusion_ratio`），策略配置不含 rotation 模块或行业资产域。
+> 因子元数据轴（value_shape/usage/default_params）与“因子中心=正式因子、研究页=独立实验”的研发流程见 [`docs/architecture/因子研发与集成指引.md`](docs/architecture/因子研发与集成指引.md)；行业 RRG/扩散面板仅作为指数级因子的内部数据输入（`rrg_industry_match_score` / `index_diffusion_ratio`），策略配置不含 rotation 模块或行业资产域。
 
 **Backtesting**: `BacktestService` 使用统一 `_run_backtest_loop`。集成 `FactorProvider` 预计算因子、`ContextBuilder` 构建上下文、专业绩效指标（`metrics.py`）、基准对比（`benchmark.py`）。回测收益为**毛收益**：系统当前阶段不考虑实盘交易与交易成本，仅研究策略理想效果。支持调仓频率控制和换手率计算。回测仅支持配置模式（策略需配置 portfolio 模块）。
 

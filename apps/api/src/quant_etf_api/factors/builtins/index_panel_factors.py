@@ -81,7 +81,6 @@ class IndexDiffusionRatioComputer:
             ),
             required_data=["index_membership", "stock_closes"],
             lookback_days=650,
-            asset_domain="index",
             value_shape="asset",
             usage=[USAGE_SCORE, USAGE_FILTER, USAGE_RANK],
             default_params=_default_diffusion_params(),
@@ -232,7 +231,6 @@ class RRGIndustryMatchComputer:
             # 行业选择直接消费已预计算的 industry_factor_value 面板，
             # 不要求引擎为本因子扩大指数行情回望窗口
             lookback_days=90,
-            asset_domain="index",
             value_shape="asset",
             usage=[USAGE_SCORE, USAGE_FILTER, USAGE_RANK],
             default_params=_default_rrg_match_params(),

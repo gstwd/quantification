@@ -4,7 +4,7 @@
 同一交易日所有指数返回相同值，适合用于择时（代理指数读取）或过滤阈值，
 不建议用于横截面评分。
 
-因子元数据四轴：asset_domain=index、value_shape=market、
+因子元数据：value_shape=market、
 usage=[timing, filter]——配置校验会拒绝将其放入 score/rank。
 
 由于该因子需要全市场行情，FactorSpec.market_scope=True，

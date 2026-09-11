@@ -1,4 +1,4 @@
-"""因子元数据（usage/asset_domain）校验测试。"""
+"""因子元数据 usage 校验测试。"""
 
 from __future__ import annotations
 
@@ -11,11 +11,10 @@ from quant_etf_api.factors.registry import get_default_factor_registry
 from quant_etf_api.services.strategy_config_service import StrategyConfigService
 
 
-def _meta_row(factor_id: str, *, usage: list[str], asset_domain: str = "index") -> SimpleNamespace:
+def _meta_row(factor_id: str, *, usage: list[str]) -> SimpleNamespace:
     """构造带元数据的因子定义行替身。"""
     return SimpleNamespace(
         factor_id=factor_id,
-        asset_domain=asset_domain,
         usage=usage,
     )
 
@@ -35,7 +34,6 @@ def test_default_registry_has_no_industry_factors() -> None:
     assert "rrg_quadrant" not in specs
     assert "diffusion_count_ratio" not in specs
     for spec in specs.values():
-        assert spec.asset_domain == "index"
         assert spec.value_shape in {"asset", "market"}
         assert spec.usage
 
@@ -56,25 +54,6 @@ def test_breadth_factor_usage_restricted() -> None:
     result = svc.validate_config(config)
     assert not result.valid
     assert any("不适用于评分位置" in e for e in result.errors)
-
-
-def test_industry_domain_row_cannot_be_used_in_generic_score() -> None:
-    """历史遗留 industry 挂载域因子行不能进入通用评分。"""
-    rows = [
-        _meta_row(
-            "rrg_rs_ratio",
-            usage=["score"],
-            asset_domain="industry",
-        )
-    ]
-    svc = _make_service(rows)
-    config = {
-        "score": {"factors": {"rrg_rs_ratio": 1.0}},
-        "portfolio": {"method": "equal_weight"},
-    }
-    result = svc.validate_config(config)
-    assert not result.valid
-    assert any("值挂载域为 industry" in e for e in result.errors)
 
 
 def test_factor_params_rejected_for_non_parameterized_factor() -> None:
