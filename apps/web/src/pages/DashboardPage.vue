@@ -541,7 +541,6 @@ function formatRunType(runType: string): string {
     macro_refresh: '宏观数据刷新',
     factor_computation: '因子计算',
     industry_ingest: '行业数据刷新',
-    industry_factor_compute: '行业因子计算',
     industry_universe_refresh: '更新行业信息',
     industry_bars_refresh: '行业日线刷新',
     industry_quality_check: '行业质量检查',

@@ -22,7 +22,6 @@ from .core import (
 )
 from .industry import (
     IndustryDailyBarModel,
-    IndustryFactorValueModel,
     IndustryMembershipEventModel,
     IndustryUniverseModel,
     StockDailyCloseModel,
@@ -50,7 +49,6 @@ __all__ = [
     "StrategyConfigModel",
     "TradingCalendarModel",
     "IndustryDailyBarModel",
-    "IndustryFactorValueModel",
     "IndustryMembershipEventModel",
     "IndustryUniverseModel",
     "StockDailyCloseModel",

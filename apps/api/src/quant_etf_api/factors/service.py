@@ -41,9 +41,6 @@ logger = logging.getLogger(__name__)
 
 # 指数扩散的 160 日均线、150 日快线与 25 日慢线需要 333 个连续交易日（含目标日）。
 _PANEL_FACTOR_WINDOW_DAYS = 333
-_BACKGROUND_ONLY_FACTOR_IDS = {"index_diffusion_ratio", "rrg_industry_match_score"}
-
-
 def _get_max_lookback_days(registry: "FactorRegistry") -> int:
     """从注册表中获取所有因子所需的最大回望自然日数。
 
@@ -115,9 +112,7 @@ class FactorService:
             logger.warning("compute_and_store: 无已启用的因子，跳过计算")
             return {"index_count": len(indexes), "factor_count": 0, "upsert_count": 0, "errors": 0}
 
-        include_composite_panels = any(
-            computer.spec.factor_id in _BACKGROUND_ONLY_FACTOR_IDS for computer in computers
-        )
+        include_composite_panels = any(computer.spec.required_data for computer in computers)
         panel_dates = (
             self._panel_calculation_dates(trade_date) if include_composite_panels else [trade_date]
         )
@@ -230,12 +225,7 @@ class FactorService:
             else []
         )
 
-        if factor_id in _BACKGROUND_ONLY_FACTOR_IDS:
-            if force_recompute or not existing_rows:
-                self._enqueue_factor_computation(target_date)
-            if target_date is None or not existing_rows:
-                raise ValueError("复合因子尚未由后台任务计算，请稍后重试")
-        elif target_date is None or force_recompute or not existing_rows:
+        if target_date is None or force_recompute or not existing_rows:
             target_date = target_date or self._index_repo.find_latest_bar_date()
             if target_date is None:
                 raise ValueError("无任何指数行情数据，无法计算因子")
@@ -274,18 +264,6 @@ class FactorService:
         Returns:
             按 trade_date 升序排列的 FactorRow 列表。
         """
-        if factor_id in _BACKGROUND_ONLY_FACTOR_IDS:
-            if force_recompute:
-                self._enqueue_factor_computation()
-            rows = self._index_repo.find_factor_values(
-                factor_id,
-                index_code,
-                start_date,
-                end_date,
-                params_hash=self._default_params_hash(factor_id),
-            )
-            return [_row_to_factor_row(row) for row in rows]
-
         if force_recompute:
             dates_to_compute = self._index_repo.find_all_bar_dates(index_code, start_date, end_date)
         else:
@@ -370,10 +348,9 @@ class FactorService:
         # 复合因子数据面板：注册表出现消费 index_membership / stock_closes /
         # industry_selection 等面板的因子时，由装配服务按当日注入
         panel_factor_ids = {
-            spec.factor_id
-            for spec in self._registry.specs()
-            if spec.required_data
-            and any(
+            computer.spec.factor_id
+            for computer in self._registry.all()
+            if any(
                 name
                 in {
                     "index_membership",
@@ -381,7 +358,7 @@ class FactorService:
                     "industry_selection",
                     "index_industry_exposure",
                 }
-                for name in spec.required_data
+                for name in computer.spec.required_data
             )
         }
         if include_composite_panels and panel_factor_ids and index_codes:
@@ -393,6 +370,7 @@ class FactorService:
                 index_codes=index_codes,
                 dates=panel_dates or [trade_date],
                 lookback_natural_days=lookback_days,
+                include_industry_panels="rrg_industry_match_score" in panel_factor_ids,
             )
         return ctx
 
@@ -425,20 +403,6 @@ class FactorService:
             trade_date - timedelta(days=800), trade_date
         )
         return dates[-_PANEL_FACTOR_WINDOW_DAYS:]
-
-    def _enqueue_factor_computation(self, trade_date: date | None = None) -> None:
-        """将指定日期的全量因子计算入队，避免复合因子阻塞请求线程。"""
-        target_date = trade_date or self._index_repo.find_latest_bar_date()
-        if target_date is None:
-            return
-        from quant_etf_api.infra.job_queue.queue import get_job_queue
-
-        get_job_queue().enqueue(
-            "factor_computation",
-            {"trade_date": target_date.isoformat()},
-            job_key=f"factor_computation:{target_date.isoformat()}",
-        )
-
 
 def _row_to_factor_row(row: IndexFactorValueModel) -> FactorRow:
     """将 ORM 行转换为 FactorRow schema。"""

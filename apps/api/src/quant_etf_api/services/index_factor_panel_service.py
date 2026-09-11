@@ -4,24 +4,21 @@
 所需的 panels：
 - index_membership：指数成分事件按日期的有效成员（含权重）；
 - stock_closes：成员股收盘；
-- industry_selection：行业面板（industry_factor_value 默认参数）按研报
-  信号产生的每日选中行业集合；
+- industry_selection：从原始行业行情按研报信号产生的每日选中行业集合；
 - index_industry_exposure：指数成分的申万行业暴露（有权重按权重，否则
   等权），用于与选中行业集合计算重合度。
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from quant_etf_api.domain.industry.constants import (
-    industry_params_hash,
-    normalize_sw_code,
-)
+from quant_etf_api.domain.industry.constants import normalize_sw_code
 from quant_etf_api.domain.industry.selection import (
     IndustryRotationEngine,
     IndustryRotationInput,
@@ -29,14 +26,13 @@ from quant_etf_api.domain.industry.selection import (
 )
 from quant_etf_api.factors.builtins.index_panel_factors import _UNMAPPED_INDUSTRY
 from quant_etf_api.infra.db.models.core import IndexMemberEventModel
-from quant_etf_api.infra.db.models.industry import (
-    IndustryFactorValueModel,
-    IndustryMembershipEventModel,
-)
+from quant_etf_api.infra.db.models.industry import IndustryMembershipEventModel
 from quant_etf_api.infra.db.repositories.index_member import IndexMemberEventRepository
 from quant_etf_api.infra.db.repositories.industry import (
     StockDailyCloseRepository,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _merge_members_by_stock(members: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -97,9 +93,7 @@ class IndexFactorPanelService:
             lookback_natural_days: 为成分扩散预留的个股收盘回看窗口。
             include_industry_panels: 是否加载 RRG 匹配度所需的行业选择和行业暴露面板。
                 单日扩散调试只需成分与个股收盘，传 False 可避免无关的行业表查询。
-            calculate_industry_selection: 是否从原始行业行情与个股收盘即时计算行业选择。
-                回测必须开启，避免历史区间依赖仅覆盖近期的预计算行业因子；实时
-                路径保持关闭，仅读取已物化的行业因子值。
+            calculate_industry_selection: 保留兼容参数，行业选择始终从原始行业行情即时计算。
 
         Returns:
             panels 字典（index_membership / stock_closes /
@@ -107,12 +101,19 @@ class IndexFactorPanelService:
         """
         if not index_codes or not dates:
             return {}
+        logger.debug(
+            "指数复合因子面板开始装配: indexes=%d dates=%d start=%s end=%s industry=%s",
+            len(index_codes),
+            len(dates),
+            dates[0],
+            dates[-1],
+            include_industry_panels,
+        )
         membership = self._build_membership(index_codes, dates)
         closes = self._build_stock_closes(membership, dates, lookback_natural_days)
+        # 行业选择直接从原始行业日线计算，避免依赖独立的行业因子物化表。
         selection = (
             self._build_industry_selection_from_source(dates)
-            if include_industry_panels and calculate_industry_selection
-            else self._build_industry_selection(dates)
             if include_industry_panels
             else {}
         )
@@ -124,7 +125,7 @@ class IndexFactorPanelService:
             len(members) for daily in membership.values() for members in daily.values()
         )
         stock_close_points = sum(len(series) for series in closes.values())
-        return {
+        result = {
             "calculation_dates": dates,
             "index_membership": membership,
             "stock_closes": closes,
@@ -140,6 +141,8 @@ class IndexFactorPanelService:
                 "stock_close_point_count": stock_close_points,
             },
         }
+        logger.debug("指数复合因子面板装配完成: metrics=%s", result["panel_metrics"])
+        return result
 
     def _build_membership(
         self,
@@ -207,73 +210,14 @@ class IndexFactorPanelService:
             closes.setdefault(stock_code, {})[trade_date] = close
         return closes
 
-    def _build_industry_selection(self, dates: list[date]) -> dict[date, dict[str, float]]:
-        """读取行业因子预计算值并生成每日研报信号选中行业集合。"""
-        if not dates:
-            return {}
-        params_hash = industry_params_hash()
-        factor_ids = ["rrg_rs_ratio", "rrg_rs_momentum", "rrg_quadrant", "diffusion_count_ratio"]
-        rows = (
-            self._db.query(IndustryFactorValueModel)
-            .filter(
-                IndustryFactorValueModel.factor_id.in_(factor_ids),
-                IndustryFactorValueModel.trade_date >= dates[0],
-                IndustryFactorValueModel.trade_date <= dates[-1],
-                IndustryFactorValueModel.params_hash == params_hash,
-            )
-            .all()
-        )
-        by_field: dict[str, dict[date, dict[str, float | None]]] = {
-            "rs_ratio": {},
-            "rs_momentum": {},
-            "quadrant": {},
-            "diffusion": {},
-        }
-        field_of: dict[str, str] = {
-            "rrg_rs_ratio": "rs_ratio",
-            "rrg_rs_momentum": "rs_momentum",
-            "rrg_quadrant": "quadrant",
-            "diffusion_count_ratio": "diffusion",
-        }
-        for row in rows:
-            field = field_of[row.factor_id]
-            by_field[field].setdefault(row.trade_date, {})[row.industry_code] = (
-                row.factor_value_numeric
-            )
-        engine = IndustryRotationEngine()
-        config = IndustrySelectionConfig()
-        result: dict[date, dict[str, float]] = {}
-        codes: set[str] = set()
-        for trade_date in dates:
-            quadrant_raw = by_field["quadrant"].get(trade_date) or {}
-            quadrant = {
-                code: (int(value) if value is not None else None)
-                for code, value in quadrant_raw.items()
-            }
-            codes.update(quadrant)
-            data = IndustryRotationInput(
-                trade_date=trade_date,
-                industry_codes=sorted(codes),
-                rs_ratio=by_field["rs_ratio"].get(trade_date) or {},
-                rs_momentum=by_field["rs_momentum"].get(trade_date) or {},
-                quadrant=quadrant,
-                diffusion=by_field["diffusion"].get(trade_date) or {},
-            )
-            selected, weights = engine.select(config, data)
-            if selected:
-                result[trade_date] = weights
-        return result
-
     def _build_industry_selection_from_source(
         self,
         dates: list[date],
     ) -> dict[date, dict[str, float]]:
         """从原始行业数据即时构建回测所需的 RRG/扩散行业选择。
 
-        历史回测不能依赖 ``industry_factor_value`` 的物化覆盖范围：该表日常只需
-        计算最近交易日，历史区间可能没有行，若直接读取会让 RRG 匹配因子在整段
-        回测中为空。本方法仅在回测预计算路径调用，复用行业因子服务的默认口径，
-        不写数据库，保证回测可复现且不受任务调度历史影响。
+        直接从原始行业行情构建 RRG 行业选择，实时和回测共用该路径，
+        不写数据库，保证结果不受任务调度历史影响。
 
         Args:
             dates: 回测交易日列表。
@@ -289,6 +233,12 @@ class IndexFactorPanelService:
         panels = IndustryFactorService(self._db).build_panels(
             start=dates[0],
             end=dates[-1],
+            need_diffusion=False,
+        )
+        logger.debug(
+            "RRG行业选择面板完成: dates=%d industries=%d",
+            len(panels.get("trading_dates", [])),
+            len(panels.get("industry_codes", [])),
         )
         ratio = panels["rs_ratio"]
         momentum = panels["rs_momentum"]

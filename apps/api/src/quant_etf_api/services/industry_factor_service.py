@@ -1,4 +1,4 @@
-"""行业因子面板构建与持久化服务（RRG / 扩散数量占比）。
+"""行业因子面板构建服务（RRG / 扩散数量占比）。
 
 除计算面板外，本服务还提供研究调试台需要的“数据问题可见性”能力：
 - RRG 按行业报告输入窗口内的日线缺口、ffill 兜底、warm-up 不足；
@@ -18,8 +18,6 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.domain.industry.constants import (
     SW_EXCLUDED_INDUSTRY_CODES,
-    canonical_industry_params,
-    industry_params_hash,
     normalize_sw_code,
 )
 from quant_etf_api.domain.industry.diffusion_panel import (
@@ -32,10 +30,8 @@ from quant_etf_api.domain.industry.factor_algo import (
     compute_rrg,
     equal_weight_benchmark,
 )
-from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
-    IndustryFactorValueRepository,
     IndustryMembershipEventRepository,
     IndustryUniverseRepository,
     StockDailyCloseRepository,
@@ -73,7 +69,7 @@ def _diffusion_buffer_natural_days(lookback: int, smooth_window: int) -> int:
 
 
 class IndustryFactorService:
-    """构建行业因子宽表面板（RRG 与扩散），并可持久化到 industry_factor_value。"""
+    """构建行业因子宽表面板（RRG 与扩散），供研究和指数因子按需消费。"""
 
     def __init__(self, db: Session) -> None:
         """初始化行业因子服务。
@@ -86,7 +82,6 @@ class IndustryFactorService:
         self._universe_repo = IndustryUniverseRepository(db)
         self._membership_repo = IndustryMembershipEventRepository(db)
         self._close_repo = StockDailyCloseRepository(db)
-        self._factor_repo = IndustryFactorValueRepository(db)
 
     def resolve_industry_codes(self, codes: list[str] | None = None) -> list[str]:
         """解析行业代码列表，为空时返回全部启用行业（升序）。"""
@@ -595,145 +590,6 @@ class IndustryFactorService:
                 )
         extra: dict[str, Any] = {"items": items, "issues": issues, "daily": daily}
         return frame, extra
-
-    def compute_and_store(
-        self,
-        *,
-        start: date,
-        end: date,
-        industry_codes: list[str] | None = None,
-        lookback_ratio: int = 220,
-        lookback_mom: int = 60,
-        smooth_window: int = 20,
-        diffusion_lookback: int = 220,
-        benchmark_exclude: list[str] | None = None,
-    ) -> dict[str, int]:
-        """计算区间内全部行业因子并持久化。
-
-        行携带规范化参数与参数指纹（params_hash），不同参数组合分行存储，
-        互不覆盖（P12）。
-
-        Args:
-            start: 计算区间起始日。
-            end: 计算区间结束日。
-            industry_codes: 行业代码列表，None 表示全部启用行业。
-            lookback_ratio: RS-Ratio 比率回看天数。
-            lookback_mom: RS-Momentum 比率回看天数。
-            smooth_window: MA 平滑窗口。
-            diffusion_lookback: 扩散上涨判定回看天数。
-            benchmark_exclude: RRG 行业等权基准剔除行业代码列表。
-
-        Returns:
-            {industry_count, date_count, factor_row_count} 统计。
-        """
-        params = canonical_industry_params(
-            lookback_ratio=lookback_ratio,
-            lookback_mom=lookback_mom,
-            smooth_window=smooth_window,
-            diffusion_lookback=diffusion_lookback,
-            benchmark_exclude=benchmark_exclude,
-        )
-        params_hash = industry_params_hash(
-            lookback_ratio=lookback_ratio,
-            lookback_mom=lookback_mom,
-            smooth_window=smooth_window,
-            diffusion_lookback=diffusion_lookback,
-            benchmark_exclude=benchmark_exclude,
-        )
-        panels = self.build_panels(
-            start=start,
-            end=end,
-            industry_codes=industry_codes,
-            lookback_ratio=lookback_ratio,
-            lookback_mom=lookback_mom,
-            smooth_window=smooth_window,
-            diffusion_lookback=diffusion_lookback,
-        )
-        date_values = [d for d in panels["trading_dates"] if start <= d <= end]
-        rows: list[dict[str, Any]] = []
-        total_rows = 0
-        chunk_size = 20_000
-        for factor_id, panel_name in (
-            ("rrg_rs_ratio", "rs_ratio"),
-            ("rrg_rs_momentum", "rs_momentum"),
-            ("rrg_quadrant", "quadrant"),
-            ("diffusion_count_ratio", "diffusion"),
-        ):
-            panel = panels[panel_name]
-            if panel.empty:
-                continue
-            for d in date_values:
-                # 行业面板使用 DatetimeIndex，而交易日轴为 date；直接比较会导致
-                # 所有日期都不命中，使任务表面成功但实际零行落库。
-                panel_date = pd.Timestamp(d)
-                if panel_date not in panel.index:
-                    continue
-                row = panel.loc[panel_date]
-                for code in panels["industry_codes"]:
-                    if code not in panel.columns:
-                        continue
-                    value = row.get(code)
-                    rows.append(
-                        {
-                            "trade_date": d,
-                            "industry_code": code,
-                            "factor_id": factor_id,
-                            "factor_value_numeric": (None if pd.isna(value) else float(value)),
-                            "factor_payload": None,
-                            "params_hash": params_hash,
-                            "params": params,
-                            "updated_at": utcnow(),
-                        }
-                    )
-                    if len(rows) >= chunk_size:
-                        self._factor_repo.bulk_upsert(rows)
-                        total_rows += len(rows)
-                        rows = []
-        if rows:
-            self._factor_repo.bulk_upsert(rows)
-            total_rows += len(rows)
-        self._db.commit()
-        return {
-            "industry_count": len(panels["industry_codes"]),
-            "date_count": len(date_values),
-            "factor_row_count": total_rows,
-        }
-
-    def load_factor_rows(
-        self,
-        *,
-        factor_id: str,
-        start: date,
-        end: date,
-        industry_codes: list[str] | None = None,
-        params_hash: str | None = None,
-    ) -> pd.DataFrame:
-        """从 industry_factor_value 读取因子宽表（date × industry_code）。
-
-        Args:
-            factor_id: 行业因子 ID。
-            start: 起始日期。
-            end: 结束日期。
-            industry_codes: 行业代码列表。
-            params_hash: 参数指纹；None 表示不按参数过滤。
-        """
-        codes = self.resolve_industry_codes(industry_codes)
-        rows = self._factor_repo.find_values(factor_id, start, end, codes, params_hash)
-        data: dict[tuple[date, str], float | None] = {}
-        for row in rows:
-            data[(row.trade_date, row.industry_code)] = row.factor_value_numeric
-        if not data:
-            return pd.DataFrame(columns=codes)
-        frame = pd.DataFrame(
-            [
-                {
-                    "trade_date": d,
-                    **{code: data.get((d, code)) for code in codes},
-                }
-                for d in sorted({d for d, _ in data})
-            ]
-        ).set_index("trade_date")
-        return frame.reindex(columns=codes)
 
 def _rrg_rules(
     *,

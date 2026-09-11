@@ -16,7 +16,6 @@ from quant_etf_api.domain.industry.membership import (
 )
 from quant_etf_api.infra.db.models.industry import (
     IndustryDailyBarModel,
-    IndustryFactorValueModel,
     IndustryMembershipEventModel,
     IndustryUniverseModel,
     StockDailyCloseModel,
@@ -493,98 +492,6 @@ class StockDailyCloseRepository(BaseRepository):
                 pg_insert(StockDailyCloseModel)
                 .values(chunk)
                 .on_conflict_do_nothing(constraint="uq_stock_daily_close")
-            )
-
-        return _exec_pg_insert_chunks(self._db, rows, _build)
-
-
-class IndustryFactorValueRepository(BaseRepository):
-    """industry_factor_value 只读查询与写入门禁。"""
-
-    def find_values(
-        self,
-        factor_id: str,
-        start: date,
-        end: date,
-        industry_codes: list[str] | None = None,
-        params_hash: str | None = None,
-    ) -> list[IndustryFactorValueModel]:
-        """查询指定因子在日期区间的行业因子行（升序，可按参数指纹过滤）。"""
-        query = self._db.query(IndustryFactorValueModel).filter(
-            and_(
-                IndustryFactorValueModel.factor_id == factor_id,
-                IndustryFactorValueModel.trade_date >= start,
-                IndustryFactorValueModel.trade_date <= end,
-            )
-        )
-        if params_hash is not None:
-            query = query.filter(IndustryFactorValueModel.params_hash == params_hash)
-        if industry_codes:
-            query = query.filter(IndustryFactorValueModel.industry_code.in_(industry_codes))
-        return query.order_by(IndustryFactorValueModel.trade_date.asc()).all()
-
-    def find_latest_trade_date(
-        self,
-        factor_id: str,
-        params_hash: str | None = None,
-    ) -> date | None:
-        """查询某行业因子最新日期（可按参数指纹过滤）。"""
-        query = self._db.query(func.max(IndustryFactorValueModel.trade_date)).filter(
-            IndustryFactorValueModel.factor_id == factor_id
-        )
-        if params_hash is not None:
-            query = query.filter(IndustryFactorValueModel.params_hash == params_hash)
-        return query.scalar()
-
-    def find_values_asof(
-        self,
-        factor_id: str,
-        params_hash: str,
-        trade_date: date,
-        industry_codes: list[str] | None = None,
-    ) -> list[IndustryFactorValueModel]:
-        """查询指定因子在目标日（含）之前最近一次计算的行业因子行。
-
-        实时决策以“因子值截止 <= 决策日”读取最新计算值，避免把未来值
-        当成本日信号（前视规避）；参数指纹精确匹配参数组合。
-
-        Args:
-            factor_id: 行业因子 ID。
-            params_hash: 参数指纹。
-            trade_date: 决策日。
-            industry_codes: 行业代码列表，None 表示全部。
-
-        Returns:
-            满足条件的行业因子行列表（同一行业可能有多个日期历史行，
-            由调用方按行业取最新）。
-        """
-        query = self._db.query(IndustryFactorValueModel).filter(
-            and_(
-                IndustryFactorValueModel.factor_id == factor_id,
-                IndustryFactorValueModel.params_hash == params_hash,
-                IndustryFactorValueModel.trade_date <= trade_date,
-            )
-        )
-        if industry_codes:
-            query = query.filter(IndustryFactorValueModel.industry_code.in_(industry_codes))
-        return query.order_by(IndustryFactorValueModel.trade_date.asc()).all()
-
-    def bulk_upsert(self, rows: list[dict[str, Any]]) -> int:
-        """批量幂等写入行业因子值（按参数指纹区分，重复行更新数值与 payload）。"""
-        if not rows:
-            return 0
-
-        def _build(chunk: list[dict[str, Any]]) -> Any:
-            """构造单块行业因子 ON CONFLICT DO UPDATE 语句。"""
-            stmt = pg_insert(IndustryFactorValueModel).values(chunk)
-            return stmt.on_conflict_do_update(
-                constraint="uq_industry_factor_value_params",
-                set_={
-                    "factor_value_numeric": stmt.excluded.factor_value_numeric,
-                    "factor_payload": stmt.excluded.factor_payload,
-                    "params": stmt.excluded.params,
-                    "updated_at": stmt.excluded.updated_at,
-                },
             )
 
         return _exec_pg_insert_chunks(self._db, rows, _build)

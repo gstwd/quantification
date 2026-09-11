@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from quant_etf_api.services.industry_factor_service import IndustryFactorService
@@ -136,35 +135,6 @@ def test_build_panels_slices_empty_panels_with_timestamp() -> None:
     assert panels["rs_ratio"].isna().all().all()
     assert panels["diffusion"].isna().all().all()
 
-
-def test_compute_and_store_persists_date_axis_against_datetime_index() -> None:
-    """持久化时应将 date 交易日精确映射到 DatetimeIndex，而非误跳过全部行。"""
-    trade_date = date(2026, 9, 8)
-    panel_index = pd.DatetimeIndex([pd.Timestamp(trade_date)])
-    panels = {
-        "trading_dates": [trade_date],
-        "industry_codes": ["801010"],
-        "rs_ratio": pd.DataFrame({"801010": [101.0]}, index=panel_index),
-        "rs_momentum": pd.DataFrame({"801010": [102.0]}, index=panel_index),
-        "quadrant": pd.DataFrame({"801010": [1.0]}, index=panel_index),
-        "diffusion": pd.DataFrame({"801010": [55.0]}, index=panel_index),
-    }
-    service = object.__new__(IndustryFactorService)
-    service._db = MagicMock()
-    service._factor_repo = MagicMock()
-    service.build_panels = MagicMock(return_value=panels)
-
-    result = service.compute_and_store(start=trade_date, end=trade_date)
-
-    assert result == {"industry_count": 1, "date_count": 1, "factor_row_count": 4}
-    persisted = service._factor_repo.bulk_upsert.call_args.args[0]
-    assert {row["factor_id"] for row in persisted} == {
-        "rrg_rs_ratio",
-        "rrg_rs_momentum",
-        "rrg_quadrant",
-        "diffusion_count_ratio",
-    }
-    assert {row["trade_date"] for row in persisted} == {trade_date}
 
 
 def test_diffusion_panel_built_per_industry_with_stats() -> None:

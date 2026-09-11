@@ -327,25 +327,12 @@ def _build_industry_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--codes", dest="stock_codes", help="逗号分隔的股票代码，默认全部成分股")
     _add_json_flag(p)
 
-    p = sub.add_parser("compute-factors", help="计算并持久化区间行业因子")
-    p.add_argument("--start", type=date.fromisoformat, required=True)
-    p.add_argument("--end", type=date.fromisoformat, required=True)
-    p.add_argument("--codes", dest="industry_codes", help="逗号分隔的行业代码，默认全部")
-    p.add_argument("--lookback-ratio", type=int, default=220)
-    p.add_argument("--lookback-mom", type=int, default=60)
-    p.add_argument("--smooth-window", type=int, default=20)
-    p.add_argument("--diffusion-lookback", type=int, default=220)
-    _add_json_flag(p)
-
 def _run_industry(args: argparse.Namespace) -> None:
     """执行 industry 命令组。"""
     db = SessionLocal()
     try:
         from quant_etf_api.services.industry_data_service import (  # noqa: PLC0415
             IndustryDataService,
-        )
-        from quant_etf_api.services.industry_factor_service import (  # noqa: PLC0415
-            IndustryFactorService,
         )
 
         if args.subcommand == "init-universe":
@@ -426,21 +413,6 @@ def _run_industry(args: argparse.Namespace) -> None:
             _emit(result, not args.no_json)
             if result["errors"]:
                 sys.exit(1)
-            return
-        if args.subcommand == "compute-factors":
-            if args.start > args.end:
-                _fail("--start 不能晚于 --end")
-            codes = _split_codes(args.industry_codes)
-            result = IndustryFactorService(db).compute_and_store(
-                start=args.start,
-                end=args.end,
-                industry_codes=codes,
-                lookback_ratio=args.lookback_ratio,
-                lookback_mom=args.lookback_mom,
-                smooth_window=args.smooth_window,
-                diffusion_lookback=args.diffusion_lookback,
-            )
-            _emit(result, not args.no_json)
             return
     except ValueError as exc:
         _fail(str(exc))

@@ -6,7 +6,6 @@ from datetime import date, datetime
 
 import sqlalchemy as sa
 from sqlalchemy import (
-    JSON,
     Boolean,
     Date,
     DateTime,
@@ -167,50 +166,4 @@ class StockDailyCloseModel(Base):
     source: Mapped[str] = mapped_column(String(32), default="akshare_em", comment="数据来源")
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, comment="数据入库时间（UTC）"
-    )
-
-
-class IndustryFactorValueModel(Base):
-    """行业因子值（RRG / 扩散），独立于通用 index_factor_value 存储。"""
-
-    __tablename__ = "industry_factor_value"
-    __table_args__ = (
-        UniqueConstraint(
-            "trade_date",
-            "industry_code",
-            "factor_id",
-            "params_hash",
-            name="uq_industry_factor_value_params",
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True, comment="自增主键"
-    )
-    trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="交易日期")
-    industry_code: Mapped[str] = mapped_column(
-        ForeignKey("industry_universe.industry_code"),
-        nullable=False,
-        comment="申万一级行业代码",
-    )
-    factor_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="行业因子 ID")
-    factor_value_numeric: Mapped[float | None] = mapped_column(Float, comment="因子数值")
-    factor_payload: Mapped[dict | None] = mapped_column(
-        JSON, comment="计算中间数据（warm-up/样本数等）"
-    )
-    params_hash: Mapped[str] = mapped_column(
-        String(64),
-        nullable=False,
-        default="",
-        server_default="",
-        comment="参数指纹（规范化参数字典 sha256），区分同 factor_id 不同参数计算",
-    )
-    params: Mapped[dict | None] = mapped_column(
-        JSON, comment="计算参数字典（lookback/smooth/基准剔除等）"
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=utcnow,
-        onupdate=utcnow,
-        comment="最后更新时间（UTC）",
     )

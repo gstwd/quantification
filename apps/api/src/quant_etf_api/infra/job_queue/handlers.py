@@ -304,9 +304,7 @@ def handle_data_management_operation(payload: dict) -> dict[str, Any]:
 def handle_data_sync_all(payload: dict) -> None:
     """执行每日全局同步并驱动后续因子链路。
 
-    同步完成后：行业日线/成分/个股收盘三项关键输入全部成功时按库内实际
-    最新行业交易日入队行业面板因子；指数日线或估值有新记录时按实际最新
-    指数交易日入队通用因子计算。
+    同步完成后，指数日线或估值有新记录时按实际最新指数交易日入队通用因子计算。
     """
     result = handle_data_management_operation({**payload, "operation": "sync_latest"})
     try:
@@ -314,33 +312,11 @@ def handle_data_sync_all(payload: dict) -> None:
 
         from quant_etf_api.infra.db.base import SessionLocal
         from quant_etf_api.infra.db.models.core import IndexDailyBarModel
-        from quant_etf_api.infra.db.models.industry import IndustryDailyBarModel
         from quant_etf_api.infra.job_queue.queue import get_job_queue
 
         items = {item["dataset_key"]: item for item in result["items"]}
-        critical_inputs = {"industry_daily_bar", "industry_membership", "stock_daily_close"}
         db = SessionLocal()
         try:
-            industry_bar_records = int(items.get("industry_daily_bar", {}).get("records") or 0)
-            industry_close_records = int(items.get("stock_daily_close", {}).get("records") or 0)
-            if (
-                all(items.get(key, {}).get("status") == "success" for key in critical_inputs)
-                and (industry_bar_records > 0 or industry_close_records > 0)
-            ):
-                latest_industry = db.query(func.max(IndustryDailyBarModel.trade_date)).scalar()
-                if latest_industry is not None:
-                    get_job_queue().enqueue(
-                        "industry_factor_compute",
-                        {"trade_date": latest_industry.isoformat()},
-                        job_key=f"industry_factor_compute:{latest_industry.isoformat()}",
-                    )
-            else:
-                failed = [
-                    key for key in critical_inputs
-                    if items.get(key, {}).get("status") != "success"
-                ]
-                logger.warning("全局同步未满足行业因子前置数据（%s），跳过行业因子计算", ",".join(failed))
-
             bar_item = items.get("index_daily_bar", {})
             valuation_item = items.get("index_valuation", {})
             if (
@@ -401,7 +377,7 @@ def handle_warm_calendar(payload: dict) -> None:
 
 
 def handle_industry_daily_ingest(payload: dict) -> None:
-    """执行申万行业日频摄取，落库后按实际行情日入队行业因子计算。"""
+    """执行申万行业日频摄取并更新数据质量状态。"""
     from quant_etf_api.infra.db.base import SessionLocal
     from quant_etf_api.infra.job_queue.queue import get_job_queue
     from quant_etf_api.services.industry_data_service import IndustryDataService
@@ -412,29 +388,6 @@ def handle_industry_daily_ingest(payload: dict) -> None:
     try:
         RunService(db).mark_running(run_id)
         result = IndustryDataService(db).run_daily_ingest()
-        bars = result.get("bars") or {}
-        stock_snapshot = result.get("stock_snapshot") or {}
-        target_date = result.get("target_date")
-        bars_errors = bars.get("errors") or []
-        snapshot_error = stock_snapshot.get("error")
-        # 行情/快照不完整时不入队当日因子计算，避免用缺边缺角输入算扩散/RRG
-        if (
-            target_date is not None
-            and not bars_errors
-            and snapshot_error is None
-        ):
-            get_job_queue().enqueue(
-                "industry_factor_compute",
-                {"trade_date": target_date.isoformat()},
-                job_key=f"industry_factor_compute:{target_date.isoformat()}",
-            )
-        else:
-            result["factor_skipped"] = {
-                "target_date": target_date.isoformat() if target_date else None,
-                "reason": "行业日线或个股收盘快照存在未补齐错误，等待补齐后重跑",
-                "bars_errors": len(bars_errors),
-                "stock_snapshot_error": bool(snapshot_error),
-            }
         RunService(db).mark_success(run_id, metrics=_json_safe(result))
         # 行业凌晨补拉会补齐前一日缺口；结束后入队全局质量检查，
         # 让统一健康快照在早上即反映补拉后的真实状态（幂等去重）。
@@ -462,75 +415,6 @@ def handle_industry_daily_ingest(payload: dict) -> None:
         logger.exception("行业日频摄取任务异常: run_id=%s", run_id)
         db.rollback()
         RunService(db).mark_failed(run_id, f"行业日频摄取异常: {type(e).__name__}: {e}")
-        raise
-    finally:
-        db.close()
-
-
-def handle_industry_factor_compute(payload: dict) -> None:
-    """计算指定交易日申万行业因子并入库，并在默认口径完成后触发复合因子重算。"""
-    from datetime import date as date_cls
-
-    from quant_etf_api.domain.industry.constants import industry_params_hash
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.infra.job_queue.queue import get_job_queue
-    from quant_etf_api.services.industry_factor_service import IndustryFactorService
-    from quant_etf_api.services.run_service import RunService
-
-    trade_date_str = payload.get("trade_date") or date_cls.today().isoformat()
-    trade_date = date_cls.fromisoformat(trade_date_str)
-    # 参数覆盖：研究页/CLI 以非默认参数触发行业面板计算时，payload 携带参数，
-    # 落库带参数指纹，job_key 也带指纹防止默认/自定义任务互相去重
-    lookback_ratio = int(payload.get("lookback_ratio", 220))
-    lookback_mom = int(payload.get("lookback_mom", 60))
-    smooth_window = int(payload.get("smooth_window", 20))
-    diffusion_lookback = int(payload.get("diffusion_lookback", 220))
-    benchmark_exclude = payload.get("benchmark_exclude")
-    if benchmark_exclude is not None:
-        benchmark_exclude = [str(c) for c in benchmark_exclude]
-    db = SessionLocal()
-    run_id = ""
-    try:
-        run_svc = RunService(db)
-        run = run_svc.create_run("industry_factor_compute", None, trade_date)
-        run_id = run.run_id
-        run_svc.mark_running(run_id)
-        metrics = IndustryFactorService(db).compute_and_store(
-            start=trade_date,
-            end=trade_date,
-            lookback_ratio=lookback_ratio,
-            lookback_mom=lookback_mom,
-            smooth_window=smooth_window,
-            diffusion_lookback=diffusion_lookback,
-            benchmark_exclude=benchmark_exclude,
-        )
-        factor_row_count = int(metrics.get("factor_row_count") or 0)
-        if factor_row_count <= 0:
-            raise RuntimeError(
-                "行业因子计算未写入任何行；请检查行业面板日期、日线覆盖与 warm-up 数据"
-            )
-        run_svc.mark_success(run_id, metrics=metrics)
-
-        # RRG 指数匹配度只消费默认参数指纹的行业因子。行业面板成功落库后，
-        # 重新计算同日指数复合因子，避免两个任务并发时先读到旧面板而留下空值。
-        task_params_hash = industry_params_hash(
-            lookback_ratio=lookback_ratio,
-            lookback_mom=lookback_mom,
-            smooth_window=smooth_window,
-            diffusion_lookback=diffusion_lookback,
-            benchmark_exclude=benchmark_exclude,
-        )
-        if task_params_hash == industry_params_hash():
-            get_job_queue().enqueue(
-                "factor_computation",
-                {"trade_date": trade_date.isoformat()},
-                job_key=f"factor_computation:{trade_date.isoformat()}",
-            )
-    except Exception as e:
-        logger.exception("行业因子计算任务异常: trade_date=%s", trade_date)
-        if run_id:
-            db.rollback()
-            RunService(db).mark_failed(run_id, f"行业因子计算异常: {type(e).__name__}: {e}")
         raise
     finally:
         db.close()
@@ -735,7 +619,6 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "factor_computation": handle_factor_computation,
     "warm_calendar": handle_warm_calendar,
     "industry_daily_ingest": handle_industry_daily_ingest,
-    "industry_factor_compute": handle_industry_factor_compute,
     "industry_universe_refresh": handle_industry_universe_refresh,
     "industry_bars_refresh": handle_industry_bars_refresh,
     "industry_quality_check": handle_industry_quality_check,

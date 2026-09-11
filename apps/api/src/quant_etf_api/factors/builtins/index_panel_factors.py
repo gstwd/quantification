@@ -14,6 +14,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+import logging
+
 from quant_etf_api.factors.base import (
     FactorContext,
     FactorSpec,
@@ -22,6 +24,8 @@ from quant_etf_api.factors.base import (
     USAGE_RANK,
     USAGE_SCORE,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _default_diffusion_params() -> dict[str, Any]:
@@ -107,7 +111,15 @@ class IndexDiffusionRatioComputer:
         closes = ctx.panels.get("stock_closes") or {}
         membership = ctx.panels.get("index_membership") or {}
 
-        ordered_dates = sorted(set(dates))
+        logger.debug(
+            "扩散因子开始计算: index=%s dates=%d trend=%d fast=%d slow=%d closes=%d",
+            index_code,
+            len(ordered_dates := sorted(set(dates))),
+            trend_window,
+            fast_window,
+            slow_window,
+            len(closes),
+        )
         position = {trade_date: i for i, trade_date in enumerate(ordered_dates)}
         ratio_by_date: dict[date, float | None] = {}
         diagnostics: dict[date, dict[str, int | float | None]] = {}
@@ -162,6 +174,16 @@ class IndexDiffusionRatioComputer:
                 "raw_ratio": ratio_by_date[trade_date],
                 "weighting_mode": "index_weight" if use_index_weight else "equal",
             }
+            logger.debug(
+                "扩散原始占比: index=%s date=%s members=%d valid=%d bullish=%d ratio=%s weighting=%s",
+                index_code,
+                trade_date,
+                member_count,
+                valid,
+                bullish,
+                ratio_by_date[trade_date],
+                diagnostics[trade_date]["weighting_mode"],
+            )
 
         fast_by_date: dict[date, float | None] = {}
         fast_valid_days_by_date: dict[date, int] = {}
@@ -204,6 +226,19 @@ class IndexDiffusionRatioComputer:
                     "calculation_version": _INDEX_DIFFUSION_CALCULATION_VERSION,
                 },
             )
+            logger.debug(
+                "扩散因子完成: index=%s date=%s raw=%s fast=%s slow=%s numeric=%s "
+                "fast_valid=%d fast_complete=%s slow_complete=%s",
+                index_code,
+                trade_date,
+                current["raw_ratio"],
+                fast_value,
+                slow_value,
+                numeric,
+                fast_valid_days_by_date[trade_date],
+                fast_value is not None,
+                slow_complete,
+            )
         return result
 
 
@@ -228,7 +263,7 @@ class RRGIndustryMatchComputer:
                 "industry_selection",
                 "index_industry_exposure",
             ],
-            # 行业选择直接消费已预计算的 industry_factor_value 面板，
+            # 行业选择直接消费面板装配层从原始数据计算出的结果，
             # 不要求引擎为本因子扩大指数行情回望窗口
             lookback_days=90,
             value_shape="asset",
@@ -252,15 +287,30 @@ class RRGIndustryMatchComputer:
         selections = ctx.panels.get("industry_selection") or {}
         exposures = ctx.panels.get("index_industry_exposure") or {}
         exposure_meta = ctx.panels.get("index_industry_exposure_meta") or {}
+        logger.debug(
+            "RRG匹配开始计算: index=%s dates=%d selection_dates=%d exposure_dates=%d",
+            index_code,
+            len(dates),
+            len(selections),
+            len(exposures.get(index_code) or {}),
+        )
         result: dict[date, FactorValue] = {}
         for trade_date in dates:
             selected = selections.get(trade_date) or {}
             exposure = (exposures.get(index_code) or {}).get(trade_date) or {}
             meta = (exposure_meta.get(index_code) or {}).get(trade_date) or {}
             if not selected or not exposure:
+                logger.debug(
+                    "RRG匹配缺少输入: index=%s date=%s selected=%d exposure_industries=%d",
+                    index_code,
+                    trade_date,
+                    len(selected),
+                    len(exposure),
+                )
                 continue
             total = sum(value for value in exposure.values() if value is not None)
             if total <= 0:
+                logger.debug("RRG匹配暴露总量无效: index=%s date=%s total=%s", index_code, trade_date, total)
                 continue
             matched = sum(
                 value
@@ -281,5 +331,15 @@ class RRGIndustryMatchComputer:
                     "weighting_mode": meta.get("weighting_mode"),
                     "calculation_version": _RRG_MATCH_CALCULATION_VERSION,
                 },
+            )
+            logger.debug(
+                "RRG匹配完成: index=%s date=%s selected=%d matched=%s total=%s score=%s coverage=%s",
+                index_code,
+                trade_date,
+                len(selected),
+                matched,
+                total,
+                result[trade_date].numeric,
+                meta.get("industry_coverage"),
             )
         return result

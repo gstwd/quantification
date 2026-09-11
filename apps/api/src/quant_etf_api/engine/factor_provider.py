@@ -357,8 +357,7 @@ class FactorProvider:
                 # 仅扩散因子不依赖行业面板；避免为其重建无关的 RRG 行业选择，
                 # 既减少回测成本，也避免行业数据缺口干扰扩散因子的诊断。
                 include_industry_panels=needs_industry_panels,
-                # 回测必须从原始历史行业数据重建选择信号，不能依赖只物化近期的
-                # industry_factor_value，否则 RRG 匹配因子在历史区间会全部为空。
+                # 回测与实时均从原始历史行业数据重建选择信号，保证计算口径一致。
                 calculate_industry_selection=needs_industry_panels,
             )
 

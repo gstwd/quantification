@@ -29,7 +29,7 @@ DEFAULT_INDEX_FACTOR_USAGE = [USAGE_TIMING, USAGE_SCORE, USAGE_FILTER, USAGE_RAN
 def factor_params_hash(params: dict[str, Any]) -> str:
     """计算因子参数指纹（规范化 JSON 的 sha256）。
 
-    用于参数化因子值表（index_factor_value / industry_factor_value）区分
+    用于参数化因子值表（index_factor_value）区分
     不同参数组合，避免同 factor_id 不同参数互相覆盖。
 
     Args:
