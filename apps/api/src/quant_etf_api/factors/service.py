@@ -305,39 +305,6 @@ class FactorService:
         )
         return [_row_to_factor_row(r) for r in rows]
 
-    def factor_history(
-        self,
-        factor_id: str,
-        index_code: str,
-        start_date: date,
-        end_date: date,
-    ) -> list[FactorRow]:
-        """查询单因子在单指数上的时间序列。
-
-        仅返回独立因子值（strategy_id IS NULL）。
-
-        Args:
-            factor_id: 因子标识。
-            index_code: 指数代码。
-            start_date: 开始日期（含）。
-            end_date: 截止日期（含）。
-
-        Returns:
-            按 trade_date 升序排列的 FactorRow 列表。
-        """
-        try:
-            rows = self._index_repo.find_factor_values(
-                factor_id,
-                index_code,
-                start_date,
-                end_date,
-                params_hash=self._default_params_hash(factor_id),
-            )
-            return [_row_to_factor_row(r) for r in rows]
-        except Exception:
-            logger.warning("factor_history 查询失败", exc_info=True)
-            return []
-
     # ==================================================================
     # 内部方法
     # ==================================================================
