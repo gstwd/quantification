@@ -1,8 +1,8 @@
 """因子计算编排与持久化（基于指数数据）。
 
 负责以下职责：
-1. 批量加载 90 天回望的指数上下文数据
-2. 对全量指数 × 全量已启用因子调用 compute()
+1. 按本次因子集合批量加载指数回望上下文数据
+2. 对全量指数 × 指定的已启用因子调用 compute()
 3. 使用 PostgreSQL partial index ON CONFLICT upsert 写入 index_factor_value
 4. 提供横截面和时间序列查询，支持按需自动计算缺失数据
 
@@ -35,24 +35,40 @@ from quant_etf_api.schemas.factor import CrossSectionRow
 from quant_etf_api.schemas.signal import FactorRow
 
 if TYPE_CHECKING:
+    from quant_etf_api.factors.base import FactorComputer
     from quant_etf_api.factors.registry import FactorRegistry
 
 logger = logging.getLogger(__name__)
 
 # 指数扩散的 160 日均线、150 日快线与 25 日慢线需要 333 个连续交易日（含目标日）。
 _PANEL_FACTOR_WINDOW_DAYS = 333
-def _get_max_lookback_days(registry: "FactorRegistry") -> int:
-    """从注册表中获取所有因子所需的最大回望自然日数。
 
-    统一委托 factors.registry.max_lookback_days，保证实时与回测口径一致。
+_PANEL_DATA_NAMES = {
+    "index_membership",
+    "stock_closes",
+    "industry_selection",
+    "index_industry_exposure",
+}
+
+
+def _get_max_lookback_days(
+    registry: "FactorRegistry", computers: list["FactorComputer"] | None = None
+) -> int:
+    """获取本次计算所需的最大回望自然日数。
+
+    未指定因子集合时委托 factors.registry.max_lookback_days，保证全量后台计算
+    与回测口径一致；按需计算时只根据实际因子收敛窗口。
 
     Args:
         registry: 因子注册表。
+        computers: 本次实际计算的因子；不传时使用注册表中的全部因子。
 
     Returns:
         最大回望自然日数。
     """
-    return max_lookback_days(registry)
+    if computers is None:
+        return max_lookback_days(registry)
+    return max((computer.spec.lookback_days for computer in computers), default=90)
 
 
 class FactorService:
@@ -79,8 +95,17 @@ class FactorService:
     # 公开接口
     # ==================================================================
 
-    def compute_and_store(self, trade_date: date) -> dict[str, Any]:
-        """计算指定交易日全量指数 × 全量已启用因子并写入 DB。
+    def compute_and_store(
+        self,
+        trade_date: date,
+        factor_ids: set[str] | None = None,
+        index_code: str | None = None,
+    ) -> dict[str, Any]:
+        """计算指定交易日的指数因子并写入 DB。
+
+        未指定 ``factor_ids`` 时保持后台任务的全量计算行为；指定后只计算其中
+        已启用且已注册的因子，供单因子查询按需补算，避免无关因子和面板被触发。
+        指定 ``index_code`` 时只计算该指数，供单指数时间序列补算，避免遍历其他指数。
 
         执行流程：
         1. 查询 benchmark_index 中所有指数
@@ -90,29 +115,35 @@ class FactorService:
 
         Args:
             trade_date: 要计算的交易日。
+            factor_ids: 可选的目标因子集合；不传时计算全部已启用因子。
+            index_code: 可选的目标指数代码；不传时计算全部启用指数。
 
         Returns:
             汇总统计字典，包含 index_count / factor_count / upsert_count / errors。
         """
-        indexes = (
-            self._db.query(BenchmarkIndexModel)
-            .filter(BenchmarkIndexModel.is_active.is_(True))
-            .order_by(BenchmarkIndexModel.index_code)
-            .all()
+        index_query = self._db.query(BenchmarkIndexModel).filter(
+            BenchmarkIndexModel.is_active.is_(True)
         )
+        if index_code is not None:
+            index_query = index_query.filter(BenchmarkIndexModel.index_code == index_code)
+        indexes = index_query.order_by(BenchmarkIndexModel.index_code).all()
         if not indexes:
             logger.warning("compute_and_store: 无指数，跳过因子计算")
             return {"index_count": 0, "factor_count": 0, "upsert_count": 0, "errors": 0}
 
         index_codes = [idx.index_code for idx in indexes]
         active_ids = {d.factor_id for d in self._repo.find_active()}
-        computers = [c for c in self._registry.all() if c.spec.factor_id in active_ids]
+        target_ids = active_ids if factor_ids is None else active_ids & factor_ids
+        computers = [c for c in self._registry.all() if c.spec.factor_id in target_ids]
 
         if not computers:
             logger.warning("compute_and_store: 无已启用的因子，跳过计算")
             return {"index_count": len(indexes), "factor_count": 0, "upsert_count": 0, "errors": 0}
 
-        include_composite_panels = any(computer.spec.required_data for computer in computers)
+        include_composite_panels = any(
+            _PANEL_DATA_NAMES.intersection(computer.spec.required_data)
+            for computer in computers
+        )
         panel_dates = (
             self._panel_calculation_dates(trade_date) if include_composite_panels else [trade_date]
         )
@@ -121,6 +152,7 @@ class FactorService:
             index_codes,
             panel_dates=panel_dates,
             include_composite_panels=include_composite_panels,
+            computers=computers,
         )
 
         builtin_rows: list[dict] = []
@@ -229,7 +261,7 @@ class FactorService:
             target_date = target_date or self._index_repo.find_latest_bar_date()
             if target_date is None:
                 raise ValueError("无任何指数行情数据，无法计算因子")
-            self.compute_and_store(target_date)
+            self.compute_and_store(target_date, factor_ids={factor_id})
 
         rows = self._index_repo.find_cross_section(
             factor_id, target_date, params_hash=params_hash
@@ -272,7 +304,7 @@ class FactorService:
             )
 
         for d in dates_to_compute:
-            self.compute_and_store(d)
+            self.compute_and_store(d, factor_ids={factor_id}, index_code=index_code)
 
         rows = self._index_repo.find_factor_values(
             factor_id,
@@ -293,6 +325,7 @@ class FactorService:
         index_codes: list[str],
         panel_dates: list[date] | None = None,
         include_composite_panels: bool = True,
+        computers: list["FactorComputer"] | None = None,
     ) -> FactorContext:
         """批量加载回望数据，构建 FactorContext。
 
@@ -303,11 +336,13 @@ class FactorService:
             index_codes: 指数代码列表。
             panel_dates: 复合因子的连续交易日计算轴；仅后台计算路径传入。
             include_composite_panels: 是否装配成分股、行业归属等高成本复合因子面板。
+            computers: 本次实际计算的因子；用于限制回望窗口和面板装配范围。
 
         Returns:
             填充了 index_bars / index_valuation / macro_indicators 的 FactorContext。
         """
-        lookback_days = _get_max_lookback_days(self._registry)
+        selected_computers = computers or self._registry.all()
+        lookback_days = _get_max_lookback_days(self._registry, selected_computers)
         lookback_start = trade_date - timedelta(days=lookback_days)
 
         # 加载指数日线
@@ -349,15 +384,10 @@ class FactorService:
         # industry_selection 等面板的因子时，由装配服务按当日注入
         panel_factor_ids = {
             computer.spec.factor_id
-            for computer in self._registry.all()
+            for computer in selected_computers
             if any(
                 name
-                in {
-                    "index_membership",
-                    "stock_closes",
-                    "industry_selection",
-                    "index_industry_exposure",
-                }
+                in _PANEL_DATA_NAMES
                 for name in computer.spec.required_data
             )
         }
