@@ -7,12 +7,13 @@ import json
 from enum import Enum
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 
 # 值形态：决定因子值在实时/回测中的加载与预计算方式。
 VALUE_SHAPE_ASSET = "asset"  # 每资产一个独立值（如 return_20d）
 VALUE_SHAPE_MARKET = "market"  # 市场级单一值（如市场宽度）
+ValueShape = Literal["asset", "market"]
 
 # 适用位置（usage）：因子允许被策略管线中的哪些模块消费。
 USAGE_TIMING = "timing"
@@ -91,9 +92,14 @@ class FactorSpec:
     required_data: list[str] = field(default_factory=list)
     lookback_days: int = 90
     market_scope: bool = False
-    value_shape: str = VALUE_SHAPE_ASSET
+    value_shape: ValueShape = VALUE_SHAPE_ASSET
     usage: list[str] = field(default_factory=lambda: list(DEFAULT_INDEX_FACTOR_USAGE))
     default_params: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """校验因子值形态仅允许每资产值或市场级值。"""
+        if self.value_shape not in (VALUE_SHAPE_ASSET, VALUE_SHAPE_MARKET):
+            raise ValueError("value_shape 必须是 asset 或 market")
 
 
 @dataclass

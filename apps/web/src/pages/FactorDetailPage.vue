@@ -26,7 +26,7 @@
         <div class="meta-row">
           <span class="meta-label">值形态 / 适用位置</span>
           <span class="meta-val">
-            {{ { asset: '每资产', market: '市场级', panel: '面板' }[spec.value_shape ?? 'asset'] ?? spec.value_shape }}
+            {{ { asset: '每资产', market: '市场级' }[spec.value_shape ?? 'asset'] ?? spec.value_shape }}
             · {{ (spec.usage ?? []).join(' / ') || '未声明' }}
           </span>
         </div>

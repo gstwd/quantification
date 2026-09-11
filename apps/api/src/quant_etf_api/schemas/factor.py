@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -28,7 +30,7 @@ class FactorSpecResponse(BaseModel):
     description: str
     required_data: list[str]
     is_active: bool
-    value_shape: str = "asset"
+    value_shape: Literal["asset", "market"] = "asset"
     usage: list[str] = Field(default_factory=list)
     default_params: dict | None = None
 

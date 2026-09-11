@@ -160,11 +160,10 @@ alembic upgrade head
 uvicorn quant_etf_api.main:app --reload --port 8000
 ```
 
-首次部署后同步因子与指数种子数据：
+首次部署后同步因子定义。指数通过数据库迁移初始化，后续通过页面或 API 添加：
 
 ```bash
 python -m quant_etf_api.cli init-factors
-python -m quant_etf_api.cli init-indexes
 ```
 
 ### 前端

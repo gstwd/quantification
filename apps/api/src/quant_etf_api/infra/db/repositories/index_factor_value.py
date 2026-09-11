@@ -83,6 +83,7 @@ class IndexFactorValueRepository(BaseRepository):
                 IndexFactorValueModel.factor_id == factor_id,
                 IndexFactorValueModel.trade_date == trade_date,
                 IndexFactorValueModel.strategy_id.is_(None),
+                BenchmarkIndexModel.is_active.is_(True),
             )
         )
         if params_hash is not None:

@@ -288,7 +288,7 @@ import type { IndexDetail } from '@/types/api'
   研究页=独立实验、只共享只读数据。新因子必须遵循
   [`docs/architecture/因子研发与集成指引.md`](architecture/因子研发与集成指引.md)。
 - **元数据三轴必填**：每个 `FactorSpec`/`factor_definition` 必须声明
-  `value_shape`（asset/market/panel）、
+  `value_shape`（asset/market）、
   `usage`（timing/score/filter/rank/rotation_input）；参数化因子必须声明
   `default_params` 并在值表携带 `params_hash`。
 - **位置限制生效**：配置校验按 usage 拒绝错位引用；

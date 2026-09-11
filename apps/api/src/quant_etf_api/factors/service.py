@@ -97,7 +97,12 @@ class FactorService:
         Returns:
             汇总统计字典，包含 index_count / factor_count / upsert_count / errors。
         """
-        indexes = self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
+        indexes = (
+            self._db.query(BenchmarkIndexModel)
+            .filter(BenchmarkIndexModel.is_active.is_(True))
+            .order_by(BenchmarkIndexModel.index_code)
+            .all()
+        )
         if not indexes:
             logger.warning("compute_and_store: 无指数，跳过因子计算")
             return {"index_count": 0, "factor_count": 0, "upsert_count": 0, "errors": 0}

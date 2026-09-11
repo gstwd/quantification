@@ -7,6 +7,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -113,6 +114,12 @@ class SourcePayloadLogModel(Base):
 
 class FactorDefinitionModel(Base):
     __tablename__ = "factor_definition"
+    __table_args__ = (
+        CheckConstraint(
+            "value_shape IN ('asset', 'market')",
+            name="ck_factor_definition_value_shape",
+        ),
+    )
 
     factor_id: Mapped[str] = mapped_column(
         String(64), primary_key=True, comment="因子唯一标识，如 volume_ratio_20d"
@@ -134,7 +141,7 @@ class FactorDefinitionModel(Base):
         nullable=False,
         default="asset",
         server_default="asset",
-        comment="因子值形态：asset=每资产值，market=市场级值，panel=面板值",
+        comment="因子值形态：asset=每资产值，market=市场级值",
     )
     usage: Mapped[list | None] = mapped_column(
         JSON,

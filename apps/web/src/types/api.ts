@@ -545,7 +545,7 @@ export interface FactorSpec {
   required_data: string[]
   is_active: boolean
   /** 因子值形态：asset/market */
-  value_shape?: string
+  value_shape?: 'asset' | 'market'
   /** 适用位置：timing/score/filter/rank */
   usage?: string[]
   /** 因子默认参数（参数化因子） */
