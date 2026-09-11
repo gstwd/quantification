@@ -46,13 +46,14 @@
           <span class="card-title">横截面快照</span>
           <span v-if="crossDate" class="card-subtitle">数据日期：{{ crossDate }}</span>
           <div class="controls">
-            <input type="date" class="date-input" v-model="crossDateInput" />
+            <input type="date" class="date-input" v-model="crossDateInput" :max="todayCn()" />
             <button class="query-btn" @click="loadCrossByDate">指定日期查询</button>
             <button class="recompute-btn" :disabled="crossLoading" @click="loadCross(true)">
               {{ crossLoading ? '计算中...' : '强制重新计算' }}
             </button>
           </div>
         </div>
+        <p v-if="crossDateError" class="error-text">{{ crossDateError }}</p>
         <details class="info-block">
           <summary>查看说明</summary>
           <p><strong>横截面快照</strong>是某一天所有指数的因子值截面，按因子值降序排列。因子值越高，表示该因子维度上信号越强。</p>
@@ -251,6 +252,7 @@ const crossDate = ref('')
 const crossDateInput = ref('')
 const crossRows = ref<CrossSectionRow[]>([])
 const crossLoading = ref(false)
+const crossDateError = ref('')
 
 /** 时间序列状态 */
 const seriesIndex = ref('')
@@ -316,6 +318,7 @@ function barWidth(val: number | null): number {
 
 /** 加载横截面数据（默认最新日期），按因子值降序排列 */
 async function loadCross(forceRecompute = false) {
+  crossDateError.value = ''
   crossLoading.value = true
   try {
     const resp = await fetchFactorCrossSection(props.factorId, undefined, forceRecompute)
@@ -334,6 +337,11 @@ async function loadCross(forceRecompute = false) {
 /** 按指定日期加载横截面 */
 async function loadCrossByDate() {
   if (!crossDateInput.value) return
+  if (crossDateInput.value > todayCn()) {
+    crossDateError.value = '不能查询未来日期，请选择今天或之前的日期'
+    return
+  }
+  crossDateError.value = ''
   crossLoading.value = true
   try {
     const resp = await fetchFactorCrossSection(props.factorId, crossDateInput.value)
@@ -674,6 +682,7 @@ onUnmounted(() => {
 .card-subtitle { font-size: 12px; color: var(--text-muted); }
 
 .controls { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+.error-text { margin: -8px 0 12px; color: var(--danger, #d14343); font-size: 13px; }
 
 .date-input {
   background: var(--surface-2, rgba(255,255,255,0.05));

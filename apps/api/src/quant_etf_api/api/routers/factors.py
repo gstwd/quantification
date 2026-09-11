@@ -12,6 +12,7 @@ from quant_etf_api.api.deps import get_db, get_factor_registry
 from quant_etf_api.factors.registry import FactorRegistry
 from quant_etf_api.factors.service import FactorService
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
+from quant_etf_api.infra.time import today_cn
 from quant_etf_api.factors.evaluation import (
     calc_factor_correlation_matrix,
 )
@@ -141,8 +142,14 @@ def factor_cross_section(
     设置 force_recompute=True 时强制重新计算并覆盖已有数据。
     """
     svc = FactorService(db, registry)
+    if trade_date is not None and trade_date > today_cn():
+        raise HTTPException(status_code=422, detail="不能查询未来日期")
     try:
-        result_date, rows = svc.get_or_compute_cross_section(factor_id, force_recompute)
+        result_date, rows = svc.get_or_compute_cross_section(
+            factor_id,
+            trade_date=trade_date,
+            force_recompute=force_recompute,
+        )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from None
 

@@ -200,12 +200,16 @@ class FactorService:
         }
 
     def get_or_compute_cross_section(
-        self, factor_id: str, force_recompute: bool = False
+        self,
+        factor_id: str,
+        force_recompute: bool = False,
+        trade_date: date | None = None,
     ) -> tuple[date, list[CrossSectionRow]]:
-        """获取指定因子的横截面数据，自动选择最新日期并按需计算。
+        """获取指定因子的横截面数据，按指定日期查询或自动选择最新日期。
 
         Args:
             factor_id: 因子标识。
+            trade_date: 指定交易日；不传时自动选择最新有数据的日期。
             force_recompute: 是否强制重新计算，覆盖已有数据。
 
         Returns:
@@ -215,22 +219,32 @@ class FactorService:
             ValueError: 无任何行情数据时抛出。
         """
         params_hash = self._default_params_hash(factor_id)
-        latest = self._index_repo.find_latest_date(factor_id, params_hash=params_hash)
+        target_date = trade_date or self._index_repo.find_latest_date(
+            factor_id, params_hash=params_hash
+        )
+        existing_rows = (
+            self._index_repo.find_cross_section(
+                factor_id, target_date, params_hash=params_hash
+            )
+            if target_date is not None
+            else []
+        )
 
         if factor_id in _BACKGROUND_ONLY_FACTOR_IDS:
-            if force_recompute or latest is None:
-                self._enqueue_latest_factor_computation()
-            if latest is None:
+            if force_recompute or not existing_rows:
+                self._enqueue_factor_computation(target_date)
+            if target_date is None or not existing_rows:
                 raise ValueError("复合因子尚未由后台任务计算，请稍后重试")
-        elif latest is None or force_recompute:
-            bar_latest = self._index_repo.find_latest_bar_date()
-            if bar_latest is None:
+        elif target_date is None or force_recompute or not existing_rows:
+            target_date = target_date or self._index_repo.find_latest_bar_date()
+            if target_date is None:
                 raise ValueError("无任何指数行情数据，无法计算因子")
-            self.compute_and_store(bar_latest)
-            latest = bar_latest
+            self.compute_and_store(target_date)
 
-        rows = self._index_repo.find_cross_section(factor_id, latest, params_hash=params_hash)
-        return latest, [
+        rows = self._index_repo.find_cross_section(
+            factor_id, target_date, params_hash=params_hash
+        )
+        return target_date, [
             CrossSectionRow(
                 index_code=r[0],
                 name_cn=r[1],
@@ -262,7 +276,7 @@ class FactorService:
         """
         if factor_id in _BACKGROUND_ONLY_FACTOR_IDS:
             if force_recompute:
-                self._enqueue_latest_factor_computation()
+                self._enqueue_factor_computation()
             rows = self._index_repo.find_factor_values(
                 factor_id,
                 index_code,
@@ -445,17 +459,17 @@ class FactorService:
         )
         return dates[-_PANEL_FACTOR_WINDOW_DAYS:]
 
-    def _enqueue_latest_factor_computation(self) -> None:
-        """将最新日全量因子计算入队，避免复合因子在请求线程加载大面板。"""
-        latest = self._index_repo.find_latest_bar_date()
-        if latest is None:
+    def _enqueue_factor_computation(self, trade_date: date | None = None) -> None:
+        """将指定日期的全量因子计算入队，避免复合因子阻塞请求线程。"""
+        target_date = trade_date or self._index_repo.find_latest_bar_date()
+        if target_date is None:
             return
         from quant_etf_api.infra.job_queue.queue import get_job_queue
 
         get_job_queue().enqueue(
             "factor_computation",
-            {"trade_date": latest.isoformat()},
-            job_key=f"factor_computation:{latest.isoformat()}",
+            {"trade_date": target_date.isoformat()},
+            job_key=f"factor_computation:{target_date.isoformat()}",
         )
 
 
