@@ -16,12 +16,14 @@ from quant_etf_api.infra.clients.stock_close_client import (
 from quant_etf_api.infra.clients.stock_metadata_client import StockMetadataClient
 from quant_etf_api.infra.clients.tushare_market import TushareStockClient
 from quant_etf_api.infra.db.base import utcnow
+from quant_etf_api.infra.db.models.core import DataHealthSnapshotModel
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
     IndustryMembershipEventRepository,
     IndustryUniverseRepository,
     StockDailyCloseRepository,
 )
+from quant_etf_api.infra.db.repositories.data_health import DataHealthSnapshotRepository
 from quant_etf_api.infra.db.repositories.stock import StockUniverseRepository
 from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.infra.time import today_cn
@@ -51,6 +53,7 @@ class StockDataService:
         """
         self._db = db
         self._universe_repo = StockUniverseRepository(db)
+        self._health_repo = DataHealthSnapshotRepository(db)
         self._close_repo = StockDailyCloseRepository(db)
         self._membership_repo = IndustryMembershipEventRepository(db)
         self._bar_repo = IndustryDailyBarRepository(db)
@@ -292,32 +295,43 @@ class StockDataService:
         }
 
     def _persist_quality_snapshots(self, snapshots: list[dict[str, Any]]) -> None:
-        """把质量快照批量写回 stock_universe 质量列。"""
+        """把个股质量快照批量写入统一健康快照表。"""
         if not snapshots:
             return
-        rows = [
-            {
-                "stock_code": snap["stock_code"],
-                "data_start_date": snap["data_start_date"],
-                "data_end_date": snap["data_end_date"],
-                "bar_count": snap["bar_count"],
-                "missing_day_count": snap["missing_day_count"],
-                "quality_checked_at": utcnow(),
-                "updated_at": utcnow(),
-            }
-            for snap in snapshots
-        ]
-        self._universe_repo.bulk_upsert(
-            rows,
-            update_cols={
-                "data_start_date",
-                "data_end_date",
-                "bar_count",
-                "missing_day_count",
-                "quality_checked_at",
-                "updated_at",
-            },
-        )
+        expected_date = self._latest_trading_day()
+        for snapshot in snapshots:
+            row = self._health_repo.find_one(
+                "stock_daily_close", snapshot["stock_code"]
+            )
+            if row is None:
+                row = DataHealthSnapshotModel(
+                    dataset_key="stock_daily_close",
+                    partition_key=snapshot["stock_code"],
+                )
+                self._db.add(row)
+            stock_row = self._universe_repo.find_by_code(snapshot["stock_code"])
+            row.partition_name = stock_row.name_cn if stock_row is not None else snapshot["stock_code"]
+            row.health_status = (
+                "error"
+                if not snapshot["bar_count"]
+                else "warning"
+                if snapshot["missing_day_count"]
+                else "healthy"
+            )
+            row.earliest_date = snapshot["data_start_date"]
+            row.latest_date = snapshot["data_end_date"]
+            row.expected_date = expected_date
+            row.record_count = snapshot["bar_count"]
+            row.missing_count = snapshot["missing_day_count"] or 0
+            row.invalid_count = 0
+            row.issue_summary = (
+                {"missing_count": snapshot["missing_day_count"]}
+                if snapshot["missing_day_count"]
+                else None
+            )
+            row.last_checked_at = utcnow()
+            row.last_run_status = "success"
+            row.last_success_at = row.last_checked_at
 
     # ------------------------------------------------------------------
     # 数据拉取与补全
@@ -350,6 +364,9 @@ class StockDataService:
             industry_code=industry_code,
             status=status,
         )
+        health = self._health_repo.find_by_dataset_and_partitions(
+            "stock_daily_close", [row.stock_code for row in rows]
+        )
         industry_names = {
             row.industry_code: row.name_cn for row in self._industry_repo.find_all_active()
         }
@@ -362,11 +379,21 @@ class StockDataService:
                 ipo_date=row.ipo_date,
                 delist_date=row.delist_date,
                 is_active=row.is_active,
-                data_start_date=row.data_start_date,
-                data_end_date=row.data_end_date,
-                bar_count=row.bar_count,
-                missing_day_count=row.missing_day_count,
-                quality_checked_at=row.quality_checked_at,
+                data_start_date=health.get(row.stock_code).earliest_date
+                if health.get(row.stock_code)
+                else None,
+                data_end_date=health.get(row.stock_code).latest_date
+                if health.get(row.stock_code)
+                else None,
+                bar_count=health.get(row.stock_code).record_count
+                if health.get(row.stock_code)
+                else None,
+                missing_day_count=health.get(row.stock_code).missing_count
+                if health.get(row.stock_code)
+                else None,
+                quality_checked_at=health.get(row.stock_code).last_checked_at
+                if health.get(row.stock_code)
+                else None,
             )
             for row in rows
         ]

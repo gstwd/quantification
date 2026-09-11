@@ -3,6 +3,7 @@ from __future__ import annotations
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
 from quant_etf_api.infra.db.repositories.base import BaseRepository
 from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
+from quant_etf_api.infra.db.repositories.data_health import DataHealthSnapshotRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.infra.db.repositories.index_factor_value import IndexFactorValueRepository
 from quant_etf_api.infra.db.repositories.index_signal import IndexSignalRepository
@@ -14,6 +15,7 @@ __all__ = [
     "BacktestRepository",
     "BaseRepository",
     "BenchmarkIndexRepository",
+    "DataHealthSnapshotRepository",
     "IndexDailyBarRepository",
     "IndexFactorValueRepository",
     "IndexSignalRepository",

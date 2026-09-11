@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import date
 from typing import Any
 
 from sqlalchemy import func, or_
@@ -102,7 +101,3 @@ class StockUniverseRepository(BaseRepository):
                 )
             self._db.execute(stmt)
         return len(rows)
-
-    def latest_data_date(self) -> date | None:
-        """查询个股质量快照中最新的 data_end_date（用于总览展示）。"""
-        return self._db.query(func.max(StockUniverseModel.data_end_date)).scalar()

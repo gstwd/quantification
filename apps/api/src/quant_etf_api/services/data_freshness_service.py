@@ -20,6 +20,7 @@ from quant_etf_api.infra.db.models.industry import (
 )
 from quant_etf_api.infra.db.models.stock import StockUniverseModel
 from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
+from quant_etf_api.infra.db.repositories.data_health import DataHealthSnapshotRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
 from quant_etf_api.infra.time import today_cn
@@ -36,6 +37,7 @@ class DataFreshnessService:
             db: SQLAlchemy 同步 Session。
         """
         self._db = db
+        self._health_repo = DataHealthSnapshotRepository(db)
         self._index_bar_repo = IndexDailyBarRepository(db)
         self._valuation_repo = IndexValuationRepository(db)
         self._index_repo = BenchmarkIndexRepository(db)
@@ -126,16 +128,20 @@ class DataFreshnessService:
             "latest_date": str(idx_val_latest) if idx_val_latest else None,
         }
 
-        # --- 个股日线（基于 stock_universe 质量快照聚合） ---
+        # --- 个股日线（基于统一数据健康快照） ---
         stock_rows = self._db.query(StockUniverseModel).all()
+        stock_health = self._health_repo.find_by_dataset_and_partitions(
+            "stock_daily_close", [stock.stock_code for stock in stock_rows]
+        )
         stock_stale: list[dict[str, Any]] = []
         stock_missing: list[dict[str, Any]] = []
         for stock in stock_rows:
+            health = stock_health.get(stock.stock_code)
             if (
-                stock.quality_checked_at is None
-                or stock.bar_count is None
-                or stock.bar_count == 0
-                or stock.data_end_date is None
+                health is None
+                or health.last_checked_at is None
+                or health.record_count == 0
+                or health.latest_date is None
             ):
                 stock_missing.append(
                     {
@@ -146,12 +152,12 @@ class DataFreshnessService:
                     }
                 )
                 continue
-            if stock.data_end_date < stale_threshold:
+            if health.latest_date < stale_threshold:
                 stock_stale.append(
                     {
                         "code": stock.stock_code,
                         "name": stock.name_cn,
-                        "latest_date": str(stock.data_end_date),
+                        "latest_date": str(health.latest_date),
                         "is_stale": True,
                     }
                 )

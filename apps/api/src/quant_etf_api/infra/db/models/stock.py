@@ -1,11 +1,11 @@
-"""个股元数据模型（个股目录 + 日线质量快照）。"""
+"""个股元数据模型（仅保存个股目录）。"""
 
 from __future__ import annotations
 
 from datetime import date, datetime
 
 import sqlalchemy as sa
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from quant_etf_api.infra.db.base import Base, utcnow
@@ -14,9 +14,8 @@ from quant_etf_api.infra.db.base import Base, utcnow
 class StockUniverseModel(Base):
     """个股元数据表，对标 benchmark_index 与 index_daily_bar 的关系。
 
-    stock_universe 存放个股目录（代码/名称/申万行业/上市与退市状态）以及由
-    “数据质量检查”刷新维护的日线质量快照；行情明细仍在 stock_daily_close，
-    本表不改动其列结构。
+    stock_universe 仅存放个股目录（代码/名称/申万行业/上市与退市状态）；
+    行情明细与质量快照分别存放在 stock_daily_close 和 data_health_snapshot。
     """
 
     __tablename__ = "stock_universe"
@@ -43,21 +42,6 @@ class StockUniverseModel(Base):
     )
     source: Mapped[str | None] = mapped_column(
         String(32), nullable=True, comment="元数据来源，如 akshare_exchange"
-    )
-    data_start_date: Mapped[date | None] = mapped_column(
-        Date, nullable=True, comment="库内日线最早日期（质量快照）"
-    )
-    data_end_date: Mapped[date | None] = mapped_column(
-        Date, nullable=True, comment="库内日线最晚日期（质量快照）"
-    )
-    bar_count: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, comment="库内日线行数（质量快照）"
-    )
-    missing_day_count: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, comment="按交易日历校验的缺失交易日数（质量快照）"
-    )
-    quality_checked_at: Mapped[datetime | None] = mapped_column(
-        DateTime, nullable=True, comment="最近一次数据质量检查时间（UTC）"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, comment="记录创建时间（UTC）"
