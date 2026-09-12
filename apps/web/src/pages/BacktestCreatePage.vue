@@ -31,10 +31,13 @@
       <div class="form-section">
         <label class="form-label">数据质量</label>
         <select v-model="form.data_quality_mode" class="form-select">
-          <option value="warn">警告并继续（默认）</option>
-          <option value="strict">严格排除缺失资产</option>
+          <option value="warn">缺口汇总提示（默认）</option>
+          <option value="strict">缺口逐指数提示</option>
         </select>
-        <div class="form-hint">严格模式不会前值填充，缺失因子或必要行情会使指数退出当日组合。</div>
+        <div class="form-hint">
+          两种口径都使用同一"当日可执行候选池"（缺失因子或必要行情的指数退出当日组合），
+          选股与绩效结果完全一致，仅数据缺口提示的详细程度不同。
+        </div>
       </div>
 
       <div class="form-section">

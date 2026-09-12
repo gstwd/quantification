@@ -155,10 +155,12 @@
       <div class="form-section">
         <label class="form-label">数据质量</label>
         <select v-model="form.data_quality_mode" class="form-select">
-          <option value="warn">警告并继续（默认）</option>
-          <option value="strict">严格排除缺失资产</option>
+          <option value="warn">缺口汇总提示（默认）</option>
+          <option value="strict">缺口逐指数提示</option>
         </select>
-        <div class="form-hint">严格模式可能减少当日可选资产并改变组合暴露。</div>
+        <div class="form-hint">
+          A/B 两个子回测使用同一候选池口径；该选项只影响数据缺口提示的详细程度，不影响绩效差异。
+        </div>
       </div>
 
       <!-- 基准对比 -->

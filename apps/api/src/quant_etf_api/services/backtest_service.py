@@ -566,8 +566,10 @@ class BacktestService:
         last_rebalance_date: date | None = None
         # 数据缺口天数：至少一个持仓资产当日收益受缺失行情影响的交易日数（B10）
         data_gap_days = 0
-        strict_exclusion_dates: dict[str, list[date]] = {}
-        strict_exclusion_reasons: dict[str, set[str]] = {}
+        # 数据缺口剔除记录：两种数据质量口径共用同一候选池，因此剔除集合一致，
+        # 仅提示详细程度不同（strict 逐指数、warn 汇总）
+        exclusion_dates: dict[str, list[date]] = {}
+        exclusion_reasons: dict[str, set[str]] = {}
         # 进度跟踪：每完成约 10% 交易日写一次进度
         last_progress = 0
         total_dates = len(trading_dates)
@@ -589,16 +591,18 @@ class BacktestService:
 
             execution_model = params.get("_execution_model", "t_plus_1_open")
             data_quality_mode = params.get("_data_quality_mode", "warn")
-            day_codes = index_codes
-            if data_quality_mode == "strict":
-                day_codes, day_exclusion_reasons = self._strict_eligible_codes(
-                    config, trade_date, next_date, index_codes, all_bars, day_factors, execution_model
+            # 口径统一：候选池与 data_quality_mode 无关，两种模式都使用"当日可执行
+            # 候选池"。宽松模式此前把所有标的（含无法交易/因子缺失的标的）放进
+            # 横截面 z-score 池，会改变统计量进而改变选股结果——同一配置在两种
+            # 口径下得到完全不同的组合与收益，这是需要消除的口径分叉。
+            day_codes, day_exclusion_reasons = self._build_candidate_pool(
+                config, trade_date, next_date, index_codes, all_bars, day_factors, execution_model
+            )
+            for excluded_code in set(index_codes) - set(day_codes):
+                exclusion_dates.setdefault(excluded_code, []).append(trade_date)
+                exclusion_reasons.setdefault(excluded_code, set()).update(
+                    day_exclusion_reasons.get(excluded_code, {"DATA_EXCLUDED"})
                 )
-                for excluded_code in set(index_codes) - set(day_codes):
-                    strict_exclusion_dates.setdefault(excluded_code, []).append(trade_date)
-                    strict_exclusion_reasons.setdefault(excluded_code, set()).update(
-                        day_exclusion_reasons.get(excluded_code, {"DATA_EXCLUDED"})
-                    )
             day_universe = build_universe_items(
                 [{"index_code": c, "name_cn": c} for c in day_codes]
             )
@@ -832,28 +836,44 @@ class BacktestService:
             len(run_warnings),
             perf_counter() - missing_factor_started,
         )
-        if data_quality_mode == "strict":
-            strict_warning_started = perf_counter()
-            for code, excluded_dates in list(strict_exclusion_dates.items())[:5]:
+        if exclusion_dates:
+            exclusion_warning_started = perf_counter()
+            excluded_days_total = sum(len(dates) for dates in exclusion_dates.values())
+            if data_quality_mode == "strict":
+                for code, dates in list(exclusion_dates.items())[:5]:
+                    run_warnings.append(
+                        BacktestWarning(
+                            level="warning",
+                            code="DATA_EXCLUDED",
+                            message=(
+                                f"数据缺口剔除指数 {code} {len(dates)} 个交易日，"
+                                f"范围 {dates[0]}~{dates[-1]}；"
+                                f"原因：{','.join(sorted(exclusion_reasons.get(code, set())))}"
+                            ),
+                            index_code=code,
+                        )
+                    )
+            else:
+                # 宽松口径：决策与严格口径一致，仅把逐指数明细压缩为一条汇总提示
                 run_warnings.append(
                     BacktestWarning(
                         level="warning",
                         code="DATA_EXCLUDED",
                         message=(
-                            f"严格数据质量模式排除指数 {code} {len(excluded_dates)} 个交易日，"
-                            f"范围 {excluded_dates[0]}~{excluded_dates[-1]}；"
-                            f"原因：{','.join(sorted(strict_exclusion_reasons.get(code, set())))}"
+                            f"数据缺口剔除 {len(exclusion_dates)} 个指数、"
+                            f"合计 {excluded_days_total} 个交易日（候选池口径与严格模式一致，"
+                            "切换严格模式可查看逐指数明细）"
                         ),
-                        index_code=code,
                     )
                 )
             logger.info(
-                "[backtest] 严格模式告警完成: backtest_id=%s excluded_indexes=%s "
+                "[backtest] 数据缺口剔除告警完成: backtest_id=%s mode=%s excluded_indexes=%s "
                 "warnings=%s 耗时=%.3fs",
                 backtest_id,
-                len(strict_exclusion_dates),
+                data_quality_mode,
+                len(exclusion_dates),
                 len(run_warnings),
-                perf_counter() - strict_warning_started,
+                perf_counter() - exclusion_warning_started,
             )
         data_gap_started = perf_counter()
         run_warnings.extend(
@@ -1063,7 +1083,7 @@ class BacktestService:
 
     # ── 调仓检查 ───────────────────────────────────────────────────────────
 
-    def _strict_eligible_codes(
+    def _build_candidate_pool(
         self,
         config: StrategyConfig,
         trade_date: date,
@@ -1073,7 +1093,20 @@ class BacktestService:
         day_factors: dict[tuple[str, str], float | None],
         execution_model: str,
     ) -> tuple[list[str], dict[str, set[str]]]:
-        """按执行模型和因子值筛选当日严格模式可用指数。
+        """构建当日"可执行候选池"（横截面评分/排名/过滤与收益口径的唯一入口）。
+
+        该候选池与 `data_quality_mode` 无关：两种口径都用同一池子选股，避免
+        宽松口径把"无法交易/因子缺失"的标的塞进横截面 z-score 池，导致统计量
+        变化进而改变选股结果（同一配置出现两套完全不同绩效）。
+
+        入池条件（全部满足）：
+        1. 当日 bar 存在且收盘价有效；
+        2. 策略引用的资产级因子（评分 + 过滤 + compare_to + regime 覆盖）当日均有值；
+        3. 若引用 ATR/Donchian/月线等因子，则当日最高/最低价有效；
+        4. 存在下一交易日时，次日收盘价有效；执行模型为 T+1 开盘时还需次日开盘价有效。
+
+        `data_quality_mode` 只影响缺口提示的详细程度（strict 逐指数 / warn 汇总），
+        不影响候选池、选股结果与收益序列。
 
         Args:
             config: 策略配置。
@@ -1085,7 +1118,7 @@ class BacktestService:
             execution_model: 执行模型。
 
         Returns:
-            当日可参与策略决策和收益计算的指数代码列表，以及每个被排除指数的原因。
+            当日可参与策略决策和收益计算的指数代码列表，以及每个被排除指数的原因集合。
         """
         required_ids = set(config.score.factors)
         if config.filters:

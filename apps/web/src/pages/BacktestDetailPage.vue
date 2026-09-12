@@ -285,7 +285,7 @@ const executionModelLabel = computed(() => {
 
 const dataQualityLabel = computed(() => {
   const value = store.current?.params?.['_data_quality_mode']
-  return value === 'strict' ? '严格排除缺失资产' : '警告并继续'
+  return value === 'strict' ? '缺口逐指数提示' : '缺口汇总提示'
 })
 
 function warningLevelLabel(level: BacktestWarning['level']): string {

@@ -39,7 +39,9 @@ class BacktestCreateRequest(BaseModel):
         enable_benchmark: 是否启用基准对比。
         benchmark_index_code: 基准指数代码，默认沪深300。
         execution_model: 执行模型，t_plus_1_open 或 t_plus_1_close。
-        data_quality_mode: 数据质量模式，warn 或 strict。
+        data_quality_mode: 数据缺口提示口径，warn（汇总提示）或 strict（逐指数提示）。
+            两种口径使用同一"当日可执行候选池"，选股与收益结果完全一致，
+            该字段只影响 warnings 的详细程度。
         基准统一按所选指数的买入持有收益计算，不再区分模式。
     """
 
@@ -189,7 +191,7 @@ class BacktestComparisonCreateRequest(BaseModel):
         enable_benchmark: 是否启用基准对比。
         benchmark_index_code: 基准指数代码，默认沪深300。
         execution_model: 两个子回测共用的执行模型。
-        data_quality_mode: 两个子回测共用的数据质量模式。
+        data_quality_mode: 两个子回测共用的数据缺口提示口径（口径一致，只影响 warnings 详细程度）。
         name: 可选的对比名称。
     """
 
