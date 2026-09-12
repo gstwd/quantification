@@ -162,6 +162,31 @@ class TestBuildCandidatePool:
         assert codes == []
         assert reasons["000300"] == {"MISSING_HIGH_LOW"}
 
+    def test_requires_high_low_for_rsrs_and_price_position_factors(self) -> None:
+        """引用 rsrs / price_position_ir 因子时，最高/最低价缺失应报 MISSING_HIGH_LOW。"""
+        for factor_id in ("rsrs", "price_position_ir_60d"):
+            svc = _make_service(specs=[factor_id])
+            bars = {
+                ("000300", DATES[0]): SimpleNamespace(
+                    close_price=100.0, open_price=100.0, high_price=None, low_price=None
+                ),
+                ("000300", DATES[1]): _bar(101.0, 101.0),
+            }
+            factors = {("000300", factor_id): 1.0}
+
+            codes, reasons = svc._build_candidate_pool(
+                _config(score_factors={factor_id: 1.0}),
+                DATES[0],
+                DATES[1],
+                ["000300"],
+                bars,
+                factors,
+                "t_plus_1_open",
+            )
+
+            assert codes == [], factor_id
+            assert reasons["000300"] == {"MISSING_HIGH_LOW"}, factor_id
+
     def test_last_trading_day_has_no_next_day_requirement(self) -> None:
         """回测最后一日无下一交易日，不再校验次日行情。"""
         svc = _make_service()

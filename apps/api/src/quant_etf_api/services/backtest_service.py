@@ -1141,7 +1141,9 @@ class BacktestService:
         }
         required_ids &= asset_factor_ids
         needs_high_low = any(
-            factor_id.startswith(("atr_", "donchian_", "monthly_"))
+            factor_id.startswith(
+                ("atr_", "donchian_", "monthly_", "rsrs", "price_position_ir_")
+            )
             for factor_id in required_ids
         )
         result: list[str] = []

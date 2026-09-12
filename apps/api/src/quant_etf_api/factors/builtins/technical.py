@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import bisect
+import math
 from datetime import date
 
 from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
@@ -991,3 +992,137 @@ class DrawdownCurrentComputer:
                 },
             )
         return result
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 超越均值 ± 标准差天数差（Tushare days_beyond_upper_lower_* 口径）
+# ══════════════════════════════════════════════════════════════════════
+
+
+class DaysBeyondUpperLowerComputer:
+    """N 日超越均值 ± 标准差天数差因子计算器。
+
+    计算口径（与 Tushare 因子库 days_beyond_upper_lower_* 一致）：
+    取近 N 个交易日收盘价，先用同一窗口计算均值 mean 与样本标准差 std(ddof=1)，
+    再统计 close > mean + std 的天数减去 close < mean − std 的天数。
+
+    取值范围 [−N, N]：正数表示价格更多时间运行在均值上方（偏强），
+    负数表示更多时间运行在均值下方（偏弱），0 表示两侧均衡或全程在
+    均值 ± 1 个标准差之内。可作为"过热/过冷"的过滤依据。
+    实现 BatchFactorComputer 协议，支持回测批量预计算。
+
+    Attributes:
+        _period: 回望交易日数。
+        _lookback: 所需自然日回望窗口。
+    """
+
+    def __init__(self, period: int = 21) -> None:
+        """初始化超越均值天数差计算器。
+
+        Args:
+            period: 回望交易日数，默认 21。
+        """
+        self._period = period
+        # 自然日 ≈ 交易日 × 1.5 加安全余量
+        self._lookback = max(15, int(period * 1.5) + 5)
+
+    @property
+    def spec(self) -> FactorSpec:
+        """返回超越均值 ± 标准差天数差的因子元数据。"""
+        return FactorSpec(
+            factor_id=f"days_beyond_upper_lower_{self._period}d",
+            name=f"{self._period}日超越均值±标准差天数差",
+            category="technical",
+            version="1.0.0",
+            description=(
+                f"近 {self._period} 个交易日收盘价中高于 mean+std 的天数减去"
+                "低于 mean−std 的天数（mean/std 取同一窗口，ddof=1），"
+                "衡量价格偏离均值的强度与频率。"
+            ),
+            required_data=["index_bars"],
+            lookback_days=self._lookback,
+        )
+
+    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
+        """计算单个交易日的超越均值 ± 标准差天数差。
+
+        Args:
+            index_code: 指数代码。
+            trade_date: 目标交易日。
+            ctx: FactorContext。
+
+        Returns:
+            FactorValue，数据不足时 numeric 为 None；
+            payload 包含 window_mean / window_std / sample_count。
+        """
+        closes = _get_historical_closes(index_code, trade_date, ctx, self._period)
+        if closes is None:
+            return FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=None,
+                payload={"reason": f"收盘价数据不足 {self._period} 条或当日无行情"},
+            )
+        return self._build_value(closes)
+
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的超越均值 ± 标准差天数差。
+
+        Args:
+            index_code: 指数代码。
+            dates: 需要计算的交易日列表（升序）。
+            ctx: FactorContext，包含全量回望数据。
+
+        Returns:
+            key=交易日, value=FactorValue 的字典。
+        """
+        close_dates, close_prices = _build_sorted_closes_for_code(index_code, ctx)
+        result: dict[date, FactorValue] = {}
+        for trade_date in dates:
+            idx = bisect.bisect_right(close_dates, trade_date) - 1
+            if idx < self._period - 1 or idx < 0 or close_dates[idx] != trade_date:
+                result[trade_date] = FactorValue(
+                    factor_id=self.spec.factor_id,
+                    numeric=None,
+                    payload={"reason": f"收盘价数据不足 {self._period} 条或当日无行情"},
+                )
+                continue
+            window = close_prices[idx - self._period + 1 : idx + 1]
+            result[trade_date] = self._build_value(window)
+        return result
+
+    def _build_value(self, window: list[float]) -> FactorValue:
+        """由 N 个收盘价窗口构造天数差因子值。
+
+        Args:
+            window: 从旧到新的 N 个收盘价（含当日）。
+
+        Returns:
+            FactorValue，样本不足 2 个时 numeric 为 None。
+        """
+        n = len(window)
+        if n < 2:
+            return FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=None,
+                payload={"reason": "收盘价样本不足 2 条"},
+            )
+        mean = sum(window) / n
+        variance = sum((p - mean) ** 2 for p in window) / (n - 1)
+        std = math.sqrt(variance)
+        upper = mean + std
+        lower = mean - std
+        above = sum(1 for p in window if p > upper)
+        below = sum(1 for p in window if p < lower)
+        return FactorValue(
+            factor_id=self.spec.factor_id,
+            numeric=float(above - below),
+            payload={
+                "above": above,
+                "below": below,
+                "window_mean": round(mean, 6),
+                "window_std": round(std, 6),
+                "sample_count": n,
+            },
+        )

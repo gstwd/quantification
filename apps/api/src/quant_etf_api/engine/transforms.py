@@ -165,6 +165,21 @@ def drawdown_score(value: float) -> float:
     return 5.0
 
 
+def rsrs_score(value: float) -> float:
+    """RSRS 标准分映射为择时得分（0-100）。
+
+    value 为 RSRS 标准分（z 值，正数代表支撑强于阻力）。
+    线性映射并裁剪：z ≤ -2 → 0，z ≥ +2 → 100，中间为 50 + z × 25。
+    未做映射时 z 值（±3 量级）混入 0-100 打分空间几乎不影响结果，
+    因此择时配置引用 rsrs 时必须配套该变换。
+    """
+    if value <= -2:
+        return 0.0
+    if value >= 2:
+        return 100.0
+    return round(50.0 + value * 25, 1)
+
+
 # 内置变换函数注册（启动即注册，供配置校验与引擎执行使用）
 _BUILTIN_TRANSFORMS: dict[str, Callable[[float], float]] = {
     "invert_percentile": invert_percentile,
@@ -174,6 +189,7 @@ _BUILTIN_TRANSFORMS: dict[str, Callable[[float], float]] = {
     "clamp_0_100": clamp_0_100,
     "erp_score": erp_score,
     "drawdown_score": drawdown_score,
+    "rsrs_score": rsrs_score,
 }
 
 for _name, _fn in _BUILTIN_TRANSFORMS.items():

@@ -22,6 +22,7 @@ from quant_etf_api.engine.transforms import (
     clamp_0_100,
     invert_percentile,
     momentum_score,
+    rsrs_score,
     trend_score,
     volume_score,
 )
@@ -91,6 +92,16 @@ class TestTransformFunctions:
         assert clamp_0_100(150.0) == 100.0
         assert clamp_0_100(-50.0) == 0.0
         assert clamp_0_100(50.0) == 50.0
+
+    def test_rsrs_score(self) -> None:
+        """RSRS 标准分线性映射到 0-100，两端裁剪。"""
+        assert rsrs_score(-3.0) == 0.0
+        assert rsrs_score(-2.0) == 0.0
+        assert rsrs_score(0.0) == 50.0
+        assert rsrs_score(1.0) == 75.0
+        assert rsrs_score(-1.0) == 25.0
+        assert rsrs_score(2.0) == 100.0
+        assert rsrs_score(3.0) == 100.0
 
 
 class TestDefaultScoreCalculator:

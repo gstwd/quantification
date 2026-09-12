@@ -75,16 +75,20 @@ def build_default_factor_registry() -> FactorRegistry:
         MonthlyStreakComputer,
     )
     from quant_etf_api.factors.builtins.momentum import (
+        DaysDownUpComputer,
+        PricePositionIrComputer,
         Return120dComputer,
         Return17dComputer,
         Return20dComputer,
         Return5dComputer,
         Return60dComputer,
+        RsrsComputer,
         Sharpe60dComputer,
     )
     from quant_etf_api.factors.builtins.price import ChangePctComputer, ClosePriceComputer
     from quant_etf_api.factors.builtins.technical import (
         ATRComputer,
+        DaysBeyondUpperLowerComputer,
         DrawdownCurrentComputer,
         DonchianHighComputer,
         DonchianLowComputer,
@@ -98,6 +102,8 @@ def build_default_factor_registry() -> FactorRegistry:
         PEPercentileComputer,
     )
     from quant_etf_api.factors.builtins.volatility import (
+        HighLowRangeComputer,
+        ReturnStdComputer,
         Volatility17dComputer,
         Volatility20dComputer,
     )
@@ -126,9 +132,19 @@ def build_default_factor_registry() -> FactorRegistry:
     registry.register(Return120dComputer())
     # 风险调整动量（夏普式比率）
     registry.register(Sharpe60dComputer())
+    # 动量 — RSRS 阻力支撑相对强度（高低价 OLS 斜率 × R² 的滚动标准分）
+    registry.register(RsrsComputer())
+    # 动量 — 日内位置比率的信息比率（close/open/high/low）
+    registry.register(PricePositionIrComputer(period=60))
+    # 动量 — 连续涨跌天数差
+    registry.register(DaysDownUpComputer())
     # 波动
     registry.register(Volatility17dComputer())
     registry.register(Volatility20dComputer())
+    # 波动/风险 — 收益率标准差（不年化）与区间宽度
+    registry.register(ReturnStdComputer(period=63))
+    registry.register(HighLowRangeComputer(period=63))
+    registry.register(HighLowRangeComputer(period=21))
     # 估值
     registry.register(PEPercentileComputer())
     registry.register(PBPercentileComputer())
@@ -146,6 +162,8 @@ def build_default_factor_registry() -> FactorRegistry:
     registry.register(DonchianLowComputer(period=20))
     # 技术指标 — RSI
     registry.register(RSIComputer(period=14))
+    # 技术指标 — 超越均值 ± 标准差天数差（过热/过冷）
+    registry.register(DaysBeyondUpperLowerComputer(period=21))
     # 技术指标 — 最大回撤
     registry.register(MaxDrawdown60dComputer())
     # 技术指标 — 当前回撤（250 日窗口 + 水下时间）

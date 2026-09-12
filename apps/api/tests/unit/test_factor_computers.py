@@ -17,20 +17,28 @@ from quant_etf_api.factors.base import FactorContext
 from quant_etf_api.factors.builtins.breadth import BreadthMA20Computer
 from quant_etf_api.factors.builtins.macro import PMIMomentumComputer
 from quant_etf_api.factors.builtins.momentum import (
+    DaysDownUpComputer,
+    PricePositionIrComputer,
     Return20dComputer,
     Return5dComputer,
     Return60dComputer,
+    RsrsComputer,
     Sharpe60dComputer,
     _calc_nd_return,
 )
 from quant_etf_api.factors.builtins.technical import (
     ATRComputer,
+    DaysBeyondUpperLowerComputer,
     DrawdownCurrentComputer,
     DonchianHighComputer,
     DonchianLowComputer,
     MADeviationComputer,
 )
-from quant_etf_api.factors.builtins.volatility import Volatility20dComputer
+from quant_etf_api.factors.builtins.volatility import (
+    HighLowRangeComputer,
+    ReturnStdComputer,
+    Volatility20dComputer,
+)
 from quant_etf_api.factors.builtins.volume import AmountRatio20dComputer, VolumeRatio20dComputer
 from quant_etf_api.factors.registry import build_default_factor_registry
 
@@ -44,6 +52,7 @@ class MockBar:
 
     volume: float | None = None
     close_price: float | None = None
+    open_price: float | None = None
     high_price: float | None = None
     low_price: float | None = None
     change_pct: float | None = None
@@ -83,6 +92,39 @@ def _build_index_bars(
             change_pct=round(daily_return * 100, 4),
         )
         close = close * (1 + daily_return)
+    return bars
+
+
+def _build_ohlc_bars(
+    index_code: str,
+    trade_date: date,
+    n_days: int,
+) -> dict:
+    """构造带真实波动的完整 OHLC 历史 K 线（供日内位置/区间/RSRS 类因子使用）。
+
+    收盘价按正弦叠加线性趋势生成，保证收益率可变，避免常数序列
+    触发"标准差为 0"等退化分支。
+
+    Args:
+        index_code: 指数代码。
+        trade_date: 最新交易日。
+        n_days: 生成的历史天数（含 trade_date 当日）。
+
+    Returns:
+        符合 FactorContext.index_bars 格式的 dict。
+    """
+    bars = {}
+    for i in range(n_days - 1, -1, -1):
+        dt = trade_date - timedelta(days=i)
+        k = n_days - 1 - i
+        close = 100.0 + 10.0 * math.sin(k / 23.0) + k * 0.02
+        bars[(index_code, dt)] = MockBar(
+            volume=1000.0,
+            close_price=round(close, 6),
+            open_price=close - 0.3 * math.sin(k / 5.0),
+            high_price=close + 1.0 + math.cos(k / 7.0),
+            low_price=close - 1.0 - math.cos(k / 11.0),
+        )
     return bars
 
 
@@ -403,7 +445,7 @@ class TestFactorRegistry:
     def test_default_registry_has_all_factors(self) -> None:
         """默认注册表应包含全部内置因子。"""
         registry = build_default_factor_registry()
-        assert len(registry.all()) == 40
+        assert len(registry.all()) == 47
 
     def test_default_registry_factor_ids(self) -> None:
         """默认注册表的 factor_id 集合应包含核心因子。"""
@@ -437,6 +479,13 @@ class TestFactorRegistry:
             "donchian_20d_low",
             "pmi_momentum_3m",
             "breadth_ma20_pct",
+            "rsrs",
+            "return_std_63d",
+            "high_low_63d",
+            "high_low_21d",
+            "days_beyond_upper_lower_21d",
+            "price_position_ir_60d",
+            "days_down_up",
         }
 
     def test_get_returns_correct_computer(self) -> None:
@@ -779,3 +828,361 @@ class TestBreadthMA20Computer:
         point = self._computer.compute("000300", trade_date, ctx)
         batch = self._computer.compute_batch("000300", [trade_date], ctx)[trade_date]
         assert point.numeric == batch.numeric
+
+
+# ─── P1 因子（Tushare 因子库口径）──────────────────────────────────────────────
+
+
+class TestRsrsComputer:
+    """RSRS 阻力支撑相对强度因子。"""
+
+    _TRADE_DATE = date(2024, 6, 3)
+
+    def test_spec(self) -> None:
+        """元数据应为动量类指数级因子，回望窗口 400 自然日。"""
+        spec = RsrsComputer().spec
+        assert spec.factor_id == "rsrs"
+        assert spec.category == "momentum"
+        assert spec.required_data == ["index_bars"]
+        assert spec.lookback_days == 400
+
+    def test_none_when_insufficient_history(self) -> None:
+        """不足 N + M − 1 条高低价时返回 None。"""
+        ctx = FactorContext(index_bars=_build_ohlc_bars("000300", self._TRADE_DATE, 200))
+        result = RsrsComputer().compute("000300", self._TRADE_DATE, ctx)
+        assert result.numeric is None
+        assert "不足" in result.payload["reason"]
+
+    def test_none_when_high_low_missing(self) -> None:
+        """高/低价缺失（未回补 OHLC）时返回 None 而不是零值。"""
+        ctx = FactorContext(
+            index_bars=_build_index_bars("000300", self._TRADE_DATE, 600)
+        )
+        result = RsrsComputer().compute("000300", self._TRADE_DATE, ctx)
+        assert result.numeric is None
+        assert "缺少有效最高价/最低价数据" in result.payload["reason"]
+
+    def test_value_with_sufficient_data(self) -> None:
+        """数据充足时输出无量纲标准分，并记录修正斜率与窗口统计量。"""
+        ctx = FactorContext(index_bars=_build_ohlc_bars("000300", self._TRADE_DATE, 600))
+        result = RsrsComputer().compute("000300", self._TRADE_DATE, ctx)
+        assert result.numeric is not None
+        assert -6.0 < result.numeric < 6.0
+        assert result.payload["n"] == 18
+        assert result.payload["m"] == 250
+        assert result.payload["std"] > 0
+
+    def test_batch_matches_point(self) -> None:
+        """批量计算结果应与逐点计算完全一致（共用同一实现）。"""
+        ctx = FactorContext(index_bars=_build_ohlc_bars("000300", self._TRADE_DATE, 600))
+        computer = RsrsComputer()
+        dates = [
+            self._TRADE_DATE - timedelta(days=1),
+            self._TRADE_DATE,
+        ]
+        batch = computer.compute_batch("000300", dates, ctx)
+        for trade_date in dates:
+            point = computer.compute("000300", trade_date, ctx)
+            assert point.numeric == batch[trade_date].numeric
+
+
+class TestReturnStdComputer:
+    """N 日日收益率标准差因子（不年化）。"""
+
+    _TRADE_DATE = date(2024, 6, 3)
+
+    def test_spec(self) -> None:
+        """元数据应为波动率类指数级因子。"""
+        spec = ReturnStdComputer(period=63).spec
+        assert spec.factor_id == "return_std_63d"
+        assert spec.category == "volatility"
+        assert spec.required_data == ["index_bars"]
+
+    def test_none_when_insufficient_history(self) -> None:
+        """不足 period + 1 条收盘价时返回 None。"""
+        ctx = FactorContext(
+            index_bars=_build_index_bars("000300", self._TRADE_DATE, 30)
+        )
+        result = ReturnStdComputer(period=63).compute("000300", self._TRADE_DATE, ctx)
+        assert result.numeric is None
+
+    def test_zero_for_constant_returns(self) -> None:
+        """等差数列收益率为常数时标准差为 0。"""
+        ctx = FactorContext(
+            index_bars=_build_index_bars("000300", self._TRADE_DATE, 80)
+        )
+        result = ReturnStdComputer(period=63).compute("000300", self._TRADE_DATE, ctx)
+        assert result.numeric == 0.0
+        assert result.payload["sample_count"] == 63
+
+    def test_not_annualized(self) -> None:
+        """未做 sqrt(252) 年化：口径应与交易日波动率同量级（< 5%）。"""
+        ctx = FactorContext(index_bars=_build_ohlc_bars("000300", self._TRADE_DATE, 200))
+        result = ReturnStdComputer(period=63).compute("000300", self._TRADE_DATE, ctx)
+        assert result.numeric is not None
+        assert 0.0 < result.numeric < 5.0
+
+    def test_batch_matches_point(self) -> None:
+        """批量计算结果应与逐点计算一致。"""
+        ctx = FactorContext(index_bars=_build_ohlc_bars("000300", self._TRADE_DATE, 200))
+        computer = ReturnStdComputer(period=63)
+        dates = [self._TRADE_DATE - timedelta(days=1), self._TRADE_DATE]
+        batch = computer.compute_batch("000300", dates, ctx)
+        for trade_date in dates:
+            assert computer.compute("000300", trade_date, ctx).numeric == batch[
+                trade_date
+            ].numeric
+
+
+class TestHighLowRangeComputer:
+    """N 日区间宽度因子。"""
+
+    _TRADE_DATE = date(2024, 6, 3)
+
+    def test_spec(self) -> None:
+        """元数据应为波动率类，factor_id 带窗口后缀。"""
+        assert HighLowRangeComputer(period=63).spec.factor_id == "high_low_63d"
+        assert HighLowRangeComputer(period=21).spec.factor_id == "high_low_21d"
+        assert HighLowRangeComputer(period=21).spec.category == "volatility"
+
+    def test_none_when_insufficient_history(self) -> None:
+        """不足窗口长度时返回 None。"""
+        ctx = FactorContext(
+            index_bars=_build_index_bars("000300", self._TRADE_DATE, 10)
+        )
+        assert HighLowRangeComputer(period=21).compute(
+            "000300", self._TRADE_DATE, ctx
+        ).numeric is None
+
+    def test_monotone_series_width(self) -> None:
+        """单调上涨 21 日的区间宽度应等于两端比值。"""
+        ctx = FactorContext(
+            index_bars=_build_index_bars(
+                "000300", self._TRADE_DATE, 21, base_close=100.0, daily_return=0.01
+            )
+        )
+        result = HighLowRangeComputer(period=21).compute(
+            "000300", self._TRADE_DATE, ctx
+        )
+        expected = round((100.0 * 1.01**20 - 100.0) / 100.0 * 100, 4)
+        assert result.numeric == expected
+        assert result.payload["sample_count"] == 21
+
+    def test_longer_window_not_narrower(self) -> None:
+        """更长窗口的区间宽度不应小于更短窗口（窗口为区间包含关系）。"""
+        ctx = FactorContext(index_bars=_build_ohlc_bars("000300", self._TRADE_DATE, 200))
+        short = HighLowRangeComputer(period=21).compute("000300", self._TRADE_DATE, ctx)
+        long = HighLowRangeComputer(period=63).compute("000300", self._TRADE_DATE, ctx)
+        assert short.numeric is not None
+        assert long.numeric is not None
+        assert long.numeric >= short.numeric
+
+    def test_batch_matches_point(self) -> None:
+        """批量计算结果应与逐点计算一致。"""
+        ctx = FactorContext(index_bars=_build_ohlc_bars("000300", self._TRADE_DATE, 200))
+        computer = HighLowRangeComputer(period=63)
+        dates = [self._TRADE_DATE - timedelta(days=1), self._TRADE_DATE]
+        batch = computer.compute_batch("000300", dates, ctx)
+        for trade_date in dates:
+            assert computer.compute("000300", trade_date, ctx).numeric == batch[
+                trade_date
+            ].numeric
+
+
+class TestDaysBeyondUpperLowerComputer:
+    """超越均值 ± 标准差天数差因子。"""
+
+    _TRADE_DATE = date(2024, 6, 3)
+
+    def test_spec(self) -> None:
+        """元数据应为技术类指数级因子。"""
+        spec = DaysBeyondUpperLowerComputer(period=21).spec
+        assert spec.factor_id == "days_beyond_upper_lower_21d"
+        assert spec.category == "technical"
+
+    def test_none_when_insufficient_history(self) -> None:
+        """不足窗口长度时返回 None。"""
+        ctx = FactorContext(
+            index_bars=_build_index_bars("000300", self._TRADE_DATE, 10)
+        )
+        assert DaysBeyondUpperLowerComputer(period=21).compute(
+            "000300", self._TRADE_DATE, ctx
+        ).numeric is None
+
+    def _flat_series_with_final_close(self, final_close: float) -> FactorContext:
+        """构造 20 日横盘 + 末日异动的窗口（用于制造非对称分布）。"""
+        bars = {}
+        for i in range(20, -1, -1):
+            dt = self._TRADE_DATE - timedelta(days=i)
+            bars[("000300", dt)] = MockBar(close_price=100.0)
+        bars[("000300", self._TRADE_DATE)] = MockBar(close_price=final_close)
+        return FactorContext(index_bars=bars)
+
+    def test_symmetric_trend_has_zero_net_days(self) -> None:
+        """单调趋势的分布左右对称，两侧天数相抵为 0（该因子衡量的是非对称性）。"""
+        ctx = FactorContext(
+            index_bars=_build_index_bars(
+                "000300", self._TRADE_DATE, 21, daily_return=0.01
+            )
+        )
+        result = DaysBeyondUpperLowerComputer(period=21).compute(
+            "000300", self._TRADE_DATE, ctx
+        )
+        assert result.numeric == 0.0
+        assert result.payload["above"] == result.payload["below"]
+
+    def test_upward_spike_is_positive(self) -> None:
+        """末日向上异动：价格上探均值+标准差，天数差为正。"""
+        ctx = self._flat_series_with_final_close(130.0)
+        result = DaysBeyondUpperLowerComputer(period=21).compute(
+            "000300", self._TRADE_DATE, ctx
+        )
+        assert result.numeric == 1.0
+        assert result.payload["above"] == 1
+        assert result.payload["below"] == 0
+
+    def test_downward_spike_is_negative(self) -> None:
+        """末日向下异动：价格跌破均值−标准差，天数差为负。"""
+        ctx = self._flat_series_with_final_close(70.0)
+        result = DaysBeyondUpperLowerComputer(period=21).compute(
+            "000300", self._TRADE_DATE, ctx
+        )
+        assert result.numeric == -1.0
+        assert result.payload["above"] == 0
+        assert result.payload["below"] == 1
+
+    def test_batch_matches_point(self) -> None:
+        """批量计算结果应与逐点计算一致。"""
+        ctx = FactorContext(index_bars=_build_ohlc_bars("000300", self._TRADE_DATE, 200))
+        computer = DaysBeyondUpperLowerComputer(period=21)
+        dates = [self._TRADE_DATE - timedelta(days=1), self._TRADE_DATE]
+        batch = computer.compute_batch("000300", dates, ctx)
+        for trade_date in dates:
+            assert computer.compute("000300", trade_date, ctx).numeric == batch[
+                trade_date
+            ].numeric
+
+
+class TestPricePositionIrComputer:
+    """日内位置信息比率因子。"""
+
+    _TRADE_DATE = date(2024, 6, 3)
+
+    def test_spec(self) -> None:
+        """元数据应为动量类指数级因子。"""
+        spec = PricePositionIrComputer(period=60).spec
+        assert spec.factor_id == "price_position_ir_60d"
+        assert spec.category == "momentum"
+
+    def test_none_when_ohlc_missing(self) -> None:
+        """缺少开盘价时返回 None（未回补 OHLC 的真实场景）。"""
+        ctx = FactorContext(
+            index_bars=_build_index_bars("000300", self._TRADE_DATE, 200)
+        )
+        result = PricePositionIrComputer(period=60).compute(
+            "000300", self._TRADE_DATE, ctx
+        )
+        assert result.numeric is None
+
+    def test_value_with_sufficient_data(self) -> None:
+        """数据充足时输出信息比率（均值/标准差）。"""
+        ctx = FactorContext(index_bars=_build_ohlc_bars("000300", self._TRADE_DATE, 200))
+        result = PricePositionIrComputer(period=60).compute(
+            "000300", self._TRADE_DATE, ctx
+        )
+        assert result.numeric is not None
+        assert result.payload["sample_count"] == 60
+        assert result.payload["std_ratio"] > 0
+
+    def test_flat_intraday_range_skipped(self) -> None:
+        """high == low 的交易日全部跳过时，有效样本不足应返回 None。"""
+        bars = _build_ohlc_bars("000300", self._TRADE_DATE, 200)
+        for key, bar in bars.items():
+            bar.high_price = bar.close_price
+            bar.low_price = bar.close_price
+        ctx = FactorContext(index_bars=bars)
+        result = PricePositionIrComputer(period=60).compute(
+            "000300", self._TRADE_DATE, ctx
+        )
+        assert result.numeric is None
+        assert "有效日内位置样本不足" in result.payload["reason"]
+
+    def test_batch_matches_point(self) -> None:
+        """批量计算结果应与逐点计算一致。"""
+        ctx = FactorContext(index_bars=_build_ohlc_bars("000300", self._TRADE_DATE, 200))
+        computer = PricePositionIrComputer(period=60)
+        dates = [self._TRADE_DATE - timedelta(days=1), self._TRADE_DATE]
+        batch = computer.compute_batch("000300", dates, ctx)
+        for trade_date in dates:
+            assert computer.compute("000300", trade_date, ctx).numeric == batch[
+                trade_date
+            ].numeric
+
+
+class TestDaysDownUpComputer:
+    """连续涨跌天数差因子。"""
+
+    _TRADE_DATE = date(2024, 6, 3)
+
+    def test_spec(self) -> None:
+        """元数据应为动量类指数级因子。"""
+        spec = DaysDownUpComputer().spec
+        assert spec.factor_id == "days_down_up"
+        assert spec.category == "momentum"
+        assert spec.lookback_days == 120
+
+    def test_none_when_insufficient_history(self) -> None:
+        """不足 2 条收盘价时返回 None。"""
+        ctx = FactorContext(
+            index_bars={("000300", self._TRADE_DATE): MockBar(close_price=100.0)}
+        )
+        assert DaysDownUpComputer().compute(
+            "000300", self._TRADE_DATE, ctx
+        ).numeric is None
+
+    def test_consecutive_up_days(self) -> None:
+        """连续上涨 n 天后取值应为 n − 1。"""
+        ctx = FactorContext(
+            index_bars=_build_index_bars(
+                "000300", self._TRADE_DATE, 10, daily_return=0.01
+            )
+        )
+        result = DaysDownUpComputer().compute("000300", self._TRADE_DATE, ctx)
+        assert result.numeric == 8.0
+        assert result.payload["up_days"] == 9
+        assert result.payload["down_days"] == 0
+
+    def test_consecutive_down_days(self) -> None:
+        """连续下跌 n 天后取值应为 n − 1（取绝对值）。"""
+        ctx = FactorContext(
+            index_bars=_build_index_bars(
+                "000300", self._TRADE_DATE, 10, daily_return=-0.01
+            )
+        )
+        result = DaysDownUpComputer().compute("000300", self._TRADE_DATE, ctx)
+        assert result.numeric == 8.0
+        assert result.payload["down_days"] == 9
+
+    def test_flat_day_breaks_streak(self) -> None:
+        """平盘不延续连涨/连跌计数，当日取值为 −1。"""
+        bars = _build_index_bars("000300", self._TRADE_DATE, 10, daily_return=0.01)
+        prev_date = self._TRADE_DATE - timedelta(days=1)
+        bars[("000300", self._TRADE_DATE)] = MockBar(
+            close_price=bars[("000300", prev_date)].close_price
+        )
+        ctx = FactorContext(index_bars=bars)
+        result = DaysDownUpComputer().compute("000300", self._TRADE_DATE, ctx)
+        assert result.numeric == -1.0
+        assert result.payload["up_days"] == 0
+        assert result.payload["down_days"] == 0
+
+    def test_batch_matches_point(self) -> None:
+        """批量计算结果应与逐点计算一致。"""
+        ctx = FactorContext(index_bars=_build_ohlc_bars("000300", self._TRADE_DATE, 200))
+        computer = DaysDownUpComputer()
+        dates = [self._TRADE_DATE - timedelta(days=1), self._TRADE_DATE]
+        batch = computer.compute_batch("000300", dates, ctx)
+        for trade_date in dates:
+            assert computer.compute("000300", trade_date, ctx).numeric == batch[
+                trade_date
+            ].numeric
