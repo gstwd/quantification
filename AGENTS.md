@@ -71,6 +71,8 @@ python -m quant_etf_api.cli optimization finish <opt_id> --verdict accept --repo
 
 回测创建时快照策略配置（`backtest_run.config_snapshot/config_hash`），执行时优先用快照重建配置，保证回测结果可复现。优化会话记录在 `strategy_optimization` 表（迁移 0028）。
 
+> **回测区间下限（用户约定，2026-09-12 起）**：所有回测、对比与优化评估的区间**一律从 2016-01-01 开始**，不再使用 2016 年之前的数据（含 `--start` 缺省值、滚动分段的第一段、`optimization start --start`）。早于 2016 年的结果仅作历史参考，不作为验收依据。
+
 ### Factor definition sync
 
 因子定义以数据库为唯一 source of truth。首次部署或添加新因子后，需要手动同步：
