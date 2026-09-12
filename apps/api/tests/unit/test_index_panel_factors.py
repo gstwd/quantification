@@ -12,7 +12,10 @@ from quant_etf_api.factors.builtins.index_panel_factors import (
     IndexDiffusionRatioComputer,
     RRGIndustryMatchComputer,
 )
-from quant_etf_api.services.index_factor_panel_service import IndexFactorPanelService
+from quant_etf_api.services.index_factor_panel_service import (
+    IndexFactorPanelService,
+    _INDUSTRY_SELECTION_CACHE,
+)
 
 
 def _dates(count: int, start: date = date(2024, 1, 2)) -> list[date]:
@@ -241,3 +244,31 @@ def test_rrg_selection_builds_diffusion_panel() -> None:
         need_diffusion=True,
     )
     assert selected == {trade_date: {"801010": 1.0}}
+
+
+def test_rrg_selection_reuses_process_cache() -> None:
+    """同一进程内相同交易日的 RRG 行业选择只构建一次面板。"""
+    trade_date = date(2099, 1, 2)
+    timestamp = pd.Timestamp(trade_date)
+    panel = {
+        "rs_ratio": pd.DataFrame({"801010": [110.0]}, index=[timestamp]),
+        "rs_momentum": pd.DataFrame({"801010": [110.0]}, index=[timestamp]),
+        "quadrant": pd.DataFrame({"801010": [1.0]}, index=[timestamp]),
+        "diffusion": pd.DataFrame({"801010": [0.9]}, index=[timestamp]),
+        "industry_codes": ["801010"],
+        "trading_dates": [trade_date],
+    }
+    _INDUSTRY_SELECTION_CACHE.pop(trade_date, None)
+    with patch(
+        "quant_etf_api.services.industry_factor_service.IndustryFactorService.build_panels",
+        return_value=panel,
+    ) as build_panels:
+        first = IndexFactorPanelService(MagicMock())._build_industry_selection_from_source(
+            [trade_date]
+        )
+        second = IndexFactorPanelService(MagicMock())._build_industry_selection_from_source(
+            [trade_date]
+        )
+
+    build_panels.assert_called_once()
+    assert first == second == {trade_date: {"801010": 1.0}}

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import date, timedelta
 from typing import Any
 
@@ -33,6 +34,9 @@ from quant_etf_api.infra.db.repositories.industry import (
 )
 
 logger = logging.getLogger(__name__)
+
+_INDUSTRY_SELECTION_CACHE: dict[date, dict[str, float] | None] = {}
+_INDUSTRY_SELECTION_CACHE_LOCK = threading.Lock()
 
 
 def _merge_members_by_stock(members: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -212,13 +216,56 @@ class IndexFactorPanelService:
         self,
         dates: list[date],
     ) -> dict[date, dict[str, float]]:
-        """从原始行业数据即时构建回测所需的 RRG/扩散行业选择。
+        """从内存缓存或原始行业数据获取 RRG/扩散行业选择。
 
-        直接从原始行业行情构建 RRG 行业选择，实时和回测共用该路径，
-        不写数据库，保证结果不受任务调度历史影响。
+        当前行业选择使用固定的默认配置，并且不依赖指数代码，因此同一进程内
+        所有指数和回测请求可以按交易日共享选中行业结果。缓存只存在 Python
+        进程内，进程重启后自动清空并从原始数据重新计算。
 
         Args:
             dates: 回测交易日列表。
+
+        Returns:
+            按交易日映射的 ``{行业代码: 等权重}`` 选择结果；无有效信号的日期省略。
+        """
+        requested_dates = list(dict.fromkeys(dates))
+        if not requested_dates:
+            return {}
+
+        with _INDUSTRY_SELECTION_CACHE_LOCK:
+            missing_dates = [
+                trade_date
+                for trade_date in requested_dates
+                if trade_date not in _INDUSTRY_SELECTION_CACHE
+            ]
+            if missing_dates:
+                computed = self._compute_industry_selection_from_source(missing_dates)
+                for trade_date in missing_dates:
+                    # 缓存无有效选中行业的日期，避免 warm-up/缺失日期反复触发重算。
+                    selected = computed.get(trade_date)
+                    _INDUSTRY_SELECTION_CACHE[trade_date] = dict(selected) if selected else None
+                logger.debug(
+                    "RRG行业选择缓存写入: requested=%d computed=%d",
+                    len(missing_dates),
+                    len(computed),
+                )
+            else:
+                logger.debug("RRG行业选择缓存命中: dates=%d", len(requested_dates))
+
+            return {
+                trade_date: dict(_INDUSTRY_SELECTION_CACHE[trade_date])
+                for trade_date in requested_dates
+                if _INDUSTRY_SELECTION_CACHE[trade_date]
+            }
+
+    def _compute_industry_selection_from_source(
+        self,
+        dates: list[date],
+    ) -> dict[date, dict[str, float]]:
+        """从原始行业数据构建指定日期的 RRG/扩散行业选择。
+
+        Args:
+            dates: 需要计算的交易日列表。
 
         Returns:
             按交易日映射的 ``{行业代码: 等权重}`` 选择结果；无有效信号的日期省略。
