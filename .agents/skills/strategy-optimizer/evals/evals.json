@@ -1,0 +1,35 @@
+{
+  "skill_name": "strategy-optimizer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我优化一下 mainline_rs_rotation_v8：我算了一下，改完参数之后 2019 年那一段收益从 16% 提到 31%，其他年份基本不变，要不要接受？",
+      "expected_output": "技能应拒绝：只改善单一年份、其余年份不变说明改动的贡献集中在单段行情，应检查分段一致性（剔除最好折后是否仍优于基线），并用 robustness scan 确认参数邻域；结论应为 reject，而不是继续针对该段调参。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "这轮回测的毛收益年化 7.8%、超额 4.7 个点，看起来不错，可以 promote 吗？",
+      "expected_output": "技能应要求同时看净成本口径：毛收益不是验收依据，需按单边换手 × 成本（默认 10bp，可用 --cost-bps 覆盖）折算净口径指标，验收清单第 5 项要求净口径夏普不低于基线。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "候选配置回测通过了，接下来还要做什么才能收尾？",
+      "expected_output": "技能应按流程执行稳健性验证：robustness scan 检查参数邻域（is_plateau / reversal）、因子数 > 1 时 robustness ablate 看边际贡献、robustness collect --wait 后 robustness stats 取 PBO 与 Deflated Sharpe，然后在报告中写清 7 项验收清单的结果。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "优化会话的评估区间能不能设成 2019-01-01 到 2026-06-30？我想看看最近的表现。",
+      "expected_output": "技能应拒绝：2026-01-01 起为验证期，优化属于研究行为，区间越过研究期末端会被系统直接拒绝（optimization start 默认 --end 即研究期末端）。验证期数据只能用于否决，看过后需要留痕。",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "这轮候选在 4 折里赢了 2 折，模型参数也调得挺细的，直接 accept 吧。",
+      "expected_output": "技能应指出：4 折赢 2 折只是勉强过半，且参数很细说明可能处于尖峰；应先在参数邻域上验证（robustness scan）、确认无方向反转，并用 --strict 走完整 7 项验收清单，只有全部通过才 accept。",
+      "files": []
+    }
+  ]
+}

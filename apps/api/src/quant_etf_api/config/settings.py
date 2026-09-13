@@ -44,6 +44,25 @@ class Settings(BaseSettings):
         default=None, description="JSON 日志文件路径，留空则仅输出到控制台"
     )
 
+    # 研究期 / 验证期边界（用户约定）：研究期固定为 2016-01-01 ~ 2025-12-31，
+    # 2026-01-01 起为验证期（上线后的实盘验收区间）。边界写成系统常量而非人工
+    # 记忆，研究类回测与优化会话越过研究期末端会被直接拒绝。
+    research_period_start: str = Field(
+        default="2016-01-01", description="研究期起始日（含），所有研究类回测的下限"
+    )
+    research_period_end: str = Field(
+        default="2025-12-31", description="研究期截止日（含），研究类回测不得越过该日期"
+    )
+    validation_period_start: str = Field(
+        default="2026-01-01", description="验证期起始日（含），仅允许验证/监控类回测使用"
+    )
+
+    # 回测与监控的默认交易成本（单边，基点）：系统回测为毛收益口径，
+    # 净口径指标按"单边换手率 × cost_bps"在读取路径折算
+    default_cost_bps: float = Field(
+        default=10.0, ge=0.0, description="默认单边交易成本（基点），用于净口径指标折算"
+    )
+
     # LLM 配置（可选，不配置则 AI 分析功能不可用）
     llm_api_key: str | None = Field(default=None, description="LLM API Key")
     llm_base_url: str | None = Field(

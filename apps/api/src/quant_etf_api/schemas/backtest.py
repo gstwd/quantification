@@ -42,6 +42,11 @@ class BacktestCreateRequest(BaseModel):
         data_quality_mode: 数据缺口提示口径，warn（汇总提示）或 strict（逐指数提示）。
             两种口径使用同一"当日可执行候选池"，选股与收益结果完全一致，
             该字段只影响 warnings 的详细程度。
+        purpose: 回测用途，research=研究期研究（不得越过研究期末端），
+            validation=验证期验收，monitor=上线后监控。
+        purpose_reason: 用途说明与触发来源（如优化会话 ID、生命周期刷新），
+            用于验证期数据的留痕审计。
+        cost_bps: 净口径指标使用的单边交易成本（基点），留空时取系统默认值。
         基准统一按所选指数的买入持有收益计算，不再区分模式。
     """
 
@@ -55,6 +60,9 @@ class BacktestCreateRequest(BaseModel):
     benchmark_index_code: str = "000300"
     execution_model: Literal["t_plus_1_open", "t_plus_1_close"] = "t_plus_1_open"
     data_quality_mode: Literal["warn", "strict"] = "warn"
+    purpose: Literal["research", "validation", "monitor"] = "research"
+    purpose_reason: str | None = None
+    cost_bps: float | None = None
 
 
 class BacktestMetrics(BaseModel):
@@ -80,6 +88,111 @@ class BacktestMetrics(BaseModel):
     excess_return_pct: float | None = None
     # B10：数据缺口统计
     data_gap_days: int = 0
+    # 净口径指标（按单边换手率折算成本），默认成本 10bp，明细见 stability 块
+    net_annualized_return_pct: float | None = None
+    net_sharpe_ratio: float | None = None
+    net_excess_return_pct: float | None = None
+    annualized_turnover: float | None = None
+
+
+class BacktestStability(BaseModel):
+    """回测稳健性指标：描述结果对历史细节的依赖程度。
+
+    在回测读取路径由 ``domain.research.stability`` 从已落库的逐日结果现算，
+    因此存量回测无需重跑即可获得；指标口径指纹一并返回，避免不同成本假设、
+    执行模型或数据质量口径的指标被相互比较。
+
+    Attributes:
+        cost_bps: 成本折算使用的单边成本（基点）。
+        execution_model: 该回测使用的执行模型。
+        data_quality_mode: 数据缺口提示口径。
+        benchmark_index_code: 基准指数代码，未启用基准时为 None。
+        annualized_turnover: 年化单边换手率（倍）。
+        cost_drag_pct_per_year: 成本拖累（百分点/年）。
+        net_cumulative_return_pct: 扣成本后累计收益率（%）。
+        net_annualized_return_pct: 扣成本后年化收益率（%）。
+        net_sharpe_ratio: 扣成本后年化夏普。
+        net_excess_return_pct: 扣成本后年化超额（百分点）。
+        year_return_share_max: 年度对数收益占比最大值（0-1）。
+        year_return_share_hhi: 年度对数收益占比的赫芬达尔指数。
+        best_year: 对数收益最大的年份。
+        ex_best_year_annualized_return_pct: 剔除最好年份后的年化收益率（%）。
+        ex_best_year_sharpe_ratio: 剔除最好年份后的年化夏普。
+        annual_sharpe_positive_ratio: 夏普为正的自然年占比。
+        segment_sharpe_positive_ratio: 三段等分区中夏普为正的比例。
+        best_segment_sharpe: 最好段夏普。
+        worst_segment_sharpe: 最差段夏普。
+        max_drawdown_pct: 全期最大回撤（%）。
+        current_drawdown_pct: 期末回撤（%）。
+        current_drawdown_percentile_pct: 期末回撤在自身逐日回撤分布中的分位。
+        max_drawdown_days: 最长水下持续天数。
+        average_exposure: 平均仓位，无数据时为 None。
+        position_concentration: 持仓权重平均赫芬达尔指数，无数据时为 None。
+    """
+
+    cost_bps: float
+    execution_model: str | None = None
+    data_quality_mode: str | None = None
+    benchmark_index_code: str | None = None
+    annualized_turnover: float = 0.0
+    cost_drag_pct_per_year: float = 0.0
+    net_cumulative_return_pct: float = 0.0
+    net_annualized_return_pct: float = 0.0
+    net_sharpe_ratio: float = 0.0
+    net_excess_return_pct: float | None = None
+    year_return_share_max: float = 0.0
+    year_return_share_hhi: float = 0.0
+    best_year: int | None = None
+    ex_best_year_annualized_return_pct: float = 0.0
+    ex_best_year_sharpe_ratio: float = 0.0
+    annual_sharpe_positive_ratio: float = 0.0
+    segment_sharpe_positive_ratio: float = 0.0
+    best_segment_sharpe: float = 0.0
+    worst_segment_sharpe: float = 0.0
+    max_drawdown_pct: float = 0.0
+    current_drawdown_pct: float = 0.0
+    current_drawdown_percentile_pct: float = 0.0
+    max_drawdown_days: int = 0
+    average_exposure: float | None = None
+    position_concentration: float | None = None
+
+
+class ValidationUsageItem(BaseModel):
+    """验证期数据使用记录（留痕）。
+
+    Attributes:
+        backtest_id: 回测 ID。
+        strategy_id: 策略 ID。
+        strategy_version: 回测创建时的策略版本。
+        config_hash: 回测创建时的配置哈希。
+        purpose: 用途（validation/monitor）。
+        purpose_reason: 用途说明与触发来源。
+        start_date: 回测起始日期。
+        end_date: 回测截止日期。
+        created_at: 回测创建时间（UTC）。
+    """
+
+    backtest_id: str
+    strategy_id: str
+    strategy_version: str | None = None
+    config_hash: str | None = None
+    purpose: str
+    purpose_reason: str | None = None
+    start_date: date
+    end_date: date
+    created_at: UtcDatetime
+
+
+class ValidationUsageResponse(BaseModel):
+    """验证期数据使用留痕列表响应。
+
+    Attributes:
+        items: 使用记录列表（按创建时间倒序）。
+        total: 记录总数。
+    """
+
+    items: list[ValidationUsageItem] = Field(default_factory=list)
+    total: int = 0
 
 
 class AnnualMetrics(BaseModel):
@@ -108,6 +221,7 @@ class BacktestSummary(BaseModel):
     finished_at: UtcDatetime | None = None
     error_message: str | None = None
     progress: int = 0
+    purpose: str = "research"
 
 
 class BacktestDetail(BacktestSummary):
@@ -121,6 +235,8 @@ class BacktestDetail(BacktestSummary):
     data_cutoff_date: date | None = None
     optimization_id: str | None = None
     annual_metrics: list[AnnualMetrics] = Field(default_factory=list)
+    stability: BacktestStability | None = None
+    purpose_reason: str | None = None
 
 
 class BacktestDailyResult(BaseModel):

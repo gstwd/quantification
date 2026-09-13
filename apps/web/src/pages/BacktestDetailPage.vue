@@ -174,6 +174,80 @@
         </div>
       </div>
 
+      <!-- 稳健性与成本口径 -->
+      <div v-if="store.current?.stability" class="metrics-section">
+        <div class="section-label">
+          稳健性与成本口径
+          <HelpTip :text="'描述该回测结果对历史细节的依赖程度：成本折算、收益集中度、分段一致性与回撤结构。指标按单边换手率在读取路径现算，同一回测在不同时点结果一致。'" />
+        </div>
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-label">成本假设</div>
+            <div class="metric-value">{{ store.current.stability.cost_bps }} bp</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">年化单边换手</div>
+            <div class="metric-value">{{ store.current.stability.annualized_turnover.toFixed(2) }}x</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">成本拖累</div>
+            <div class="metric-value danger">{{ formatPct(store.current.stability.cost_drag_pct_per_year) }}/年</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">净口径年化</div>
+            <div class="metric-value" :class="pctClass(store.current.stability.net_annualized_return_pct)">
+              {{ formatPct(store.current.stability.net_annualized_return_pct) }}
+            </div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">净口径夏普</div>
+            <div class="metric-value">{{ store.current.stability.net_sharpe_ratio.toFixed(2) }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">净口径超额</div>
+            <div class="metric-value" :class="pctClass(store.current.stability.net_excess_return_pct ?? 0)">
+              {{ store.current.stability.net_excess_return_pct !== null ? formatPct(store.current.stability.net_excess_return_pct) : '-' }}
+            </div>
+          </div>
+        </div>
+        <div class="annual-table-wrap">
+          <table class="annual-table">
+            <thead>
+              <tr>
+                <th>收益集中度</th>
+                <th>最大年度占比</th>
+                <th>剔除最好年份年化</th>
+                <th>分段一致（三段）</th>
+                <th>夏普为正年份占比</th>
+                <th>期末回撤分位</th>
+                <th>最长水下天数</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>HHI {{ store.current.stability.year_return_share_hhi.toFixed(3) }}</td>
+                <td>{{ (store.current.stability.year_return_share_max * 100).toFixed(1) }}%</td>
+                <td :class="pctClass(store.current.stability.ex_best_year_annualized_return_pct)">
+                  {{ formatPct(store.current.stability.ex_best_year_annualized_return_pct) }}
+                </td>
+                <td>{{ (store.current.stability.segment_sharpe_positive_ratio * 100).toFixed(0) }}%</td>
+                <td>{{ (store.current.stability.annual_sharpe_positive_ratio * 100).toFixed(0) }}%</td>
+                <td>{{ store.current.stability.current_drawdown_percentile_pct.toFixed(1) }}%</td>
+                <td>{{ store.current.stability.max_drawdown_days }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="stability-note">
+          指标口径：{{ store.current.stability.execution_model || '—' }} /
+          {{ store.current.stability.data_quality_mode || '—' }} /
+          基准 {{ store.current.stability.benchmark_index_code || '未启用' }}
+          <template v-if="store.current.purpose && store.current.purpose !== 'research'">
+            ｜用途：{{ store.current.purpose }}
+          </template>
+        </div>
+      </div>
+
       <!-- 权益曲线 -->
       <div class="chart-card">
         <div class="chart-title">权益曲线（累计收益率 %）</div>
@@ -714,6 +788,8 @@ onUnmounted(() => {
 .subtitle { font-size: 13px; color: var(--text-muted); margin-top: 2px; }
 
 .loading { padding: 60px; text-align: center; color: var(--text-muted); }
+
+.stability-note { margin-top: 8px; font-size: 12px; color: var(--text-muted); }
 
 .annual-table-wrap {
   overflow-x: auto;

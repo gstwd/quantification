@@ -3,7 +3,8 @@
 重构后使用统一的 _run_backtest_loop 替代 signal/allocation 双模式分支。
 集成 FactorProvider、专业绩效指标和基准对比。
 回测收益按毛收益口径输出：系统当前阶段不考虑实盘交易与交易成本，
-仅研究策略理想效果。
+仅研究策略理想效果。净成本口径与稳健性指标在读取路径按单边换手率现算
+（见 ``domain.research.stability``），因此存量回测无需重跑即可获得。
 """
 
 from __future__ import annotations
@@ -65,18 +66,28 @@ from quant_etf_api.schemas.backtest import (
     BacktestDetail,
     BacktestIndexResult,
     BacktestMetrics,
+    BacktestStability,
     BacktestSummary,
     BacktestWarning,
     ComparisonDailyPoint,
     ComparisonDailyResponse,
     ComparisonMetrics,
+    ValidationUsageItem,
+    ValidationUsageResponse,
 )
 from quant_etf_api.domain.portfolio.benchmark import compute_buy_hold_benchmark
+from quant_etf_api.domain.research.periods import (
+    PURPOSE_RESEARCH,
+    PeriodBoundaries,
+    validate_backtest_period,
+)
+from quant_etf_api.domain.research.stability import compute_stability_metrics
 from quant_etf_api.domain.research.metrics import (
     compute_annual_breakdown,
     compute_performance_metrics,
     compute_rolling_metrics,
 )
+from quant_etf_api.config.settings import get_settings
 from quant_etf_api.services.strategy_config_service import (
     StrategyConfigService,
     compute_config_hash,
@@ -123,6 +134,8 @@ class BacktestService:
 
         如果策略配置了 index_codes（非空），则强制将回测标的范围限定为这些指数，
         忽略请求中的 universe_mode 和 index_codes。空 index_codes 表示全指数通用策略。
+        创建前按用途校验研究期/验证期边界：研究类回测不得越过研究期末端，
+        验证与监控类回测允许使用验证期数据（供留痕审计）。
 
         Args:
             req: 创建回测请求。
@@ -132,10 +145,15 @@ class BacktestService:
             回测摘要。
 
         Raises:
-            ValueError: 策略不存在或配置校验失败。
+            ValueError: 策略不存在、配置校验失败，或回测区间不符合用途边界时抛出。
         """
         backtest_id = str(uuid4())
         now = utcnow()
+
+        # 研究期/验证期硬约束：研究类回测越过研究期末端直接拒绝
+        validate_backtest_period(
+            _period_boundaries(), req.purpose, req.start_date, req.end_date
+        )
 
         # 加载策略配置，检查是否有 index_codes 限定
         config_svc = StrategyConfigService(self._db)
@@ -170,6 +188,10 @@ class BacktestService:
         params = dict(req.params) if req.params else {}
         params["_execution_model"] = req.execution_model
         params["_data_quality_mode"] = req.data_quality_mode
+        # 净口径成本随回测固化，避免"同一回测在不同时点算出不同净收益"
+        params["_cost_bps"] = (
+            req.cost_bps if req.cost_bps is not None else get_settings().default_cost_bps
+        )
         # 保存基准配置到 params，供执行时读取；基准统一采用买入持有口径。
         params["_enable_benchmark"] = req.enable_benchmark
         params["_benchmark_index_code"] = req.benchmark_index_code
@@ -205,6 +227,8 @@ class BacktestService:
                 config_snapshot=config_snapshot,
                 config_hash=config_hash,
                 optimization_id=optimization_id,
+                purpose=req.purpose,
+                purpose_reason=req.purpose_reason,
                 created_at=now,
             )
             self._db.add(row)
@@ -220,6 +244,7 @@ class BacktestService:
             end_date=req.end_date,
             status="pending",
             created_at=now,
+            purpose=req.purpose,
         )
 
     def list_backtests(
@@ -281,6 +306,9 @@ class BacktestService:
                         [r.portfolio_return for r in daily_rows],
                         [r.trade_date for r in daily_rows],
                     )
+                    # 稳健性指标与净成本口径同样在读取路径现算：与分年度表共用
+                    # 已落库的逐日序列，存量回测无需重跑即可获得
+                    stability = self._compute_stability(row, daily_rows)
                     detail = detail.model_copy(
                         update={
                             "annual_metrics": [
@@ -294,13 +322,123 @@ class BacktestService:
                                     max_drawdown_pct=r.max_drawdown_pct,
                                 )
                                 for r in annual_rows
-                            ]
+                            ],
+                            "stability": stability,
+                            "metrics": _merge_net_metrics(detail.metrics, stability),
                         }
                     )
             return detail
         except Exception:
             logger.warning("get_backtest DB query failed", exc_info=True)
             return None
+
+    def _compute_stability(
+        self, row: BacktestRunModel, daily_rows: list
+    ) -> BacktestStability:
+        """从已落库的逐日结果现算稳健性指标与净成本口径。
+
+        成本取创建回测时固化的 ``params["_cost_bps"]``，缺失时回退系统默认值；
+        执行模型、数据质量口径与基准一并写入结果，作为指标口径指纹，避免
+        不同口径的回测指标被相互比较（历史上 warn/strict 口径分叉曾导致同一
+        配置出现两套结果）。
+
+        Args:
+            row: 回测 ORM 行。
+            daily_rows: 该回测的逐日结果行（按日期升序）。
+
+        Returns:
+            BacktestStability 实例。
+        """
+        params = row.params or {}
+        cost_bps = params.get("_cost_bps")
+        if cost_bps is None:
+            cost_bps = get_settings().default_cost_bps
+        enable_benchmark = params.get("_enable_benchmark", True)
+        stability = compute_stability_metrics(
+            [r.portfolio_return for r in daily_rows],
+            [r.trade_date for r in daily_rows],
+            benchmark_returns=[getattr(r, "benchmark_return", None) for r in daily_rows],
+            turnovers=[getattr(r, "turnover", None) for r in daily_rows],
+            exposures=[getattr(r, "total_exposure", None) for r in daily_rows],
+            positions=[getattr(r, "positions", None) for r in daily_rows],
+            cost_bps=float(cost_bps),
+        )
+        return BacktestStability(
+            cost_bps=stability.cost_bps,
+            execution_model=params.get("_execution_model"),
+            data_quality_mode=params.get("_data_quality_mode"),
+            benchmark_index_code=(
+                params.get("_benchmark_index_code") if enable_benchmark else None
+            ),
+            annualized_turnover=stability.annualized_turnover,
+            cost_drag_pct_per_year=stability.cost_drag_pct_per_year,
+            net_cumulative_return_pct=stability.net_cumulative_return_pct,
+            net_annualized_return_pct=stability.net_annualized_return_pct,
+            net_sharpe_ratio=stability.net_sharpe_ratio,
+            net_excess_return_pct=stability.net_excess_return_pct,
+            year_return_share_max=stability.year_return_share_max,
+            year_return_share_hhi=stability.year_return_share_hhi,
+            best_year=stability.best_year,
+            ex_best_year_annualized_return_pct=(
+                stability.ex_best_year_annualized_return_pct
+            ),
+            ex_best_year_sharpe_ratio=stability.ex_best_year_sharpe_ratio,
+            annual_sharpe_positive_ratio=stability.annual_sharpe_positive_ratio,
+            segment_sharpe_positive_ratio=stability.segment_sharpe_positive_ratio,
+            best_segment_sharpe=stability.best_segment_sharpe,
+            worst_segment_sharpe=stability.worst_segment_sharpe,
+            max_drawdown_pct=stability.max_drawdown_pct,
+            current_drawdown_pct=stability.current_drawdown_pct,
+            current_drawdown_percentile_pct=stability.current_drawdown_percentile_pct,
+            max_drawdown_days=stability.max_drawdown_days,
+            average_exposure=stability.average_exposure,
+            position_concentration=stability.position_concentration,
+        )
+
+    def list_validation_usage(
+        self, limit: int = 200
+    ) -> ValidationUsageResponse:
+        """列出所有使用验证期（2026-01-01 起）数据的回测，用于留痕审计。
+
+        验证期数据只能用于否决、不能用于确认；只要看过就应留痕，避免
+        "研究者自身成为模型的一部分"这类隐性过拟合。
+
+        Args:
+            limit: 返回条数上限，默认 200。
+
+        Returns:
+            ValidationUsageResponse（按创建时间倒序）。
+        """
+        boundaries = _period_boundaries()
+        try:
+            rows = (
+                self._db.query(BacktestRunModel)
+                .filter(BacktestRunModel.end_date >= boundaries.validation_start)
+                .order_by(BacktestRunModel.created_at.desc())
+                .limit(limit)
+                .all()
+            )
+        except Exception:
+            logger.warning("list_validation_usage DB query failed", exc_info=True)
+            return ValidationUsageResponse()
+
+        items: list[ValidationUsageItem] = []
+        for row in rows:
+            snapshot = row.config_snapshot or {}
+            items.append(
+                ValidationUsageItem(
+                    backtest_id=row.backtest_id,
+                    strategy_id=row.strategy_id,
+                    strategy_version=snapshot.get("version"),
+                    config_hash=row.config_hash,
+                    purpose=getattr(row, "purpose", None) or PURPOSE_RESEARCH,
+                    purpose_reason=getattr(row, "purpose_reason", None),
+                    start_date=row.start_date,
+                    end_date=row.end_date,
+                    created_at=row.created_at,
+                )
+            )
+        return ValidationUsageResponse(items=items, total=len(items))
 
     def get_daily_results(self, backtest_id: str) -> list[BacktestDailyResult]:
         """返回回测每日组合绩效（含 252 交易日滚动夏普/索提诺）。"""
@@ -1540,6 +1678,7 @@ class BacktestService:
             finished_at=row.finished_at,
             error_message=row.error_message,
             progress=getattr(row, "progress", 0) or 0,
+            purpose=getattr(row, "purpose", None) or PURPOSE_RESEARCH,
         )
 
     def _row_to_detail(self, row: BacktestRunModel) -> BacktestDetail:
@@ -1558,6 +1697,7 @@ class BacktestService:
             config_hash=row.config_hash,
             data_cutoff_date=getattr(row, "data_cutoff_date", None),
             optimization_id=getattr(row, "optimization_id", None),
+            purpose_reason=getattr(row, "purpose_reason", None),
         )
 
     # ── 策略对比回测 ────────────────────────────────────────────────────
@@ -1880,3 +2020,41 @@ class BacktestService:
             error_message=row.error_message,
             progress=row.progress or 0,
         )
+
+
+def _period_boundaries() -> PeriodBoundaries:
+    """从系统配置读取研究期/验证期边界。
+
+    Returns:
+        PeriodBoundaries 实例（研究期 2016-01-01 ~ 2025-12-31，验证期自 2026-01-01 起）。
+    """
+    settings = get_settings()
+    return PeriodBoundaries(
+        research_start=date.fromisoformat(settings.research_period_start),
+        research_end=date.fromisoformat(settings.research_period_end),
+        validation_start=date.fromisoformat(settings.validation_period_start),
+    )
+
+
+def _merge_net_metrics(
+    metrics: BacktestMetrics | None, stability: BacktestStability
+) -> BacktestMetrics | None:
+    """把净成本口径指标并入回测汇总指标。
+
+    Args:
+        metrics: 原始（毛口径）回测指标，可为 None。
+        stability: 读取路径计算出的稳健性指标（含净口径结果）。
+
+    Returns:
+        补齐净口径字段后的指标对象；原始指标缺失时返回 None。
+    """
+    if metrics is None:
+        return None
+    return metrics.model_copy(
+        update={
+            "net_annualized_return_pct": stability.net_annualized_return_pct,
+            "net_sharpe_ratio": stability.net_sharpe_ratio,
+            "net_excess_return_pct": stability.net_excess_return_pct,
+            "annualized_turnover": stability.annualized_turnover,
+        }
+    )

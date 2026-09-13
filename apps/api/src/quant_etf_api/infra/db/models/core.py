@@ -449,6 +449,18 @@ class BacktestRunModel(Base):
         Date,
         comment="回测执行时行情数据截止日期，用于评估数据口径",
     )
+    purpose: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="research",
+        server_default=sa.text("'research'"),
+        comment="回测用途：research=研究期研究（不得越过研究期末端）、"
+        "validation=验证期验收、monitor=上线后监控",
+    )
+    purpose_reason: Mapped[str | None] = mapped_column(
+        Text,
+        comment="用途说明与触发来源（如优化会话 ID、生命周期刷新），用于验证期留痕",
+    )
     optimization_id: Mapped[str | None] = mapped_column(
         String(64),
         comment="关联的策略优化会话 ID（由优化 CLI 写入），普通回测为 NULL",
@@ -1141,4 +1153,194 @@ class BackgroundJobModel(Base):
     )
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime, comment="完成时间（UTC）"
+    )
+
+
+# ============================================================================
+# 稳健性验证与策略生命周期表
+# ============================================================================
+
+
+class RobustnessRunModel(Base):
+    """稳健性验证批次表，记录一次候选集级别的稳健性检验。
+
+    每次稳健性验证由一个基线候选派生出一组变体（单旋钮扰动 / 删因子 /
+    子池扰动），逐窗口批量回测后汇总邻域稳定度、边际贡献与统计显著性。
+    该表同时充当 Deflated Sharpe 所需的"试验次数 N"台账：同一策略历史上
+    评估过的变体数量即多重检验的试验次数。
+    """
+
+    __tablename__ = "robustness_run"
+    __table_args__ = (Index("ix_robustness_run_strategy", "strategy_id"),)
+
+    robustness_id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, comment="稳健性验证唯一 ID，UUID 格式"
+    )
+    strategy_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="基线策略 ID"
+    )
+    strategy_version: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="", comment="基线策略版本号"
+    )
+    baseline_config_hash: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="", comment="基线配置哈希"
+    )
+    kind: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        comment="验证类型：scan=单旋钮邻域扰动，ablate=因子消融，pool=资产池扰动",
+    )
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="running",
+        comment="状态：running=执行中，success=汇总完成，failed=失败",
+    )
+    start_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="验证区间起始日期（含）"
+    )
+    end_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="验证区间截止日期（含）"
+    )
+    windows: Mapped[list | None] = mapped_column(
+        JSONB, comment="评估窗口列表，元素为 {label, start, end}"
+    )
+    variants: Mapped[list | None] = mapped_column(
+        JSONB,
+        comment="变体列表，元素含 label/kind/knob/value/strategy_id/"
+        "backtest_ids（窗口标签 → 回测 ID）",
+    )
+    summary: Mapped[dict | None] = mapped_column(
+        JSONB, comment="邻域稳定度 / 边际贡献 / 池扰动汇总结果"
+    )
+    statistics: Mapped[dict | None] = mapped_column(
+        JSONB, comment="统计显著性：CSCV-PBO、Deflated Sharpe、块自助法置信区间"
+    )
+    trial_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=sa.text("0"),
+        comment="本批次评估的独立变体数量，累加后作为试验次数台账",
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, comment="失败时的错误信息")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, comment="批次创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, comment="批次最后更新时间（UTC）"
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="批次完成时间（UTC），未完成时为 NULL"
+    )
+
+
+class StrategyLifecycleModel(Base):
+    """策略生命周期表，记录上线后的监控状态。
+
+    只覆盖"人工标记上线之后"的阶段：研究、回测与优化仍由既有体系承担。
+    上线时冻结当时的配置快照与研究期分布，作为后续所有异常判定的参照系，
+    避免监控对象被静默替换（LIVE 状态下禁止直接修改 config_json）。
+    """
+
+    __tablename__ = "strategy_lifecycle"
+
+    strategy_id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, comment="策略 ID"
+    )
+    lifecycle_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="LIVE",
+        comment="生命周期状态（仅人工变更）：LIVE/SUSPENDED/RETIRED",
+    )
+    live_at: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="标记上线的业务日期（含），监控区间起点"
+    )
+    retired_at: Mapped[date | None] = mapped_column(
+        Date, comment="退役日期，未退役时为 NULL"
+    )
+    frozen_config_hash: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="", comment="上线时冻结的配置哈希"
+    )
+    frozen_config_snapshot: Mapped[dict | None] = mapped_column(
+        JSONB, comment="上线时冻结的配置快照（元数据 + config_json）"
+    )
+    research_backtest_id: Mapped[str | None] = mapped_column(
+        String(64), comment="研究期（2016-01-01~2025-12-31）基线回测 ID"
+    )
+    validation_backtest_id: Mapped[str | None] = mapped_column(
+        String(64), comment="最近一次验证期（上线后）回测 ID，每次刷新更新"
+    )
+    baseline_distribution: Mapped[dict | None] = mapped_column(
+        JSONB,
+        comment="上线时冻结的研究期分布快照（各窗口超额/夏普/回撤分位表）",
+    )
+    latest_health_level: Mapped[str | None] = mapped_column(
+        String(16), comment="最近一次刷新的健康等级"
+    )
+    latest_diagnosis: Mapped[str | None] = mapped_column(
+        String(32), comment="最近一次刷新的诊断结论"
+    )
+    latest_recommended_action: Mapped[str | None] = mapped_column(
+        String(16), comment="最近一次刷新的建议动作"
+    )
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="最近一次刷新时间（UTC）"
+    )
+    note: Mapped[str | None] = mapped_column(Text, comment="上线备注（研究结论、上线依据）")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, comment="上线记录创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        comment="记录最后更新时间（UTC）",
+    )
+
+
+class StrategyHealthSnapshotModel(Base):
+    """策略健康快照表，记录每次刷新得到的体检结果。
+
+    每次人工触发刷新都会追加一行，形成上线后的观察序列；诊断阈值全部取自
+    该策略自己的研究期分布，判定"是否超出历史正常范围"而不是套用固定数字。
+    """
+
+    __tablename__ = "strategy_health_snapshot"
+    __table_args__ = (Index("ix_strategy_health_snapshot_strategy", "strategy_id"),)
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="自增主键"
+    )
+    strategy_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="策略 ID"
+    )
+    as_of_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="快照对应的业务日期（监控区间截止日）"
+    )
+    live_start: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="监控区间起始日（即上线日）"
+    )
+    live_end: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="监控区间截止日"
+    )
+    metrics: Mapped[dict | None] = mapped_column(
+        JSONB, comment="体检指标：滚动收益/超额分位/回撤分位/IC/净成本口径等"
+    )
+    health_level: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="健康等级：HEALTHY/WATCH/WARNING/CRITICAL"
+    )
+    diagnosis: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="诊断结论"
+    )
+    recommended_action: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="建议动作：KEEP/WATCH/REDUCE_RISK/RESEARCH"
+    )
+    reasons: Mapped[list | None] = mapped_column(JSONB, comment="判定依据（中文逐条说明）")
+    trigger: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="manual", comment="触发方式：manual/api"
+    )
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, comment="计算时间（UTC）"
     )

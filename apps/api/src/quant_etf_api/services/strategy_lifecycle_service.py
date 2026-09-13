@@ -1,0 +1,654 @@
+"""策略生命周期服务：上线冻结、健康刷新与诊断留痕。
+
+只覆盖"人工标记上线之后"的阶段：研究、回测与优化仍由既有体系承担。
+上线时冻结配置快照并生成研究期分布作为参照系；之后每次刷新把上线后的
+表现填回该分布，输出分位、期望差与诊断结论，并追加一条健康快照。
+
+设计约束（与两篇方法论文档一致）：
+- 状态只由人工变更，健康等级只由系统计算，系统不自动调参、不自动改状态；
+- 阈值全部取自该策略自身的研究期分布，不使用全局固定数字；
+- 上线后回测标记为 ``purpose=monitor``，使用验证期数据必须留痕。
+"""
+
+from __future__ import annotations
+
+import logging
+import warnings
+from datetime import date
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from quant_etf_api.config.settings import get_settings
+from quant_etf_api.domain.research.lifecycle import (
+    assess_health,
+    build_baseline_distribution,
+    evaluate_against_baseline,
+)
+from quant_etf_api.domain.research.periods import (
+    PURPOSE_MONITOR,
+    PURPOSE_RESEARCH,
+    PeriodBoundaries,
+)
+from quant_etf_api.domain.research.stability import compute_stability_metrics
+from quant_etf_api.factors.evaluation import calc_ic_series
+from quant_etf_api.infra.db.base import utcnow
+from quant_etf_api.infra.db.models.core import (
+    BacktestRunModel,
+    StrategyHealthSnapshotModel,
+    StrategyLifecycleModel,
+)
+from quant_etf_api.infra.time import today_cn
+from quant_etf_api.schemas.backtest import BacktestCreateRequest
+from quant_etf_api.schemas.lifecycle import (
+    HealthSnapshotSchema,
+    LifecycleDetail,
+    LifecycleOnlineRequest,
+    LifecycleRefreshRequest,
+    LifecycleStatusRequest,
+    LifecycleSummary,
+)
+from quant_etf_api.services.backtest_service import BacktestService
+from quant_etf_api.services.strategy_config_service import (
+    StrategyConfigService,
+    compute_config_hash,
+)
+
+logger = logging.getLogger(__name__)
+
+# 详情页默认返回的最近快照条数
+DEFAULT_SNAPSHOT_LIMIT = 24
+
+
+class StrategyLifecycleService:
+    """策略生命周期服务，负责上线冻结、健康刷新与状态记录。
+
+    所有写操作都发生在人工触发（API 调用或页面按钮）时；本服务不做定时任务，
+    也不依据诊断结论自动修改策略配置或生命周期状态。
+    """
+
+    def __init__(self, db: Session) -> None:
+        """初始化服务。
+
+        Args:
+            db: SQLAlchemy 同步 Session。
+        """
+        self._db = db
+        self._backtest_svc = BacktestService(db)
+        self._config_svc = StrategyConfigService(db)
+
+    # ── 查询 ──────────────────────────────────────────────────────────────
+
+    def list_lifecycles(self) -> list[LifecycleSummary]:
+        """返回全部上线策略的生命周期摘要（按上线日期倒序）。
+
+        Returns:
+            生命周期摘要列表。
+        """
+        try:
+            rows = (
+                self._db.query(StrategyLifecycleModel)
+                .order_by(StrategyLifecycleModel.live_at.desc())
+                .all()
+            )
+        except Exception:
+            logger.warning("list_lifecycles DB query failed", exc_info=True)
+            return []
+        return [self._to_summary(row) for row in rows]
+
+    def get_lifecycle(
+        self, strategy_id: str, snapshot_limit: int = DEFAULT_SNAPSHOT_LIMIT
+    ) -> LifecycleDetail | None:
+        """返回单策略的生命周期详情（含最近若干次健康快照）。
+
+        Args:
+            strategy_id: 策略 ID。
+            snapshot_limit: 返回的最近快照条数，默认 24。
+
+        Returns:
+            生命周期详情，未上线时返回 None。
+        """
+        row = self._find(strategy_id)
+        if row is None:
+            return None
+        snapshots = (
+            self._db.query(StrategyHealthSnapshotModel)
+            .filter(StrategyHealthSnapshotModel.strategy_id == strategy_id)
+            .order_by(StrategyHealthSnapshotModel.computed_at.desc())
+            .limit(snapshot_limit)
+            .all()
+        )
+        summary = self._to_summary(row)
+        return LifecycleDetail(
+            **summary.model_dump(),
+            frozen_config_hash=row.frozen_config_hash,
+            frozen_config_snapshot=row.frozen_config_snapshot,
+            research_backtest_id=row.research_backtest_id,
+            validation_backtest_id=row.validation_backtest_id,
+            baseline_distribution=row.baseline_distribution,
+            note=row.note,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            snapshots=[self._to_snapshot(item) for item in snapshots],
+        )
+
+    # ── 人工操作 ──────────────────────────────────────────────────────────
+
+    def online(self, strategy_id: str, req: LifecycleOnlineRequest) -> LifecycleDetail:
+        """标记策略上线：冻结配置快照，并生成研究期分布作为监控参照系。
+
+        优先复用已存在的研究期回测（同策略、同配置哈希、覆盖完整研究期且成功），
+        避免每次上线重复跑十年回测；无可用回测时才创建并同步执行。
+
+        Args:
+            strategy_id: 策略 ID。
+            req: 上线请求（上线日期、备注、成本）。
+
+        Returns:
+            上线后的生命周期详情。
+
+        Raises:
+            ValueError: 策略不存在、上线日期早于验证期起点，或研究期回测失败时抛出。
+        """
+        detail = self._config_svc.get_config(strategy_id)
+        if detail is None:
+            raise ValueError(f"策略 {strategy_id} 不存在")
+
+        boundaries = _period_boundaries()
+        live_at = req.live_at or today_cn()
+        if live_at < boundaries.validation_start:
+            raise ValueError(
+                f"上线日期 {live_at.isoformat()} 早于验证期起点 "
+                f"{boundaries.validation_start.isoformat()}；"
+                "研究期区间只能用于研究，不能作为实盘监控起点。"
+            )
+
+        config_hash = compute_config_hash(detail.config_json)
+        research_backtest_id = self._find_reusable_research_backtest(
+            strategy_id, config_hash, boundaries
+        )
+        if research_backtest_id is None:
+            created = self._backtest_svc.create_backtest(
+                BacktestCreateRequest(
+                    strategy_id=strategy_id,
+                    start_date=boundaries.research_start,
+                    end_date=boundaries.research_end,
+                    purpose=PURPOSE_RESEARCH,
+                    purpose_reason=f"lifecycle online: {strategy_id}",
+                )
+            )
+            research_backtest_id = created.backtest_id
+            self._backtest_svc.run_backtest(research_backtest_id)
+            run_detail = self._backtest_svc.get_backtest(research_backtest_id)
+            if run_detail is None or run_detail.status != "success":
+                raise ValueError(
+                    f"研究期基线回测未成功（backtest_id={research_backtest_id}），"
+                    "请先排查数据与配置后重新上线"
+                )
+
+        distribution = self._build_distribution(research_backtest_id)
+        row = self._find(strategy_id)
+        if row is None:
+            row = StrategyLifecycleModel(
+                strategy_id=strategy_id,
+                lifecycle_status="LIVE",
+                live_at=live_at,
+                frozen_config_hash=config_hash,
+                frozen_config_snapshot={
+                    "strategy_id": detail.strategy_id,
+                    "display_name": detail.display_name,
+                    "version": detail.version,
+                    "frequency": detail.frequency,
+                    "config_json": detail.config_json,
+                },
+                research_backtest_id=research_backtest_id,
+                baseline_distribution=distribution,
+                note=req.note,
+                created_at=utcnow(),
+                updated_at=utcnow(),
+            )
+            self._db.add(row)
+        else:
+            # 重新上线：覆盖冻结点与参照分布，旧快照保留作历史观察
+            row.lifecycle_status = "LIVE"
+            row.live_at = live_at
+            row.retired_at = None
+            row.frozen_config_hash = config_hash
+            row.frozen_config_snapshot = {
+                "strategy_id": detail.strategy_id,
+                "display_name": detail.display_name,
+                "version": detail.version,
+                "frequency": detail.frequency,
+                "config_json": detail.config_json,
+            }
+            row.research_backtest_id = research_backtest_id
+            row.baseline_distribution = distribution
+            row.note = req.note or row.note
+            row.updated_at = utcnow()
+        self._db.commit()
+        result = self.get_lifecycle(strategy_id)
+        if result is None:
+            raise ValueError(f"策略 {strategy_id} 上线记录写入失败")
+        return result
+
+    def update_status(
+        self, strategy_id: str, req: LifecycleStatusRequest
+    ) -> LifecycleDetail:
+        """人工变更生命周期状态（运行中 / 暂停观察 / 退役）。
+
+        Args:
+            strategy_id: 策略 ID。
+            req: 目标状态与说明。
+
+        Returns:
+            更新后的生命周期详情。
+
+        Raises:
+            ValueError: 策略未上线时抛出。
+        """
+        row = self._find(strategy_id)
+        if row is None:
+            raise ValueError(f"策略 {strategy_id} 尚未标记上线，无法变更生命周期状态")
+        row.lifecycle_status = req.status
+        if req.status == "RETIRED":
+            row.retired_at = today_cn()
+        else:
+            row.retired_at = None
+        if req.note:
+            row.note = req.note
+        row.updated_at = utcnow()
+        self._db.commit()
+        result = self.get_lifecycle(strategy_id)
+        if result is None:
+            raise ValueError(f"策略 {strategy_id} 状态更新后详情不可用")
+        return result
+
+    def refresh(
+        self, strategy_id: str, req: LifecycleRefreshRequest
+    ) -> HealthSnapshotSchema:
+        """人工触发一次体检：跑上线后回测并与研究期分布比对，追加一条快照。
+
+        同步执行（不使用后台任务），因此调用方需容忍一次验证期回测的耗时。
+
+        Args:
+            strategy_id: 策略 ID。
+            req: 刷新请求（可选成本覆盖）。
+
+        Returns:
+            新生成的健康快照。
+
+        Raises:
+            ValueError: 策略未上线、已退役，或监控回测未成功时抛出。
+        """
+        row = self._find(strategy_id)
+        if row is None:
+            raise ValueError(f"策略 {strategy_id} 尚未标记上线，无法刷新健康快照")
+        if row.lifecycle_status == "RETIRED":
+            raise ValueError(f"策略 {strategy_id} 已退役，不再接受健康刷新")
+
+        live_start = row.live_at
+        live_end = today_cn()
+        if live_end < live_start:
+            raise ValueError(
+                f"上线日期 {live_start.isoformat()} 晚于当前日期 {live_end.isoformat()}，"
+                "暂无可用监控区间"
+            )
+        cost_bps = req.cost_bps if req.cost_bps is not None else get_settings().default_cost_bps
+        created = self._backtest_svc.create_backtest(
+            BacktestCreateRequest(
+                strategy_id=strategy_id,
+                start_date=live_start,
+                end_date=live_end,
+                purpose=PURPOSE_MONITOR,
+                purpose_reason=f"lifecycle refresh: {strategy_id}",
+                cost_bps=cost_bps,
+            )
+        )
+        self._backtest_svc.run_backtest(created.backtest_id)
+        run_detail = self._backtest_svc.get_backtest(created.backtest_id)
+        if run_detail is None or run_detail.status != "success":
+            raise ValueError(
+                f"监控区间回测未成功（backtest_id={created.backtest_id}），"
+                "请先排查数据与配置后重试"
+            )
+
+        daily_rows = self._backtest_svc.get_daily_results(created.backtest_id)
+        returns = [r.portfolio_return for r in daily_rows]
+        benchmark = [getattr(r, "benchmark_return", None) for r in daily_rows]
+        trade_dates = [r.trade_date for r in daily_rows]
+        stability = compute_stability_metrics(
+            returns,
+            trade_dates,
+            benchmark_returns=benchmark,
+            turnovers=[getattr(r, "turnover", None) for r in daily_rows],
+            exposures=[getattr(r, "total_exposure", None) for r in daily_rows],
+            positions=[getattr(r, "positions", None) for r in daily_rows],
+            cost_bps=float(cost_bps),
+        )
+        evaluation = evaluate_against_baseline(
+            returns, benchmark, row.baseline_distribution or {}
+        )
+        window_percentiles = {
+            label: entry.get("excess_return_percentile_pct")
+            for label, entry in (evaluation.get("windows") or {}).items()
+        }
+        drawdown_percentile = (evaluation.get("drawdown") or {}).get("percentile_pct")
+        ic_metrics = self._compute_factor_ic(strategy_id, live_start, live_end, live_end)
+        assessment = assess_health(
+            drawdown_percentile,
+            window_percentiles,
+            trailing_alpha_percentiles=self._trailing_alpha_percentiles(strategy_id),
+            ic_decay=ic_metrics.get("ic_decay"),
+        )
+
+        metrics = {
+            "period": {
+                "start": live_start.isoformat(),
+                "end": live_end.isoformat(),
+                "trading_days": len(daily_rows),
+            },
+            "cost_bps": cost_bps,
+            "gross": {
+                "cumulative_return_pct": round(_compound(returns), 4),
+                "annualized_return_pct": round(_annualized_return(returns), 4),
+                "max_drawdown_pct": stability.max_drawdown_pct,
+                "annualized_turnover": stability.annualized_turnover,
+            },
+            "net": {
+                "cumulative_return_pct": stability.net_cumulative_return_pct,
+                "annualized_return_pct": stability.net_annualized_return_pct,
+                "sharpe_ratio": stability.net_sharpe_ratio,
+                "excess_return_pct": stability.net_excess_return_pct,
+                "cost_drag_pct_per_year": stability.cost_drag_pct_per_year,
+            },
+            "concentration": {
+                "year_return_share_max": stability.year_return_share_max,
+                "position_concentration": stability.position_concentration,
+                "average_exposure": stability.average_exposure,
+            },
+            "evaluation": evaluation,
+            "factors": ic_metrics,
+            "validation_backtest_id": created.backtest_id,
+        }
+        snapshot = StrategyHealthSnapshotModel(
+            strategy_id=strategy_id,
+            as_of_date=live_end,
+            live_start=live_start,
+            live_end=live_end,
+            metrics=metrics,
+            health_level=assessment.health_level,
+            diagnosis=assessment.diagnosis,
+            recommended_action=assessment.recommended_action,
+            reasons=assessment.reasons,
+            trigger="manual",
+            computed_at=utcnow(),
+        )
+        self._db.add(snapshot)
+        row.validation_backtest_id = created.backtest_id
+        row.latest_health_level = assessment.health_level
+        row.latest_diagnosis = assessment.diagnosis
+        row.latest_recommended_action = assessment.recommended_action
+        row.last_refreshed_at = snapshot.computed_at
+        row.updated_at = utcnow()
+        self._db.commit()
+        self._db.refresh(snapshot)
+        return self._to_snapshot(snapshot)
+
+    # ── 内部辅助 ──────────────────────────────────────────────────────────
+
+    def _find(self, strategy_id: str) -> StrategyLifecycleModel | None:
+        """读取生命周期行，不存在时返回 None。"""
+        try:
+            return (
+                self._db.query(StrategyLifecycleModel)
+                .filter(StrategyLifecycleModel.strategy_id == strategy_id)
+                .one_or_none()
+            )
+        except Exception:
+            logger.warning("查询生命周期记录失败：%s", strategy_id, exc_info=True)
+            return None
+
+    def _find_reusable_research_backtest(
+        self, strategy_id: str, config_hash: str, boundaries: PeriodBoundaries
+    ) -> str | None:
+        """查找可复用的研究期基线回测，避免重复跑十年回测。
+
+        Args:
+            strategy_id: 策略 ID。
+            config_hash: 当前配置哈希。
+            boundaries: 研究期/验证期边界。
+
+        Returns:
+            可复用的回测 ID，无匹配时返回 None。
+        """
+        try:
+            row = (
+                self._db.query(BacktestRunModel)
+                .filter(
+                    BacktestRunModel.strategy_id == strategy_id,
+                    BacktestRunModel.purpose == PURPOSE_RESEARCH,
+                    BacktestRunModel.status == "success",
+                    BacktestRunModel.config_hash == config_hash,
+                    BacktestRunModel.start_date <= boundaries.research_start,
+                    BacktestRunModel.end_date >= boundaries.research_end,
+                )
+                .order_by(BacktestRunModel.created_at.desc())
+                .first()
+            )
+        except Exception:
+            logger.warning("查找可复用研究期回测失败", exc_info=True)
+            return None
+        return row.backtest_id if row is not None else None
+
+    def _build_distribution(self, backtest_id: str) -> dict[str, Any]:
+        """从研究期回测的逐日结果构建分布快照。
+
+        Args:
+            backtest_id: 研究期回测 ID。
+
+        Returns:
+            可 JSON 序列化的研究期分布（各窗口超额/夏普/回撤分位表）。
+        """
+        daily_rows = self._backtest_svc.get_daily_results(backtest_id)
+        return build_baseline_distribution(
+            [r.portfolio_return for r in daily_rows],
+            [getattr(r, "benchmark_return", None) for r in daily_rows],
+            [r.trade_date for r in daily_rows],
+        )
+
+    def _trailing_alpha_percentiles(self, strategy_id: str) -> list[float | None]:
+        """取最近几次快照的 3M 超额分位，用于判断"连续多次低于阈值"。
+
+        Args:
+            strategy_id: 策略 ID。
+
+        Returns:
+            3M 超额分位列表（最近在前，最多 5 条）。
+        """
+        try:
+            rows = (
+                self._db.query(StrategyHealthSnapshotModel)
+                .filter(StrategyHealthSnapshotModel.strategy_id == strategy_id)
+                .order_by(StrategyHealthSnapshotModel.computed_at.desc())
+                .limit(5)
+                .all()
+            )
+        except Exception:
+            logger.warning("读取历史快照失败", exc_info=True)
+            return []
+        result: list[float | None] = []
+        for row in rows:
+            windows = ((row.metrics or {}).get("evaluation") or {}).get("windows") or {}
+            result.append((windows.get("3m") or {}).get("excess_return_percentile_pct"))
+        return result
+
+    def _compute_factor_ic(
+        self, strategy_id: str, start: date, end: date, as_of: date
+    ) -> dict[str, Any]:
+        """计算策略引用因子在监控区间的 Rank IC 与 ICIR。
+
+        IC 每天产生一个横截面观测，是上线初期唯一具备统计功效的证据，
+        因此与收益类指标一起进入体检报告。IC 存在前瞻窗口，末端
+        ``forward_days`` 个交易日自然缺失，不影响趋势判读。
+
+        Args:
+            strategy_id: 策略 ID。
+            start: 监控区间起始日。
+            end: 监控区间截止日。
+            as_of: 计算时点（用于记录，不参与计算）。
+
+        Returns:
+            含 factor_ids / per_factor / ic_mean / ic_ir / window_ic 的字典。
+        """
+        config = self._config_svc.get_parsed_config(strategy_id)
+        factor_ids: list[str] = []
+        if config is not None:
+            score = getattr(config, "score", None)
+            if score is not None and getattr(score, "factors", None):
+                factor_ids.extend(score.factors.keys())
+            filters = getattr(config, "filters", None)
+            rules = getattr(filters, "rules", None) if filters is not None else None
+            for rule in rules or []:
+                factor_id = getattr(rule, "factor", None)
+                if factor_id and factor_id not in factor_ids:
+                    factor_ids.append(factor_id)
+        result: dict[str, Any] = {
+            "factor_ids": factor_ids,
+            "per_factor": {},
+            "as_of": as_of.isoformat(),
+        }
+        values: list[float] = []
+        # 按日期顺序保留 IC 观测，用于计算"前半段 vs 后半段"的 IC 衰减
+        observations: list[tuple[str, float]] = []
+        for factor_id in factor_ids:
+            try:
+                # 横截面因子值恒定（例如区间内只有少数资产）时 spearman 会给出
+                # 未定义的相关系数并发出警告；这属于预期情况，不污染日志
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    series = calc_ic_series(self._db, factor_id, start, end, forward_days=1)
+            except Exception:
+                logger.warning("计算因子 %s 的 IC 失败", factor_id, exc_info=True)
+                continue
+            ic_values = [item["ic"] for item in series]
+            observations.extend((str(item["trade_date"]), item["ic"]) for item in series)
+            if not ic_values:
+                result["per_factor"][factor_id] = {"count": 0}
+                continue
+            mean_ic = sum(ic_values) / len(ic_values)
+            variance = (
+                sum((x - mean_ic) ** 2 for x in ic_values) / (len(ic_values) - 1)
+                if len(ic_values) > 1
+                else 0.0
+            )
+            std = variance**0.5
+            result["per_factor"][factor_id] = {
+                "count": len(ic_values),
+                "ic_mean": round(mean_ic, 4),
+                "ic_ir": round(mean_ic / std, 4) if std > 0 else None,
+                "ic_positive_ratio": round(
+                    sum(1 for x in ic_values if x > 0) / len(ic_values), 4
+                ),
+            }
+            values.extend(ic_values)
+        if values:
+            mean_ic = sum(values) / len(values)
+            result["ic_mean"] = round(mean_ic, 4)
+            result["ic_decay"] = _split_half_ic(observations)
+        else:
+            result["ic_mean"] = None
+            result["ic_decay"] = {"first_half_mean": None, "second_half_mean": None}
+        return result
+
+    def _to_summary(self, row: StrategyLifecycleModel) -> LifecycleSummary:
+        """把生命周期 ORM 行转换为摘要模型。"""
+        display_name: str | None = None
+        try:
+            config = self._config_svc.get_config(row.strategy_id)
+            display_name = config.display_name if config is not None else None
+        except Exception:
+            display_name = None
+        return LifecycleSummary(
+            strategy_id=row.strategy_id,
+            display_name=display_name,
+            lifecycle_status=row.lifecycle_status,
+            live_at=row.live_at,
+            retired_at=row.retired_at,
+            live_days=(today_cn() - row.live_at).days,
+            health_level=row.latest_health_level,
+            diagnosis=row.latest_diagnosis,
+            recommended_action=row.latest_recommended_action,
+            last_refreshed_at=row.last_refreshed_at,
+        )
+
+    @staticmethod
+    def _to_snapshot(row: StrategyHealthSnapshotModel) -> HealthSnapshotSchema:
+        """把健康快照 ORM 行转换为响应模型。"""
+        return HealthSnapshotSchema(
+            id=row.id,
+            as_of_date=row.as_of_date,
+            live_start=row.live_start,
+            live_end=row.live_end,
+            health_level=row.health_level,
+            diagnosis=row.diagnosis,
+            recommended_action=row.recommended_action,
+            reasons=list(row.reasons or []),
+            trigger=row.trigger,
+            computed_at=row.computed_at,
+            metrics=row.metrics,
+        )
+
+
+def _period_boundaries() -> PeriodBoundaries:
+    """从系统配置读取研究期/验证期边界。"""
+    settings = get_settings()
+    return PeriodBoundaries(
+        research_start=date.fromisoformat(settings.research_period_start),
+        research_end=date.fromisoformat(settings.research_period_end),
+        validation_start=date.fromisoformat(settings.validation_period_start),
+    )
+
+
+def _split_half_ic(observations: list[tuple[str, float]]) -> dict[str, float | None]:
+    """把 IC 观测按日期顺序切成前后两半，比较均值以判断 IC 是否衰减。
+
+    监控区间通常短于 12M/24M 窗口，无法逐窗口计算 IC；用"前半段 vs 后半段"
+    代替，是上线初期能得到的、方向明确的 IC 衰减证据。
+
+    Args:
+        observations: (交易日, IC) 列表，按日期升序（可能来自多个因子的拼接）。
+
+    Returns:
+        含 first_half_mean / second_half_mean 的字典；观测不足时两者为 None。
+    """
+    points = sorted(observations, key=lambda item: item[0])
+    if len(points) < 4:
+        return {"first_half_mean": None, "second_half_mean": None}
+    middle = len(points) // 2
+    first = [ic for _, ic in points[:middle]]
+    second = [ic for _, ic in points[middle:]]
+    return {
+        "first_half_mean": round(sum(first) / len(first), 4),
+        "second_half_mean": round(sum(second) / len(second), 4),
+    }
+
+
+def _compound(daily_returns: list[float]) -> float:
+    """计算收益率序列的累计收益（百分点）。"""
+    cumulative = 1.0
+    for r in daily_returns:
+        cumulative *= 1 + r / 100
+    return (cumulative - 1) * 100
+
+
+def _annualized_return(
+    daily_returns: list[float], trading_days: int = 252
+) -> float:
+    """把日收益序列折算为年化收益率（百分点），空序列返回 0。"""
+    if not daily_returns:
+        return 0.0
+    total = _compound(daily_returns) / 100
+    years = len(daily_returns) / trading_days
+    if years <= 0 or total <= -1:
+        return 0.0
+    return ((1 + total) ** (1 / years) - 1) * 100

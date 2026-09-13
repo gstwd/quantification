@@ -73,6 +73,10 @@ python -m quant_etf_api.cli optimization finish <opt_id> --verdict accept --repo
 
 > **回测区间下限（用户约定，2026-09-12 起）**：所有回测、对比与优化评估的区间**一律从 2016-01-01 开始**，不再使用 2016 年之前的数据（含 `--start` 缺省值、滚动分段的第一段、`optimization start --start`）。早于 2016 年的结果仅作历史参考，不作为验收依据。
 
+> **研究期 / 验证期边界（硬约束，2026-09-13 起）**：研究期固定为 **2016-01-01 ~ 2025-12-31**，**2026-01-01 起为验证期**。边界定义在 `Settings.research_period_start/research_period_end/validation_period_start`，规则实现在 `domain/research/periods.py`。`backtest_run.purpose`（research/validation/monitor）标记用途：**研究类回测与优化会话越过研究期末端会被直接拒绝**，验证/监控用途允许使用验证期数据并进入留痕列表（`GET /api/backtests/validation-usage`）。`backtest run` 与 `optimization start` 的 `--end` 缺省为研究期末端。理论依据见 [`docs/architecture/策略稳健性评估与生命周期监控实施说明.md`](docs/architecture/策略稳健性评估与生命周期监控实施说明.md)。
+
+> **稳健性与生命周期模块（2026-09-13 起）**：单次回测的稳健性指标（成本折算、收益集中度、分段一致性、回撤结构）在读取路径由 `domain/research/stability.py` 现算，暴露为 `BacktestDetail.stability`，不新增数据库列、不重跑历史回测；候选集级别的过拟合风险（CSCV-PBO / Deflated Sharpe / 块自助法 / 参数邻域 / 因子消融 / 池扰动）由 `services/robustness_service.py` 与 CLI `robustness` 命令组承担，结果落 `robustness_run` 表并兼作试验次数台账；上线后的监控与诊断由 `services/strategy_lifecycle_service.py` 承担（`strategy_lifecycle` / `strategy_health_snapshot` 表，`/lifecycle` 页面），**状态只人工变更、系统不自动调参**，LIVE 状态下禁止直接修改 `config_json`。
+
 ### Factor definition sync
 
 因子定义以数据库为唯一 source of truth。首次部署或添加新因子后，需要手动同步：

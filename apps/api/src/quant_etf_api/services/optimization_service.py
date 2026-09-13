@@ -18,10 +18,20 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from quant_etf_api.config.settings import get_settings
+from quant_etf_api.domain.research.periods import (
+    PURPOSE_RESEARCH,
+    PeriodBoundaries,
+    validate_backtest_period,
+)
 from quant_etf_api.domain.research.walk_forward import compute_folds
+from quant_etf_api.domain.research.stability import compute_stability_metrics
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.infra.db.base import utcnow
-from quant_etf_api.infra.db.models.core import StrategyOptimizationModel
+from quant_etf_api.infra.db.models.core import (
+    RobustnessRunModel,
+    StrategyOptimizationModel,
+)
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.infra.db.repositories.optimization import OptimizationRepository
@@ -120,6 +130,11 @@ class OptimizationService:
             raise ValueError("start_date 不能晚于 end_date")
         if folds < 1:
             raise ValueError("folds 必须 >= 1")
+        # 研究期/验证期硬约束：优化属于研究行为，不得使用验证期数据，
+        # 否则"看了样本外再调参"会让验证期失去样本外意义
+        validate_backtest_period(
+            _period_boundaries(), PURPOSE_RESEARCH, start_date, end_date
+        )
 
         baseline = self._config_svc.get_config(strategy_id)
         if baseline is None:
@@ -630,7 +645,139 @@ class OptimizationService:
                 _ge(cumulative.get("candidate_mean"), cumulative.get("baseline_mean")),
             )
         )
+        items.append(self._check_net_cost(session))
+        items.append(self._check_neighborhood(session.strategy_id))
+        items.append(self._check_segment_consistency(session))
         return items
+
+    def _check_net_cost(self, session: StrategyOptimizationModel) -> dict[str, Any]:
+        """按净成本口径比较候选与基线（毛口径好看但扣成本后失效应被拒绝）。
+
+        逐折回测的逐日结果里带有单边换手率，因此可以在验收阶段直接折算净
+        夏普，无需重跑回测；成本假设取系统默认值。
+
+        Args:
+            session: 优化会话 ORM 行。
+
+        Returns:
+            单条验收清单项。
+        """
+        cost_bps = get_settings().default_cost_bps
+        baseline_net: list[float] = []
+        candidate_net: list[float] = []
+        for fold in session.fold_backtests or []:
+            base = self._collect_net_metrics(fold.get("baseline_backtest_id"), cost_bps)
+            cand = self._collect_net_metrics(fold.get("candidate_backtest_id"), cost_bps)
+            if base is not None:
+                baseline_net.append(base)
+            if cand is not None:
+                candidate_net.append(cand)
+        base_mean = statistics.mean(baseline_net) if baseline_net else None
+        cand_mean = statistics.mean(candidate_net) if candidate_net else None
+        return self._check_item(
+            "net_cost_nonnegative",
+            f"净成本口径（{cost_bps:g}bp）验证窗平均夏普 ≥ 基线",
+            _ge(cand_mean, base_mean),
+        )
+
+    def _check_neighborhood(self, strategy_id: str) -> dict[str, Any]:
+        """要求已完成参数邻域扰动且不存在方向反转（参数脆弱即拒绝）。
+
+        未做过 scan 批次时判定为不通过：参数是否处于平台必须用证据回答，
+        不能靠"看起来稳定"。
+
+        Args:
+            strategy_id: 基线策略 ID。
+
+        Returns:
+            单条验收清单项。
+        """
+        try:
+            row = (
+                self._db.query(RobustnessRunModel)
+                .filter(
+                    RobustnessRunModel.strategy_id == strategy_id,
+                    RobustnessRunModel.kind == "scan",
+                    RobustnessRunModel.status == "success",
+                )
+                .order_by(RobustnessRunModel.created_at.desc())
+                .first()
+            )
+        except Exception:
+            logger.warning("读取参数邻域扰动结果失败", exc_info=True)
+            row = None
+        if row is None:
+            return self._check_item(
+                "neighborhood_no_reversal",
+                "参数邻域无方向反转（需先执行 robustness scan）",
+                False,
+            )
+        neighborhood = (row.summary or {}).get("neighborhood") or {}
+        return self._check_item(
+            "neighborhood_no_reversal",
+            "参数邻域无方向反转且落在参数高原",
+            bool(neighborhood.get("is_plateau")) and not bool(neighborhood.get("reversal")),
+        )
+
+    def _check_segment_consistency(
+        self, session: StrategyOptimizationModel
+    ) -> dict[str, Any]:
+        """要求改善不是只来自某一个验证折（剔除最好折后仍不劣于基线）。
+
+        Args:
+            session: 优化会话 ORM 行。
+
+        Returns:
+            单条验收清单项。
+        """
+        deltas: list[tuple[float, float, float]] = []
+        for fold in session.metrics_folds or []:
+            base = (fold.get("baseline") or {}).get("sharpe_ratio")
+            cand = (fold.get("candidate") or {}).get("sharpe_ratio")
+            if base is None or cand is None:
+                continue
+            deltas.append((float(cand) - float(base), float(base), float(cand)))
+        if len(deltas) < 2:
+            return self._check_item(
+                "segment_consistency",
+                "分段一致性：剔除最好折后候选夏普仍不低于基线（需 ≥2 折数据）",
+                False,
+            )
+        best_delta = max(deltas, key=lambda item: item[0])
+        remaining = [item for item in deltas if item is not best_delta]
+        base_mean = statistics.mean(item[1] for item in remaining)
+        cand_mean = statistics.mean(item[2] for item in remaining)
+        return self._check_item(
+            "segment_consistency",
+            "分段一致性：剔除最好折后候选夏普仍不低于基线",
+            cand_mean >= base_mean,
+        )
+
+    def _collect_net_metrics(self, backtest_id: str | None, cost_bps: float) -> float | None:
+        """读取单折回测的净口径夏普（按逐日单边换手率折算成本）。
+
+        Args:
+            backtest_id: 回测 ID。
+            cost_bps: 单边成本（基点）。
+
+        Returns:
+            净口径年化夏普；回测缺失或失败时返回 None。
+        """
+        if not backtest_id:
+            return None
+        row = self._backtest_repo.find_by_id(backtest_id)
+        if row is None or row.status != "success":
+            return None
+        daily = self._backtest_repo.find_daily_results(backtest_id)
+        if not daily:
+            return None
+        metrics = compute_stability_metrics(
+            [item.portfolio_return for item in daily],
+            [item.trade_date for item in daily],
+            turnovers=[getattr(item, "turnover", None) for item in daily],
+            cost_bps=cost_bps,
+        )
+        return metrics.net_sharpe_ratio
 
     @staticmethod
     def _check_item(key: str, description: str, passed: bool) -> dict[str, Any]:
@@ -694,3 +841,13 @@ def _ge(candidate: Any, baseline: Any) -> bool:
     if candidate is None or baseline is None:
         return False
     return candidate >= baseline
+
+
+def _period_boundaries() -> PeriodBoundaries:
+    """从系统配置读取研究期/验证期边界。"""
+    settings = get_settings()
+    return PeriodBoundaries(
+        research_start=date.fromisoformat(settings.research_period_start),
+        research_end=date.fromisoformat(settings.research_period_end),
+        validation_start=date.fromisoformat(settings.validation_period_start),
+    )

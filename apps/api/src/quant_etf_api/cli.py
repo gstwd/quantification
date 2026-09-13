@@ -12,18 +12,23 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from quant_etf_api.config.logging_config import setup_logging
+from quant_etf_api.config.settings import get_settings
 from quant_etf_api.factors.registry import build_default_factor_registry
 from quant_etf_api.infra.clients.akshare_index import _PE_PB_NAME_MAP, _calc_percentile
 from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.infra.db.models.core import IndexValuationModel
+from quant_etf_api.infra.time import today_cn
 from quant_etf_api.schemas.backtest import BacktestCreateRequest
 from quant_etf_api.schemas.strategy import StrategyConfigCreate, StrategyConfigUpdate
 from quant_etf_api.services.backtest_service import BacktestService
 from quant_etf_api.services.factor_admin_service import FactorAdminService
 from quant_etf_api.services.optimization_service import OptimizationService
+from quant_etf_api.services.robustness_service import RobustnessService
+from quant_etf_api.services.strategy_lifecycle_service import StrategyLifecycleService
 from quant_etf_api.services.strategy_service import StrategyService
 
 logger = logging.getLogger(__name__)
+
 
 def init_factors() -> None:
     """将代码中的因子元数据（指数 + 行业）同步到数据库。
@@ -223,11 +228,24 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
     p = sub.add_parser("run", help="创建并执行回测")
     p.add_argument("--strategy", dest="strategy_id", required=True)
     p.add_argument("--start", type=date.fromisoformat, help="起始日期，默认今天往前 2 年")
-    p.add_argument("--end", type=date.fromisoformat, help="截止日期，默认今天")
+    p.add_argument(
+        "--end",
+        type=date.fromisoformat,
+        help="截止日期；purpose=research 时默认研究期末端（2025-12-31）",
+    )
     p.add_argument("--universe", choices=["all", "subset"], default="all")
     p.add_argument("--index-codes", dest="index_codes", help="逗号分隔的指数代码")
     p.add_argument("--benchmark", dest="benchmark_index", default="000300")
     p.add_argument("--no-benchmark", action="store_true")
+    p.add_argument(
+        "--purpose",
+        choices=["research", "validation", "monitor"],
+        default="research",
+        help="回测用途：research=研究期研究（不得越过研究期末端），"
+        "validation=验证期验收，monitor=上线后监控",
+    )
+    p.add_argument("--purpose-reason", help="用途说明，写入留痕记录")
+    p.add_argument("--cost-bps", type=float, help="净口径指标的单边成本（基点），默认 10")
     p.add_argument("--async", dest="async_mode", action="store_true", help="入队后台执行")
     _add_json_flag(p)
 
@@ -245,6 +263,84 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("backtest_id")
     p.add_argument("--daily", action="store_true", help="包含每日组合绩效")
     p.add_argument("--index", action="store_true", help="包含每指数信号与收益")
+    _add_json_flag(p)
+
+
+def _build_lifecycle_group(subparsers: argparse._SubParsersAction) -> None:
+    """注册 lifecycle 命令组（上线后监控与诊断）。"""
+    group = subparsers.add_parser("lifecycle", help="策略生命周期（上线后监控与诊断）")
+    sub = group.add_subparsers(dest="subcommand", required=True)
+
+    p = sub.add_parser("list", help="列出全部上线策略的生命周期摘要")
+    _add_json_flag(p)
+
+    p = sub.add_parser("show", help="查看单策略生命周期详情与最近的体检记录")
+    p.add_argument("strategy_id")
+    _add_json_flag(p)
+
+    p = sub.add_parser("online", help="标记上线（冻结配置并生成研究期分布）")
+    p.add_argument("strategy_id")
+    p.add_argument("--live-at", type=date.fromisoformat, help="上线日期，默认今天")
+    p.add_argument("--note", help="上线备注（研究结论、上线依据）")
+    p.add_argument("--cost-bps", type=float, help="净口径成本（基点），缺省取系统默认值")
+    _add_json_flag(p)
+
+    p = sub.add_parser("status", help="变更生命周期状态（仅人工触发）")
+    p.add_argument("strategy_id")
+    p.add_argument(
+        "--set", dest="target_status", choices=["LIVE", "SUSPENDED", "RETIRED"], required=True
+    )
+    p.add_argument("--note", help="变更说明")
+    _add_json_flag(p)
+
+    p = sub.add_parser("refresh", help="刷新健康快照（同步执行一次监控区间回测）")
+    p.add_argument("strategy_id")
+    p.add_argument("--cost-bps", type=float, help="净口径成本（基点），缺省取系统默认值")
+    _add_json_flag(p)
+
+
+def _build_robustness_group(subparsers: argparse._SubParsersAction) -> None:
+    """注册 robustness 命令组（候选集级别的过拟合风险检验）。"""
+    group = subparsers.add_parser(
+        "robustness", help="稳健性验证（参数邻域 / 因子消融 / 资产池扰动 / 统计显著性）"
+    )
+    sub = group.add_subparsers(dest="subcommand", required=True)
+
+    for name, help_text in (
+        ("scan", "单旋钮邻域扰动：检查参数是否处于平台而非尖峰"),
+        ("ablate", "因子消融：逐个移除评分因子与过滤条件"),
+        ("pool", "资产池扰动：随机子池、剔除常持、剔除后上市指数"),
+    ):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("--strategy", dest="strategy_id", required=True, help="基线策略 ID")
+        p.add_argument("--windows", type=int, default=4, help="研究期内切分的验证窗口数")
+        if name == "scan":
+            p.add_argument("--max-knobs", type=int, default=30, help="单旋钮扰动数量上限")
+        if name == "pool":
+            p.add_argument("--samples", type=int, default=8, help="随机子池抽样次数")
+        p.add_argument("--sync", dest="sync_mode", action="store_true", help="同步执行（默认入队）")
+        _add_json_flag(p)
+
+    p = sub.add_parser("collect", help="等待并汇总批次结果")
+    p.add_argument("robustness_id")
+    p.add_argument("--wait", action="store_true", help="轮询等待至终态")
+    p.add_argument("--timeout", type=float, default=3600.0, help="等待超时秒数")
+    _add_json_flag(p)
+
+    p = sub.add_parser("stats", help="计算 CSCV-PBO / Deflated Sharpe / 自助法置信区间")
+    p.add_argument("robustness_id")
+    p.add_argument("--n-trials", type=int, help="计入多重检验的试验次数，缺省取台账值")
+    p.add_argument("--cost-bps", type=float, help="净口径成本（基点），缺省取系统默认值")
+    p.add_argument("--block", type=int, default=20, help="自助法块长度（交易日）")
+    p.add_argument("--bootstrap", type=int, default=2000, help="自助抽样次数")
+    _add_json_flag(p)
+
+    p = sub.add_parser("show", help="查看批次详情")
+    p.add_argument("robustness_id")
+    _add_json_flag(p)
+
+    p = sub.add_parser("list", help="列出最近的批次")
+    p.add_argument("--limit", type=int, default=50)
     _add_json_flag(p)
 
 
@@ -326,6 +422,7 @@ def _build_industry_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--start", default="20130101", help="起始日 YYYYMMDD，默认 20130101")
     p.add_argument("--codes", dest="stock_codes", help="逗号分隔的股票代码，默认全部成分股")
     _add_json_flag(p)
+
 
 def _run_industry(args: argparse.Namespace) -> None:
     """执行 industry 命令组。"""
@@ -486,7 +583,7 @@ def _build_stock_group(subparsers: argparse._SubParsersAction) -> None:
     group = subparsers.add_parser("stock", help="个股数据管理（质量快照与批量补全）")
     sub = group.add_subparsers(dest="subcommand", required=True)
 
-    p = sub.add_parser("init-universe", help="初始化/同步个股元数据（申万成分+交易所名单）")
+    p = sub.add_parser("init-universe", help="同步 Tushare 沪深 A 股全量目录")
     _add_json_flag(p)
 
     p = sub.add_parser("quality", help="批量重算并落库个股数据质量快照")
@@ -499,11 +596,53 @@ def _build_stock_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--codes", dest="stock_codes", help="逗号分隔股票代码")
     p.add_argument("--only-missing", action="store_true", help="仅处理缺失>0或无数据的股票")
     p.add_argument("--start", default="20130101", help="起始日 YYYYMMDD，默认 20130101")
+    p.add_argument(
+        "--datasets",
+        default="daily,basic,moneyflow",
+        help="逗号分隔数据集：daily/basic/moneyflow",
+    )
     _add_json_flag(p)
 
     p = sub.add_parser("rebuild", help="批量全量重拉个股日线（先拉取成功后清空旧行）")
     p.add_argument("--codes", dest="stock_codes", required=True, help="逗号分隔股票代码")
     p.add_argument("--start", default="20130101", help="起始日 YYYYMMDD，默认 20130101")
+    p.add_argument(
+        "--datasets",
+        default="daily,basic,moneyflow",
+        help="逗号分隔数据集：daily/basic/moneyflow",
+    )
+    _add_json_flag(p)
+
+    p = sub.add_parser("backfill-tushare", help="按交易日回填 Tushare 个股明细")
+    p.add_argument("--start", default="20130101", help="起始日 YYYYMMDD，默认 20130101")
+    p.add_argument("--end", default=None, help="结束日 YYYYMMDD，默认最近交易日")
+    p.add_argument(
+        "--datasets",
+        default="daily,basic,moneyflow",
+        help="逗号分隔数据集：daily/basic/moneyflow",
+    )
+    p.add_argument("--force", action="store_true", help="忽略已完成判断重新抓取")
+    _add_json_flag(p)
+
+    p = sub.add_parser("sync-day", help="同步指定交易日的 Tushare 个股明细")
+    p.add_argument("--date", required=True, help="交易日 YYYYMMDD")
+    p.add_argument(
+        "--datasets",
+        default="daily,basic,moneyflow",
+        help="逗号分隔数据集：daily/basic/moneyflow",
+    )
+    _add_json_flag(p)
+
+    p = sub.add_parser("prune-legacy", help="删除 2013 年前旧 close-only 行（默认预演）")
+    p.add_argument("--before", default="20130101", help="截止日 YYYYMMDD（不含）")
+    p.add_argument("--confirm-token", default=None, help="删除确认令牌")
+    _add_json_flag(p)
+
+    p = sub.add_parser(
+        "prune-non-tushare", help="删除非 Tushare 或非沪深 A 股旧行（默认预演）"
+    )
+    p.add_argument("--start", default="20130101", help="起始日 YYYYMMDD（含）")
+    p.add_argument("--confirm-token", default=None, help="删除确认令牌")
     _add_json_flag(p)
 
 
@@ -521,8 +660,8 @@ def _run_stock(args: argparse.Namespace) -> None:
             _emit(result, not args.no_json)
             return
 
-        codes = _split_codes(args.stock_codes)
         if args.subcommand == "quality":
+            codes = _split_codes(args.stock_codes)
             if args.all:
                 codes = None
             result = service.bulk_quality(codes)
@@ -531,20 +670,65 @@ def _run_stock(args: argparse.Namespace) -> None:
                 sys.exit(1)
             return
         if args.subcommand in ("fill", "rebuild"):
+            codes = _split_codes(args.stock_codes)
             start_date = datetime.strptime(args.start, "%Y%m%d").date()
             if args.subcommand == "rebuild" and codes is None:
                 _fail("rebuild 必须通过 --codes 指定要重拉的股票")
             if args.all:
                 codes = None
+            datasets = _split_codes(args.datasets)
             result = service.bulk_fill(
                 codes=codes,
                 start_date=start_date,
                 only_missing=args.only_missing if args.subcommand == "fill" else False,
                 rebuild=args.subcommand == "rebuild",
+                datasets=datasets,
             )
             _emit(result, not args.no_json)
             if result["errors"]:
                 sys.exit(1)
+            return
+        if args.subcommand == "backfill-tushare":
+            start_date = datetime.strptime(args.start, "%Y%m%d").date()
+            end_date = (
+                datetime.strptime(args.end, "%Y%m%d").date()
+                if args.end
+                else service.latest_trading_day()
+            )
+            result = service.sync_range(
+                start_date,
+                end_date,
+                datasets=_split_codes(args.datasets),
+                force=args.force,
+            )
+            _emit(result, not args.no_json)
+            if result["errors"]:
+                sys.exit(1)
+            return
+        if args.subcommand == "sync-day":
+            trade_date = datetime.strptime(args.date, "%Y%m%d").date()
+            result = service.sync_trade_date(trade_date, datasets=_split_codes(args.datasets))
+            _emit(result, not args.no_json)
+            if result["errors"]:
+                sys.exit(1)
+            return
+        if args.subcommand == "prune-legacy":
+            before = datetime.strptime(args.before, "%Y%m%d").date()
+            expected = f"PRUNE:stock_daily_close:BEFORE:{args.before}"
+            dry_run = args.confirm_token != expected
+            result = service.prune_before(before, dry_run=dry_run)
+            if dry_run:
+                result["confirm_token"] = expected
+            _emit(result, not args.no_json)
+            return
+        if args.subcommand == "prune-non-tushare":
+            start_date = datetime.strptime(args.start, "%Y%m%d").date()
+            expected = f"PRUNE:stock_daily_close:NON_TUSHARE:{args.start}"
+            dry_run = args.confirm_token != expected
+            result = service.prune_non_tushare(start_date, dry_run=dry_run)
+            if dry_run:
+                result["confirm_token"] = expected
+            _emit(result, not args.no_json)
             return
     finally:
         db.close()
@@ -632,8 +816,16 @@ def _run_backtest(args: argparse.Namespace) -> None:
     try:
         svc = BacktestService(db)
         if args.subcommand == "run":
-            end = args.end or date.today()
+            # 研究类回测默认落在研究期末端：这样"不带日期"的调用天然处于研究期，
+            # 需要看验证期数据时必须显式声明用途，从而留下审计痕迹
+            settings = get_settings()
+            research_start = date.fromisoformat(settings.research_period_start)
+            research_end = date.fromisoformat(settings.research_period_end)
+            purpose = getattr(args, "purpose", "research")
+            end = args.end or (research_end if purpose == "research" else today_cn())
             start = args.start or (end - timedelta(days=730))
+            if start < research_start:
+                start = research_start
             if args.start and args.end and args.start > args.end:
                 _fail("--start 不能晚于 --end")
             index_codes = [
@@ -647,6 +839,9 @@ def _run_backtest(args: argparse.Namespace) -> None:
                 index_codes=index_codes,
                 enable_benchmark=not args.no_benchmark,
                 benchmark_index_code=args.benchmark_index,
+                purpose=purpose,
+                purpose_reason=getattr(args, "purpose_reason", None),
+                cost_bps=getattr(args, "cost_bps", None),
             )
             summary = svc.create_backtest(req)
             if args.async_mode:
@@ -700,13 +895,107 @@ def _run_backtest(args: argparse.Namespace) -> None:
         db.close()
 
 
+def _run_lifecycle(args: argparse.Namespace) -> None:
+    """执行 lifecycle 命令组（上线后监控与诊断）。"""
+    from quant_etf_api.schemas.lifecycle import (
+        LifecycleOnlineRequest,
+        LifecycleRefreshRequest,
+        LifecycleStatusRequest,
+    )
+
+    db = SessionLocal()
+    try:
+        svc = StrategyLifecycleService(db)
+        if args.subcommand == "list":
+            _emit([item.model_dump() for item in svc.list_lifecycles()], not args.no_json)
+        elif args.subcommand == "show":
+            detail = svc.get_lifecycle(args.strategy_id)
+            if detail is None:
+                _fail(f"策略 {args.strategy_id} 尚未标记上线")
+            _emit(detail.model_dump(), not args.no_json)
+        elif args.subcommand == "online":
+            result = svc.online(
+                args.strategy_id,
+                LifecycleOnlineRequest(
+                    live_at=args.live_at, note=args.note, cost_bps=args.cost_bps
+                ),
+            )
+            _emit(result.model_dump(), not args.no_json)
+        elif args.subcommand == "status":
+            result = svc.update_status(
+                args.strategy_id,
+                LifecycleStatusRequest(status=args.target_status, note=args.note),
+            )
+            _emit(result.model_dump(), not args.no_json)
+        elif args.subcommand == "refresh":
+            result = svc.refresh(args.strategy_id, LifecycleRefreshRequest(cost_bps=args.cost_bps))
+            _emit(result.model_dump(), not args.no_json)
+    except ValueError as exc:
+        _fail(str(exc))
+    finally:
+        db.close()
+
+
+def _run_robustness(args: argparse.Namespace) -> None:
+    """执行 robustness 命令组。"""
+    db = SessionLocal()
+    try:
+        svc = RobustnessService(db)
+        if args.subcommand in ("scan", "ablate", "pool"):
+            result = svc.create(
+                strategy_id=args.strategy_id,
+                kind=args.subcommand,
+                windows=args.windows,
+                pool_samples=getattr(args, "samples", 8),
+                max_knobs=getattr(args, "max_knobs", 30),
+                async_mode=not getattr(args, "sync_mode", False),
+            )
+            _emit(result, not args.no_json)
+        elif args.subcommand == "collect":
+            deadline = time.monotonic() + args.timeout
+            while True:
+                result = svc.collect(args.robustness_id)
+                if not args.wait or result.get("status") != "running":
+                    break
+                if time.monotonic() >= deadline:
+                    result["timeout"] = True
+                    break
+                time.sleep(5)
+            _emit(result, not args.no_json)
+            if result.get("status") == "failed":
+                sys.exit(1)
+        elif args.subcommand == "stats":
+            result = svc.compute_statistics(
+                args.robustness_id,
+                n_trials=args.n_trials,
+                cost_bps=args.cost_bps,
+                block=args.block,
+                n_bootstrap=args.bootstrap,
+            )
+            _emit(result, not args.no_json)
+        elif args.subcommand == "show":
+            detail = svc.get_run(args.robustness_id)
+            if detail is None:
+                _fail(f"稳健性验证批次 {args.robustness_id} 不存在")
+            _emit(detail.model_dump(), not args.no_json)
+        elif args.subcommand == "list":
+            result = svc.list_runs(limit=args.limit)
+            _emit(result.model_dump(), not args.no_json)
+    except ValueError as exc:
+        _fail(str(exc))
+    finally:
+        db.close()
+
+
 def _run_optimization(args: argparse.Namespace) -> None:
     """执行 optimization 命令组。"""
     db = SessionLocal()
     try:
         svc = OptimizationService(db)
         if args.subcommand == "start":
-            end = args.end or date.today()
+            # 优化属于研究行为：默认截止在研究期末端，不得触碰验证期数据
+            research_end = date.fromisoformat(get_settings().research_period_end)
+            end = args.end or research_end
             start = args.start or (end - timedelta(days=730))
             candidate = _read_json_file(args.candidate_file)
             result = svc.start(
@@ -774,6 +1063,8 @@ def main() -> None:
     )
     _build_strategy_group(subparsers)
     _build_backtest_group(subparsers)
+    _build_lifecycle_group(subparsers)
+    _build_robustness_group(subparsers)
     _build_optimization_group(subparsers)
     _build_industry_group(subparsers)
     _build_index_group(subparsers)
@@ -785,6 +1076,10 @@ def main() -> None:
         _run_strategy(args)
     elif args.command == "backtest":
         _run_backtest(args)
+    elif args.command == "lifecycle":
+        _run_lifecycle(args)
+    elif args.command == "robustness":
+        _run_robustness(args)
     elif args.command == "optimization":
         _run_optimization(args)
     elif args.command == "industry":

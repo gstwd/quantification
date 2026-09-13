@@ -33,6 +33,9 @@
             <span :class="['chip', item.status === 'active' ? 'chip-active' : 'chip-disabled']">
               {{ item.status === 'active' ? '启用' : '禁用' }}
             </span>
+            <span v-if="lifecycleMap[item.strategy_id]" :class="['chip', 'chip-lifecycle']">
+              上线 · {{ healthText(lifecycleMap[item.strategy_id].health_level) }}
+            </span>
           </div>
         </div>
         <p class="strategy-desc">{{ item.description || '暂无描述' }}</p>
@@ -135,6 +138,8 @@ import { RouterLink } from 'vue-router'
 
 import StrategyConfigForm from '../components/StrategyConfigForm.vue'
 import { useStrategyStore } from '../stores/strategies'
+import { fetchLifecycles } from '../api/lifecycle'
+import type { LifecycleSummary } from '../types/api'
 
 const store = useStrategyStore()
 const showCreate = ref(false)
@@ -143,6 +148,32 @@ const copyLoading = ref(false)
 const copyError = ref('')
 const jsonError = ref('')
 const advancedMode = ref(false)
+
+/** 已上线策略的生命周期摘要，按策略 ID 索引（未上线的策略不出现） */
+const lifecycleMap = ref<Record<string, LifecycleSummary>>({})
+
+/**
+ * 加载已上线策略的生命周期摘要，用于在策略卡片上展示上线状态与健康等级。
+ */
+async function loadLifecycles(): Promise<void> {
+  try {
+    const items = await fetchLifecycles()
+    lifecycleMap.value = Object.fromEntries(items.map(item => [item.strategy_id, item]))
+  } catch {
+    // 生命周期属于附加信息：加载失败不应影响策略列表本身
+    lifecycleMap.value = {}
+  }
+}
+
+/**
+ * 健康等级中文文案。
+ *
+ * @param level - 后端返回的健康等级，可能为空（尚未体检）
+ */
+function healthText(level: string | null): string {
+  if (!level) return '未体检'
+  return { HEALTHY: '健康', WATCH: '观察', WARNING: '警告', CRITICAL: '严重' }[level] ?? level
+}
 
 const form = ref({
   strategy_id: '',
@@ -269,7 +300,10 @@ async function handleCopyConfirm(): Promise<void> {
   }
 }
 
-onMounted(() => store.loadAll())
+onMounted(() => {
+  store.loadAll()
+  loadLifecycles()
+})
 </script>
 
 <style scoped>
@@ -352,6 +386,7 @@ onMounted(() => store.loadAll())
 .chip-scope { background: var(--surface-2); color: var(--text-muted); }
 .chip-active { background: rgba(34,197,94,0.12); color: #4ade80; }
 .chip-disabled { background: rgba(239,68,68,0.12); color: #f87171; }
+.chip-lifecycle { background: rgba(59,130,246,0.12); color: #60a5fa; }
 
 .strategy-desc { font-size: 13px; color: var(--text-muted); line-height: 1.6; flex: 1; }
 

@@ -8,6 +8,7 @@ __all__ = [
     "indexes",
     "industry",
     "market_data",
+    "robustness",
     "runs",
     "strategies",
     "system",

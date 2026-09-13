@@ -16,6 +16,7 @@ import IndexDetailPage from '../pages/IndexDetailPage.vue'
 import IndexListPage from '../pages/IndexListPage.vue'
 import IndustryDetailPage from '../pages/IndustryDetailPage.vue'
 import IndustryListPage from '../pages/IndustryListPage.vue'
+import LifecyclePage from '../pages/LifecyclePage.vue'
 import MacroPage from '../pages/MacroPage.vue'
 import RRGLabPage from '../pages/RRGLabPage.vue'
 import StockListPage from '../pages/StockListPage.vue'
@@ -35,6 +36,7 @@ const router = createRouter({
     { path: '/macro', component: MacroPage },
     { path: '/strategies', component: StrategiesPage },
     { path: '/strategies/:strategyId', component: StrategyDetailPage, props: true },
+    { path: '/lifecycle', component: LifecyclePage },
     { path: '/ai-factors', component: AIFactorsPage },
     { path: '/keyword-tags', component: KeywordTagsPage },
     { path: '/factors', component: FactorsPage },

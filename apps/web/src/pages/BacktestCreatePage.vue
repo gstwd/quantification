@@ -41,6 +41,19 @@
       </div>
 
       <div class="form-section">
+        <label class="form-label">回测用途</label>
+        <select v-model="form.purpose" class="form-select">
+          <option value="research">研究期研究（2016-01-01 ~ 2025-12-31）</option>
+          <option value="validation">验证期验收（2026-01-01 起，会留痕）</option>
+          <option value="monitor">上线后监控（2026-01-01 起，会留痕）</option>
+        </select>
+        <div class="form-hint">
+          研究类回测不得越过研究期末端：验证期数据只能用于否决、不能用于确认，
+          一旦被观察就会记入留痕列表，避免"看过样本外再调参"造成的隐性过拟合。
+        </div>
+      </div>
+
+      <div class="form-section">
         <label class="form-label">回测区间</label>
         <div class="date-presets">
           <button
@@ -149,7 +162,7 @@ import { useStrategyStore } from '../stores/strategies'
 import type { BenchmarkIndex } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
-import { getDatePresets } from '../utils/datePresets'
+import { RESEARCH_END, RESEARCH_START, getDatePresets } from '../utils/datePresets'
 import type { DatePreset } from '../utils/datePresets'
 
 /** 获取配置描述的快捷方法 */
@@ -173,6 +186,8 @@ const form = reactive({
   benchmark_index_code: '000300',
   execution_model: 't_plus_1_open' as 't_plus_1_open' | 't_plus_1_close',
   data_quality_mode: 'warn' as 'warn' | 'strict',
+  purpose: 'research' as 'research' | 'validation' | 'monitor',
+  cost_bps: null as number | null,
 })
 
 const submitting = ref(false)
@@ -197,7 +212,19 @@ const isValid = computed(() =>
   form.start_date !== '' &&
   form.end_date !== '' &&
   form.start_date <= form.end_date &&
+  // 研究类回测不得越过研究期末端（后端会直接拒绝）
+  (form.purpose !== 'research' || form.end_date <= RESEARCH_END) &&
   (form.universe_mode === 'all' || form.index_codes.length > 0),
+)
+
+// 切换用途时把区间拉回研究期，避免填好日期后切换用途导致提交被拒
+watch(
+  () => form.purpose,
+  (purpose) => {
+    if (purpose !== 'research') return
+    if (form.end_date > RESEARCH_END) form.end_date = RESEARCH_END
+    if (form.start_date > RESEARCH_END) form.start_date = RESEARCH_START
+  },
 )
 
 function toggleIndex(code: string) {
@@ -240,6 +267,8 @@ async function submit() {
       benchmark_index_code: form.benchmark_index_code,
       execution_model: form.execution_model,
       data_quality_mode: form.data_quality_mode,
+      purpose: form.purpose,
+      cost_bps: form.cost_bps,
     })
     router.push(`/backtests/${summary.backtest_id}`)
   } catch (e: unknown) {

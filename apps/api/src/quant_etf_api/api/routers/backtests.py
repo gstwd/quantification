@@ -19,6 +19,7 @@ from quant_etf_api.schemas.backtest import (
     BacktestIndexResult,
     BacktestSummary,
     ComparisonDailyResponse,
+    ValidationUsageResponse,
 )
 from quant_etf_api.schemas.pagination import PaginatedResponse
 from quant_etf_api.services.backtest_service import BacktestService
@@ -28,14 +29,34 @@ router = APIRouter(tags=["backtests"])
 
 @router.post("/backtests", response_model=BacktestSummary, status_code=202)
 def create_backtest(req: BacktestCreateRequest, db: Session = Depends(get_db)) -> BacktestSummary:
-    """创建回测任务并入队异步执行，立即返回 pending 状态。"""
+    """创建回测任务并入队异步执行，立即返回 pending 状态。
+
+    研究类（purpose=research）回测越过研究期末端会被拒绝（422），
+    验证与监控类回测允许使用验证期数据但会留痕。
+    """
     try:
         summary = BacktestService(db).create_backtest(req)
     except ValueError as e:
-        # 策略配置校验失败（未配置 portfolio / 引用未知因子等）→ 422
+        # 策略配置校验失败（未配置 portfolio / 引用未知因子等）或
+        # 回测区间越过研究期边界 → 422
         raise HTTPException(status_code=422, detail=str(e))
     get_job_queue().enqueue("backtest", {"backtest_id": summary.backtest_id})
     return summary
+
+
+# 注意：该路由必须定义在 /backtests/{backtest_id} 之前，
+# 否则 validation-usage 会被 {backtest_id} 捕获并返回 404。
+@router.get("/backtests/validation-usage", response_model=ValidationUsageResponse)
+def get_validation_usage(
+    limit: int = Query(default=200, ge=1, le=1000, description="返回条数上限"),
+    db: Session = Depends(get_db),
+) -> ValidationUsageResponse:
+    """返回所有使用验证期数据的回测记录，用于样本外留痕审计。
+
+    验证期数据只能用于否决、不能用于确认；只要被观察过就应留痕，
+    以避免"看过结果再改策略"造成的隐性过拟合。
+    """
+    return BacktestService(db).list_validation_usage(limit=limit)
 
 
 @router.get("/backtests", response_model=PaginatedResponse[BacktestSummary])

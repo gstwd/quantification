@@ -227,6 +227,12 @@ export interface BacktestCreateRequest {
   benchmark_index_code?: string
   execution_model?: 't_plus_1_open' | 't_plus_1_close'
   data_quality_mode?: 'warn' | 'strict'
+  /** 回测用途：research=研究期研究（不得越过研究期末端），validation=验证期验收，monitor=上线后监控 */
+  purpose?: 'research' | 'validation' | 'monitor'
+  /** 用途说明与触发来源，用于验证期数据留痕 */
+  purpose_reason?: string | null
+  /** 净口径指标使用的单边成本（基点），留空取系统默认值 */
+  cost_bps?: number | null
 }
 
 export interface BacktestMetrics {
@@ -259,6 +265,68 @@ export interface BacktestMetrics {
   excess_return_pct: number | null
   /** 数据缺口天数：至少一个持仓资产受缺失行情影响的交易日数 */
   data_gap_days: number
+  /** 扣成本后年化收益率（%），明细见 BacktestStability */
+  net_annualized_return_pct?: number | null
+  /** 扣成本后年化夏普比率 */
+  net_sharpe_ratio?: number | null
+  /** 扣成本后年化超额（百分点） */
+  net_excess_return_pct?: number | null
+  /** 年化单边换手率（倍） */
+  annualized_turnover?: number | null
+}
+
+/** 回测稳健性指标：描述结果对历史细节的依赖程度（读取路径现算） */
+export interface BacktestStability {
+  /** 成本折算使用的单边成本（基点） */
+  cost_bps: number
+  /** 指标口径指纹：该回测使用的执行模型 */
+  execution_model: string | null
+  /** 指标口径指纹：数据缺口提示口径 */
+  data_quality_mode: string | null
+  /** 指标口径指纹：基准指数代码 */
+  benchmark_index_code: string | null
+  /** 年化单边换手率（倍） */
+  annualized_turnover: number
+  /** 成本拖累（百分点/年） */
+  cost_drag_pct_per_year: number
+  /** 扣成本后累计收益率（%） */
+  net_cumulative_return_pct: number
+  /** 扣成本后年化收益率（%） */
+  net_annualized_return_pct: number
+  /** 扣成本后年化夏普 */
+  net_sharpe_ratio: number
+  /** 扣成本后年化超额（百分点） */
+  net_excess_return_pct: number | null
+  /** 年度对数收益占比最大值（0-1） */
+  year_return_share_max: number
+  /** 年度对数收益占比的赫芬达尔指数 */
+  year_return_share_hhi: number
+  /** 对数收益最大的年份 */
+  best_year: number | null
+  /** 剔除最好年份后的年化收益率（%） */
+  ex_best_year_annualized_return_pct: number
+  /** 剔除最好年份后的年化夏普 */
+  ex_best_year_sharpe_ratio: number
+  /** 夏普为正的自然年占比 */
+  annual_sharpe_positive_ratio: number
+  /** 三段等分区中夏普为正的比例 */
+  segment_sharpe_positive_ratio: number
+  /** 最好段夏普 */
+  best_segment_sharpe: number
+  /** 最差段夏普 */
+  worst_segment_sharpe: number
+  /** 全期最大回撤（%） */
+  max_drawdown_pct: number
+  /** 期末回撤（%） */
+  current_drawdown_pct: number
+  /** 期末回撤在自身逐日回撤分布中的分位 */
+  current_drawdown_percentile_pct: number
+  /** 最长水下持续天数 */
+  max_drawdown_days: number
+  /** 平均仓位 */
+  average_exposure: number | null
+  /** 持仓权重平均赫芬达尔指数 */
+  position_concentration: number | null
 }
 
 /** 单自然年的回测绩效汇总（分年度表） */
@@ -291,6 +359,8 @@ export interface BacktestSummary {
   error_message: string | null
   /** 执行进度（0-100），running 状态时有效 */
   progress: number
+  /** 回测用途：research / validation / monitor */
+  purpose: string
 }
 
 export interface BacktestDetail extends BacktestSummary {
@@ -300,6 +370,10 @@ export interface BacktestDetail extends BacktestSummary {
   warnings?: BacktestWarning[]
   /** 分年度绩效表（仅成功回测返回） */
   annual_metrics?: AnnualMetrics[]
+  /** 稳健性指标（仅成功回测返回，读取路径从逐日结果现算） */
+  stability?: BacktestStability | null
+  /** 回测用途说明与触发来源 */
+  purpose_reason?: string | null
 }
 
 export interface BacktestDailyResult {
@@ -808,4 +882,65 @@ export interface KeywordTagConfig {
   priority: number
   created_at: string | null
   updated_at: string | null
+}
+
+/** 策略健康体检快照（上线后监控） */
+export interface HealthSnapshot {
+  id: number
+  as_of_date: string
+  live_start: string
+  live_end: string
+  health_level: string
+  diagnosis: string
+  recommended_action: string
+  reasons: string[]
+  trigger: string
+  computed_at: string | null
+  metrics: Record<string, unknown> | null
+}
+
+/** 策略生命周期列表项 */
+export interface LifecycleSummary {
+  strategy_id: string
+  display_name: string | null
+  lifecycle_status: string
+  live_at: string
+  retired_at: string | null
+  live_days: number
+  health_level: string | null
+  diagnosis: string | null
+  recommended_action: string | null
+  last_refreshed_at: string | null
+}
+
+/** 策略生命周期详情（含冻结快照与最近的体检记录） */
+export interface LifecycleDetail extends LifecycleSummary {
+  frozen_config_hash: string
+  frozen_config_snapshot: Record<string, unknown> | null
+  research_backtest_id: string | null
+  validation_backtest_id: string | null
+  baseline_distribution: Record<string, unknown> | null
+  note: string | null
+  created_at: string | null
+  updated_at: string | null
+  snapshots: HealthSnapshot[]
+}
+
+/** 验证期数据使用记录（留痕） */
+export interface ValidationUsageItem {
+  backtest_id: string
+  strategy_id: string
+  strategy_version: string | null
+  config_hash: string | null
+  purpose: string
+  purpose_reason: string | null
+  start_date: string
+  end_date: string
+  created_at: string
+}
+
+/** 验证期数据使用留痕列表响应 */
+export interface ValidationUsageResponse {
+  items: ValidationUsageItem[]
+  total: number
 }

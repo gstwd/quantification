@@ -24,11 +24,16 @@ description: >
 4. **写候选文件并校验**：完整 config_json 存入 `candidates/` 下的 JSON 文件，`strategy validate --file <path>` 通过后再用。
 5. **开会话**：`optimization start --strategy <基线> --candidate-file <path> --hypothesis "<假设>" [--start --end] --folds 4 --version <新版本>`。`--version` 必传：promote 时基线版本取该值，不传会沿用旧版本号导致版本不递增。
 6. **评估**：`optimization evaluate <opt_id> [--folds 4]`。多方向/多段并行时改用 `--async`（需要 API 服务端在跑，2+2K 个回测一次入队并行执行，见「并行执行」），之后用 `optimization show` 轮询。长跨度（> 5 年）按「滚动分段回测」处理：分会话逐段评估，或把 `--folds` 调到每折 ≈ 1-2 年。
-7. **出报告**：`optimization report <opt_id> --file <path>` 生成骨架，补写"分析结论"：假设是否成立、数据支持、风险、下一步方向。
-8. **收尾**：对照验收清单——
+7. **稳健性验证**（评估通过后、收尾之前必做）：
+   - `robustness scan --strategy <基线>` 确认参数处于平台、无方向反转；
+   - 因子数 > 1 时 `robustness ablate --strategy <基线>` 看边际贡献；
+   - `robustness collect <id> --wait` 后 `robustness stats <id>` 取 PBO 与 Deflated Sharpe。
+   详见 [references/robustness.md](references/robustness.md)。
+8. **出报告**：`optimization report <opt_id> --file <path>` 生成骨架，补写"分析结论"：假设是否成立、数据支持（含净口径与稳健性数字）、风险、下一步方向。
+9. **收尾**：对照验收清单（共 7 项）——
    - 通过 → `optimization finish <opt_id> --verdict accept --report-file <path> --promote --strict`
    - 未通过 → `--verdict reject`（不 promote），会话保留作审计。
-9. **确认落地**：`strategy show <基线>` 验证 promote 生效，必要时用 `strategy update --version` 补版本号。
+10. **确认落地**：`strategy show <基线>` 验证 promote 生效，必要时用 `strategy update --version` 补版本号。
 
 ## 并行执行（多方向 / 多段加速）
 
@@ -60,9 +65,25 @@ description: >
 ## 关键约束
 
 - **防过拟合**：每轮只测一个假设；以滚动样本外（fold）聚合为准，不能只看全区间；`--strict` 强制验收清单。
+- **研究期 / 验证期边界（硬约束）**：研究期固定为 2016-01-01 ~ 2025-12-31，
+  2026-01-01 起为验证期。优化属于研究行为，区间越过研究期末端会被**系统直接拒绝**，
+  `optimization start` 的默认 `--end` 即研究期末端。**禁止读验证期结果来调参**：
+  一旦看过，那段数据就不再是样本外。
 - **回测区间下限（用户约定）**：所有回测、对比与优化评估的 `--start` 一律取 2016-01-01，不使用 2016 年之前的数据；滚动分段的第一段即 2016-01-01 起。
+- **净口径成本**：回测汇总为毛收益口径，验收必须同时看净口径指标
+  （默认 10bp 单边，`backtest run --cost-bps` 可覆盖）。
+  净收益 = 毛收益 − 单边换手 × 成本；换手越高，成本对结论的影响越大。
 - **单次回测跨度控制**：总跨度超过 5 年时禁止一次性跑全区间回测，必须按「滚动分段回测」逐段执行；其他情况也优先控制在约 1-2 年，只有在任务规模小、资源充足且确有统一区间需求时才放宽。分段后每段指标单独看，不以全区间合计掩盖劣化段。
-- **验收清单默认阈值**（`--strict` 强制 accept）：验证窗平均夏普 ≥ 基线；平均最大回撤劣化 ≤ 2pct；夏普胜出折数 ≥ 50%；验证窗平均累计收益 ≥ 基线。
+- **验收清单默认阈值**（`--strict` 强制 accept，共 7 项）：
+  1. 验证窗平均夏普 ≥ 基线；
+  2. 平均最大回撤劣化 ≤ 2pct；
+  3. 夏普胜出折数 ≥ 50%；
+  4. 验证窗平均累计收益 ≥ 基线；
+  5. **净成本口径**验证窗平均夏普 ≥ 基线；
+  6. **参数邻域**无方向反转且处于平台（需先跑 `robustness scan`，未跑直接判不通过）；
+  7. **分段一致性**：剔除最好折后候选夏普仍不低于基线。
+- **试验次数台账**：`robustness stats --n-trials` 缺省取该策略历史所有稳健性批次的
+  变体总数；手工做过的不入批次的对比要额外计入，多重检验的 N 只会被低估不会被高估。
 - **改动要小且可解释**；候选明显更差时先 reject 换假设，不要在同一轮叠加多个改动。
 - **并行前提与上限**：并行必须走 `--async` + 服务端多 worker，实际并行度 = min(worker 数, CPU 核心数)；每个 worker 进程持有独立 DB 连接池（pool_size=5 + max_overflow=10），6 worker 最坏约 90 连接，并行前先确认 PostgreSQL max_connections 够用。
 - 命令默认 JSON 输出；回测同步执行不依赖服务端进程（但无并行收益）。

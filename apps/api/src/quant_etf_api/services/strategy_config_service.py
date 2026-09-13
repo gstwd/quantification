@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from quant_etf_api.engine.config import SUPPORTED_SCHEMA_VERSIONS, StrategyConfig
 from quant_etf_api.engine.transforms import list_transform_names
 from quant_etf_api.factors.registry import get_default_factor_registry
-from quant_etf_api.infra.db.models.core import StrategyConfigModel
+from quant_etf_api.infra.db.models.core import StrategyConfigModel, StrategyLifecycleModel
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
 from quant_etf_api.infra.db.repositories.strategy_config import StrategyConfigRepository
 from quant_etf_api.schemas.strategy import (
@@ -148,6 +148,24 @@ class StrategyConfigService:
             return None
 
         if req.config_json is not None:
+            # LIVE 状态冻结：已上线的策略不允许直接改配置，否则生命周期监控的
+            # 对象会被静默替换，历史快照与诊断结论失去意义。需要变更时先下线，
+            # 或走候选策略 promote 新版本。
+            live = (
+                self._db.query(StrategyLifecycleModel)
+                .filter(
+                    StrategyLifecycleModel.strategy_id == strategy_id,
+                    StrategyLifecycleModel.lifecycle_status == "LIVE",
+                )
+                .one_or_none()
+            )
+            if live is not None:
+                raise ValueError(
+                    f"策略 {strategy_id} 处于上线（LIVE）状态，配置已冻结，"
+                    "不允许直接修改 config_json；"
+                    "如需变更请先将生命周期状态改为 SUSPENDED，"
+                    "或走优化会话生成候选策略后 promote 新版本。"
+                )
             validation = self.validate_config(req.config_json)
             if not validation.valid:
                 raise ValueError(f"配置校验失败: {'; '.join(validation.errors)}")
