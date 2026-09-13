@@ -19,17 +19,14 @@ from quant_etf_api.domain.industry.constants import (
 )
 from quant_etf_api.domain.industry.quality import compute_industry_bar_quality
 from quant_etf_api.infra.clients.sw_industry_client import SwIndustryClient
-from quant_etf_api.infra.clients.stock_close_client import StockCloseClient
-from quant_etf_api.infra.clients.tushare_market import TushareStockClient
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.industry import IndustryUniverseModel
-from quant_etf_api.infra.db.models.stock import StockUniverseModel
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
     IndustryMembershipEventRepository,
     IndustryUniverseRepository,
-    StockDailyCloseRepository,
 )
+from quant_etf_api.infra.db.repositories.stock import StockUniverseRepository
 from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.infra.time import today_cn
 from quant_etf_api.schemas.industry import IndustryQualityDetail, IndustrySummaryItem
@@ -52,12 +49,10 @@ class IndustryDataService:
         """
         self._db = db
         self._universe_repo = IndustryUniverseRepository(db)
+        self._stock_universe_repo = StockUniverseRepository(db)
         self._bar_repo = IndustryDailyBarRepository(db)
         self._membership_repo = IndustryMembershipEventRepository(db)
-        self._close_repo = StockDailyCloseRepository(db)
         self._sw_client = SwIndustryClient()
-        self._close_client = StockCloseClient()
-        self._tushare_stock = TushareStockClient()
         self._calendar = TradingCalendar()
         self._trading_cache: tuple[date, date, list[date]] | None = None
 
@@ -151,13 +146,9 @@ class IndustryDataService:
                     total += self._upsert_bars(code, rows)
                 else:
                     start = latest - timedelta(days=_INCREMENTAL_BUFFER_DAYS)
-                    rows = self._sw_client.fetch_daily(
-                        code, start_date=start.strftime("%Y%m%d")
-                    )
+                    rows = self._sw_client.fetch_daily(code, start_date=start.strftime("%Y%m%d"))
                     prev_close = self._bar_repo.find_close_before(code, start)
-                    total += self._upsert_bars(
-                        code, rows, prev_close_override=prev_close
-                    )
+                    total += self._upsert_bars(code, rows, prev_close_override=prev_close)
                 self._db.commit()
             except Exception as e:
                 self._db.rollback()
@@ -358,118 +349,61 @@ class IndustryDataService:
         start_date: str = _CLOSE_BACKFILL_DEFAULT_START,
         stock_codes: list[str] | None = None,
     ) -> dict[str, Any]:
-        """回填全部成分股历史收盘价（Tushare 优先，回退 baostock/AkShare）。"""
-        codes = stock_codes or sorted(
-            {event.stock_code for event in self._membership_repo.find_all_events()}
+        """回填个股 Tushare 历史日线（委托个股数据服务）。
+
+        Args:
+            start_date: 起始日 'YYYYMMDD'。
+            stock_codes: 指定股票列表；None 表示按交易日全市场回填。
+
+        Returns:
+            {codes, records, errors} 兼容旧 CLI 返回结构。
+        """
+        from quant_etf_api.services.stock_data_service import (  # noqa: PLC0415
+            StockDataService,
         )
-        if not codes:
-            return {"codes": 0, "records": 0, "errors": []}
-        total = 0
-        errors: list[str] = []
-        end = today_cn().strftime("%Y%m%d")
-        for i, code in enumerate(codes, start=1):
-            try:
-                rows = []
-                source = ""
-                if self._tushare_stock.is_configured():
-                    try:
-                        rows = self._tushare_stock.fetch_history_close(
-                            code, start_date, end
-                        )
-                        source = "tushare"
-                    except Exception as exc:
-                        logger.warning(
-                            "个股 %s tushare 历史收盘拉取失败，回退 baostock: %s",
-                            code,
-                            exc,
-                        )
-                if not rows:
-                    rows = self._close_client.fetch_history_baostock(code, start_date, end)
-                    source = "baostock"
-                if not rows:
-                    rows = self._close_client.fetch_history_akshare(code, start_date, end)
-                    source = "akshare"
-                total += self._upsert_stock_close(code, rows, source)
-                if i % 200 == 0:
-                    self._db.commit()
-                    logger.info("个股收盘回填进度: %s/%s", i, len(codes))
-            except Exception as e:
-                errors.append(f"{code}: {type(e).__name__}: {e}")
-                logger.warning("个股 %s 收盘回填失败: %s", code, e)
-        self._db.commit()
-        return {"codes": len(codes), "records": total, "errors": errors}
+
+        start = date(
+            int(start_date[0:4]),
+            int(start_date[4:6]),
+            int(start_date[6:8]),
+        )
+        end = today_cn()
+        service = StockDataService(self._db)
+        if stock_codes:
+            result = service.bulk_fill(
+                codes=stock_codes,
+                start_date=start,
+                datasets=["stock_daily_close"],
+            )
+            return {
+                "codes": int(result["codes"]),
+                "records": int(result["records"]),
+                "errors": list(result["errors"]),
+            }
+        result = service.sync_range(start, end, datasets=["stock_daily_close"])
+        return {
+            "codes": len(self._stock_universe_repo.find_codes(only_active=True)),
+            "records": int(result["records"].get("stock_daily_close") or 0),
+            "errors": list(result["errors"]),
+        }
 
     def refresh_stock_close_snapshot(self, trade_date: date) -> int:
-        """用 Tushare 全市场日线（优先）更新指定交易日收盘价。
+        """用 Tushare 全市场日线更新指定交易日行情（委托个股数据服务）。
 
-        Tushare daily 收盘后发布当日全 A（沪深京）收盘；盘中/发布延迟时返回
-        空数据，此时回退 AkShare 全 A 快照，保证当日数据不缺失。
+        Args:
+            trade_date: 交易日。
+
+        Returns:
+            写入行数。
         """
-        rows: list[dict[str, Any]] = []
-        if self._tushare_stock.is_configured():
-            try:
-                rows = self._tushare_stock.fetch_close_by_trade_date(trade_date)
-            except Exception as exc:
-                logger.warning(
-                    "tushare 全市场收盘拉取失败（%s），回退 AkShare 快照",
-                    exc,
-                )
-        if rows:
-            # Tushare daily 不含全天停牌个股；对活跃名单中缺失的代码用 AkShare
-            # 快照补充，避免质量检查把停牌交易日误报为数据缺失
-            active_codes = {
-                row[0]
-                for row in self._db.query(StockUniverseModel.stock_code)
-                .filter(StockUniverseModel.is_active.is_(True))
-                .all()
-            }
-            covered = {row["stock_code"] for row in rows}
-            missing = sorted(active_codes - covered)
-            if missing:
-                try:
-                    spot = self._close_client.fetch_all_close_snapshot()
-                    spot_by = {row["stock_code"]: row for row in spot}
-                    supplement = [spot_by[code] for code in missing if code in spot_by]
-                    if supplement:
-                        logger.info(
-                            "Tushare 收盘缺口 %d 只（含停牌股），由 AkShare 快照补充 %d 只",
-                            len(missing),
-                            len(supplement),
-                        )
-                        rows.extend(supplement)
-                except Exception as exc:
-                    logger.warning("AkShare 快照补充停牌股失败（忽略）: %s", exc)
-        if not rows:
-            rows = self._close_client.fetch_all_close_snapshot()
-        values = [
-            {
-                "trade_date": trade_date,
-                "stock_code": row["stock_code"],
-                "close": row["close"],
-                "source": row.get("source") or "akshare_em",
-                "ingested_at": utcnow(),
-            }
-            for row in rows
-        ]
-        count = self._close_repo.bulk_upsert(values)
-        self._db.commit()
-        return count
+        from quant_etf_api.services.stock_data_service import (  # noqa: PLC0415
+            StockDataService,
+        )
 
-    def _upsert_stock_close(self, stock_code: str, rows: list[dict[str, Any]], source: str) -> int:
-        """将个股收盘行幂等写入 stock_daily_close。"""
-        if not rows:
-            return 0
-        values = [
-            {
-                "trade_date": row["trade_date"],
-                "stock_code": stock_code,
-                "close": row["close"],
-                "source": source,
-                "ingested_at": utcnow(),
-            }
-            for row in rows
-        ]
-        return self._close_repo.bulk_upsert(values)
+        result = StockDataService(self._db).sync_trade_date(
+            trade_date, datasets=["stock_daily_close"]
+        )
+        return int(result["records"].get("stock_daily_close") or 0)
 
     # ------------------------------------------------------------------
     # 日频入口
@@ -500,13 +434,18 @@ class IndustryDataService:
                 "行业成分刷新失败，跳过（可稍后执行 backfill-membership）", exc_info=True
             )
         try:
-            result["stock_snapshot"] = {
-                "records": self.refresh_stock_close_snapshot(target_date or latest)
-            }
+            from quant_etf_api.services.stock_data_service import (  # noqa: PLC0415
+                StockDataService,
+            )
+
+            result["stock_snapshot"] = StockDataService(self._db).sync_missing_recent(
+                lookback_days=15
+            )
         except Exception as exc:
             result["stock_snapshot"] = {"error": f"{type(exc).__name__}: {exc}"}
             logger.warning(
-                "个股收盘快照刷新失败，跳过（可稍后执行 stock fill --all）", exc_info=True
+                "个股 Tushare 缺口补齐失败，跳过（可稍后执行 stock sync-day/backfill-tushare）",
+                exc_info=True,
             )
         # 日频摄取末尾重算 31 个行业质量快照，保证总览与列表页无需手动初检
         try:
@@ -612,9 +551,7 @@ class IndustryDataService:
             return
         # name_cn 无数据库默认值：INSERT..ON CONFLICT 也会校验新行非空，
         # 因此必须把当前目录行名称合并进写入行
-        current_rows = {
-            row.industry_code: row for row in self._universe_repo.find_all()
-        }
+        current_rows = {row.industry_code: row for row in self._universe_repo.find_all()}
         rows: list[dict[str, Any]] = []
         for snap in snapshots:
             current = current_rows.get(snap["industry_code"])
@@ -653,9 +590,7 @@ class IndustryDataService:
     def list_summary(self) -> list[IndustrySummaryItem]:
         """聚合行业目录、当前成分数、质量快照与最新一根行情，供管理列表页。"""
         rows = self._universe_repo.find_all()
-        member_counts = self._membership_repo.current_membership_counts(
-            self._membership_ref_date()
-        )
+        member_counts = self._membership_repo.current_membership_counts(self._membership_ref_date())
         latest_bars = self._bar_repo.find_latest_bars()
         items: list[IndustrySummaryItem] = []
         for row in rows:
@@ -690,9 +625,7 @@ class IndustryDataService:
         missing_low = sum(1 for b in bars if b.low_price is None)
         missing_close = sum(1 for b in bars if b.close_price is None)
         incomplete_rows = sum(
-            1
-            for b in bars
-            if b.open_price is None or b.high_price is None or b.low_price is None
+            1 for b in bars if b.open_price is None or b.high_price is None or b.low_price is None
         )
         change_pct_null = sum(1 for b in bars if b.change_pct is None)
         return IndustryQualityDetail(

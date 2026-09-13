@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from quant_etf_api.domain.stocks.quality import compute_stock_quality
-from quant_etf_api.infra.clients.stock_close_client import (
-    StockCloseClient,
-    _market_prefix,
-)
-from quant_etf_api.infra.clients.stock_metadata_client import StockMetadataClient
 from quant_etf_api.infra.clients.tushare_market import TushareStockClient
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import DataHealthSnapshotModel
@@ -25,13 +20,17 @@ from quant_etf_api.infra.db.repositories.industry import (
 )
 from quant_etf_api.infra.db.repositories.data_health import DataHealthSnapshotRepository
 from quant_etf_api.infra.db.repositories.stock import StockUniverseRepository
+from quant_etf_api.infra.db.repositories.stock_daily import (
+    StockDailyBasicRepository,
+    StockMoneyflowRepository,
+)
 from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.infra.time import today_cn
 from quant_etf_api.schemas.stock import StockSummary
 
 logger = logging.getLogger(__name__)
 
-# 与旧版回填一致的历史回填起点；早于此的行情对申万成分研究无意义
+# Tushare 个股统一起点；2013 年前旧 close-only 行将被清理
 _STOCK_FETCH_EPOCH = date(2013, 1, 1)
 
 
@@ -39,10 +38,10 @@ class StockDataService:
     """个股数据服务。
 
     职责范围：
-    - stock_universe 元数据同步（申万成分范围 + 交易所名单名称/上市日/退市状态）；
+    - stock_universe 元数据同步（Tushare 沪深 A 股名单、ts_code/市场/交易所）；
     - 按交易日历的质量快照检查与落库；
-    - 单股日线补全/全量重拉（页面与后台任务调用）；
-    - 全市场批量质量检查与补全（仅 CLI 调用）。
+    - Tushare 日线、复权因子、每日指标、资金流向的全市场与单股补全/重拉；
+    - 全市场批量质量检查、历史回填与旧源数据清理（仅 CLI 调用）。
     """
 
     def __init__(self, db: Session) -> None:
@@ -58,8 +57,8 @@ class StockDataService:
         self._membership_repo = IndustryMembershipEventRepository(db)
         self._bar_repo = IndustryDailyBarRepository(db)
         self._industry_repo = IndustryUniverseRepository(db)
-        self._metadata_client = StockMetadataClient()
-        self._close_client = StockCloseClient()
+        self._basic_repo = StockDailyBasicRepository(db)
+        self._moneyflow_repo = StockMoneyflowRepository(db)
         self._tushare_client = TushareStockClient()
         self._calendar = TradingCalendar()
         self._trading_cache: tuple[date, date, list[date]] | None = None
@@ -90,38 +89,67 @@ class StockDataService:
         return len(missing_codes)
 
     def sync_universe(self) -> dict[str, int]:
-        """同步个股元数据：申万成分范围 + 股票基础信息 + 当前行业归属。"""
-        events = self._membership_repo.find_all_events()
-        membership_codes = sorted({event.stock_code for event in events})
-        industry_map = self._current_industry_map()
+        """同步个股元数据：Tushare 沪深 A 股全量名单 + 当前行业归属。
 
-        added = self.ensure_membership_stocks()
-        existing_rows = {
-            row.stock_code: row for row in self._universe_repo.find_all(codes=membership_codes)
-        }
+        Tushare 名单按 6 位代码去重；同一代码出现多个 ts_code 时优先保留
+        上市状态、最新上市日期的记录，并把冲突数量写入返回指标。
+
+        Returns:
+            {codes, added, updated, conflicts, membership_added}。
+        """
         basics = self._fetch_universe_basics()
-        basics_by_code = {row["stock_code"]: row for row in basics}
+        chosen: dict[str, dict[str, Any]] = {}
+        conflicts = 0
+        for row in basics:
+            code = row["stock_code"]
+            current = chosen.get(code)
+            if current is None:
+                chosen[code] = row
+                continue
+            conflicts += 1
+            if self._basic_rank(row) > self._basic_rank(current):
+                chosen[code] = row
+
+        membership_added = self.ensure_membership_stocks()
+        industry_map = self._current_industry_map()
+        existing_rows = {
+            row.stock_code: row for row in self._universe_repo.find_all(codes=sorted(chosen))
+        }
+        added = len(set(chosen) - set(existing_rows))
 
         updates: list[dict[str, Any]] = []
-        for code in membership_codes:
+        for code in sorted(chosen):
+            basic = chosen[code]
             current = existing_rows.get(code)
-            if current is None:
-                continue
-            basic = basics_by_code.get(code, {})
             industry = industry_map.get(code)
-            delist_date = basic.get("delist_date") or current.delist_date
+            delist_date = basic.get("delist_date") or (
+                current.delist_date if current is not None else None
+            )
             if basic and basic.get("is_active") is True and not basic.get("delist_date"):
                 # 出现在活跃名单且无退市日期时，清除历史退市标记（例如恢复上市）
                 delist_date = None
             updates.append(
                 {
                     "stock_code": code,
-                    "name_cn": basic.get("name_cn") or current.name_cn,
-                    "industry_code": industry if industry is not None else current.industry_code,
-                    "ipo_date": basic.get("ipo_date") or current.ipo_date,
+                    "name_cn": basic.get("name_cn")
+                    or (current.name_cn if current is not None else ""),
+                    "industry_code": (
+                        industry
+                        if industry is not None
+                        else (current.industry_code if current is not None else None)
+                    ),
+                    "ts_code": basic.get("ts_code"),
+                    "market": basic.get("market"),
+                    "exchange": basic.get("exchange"),
+                    "ipo_date": basic.get("ipo_date")
+                    or (current.ipo_date if current is not None else None),
                     "delist_date": delist_date,
-                    "is_active": basic.get("is_active", current.is_active),
-                    "source": basic.get("source") or current.source,
+                    "is_active": basic.get(
+                        "is_active",
+                        current.is_active if current is not None else True,
+                    ),
+                    "source": basic.get("source") or "tushare",
+                    "created_at": current.created_at if current is not None else utcnow(),
                     "updated_at": utcnow(),
                 }
             )
@@ -130,6 +158,9 @@ class StockDataService:
             update_cols={
                 "name_cn",
                 "industry_code",
+                "ts_code",
+                "market",
+                "exchange",
                 "ipo_date",
                 "delist_date",
                 "is_active",
@@ -138,25 +169,46 @@ class StockDataService:
             },
         )
         self._db.commit()
-        return {"codes": len(membership_codes), "added": added, "updated": len(updates)}
+        return {
+            "codes": len(chosen),
+            "added": added,
+            "updated": len(updates),
+            "conflicts": conflicts,
+            "membership_added": membership_added,
+        }
 
-    def _fetch_universe_basics(self) -> list[dict[str, Any]]:
-        """拉取股票基础信息：Tushare stock_basic 优先，交易所/AkShare 兜底。
+    @staticmethod
+    def _basic_rank(row: dict[str, Any]) -> tuple[int, date, str]:
+        """返回 Tushare 基础信息行的去重排序键。
+
+        Args:
+            row: Tushare 基础信息行。
 
         Returns:
-            [{stock_code, name_cn, ipo_date, delist_date, is_active, source}]。
+            (是否活跃, 上市日期, ts_code)，元组越大越应保留。
         """
-        rows: list[dict[str, Any]] = []
-        if self._tushare_client.is_configured():
-            try:
-                rows = self._tushare_client.fetch_stock_basics()
-            except Exception as exc:
-                logger.warning(
-                    "tushare 股票基础信息拉取失败，回退交易所名单: %s",
-                    exc,
-                )
+        return (
+            1 if row.get("is_active") else 0,
+            row.get("ipo_date") or date.min,
+            str(row.get("ts_code") or ""),
+        )
+
+    def _fetch_universe_basics(self) -> list[dict[str, Any]]:
+        """拉取 Tushare stock_basic 沪深 A 股全量名单。
+
+        Returns:
+            [{stock_code, ts_code, name_cn, market, exchange, ipo_date,
+            delist_date, is_active, source}]。
+
+        Raises:
+            RuntimeError: 未配置 Tushare Token 或返回空名单时抛出；个股数据
+                已改为 Tushare 独占，不再回退交易所/AkShare。
+        """
+        if not self._tushare_client.is_configured():
+            raise RuntimeError("未配置 TUSHARE_TOKEN，个股数据已切换为 Tushare 独占")
+        rows = self._tushare_client.fetch_stock_basics()
         if not rows:
-            rows = self._metadata_client.fetch_exchange_basics()
+            raise RuntimeError("Tushare stock_basic 返回空名单，拒绝更新 stock_universe")
         return rows
 
     def _current_industry_map(self) -> dict[str, str]:
@@ -208,6 +260,10 @@ class StockDataService:
             return days[-1]
         raise ValueError("交易日历不可用，无法确定最近交易日")
 
+    def latest_trading_day(self) -> date:
+        """返回不晚于今天的最近交易日（公开入口，供 CLI 默认区间使用）。"""
+        return self._latest_trading_day()
+
     # ------------------------------------------------------------------
     # 质量快照
     # ------------------------------------------------------------------
@@ -220,14 +276,18 @@ class StockDataService:
     ) -> tuple[date, date]:
         """计算单只股票的期望统计区间（上市日→退市日/最近交易日）。"""
         if row.ipo_date is not None:
-            start = row.ipo_date
+            # 2013 年前旧 close-only 行会被清理，期望区间统一下限到 Tushare 起点
+            start = max(row.ipo_date, _STOCK_FETCH_EPOCH)
         elif start_override is not None:
-            start = start_override
+            start = max(start_override, _STOCK_FETCH_EPOCH)
         elif actual:
-            start = actual[0]
+            start = max(actual[0], _STOCK_FETCH_EPOCH)
         else:
             start = _STOCK_FETCH_EPOCH
         end = row.delist_date if row.delist_date is not None else self._latest_trading_day()
+        if end < _STOCK_FETCH_EPOCH:
+            # 2013 年前已退市的股票在清理后没有可维护数据，返回空区间
+            return _STOCK_FETCH_EPOCH, _STOCK_FETCH_EPOCH - timedelta(days=1)
         if start > end:
             start, end = end, start
         return start, end
@@ -245,7 +305,7 @@ class StockDataService:
             )
         actual = self._close_repo.find_trade_dates_by_code(stock_code)
         start, end = self._expected_bounds(row, actual, start_override=start_override)
-        trading_days = self._trading_days(start, end)
+        trading_days = [] if start > end else self._trading_days(start, end)
         result = compute_stock_quality(
             actual_dates=actual,
             trading_days=trading_days,
@@ -300,9 +360,7 @@ class StockDataService:
             return
         expected_date = self._latest_trading_day()
         for snapshot in snapshots:
-            row = self._health_repo.find_one(
-                "stock_daily_close", snapshot["stock_code"]
-            )
+            row = self._health_repo.find_one("stock_daily_close", snapshot["stock_code"])
             if row is None:
                 row = DataHealthSnapshotModel(
                     dataset_key="stock_daily_close",
@@ -310,7 +368,9 @@ class StockDataService:
                 )
                 self._db.add(row)
             stock_row = self._universe_repo.find_by_code(snapshot["stock_code"])
-            row.partition_name = stock_row.name_cn if stock_row is not None else snapshot["stock_code"]
+            row.partition_name = (
+                stock_row.name_cn if stock_row is not None else snapshot["stock_code"]
+            )
             row.health_status = (
                 "error"
                 if not snapshot["bar_count"]
@@ -425,92 +485,162 @@ class StockDataService:
         """计算拉取窗口：从上市日/默认起点到退市日/最近交易日。"""
         start, end = self._expected_bounds(row, actual, start_override=start_override)
         if actual:
-            start = min(start, actual[0])
+            start = max(_STOCK_FETCH_EPOCH, min(start, actual[0]))
         return start, end
 
-    def _fetch_rows(
+    _DATASET_ALIASES = {
+        "daily": "stock_daily_close",
+        "close": "stock_daily_close",
+        "stock_daily_close": "stock_daily_close",
+        "basic": "stock_daily_basic",
+        "daily_basic": "stock_daily_basic",
+        "stock_daily_basic": "stock_daily_basic",
+        "moneyflow": "stock_moneyflow",
+        "stock_moneyflow": "stock_moneyflow",
+    }
+    _ALL_DATASETS = ("stock_daily_close", "stock_daily_basic", "stock_moneyflow")
+
+    @staticmethod
+    def _is_hs_stock_code(stock_code: str) -> bool:
+        """判断 6 位代码是否为沪深 A 股（排除北交所与 B 股）。
+
+        Args:
+            stock_code: 6 位股票代码。
+
+        Returns:
+            True 表示沪深 A 股代码。
+        """
+        return stock_code.startswith(("00", "30", "60", "68"))
+
+    def _normalize_datasets(self, datasets: list[str] | None) -> list[str]:
+        """把 CLI/服务传入的数据集别名规范化为静态数据集键。
+
+        Args:
+            datasets: 数据集别名列表；None 表示全部个股数据集。
+
+        Returns:
+            去重后的数据集键列表。
+
+        Raises:
+            ValueError: 存在无法识别的数据集别名时抛出。
+        """
+        if not datasets:
+            return list(self._ALL_DATASETS)
+        normalized: list[str] = []
+        for item in datasets:
+            key = self._DATASET_ALIASES.get(str(item).strip().lower())
+            if key is None:
+                raise ValueError(f"未知个股数据集: {item}")
+            normalized.append(key)
+        return list(dict.fromkeys(normalized))
+
+    def _fetch_full_rows(
         self,
         stock_code: str,
         start: date,
         end: date,
-        *,
-        in_session: bool,
-    ) -> list[dict[str, Any]]:
-        """按股票代码拉取历史收盘，Tushare 失败后回退 baostock/东财/腾讯。"""
+        datasets: list[str] | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """拉取单只股票的 Tushare 日线、复权因子、每日指标与资金流向。
+
+        Args:
+            stock_code: 6 位股票代码。
+            start: 起始日期（含）。
+            end: 结束日期（含）。
+            datasets: 需要抓取的数据集；None 表示全部。
+
+        Returns:
+            {数据集键: 行列表}；无数据的数据集返回空列表。
+        """
+        selected = self._normalize_datasets(datasets)
+        if not self._is_hs_stock_code(stock_code):
+            return {key: [] for key in selected}
         start_s = start.strftime("%Y%m%d")
         end_s = end.strftime("%Y%m%d")
-        prefix = _market_prefix(stock_code)
-        failures: list[str] = []
-        rows: list[dict[str, Any]] = []
+        result: dict[str, list[dict[str, Any]]] = {key: [] for key in selected}
+        if "stock_daily_close" in selected:
+            daily_rows = self._tushare_client.fetch_history_daily(stock_code, start_s, end_s)
+            factor_map = {
+                row["trade_date"]: row.get("adj_factor")
+                for row in self._tushare_client.fetch_history_adj_factor(stock_code, start_s, end_s)
+            }
+            for row in daily_rows:
+                row["adj_factor"] = factor_map.get(row["trade_date"])
+            result["stock_daily_close"] = daily_rows
+        if "stock_daily_basic" in selected:
+            result["stock_daily_basic"] = self._tushare_client.fetch_history_daily_basic(
+                stock_code, start_s, end_s
+            )
+        if "stock_moneyflow" in selected:
+            result["stock_moneyflow"] = self._tushare_client.fetch_history_moneyflow(
+                stock_code, start_s, end_s
+            )
+        return result
 
-        # 沪深京主源：Tushare（覆盖全部 A 股，含北交所）
-        try:
-            if self._tushare_client.is_configured():
-                rows = self._tushare_client.fetch_history_close(
-                    stock_code, start_s, end_s
-                )
-                if rows:
-                    return [dict(row, source="tushare") for row in rows]
-                failures.append("tushare 返回空")
-        except Exception as exc:
-            failures.append(f"tushare({type(exc).__name__}: {exc})")
-            logger.warning("个股 %s tushare 拉取失败: %s", stock_code, exc)
+    def _upsert_dataset_rows(
+        self,
+        stock_code: str,
+        dataset_key: str,
+        rows: list[dict[str, Any]],
+    ) -> int:
+        """把单只股票的数据行幂等写入对应 Tushare 明细表。
 
-        if prefix in ("sh", "sz"):
-            # 沪深主源：baostock
-            try:
-                if in_session:
-                    rows = self._close_client.fetch_history_baostock_logged_in(
-                        stock_code, start_s, end_s
-                    )
-                else:
-                    rows = self._close_client.fetch_history_baostock(
-                        stock_code, start_s, end_s
-                    )
-                if rows:
-                    return [dict(row, source="baostock") for row in rows]
-                failures.append("baostock 返回空")
-            except Exception as exc:
-                failures.append(f"baostock({type(exc).__name__}: {exc})")
-                logger.warning("个股 %s baostock 拉取失败: %s", stock_code, exc)
+        Args:
+            stock_code: 6 位股票代码。
+            dataset_key: 数据集键。
+            rows: 已归一化的数据行。
 
-        # 东财 AkShare（北交所直接使用；沪深在 baostock 失败/空结果后兜底）
-        try:
-            rows = self._close_client.fetch_history_akshare(stock_code, start_s, end_s)
-            if rows:
-                return [dict(row, source="akshare") for row in rows]
-            failures.append("东财 AkShare 返回空")
-        except Exception as exc:
-            failures.append(f"东财 AkShare({type(exc).__name__}: {exc})")
-            logger.warning("个股 %s 东财 AkShare 拉取失败: %s", stock_code, exc)
-
-        # 腾讯 AkShare（东财在代理/限流场景不可达时的备用源）
-        try:
-            rows = self._close_client.fetch_history_tencent(stock_code, start_s, end_s)
-            if rows:
-                return [dict(row, source="tencent") for row in rows]
-            failures.append("腾讯 AkShare 返回空")
-        except Exception as exc:
-            failures.append(f"腾讯 AkShare({type(exc).__name__}: {exc})")
-            logger.warning("个股 %s 腾讯 AkShare 拉取失败: %s", stock_code, exc)
-
-        raise RuntimeError("; ".join(failures) or "所有数据源均未尝试")
-
-    def _upsert_rows(self, stock_code: str, rows: list[dict[str, Any]]) -> int:
-        """把收盘行幂等写入 stock_daily_close。"""
+        Returns:
+            写入行数。
+        """
         if not rows:
             return 0
-        values = [
-            {
-                "trade_date": row["trade_date"],
-                "stock_code": stock_code,
-                "close": row["close"],
-                "source": row.get("source") or "baostock",
-                "ingested_at": utcnow(),
-            }
-            for row in rows
-        ]
-        return self._close_repo.bulk_upsert(values)
+        if dataset_key == "stock_daily_close":
+            values = [
+                {
+                    "trade_date": row["trade_date"],
+                    "stock_code": stock_code,
+                    "open": row.get("open"),
+                    "high": row.get("high"),
+                    "low": row.get("low"),
+                    "close": row.get("close"),
+                    "pre_close": row.get("pre_close"),
+                    "change": row.get("change"),
+                    "pct_chg": row.get("pct_chg"),
+                    "vol": row.get("vol"),
+                    "amount": row.get("amount"),
+                    "ah_vol": row.get("ah_vol"),
+                    "ah_amount": row.get("ah_amount"),
+                    "adj_factor": row.get("adj_factor"),
+                    "source": "tushare",
+                    "ingested_at": utcnow(),
+                }
+                for row in rows
+            ]
+            return self._close_repo.bulk_upsert(values)
+        if dataset_key == "stock_daily_basic":
+            values = [
+                {
+                    **row,
+                    "stock_code": stock_code,
+                    "source": "tushare",
+                    "ingested_at": utcnow(),
+                }
+                for row in rows
+            ]
+            return self._basic_repo.bulk_upsert(values)
+        if dataset_key == "stock_moneyflow":
+            values = [
+                {
+                    **row,
+                    "stock_code": stock_code,
+                    "source": "tushare",
+                    "ingested_at": utcnow(),
+                }
+                for row in rows
+            ]
+            return self._moneyflow_repo.bulk_upsert(values)
+        raise ValueError(f"未知个股数据集: {dataset_key}")
 
     def fill_stock(
         self,
@@ -518,24 +648,47 @@ class StockDataService:
         *,
         in_session: bool = False,
         start_date: date | None = None,
+        datasets: list[str] | None = None,
     ) -> dict[str, Any]:
-        """补全单只股票日线到最近交易日并刷新质量快照。"""
+        """补全单只股票 Tushare 明细到最近交易日并刷新质量快照。
+
+        Args:
+            stock_code: 6 位股票代码。
+            in_session: 兼容旧 baostock 会话参数，Tushare 路径不使用。
+            start_date: 起始日覆盖；None 表示按上市日/库内历史计算。
+            datasets: 需要补全的数据集；None 表示日线、每日指标、资金流向全部。
+
+        Returns:
+            写入统计与质量快照字段。
+        """
+        del in_session  # 兼容旧调用签名；Tushare 客户端不使用 baostock 会话
+        selected = self._normalize_datasets(datasets)
         self._ensure_stock_row(stock_code)
         row = self._universe_repo.find_by_code(stock_code)
         if row is None:
             raise RuntimeError(f"股票 {stock_code} 元数据初始化失败")
         actual = self._close_repo.find_trade_dates_by_code(stock_code)
         start, end = self._fetch_window(row, actual, start_override=start_date)
-        rows = self._fetch_rows(stock_code, start, end, in_session=in_session)
-        upserted = self._upsert_rows(stock_code, rows)
+        fetched = (
+            {key: [] for key in selected}
+            if start > end
+            else self._fetch_full_rows(stock_code, start, end, datasets=selected)
+        )
+        upserted: dict[str, int] = {}
+        for dataset_key in selected:
+            upserted[dataset_key] = self._upsert_dataset_rows(
+                stock_code, dataset_key, fetched.get(dataset_key, [])
+            )
         self._db.commit()
         snapshot = self._quality_snapshot(stock_code, start_override=start_date)
         self._persist_quality_snapshots([snapshot])
         self._db.commit()
         return {
             "stock_code": stock_code,
-            "fetched_rows": len(rows),
+            "datasets": selected,
+            "fetched_rows": {key: len(fetched.get(key, [])) for key in selected},
             "upserted_rows": upserted,
+            "upserted_total": sum(upserted.values()),
             **snapshot,
         }
 
@@ -545,29 +698,390 @@ class StockDataService:
         *,
         in_session: bool = False,
         start_date: date | None = None,
+        datasets: list[str] | None = None,
     ) -> dict[str, Any]:
-        """全量重拉单只股票：先完整拉取，成功后清空旧行并写回。"""
+        """全量重拉单只股票：先完整拉取，成功后清空旧行并写回。
+
+        Args:
+            stock_code: 6 位股票代码。
+            in_session: 兼容旧 baostock 会话参数，Tushare 路径不使用。
+            start_date: 起始日覆盖。
+            datasets: 需要重拉的数据集；None 表示全部个股数据集。
+
+        Returns:
+            删除/写入统计与质量快照字段。
+        """
+        del in_session  # 兼容旧调用签名；Tushare 客户端不使用 baostock 会话
+        selected = self._normalize_datasets(datasets)
         self._ensure_stock_row(stock_code)
         row = self._universe_repo.find_by_code(stock_code)
         if row is None:
             raise RuntimeError(f"股票 {stock_code} 元数据初始化失败")
         actual = self._close_repo.find_trade_dates_by_code(stock_code)
         start, end = self._fetch_window(row, actual, start_override=start_date)
-        rows = self._fetch_rows(stock_code, start, end, in_session=in_session)
-        deleted = 0
-        if rows:
-            deleted = self._close_repo.delete_by_code(stock_code)
-            self._upsert_rows(stock_code, rows)
-            self._db.commit()
+        fetched = (
+            {key: [] for key in selected}
+            if start > end
+            else self._fetch_full_rows(stock_code, start, end, datasets=selected)
+        )
+        if not any(fetched.get(key) for key in selected):
+            raise RuntimeError(f"股票 {stock_code} 未获取到可替换的 Tushare 数据，已保留旧数据")
+        deleted: dict[str, int] = {}
+        for dataset_key in selected:
+            if not fetched.get(dataset_key):
+                # 单个数据集返回空时保留旧数据，避免上游短暂空响应清空历史
+                continue
+            if dataset_key == "stock_daily_close":
+                deleted[dataset_key] = self._close_repo.delete_by_code(stock_code)
+            elif dataset_key == "stock_daily_basic":
+                deleted[dataset_key] = self._basic_repo.delete_by_code(stock_code)
+            else:
+                deleted[dataset_key] = self._moneyflow_repo.delete_by_code(stock_code)
+            self._upsert_dataset_rows(stock_code, dataset_key, fetched.get(dataset_key, []))
+        self._db.commit()
         snapshot = self._quality_snapshot(stock_code, start_override=start_date)
         self._persist_quality_snapshots([snapshot])
         self._db.commit()
         return {
             "stock_code": stock_code,
+            "datasets": selected,
             "deleted_rows": deleted,
-            "upserted_rows": len(rows),
+            "upserted_rows": {key: len(fetched.get(key, [])) for key in selected},
+            "upserted_total": sum(len(fetched.get(key, [])) for key in selected),
             **snapshot,
         }
+
+    def sync_trade_date(
+        self,
+        trade_date: date,
+        datasets: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """按交易日抓取全市场 Tushare 个股数据并分表写入。
+
+        Args:
+            trade_date: 交易日。
+            datasets: 需要同步的数据集；None 表示全部个股数据集。
+
+        Returns:
+            {trade_date, datasets, records, errors}；单个数据集失败不中断其他数据集。
+        """
+        selected = self._normalize_datasets(datasets)
+        if not self._tushare_client.is_configured():
+            raise RuntimeError("未配置 TUSHARE_TOKEN，个股数据已切换为 Tushare 独占")
+        records = {key: 0 for key in selected}
+        errors: list[str] = []
+        empty: list[str] = []
+        if "stock_daily_close" in selected:
+            try:
+                daily_rows = self._tushare_client.fetch_daily_by_trade_date(trade_date)
+                factor_map = {
+                    row["stock_code"]: row.get("adj_factor")
+                    for row in self._tushare_client.fetch_adj_factor_by_trade_date(trade_date)
+                }
+                values = [
+                    {
+                        "trade_date": trade_date,
+                        "stock_code": row["stock_code"],
+                        "open": row.get("open"),
+                        "high": row.get("high"),
+                        "low": row.get("low"),
+                        "close": row.get("close"),
+                        "pre_close": row.get("pre_close"),
+                        "change": row.get("change"),
+                        "pct_chg": row.get("pct_chg"),
+                        "vol": row.get("vol"),
+                        "amount": row.get("amount"),
+                        "ah_vol": row.get("ah_vol"),
+                        "ah_amount": row.get("ah_amount"),
+                        "adj_factor": factor_map.get(row["stock_code"]),
+                        "source": "tushare",
+                        "ingested_at": utcnow(),
+                    }
+                    for row in daily_rows
+                    if self._is_hs_stock_code(row["stock_code"])
+                ]
+                if not values:
+                    empty.append("stock_daily_close")
+                records["stock_daily_close"] = self._close_repo.bulk_upsert(values)
+            except Exception as exc:  # noqa: PERF203
+                errors.append(f"stock_daily_close: {type(exc).__name__}: {exc}")
+                logger.warning("个股日线同步失败 %s: %s", trade_date, exc)
+        if "stock_daily_basic" in selected:
+            try:
+                rows = self._tushare_client.fetch_daily_basic_by_trade_date(trade_date)
+                values = [
+                    {
+                        **row,
+                        "trade_date": trade_date,
+                        "source": "tushare",
+                        "ingested_at": utcnow(),
+                    }
+                    for row in rows
+                    if self._is_hs_stock_code(row["stock_code"])
+                ]
+                if not values:
+                    empty.append("stock_daily_basic")
+                records["stock_daily_basic"] = self._basic_repo.bulk_upsert(values)
+            except Exception as exc:  # noqa: PERF203
+                errors.append(f"stock_daily_basic: {type(exc).__name__}: {exc}")
+                logger.warning("个股每日指标同步失败 %s: %s", trade_date, exc)
+        if "stock_moneyflow" in selected:
+            try:
+                rows = self._tushare_client.fetch_moneyflow_by_trade_date(trade_date)
+                values = [
+                    {
+                        **row,
+                        "trade_date": trade_date,
+                        "source": "tushare",
+                        "ingested_at": utcnow(),
+                    }
+                    for row in rows
+                    if self._is_hs_stock_code(row["stock_code"])
+                ]
+                if not values:
+                    empty.append("stock_moneyflow")
+                records["stock_moneyflow"] = self._moneyflow_repo.bulk_upsert(values)
+            except Exception as exc:  # noqa: PERF203
+                errors.append(f"stock_moneyflow: {type(exc).__name__}: {exc}")
+                logger.warning("个股资金流向同步失败 %s: %s", trade_date, exc)
+        self._db.commit()
+        return {
+            "trade_date": trade_date,
+            "datasets": selected,
+            "records": records,
+            "empty_datasets": empty,
+            "errors": errors,
+        }
+
+    def _dataset_latest_date(self, dataset_key: str) -> date | None:
+        """查询指定个股数据集已写入的最新日期。"""
+        if dataset_key == "stock_daily_close":
+            return self._close_repo.latest_complete_date()
+        if dataset_key == "stock_daily_basic":
+            return self._basic_repo.latest_date()
+        if dataset_key == "stock_moneyflow":
+            return self._moneyflow_repo.latest_date()
+        raise ValueError(f"未知个股数据集: {dataset_key}")
+
+    def _dataset_has_date(self, dataset_key: str, trade_date: date) -> bool:
+        """判断指定数据集在该交易日是否已有完整数据。"""
+        if dataset_key == "stock_daily_close":
+            return self._close_repo.count_trade_date(trade_date, require_open=True) > 0
+        if dataset_key == "stock_daily_basic":
+            return self._basic_repo.count_trade_date(trade_date) > 0
+        if dataset_key == "stock_moneyflow":
+            return self._moneyflow_repo.count_trade_date(trade_date) > 0
+        raise ValueError(f"未知个股数据集: {dataset_key}")
+
+    def dataset_trade_dates(
+        self,
+        dataset_key: str,
+        start: date,
+        end: date,
+    ) -> list[date]:
+        """返回单个数据集在区间内已覆盖的交易日。
+
+        Args:
+            dataset_key: 数据集键。
+            start: 起始日期（含）。
+            end: 结束日期（含）。
+
+        Returns:
+            去重升序交易日列表。
+        """
+        if dataset_key == "stock_daily_close":
+            return self._close_repo.trading_dates_with_open(start, end)
+        if dataset_key == "stock_daily_basic":
+            return self._basic_repo.trading_dates(start, end)
+        if dataset_key == "stock_moneyflow":
+            return self._moneyflow_repo.trading_dates(start, end)
+        raise ValueError(f"未知个股数据集: {dataset_key}")
+
+    def missing_trade_dates(
+        self,
+        start: date,
+        end: date,
+        *,
+        datasets: list[str] | None = None,
+    ) -> dict[str, list[date]]:
+        """计算各数据集相对交易日历的缺失日期。
+
+        Args:
+            start: 起始日期（含）。
+            end: 结束日期（含）。
+            datasets: 需要检查的数据集；None 表示全部个股数据集。
+
+        Returns:
+            {数据集键: 缺失交易日列表}。
+        """
+        selected = self._normalize_datasets(datasets)
+        trading_days = set(self._trading_days(start, end))
+        return {
+            key: sorted(trading_days - set(self.dataset_trade_dates(key, start, end)))
+            for key in selected
+        }
+
+    def sync_range(
+        self,
+        start: date,
+        end: date,
+        *,
+        datasets: list[str] | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """按交易日区间回填 Tushare 个股数据（幂等、可续跑）。
+
+        Args:
+            start: 起始日期（含）。
+            end: 结束日期（含）。
+            datasets: 需要回填的数据集；None 表示全部个股数据集。
+            force: 为 True 时忽略已完成判断，重新抓取所有交易日。
+
+        Returns:
+            {start, end, trading_days, synced_dates, skipped_dates, records, errors}。
+
+        Raises:
+            ValueError: start > end 时抛出。
+        """
+        if start > end:
+            raise ValueError("起始日期不能晚于结束日期")
+        selected = self._normalize_datasets(datasets)
+        trading_days = self._trading_days(start, end)
+        records = {key: 0 for key in selected}
+        errors: list[str] = []
+        upstream_empty = {key: set() for key in selected}
+        synced_dates = 0
+        skipped_dates = 0
+        for index, trade_date in enumerate(trading_days, start=1):
+            missing = [
+                key for key in selected if force or not self._dataset_has_date(key, trade_date)
+            ]
+            if not missing:
+                skipped_dates += 1
+                continue
+            result = self.sync_trade_date(trade_date, datasets=missing)
+            synced_dates += 1
+            for key, count in result["records"].items():
+                records[key] += int(count)
+            for key in result.get("empty_datasets", []):
+                upstream_empty.setdefault(key, set()).add(trade_date)
+            errors.extend(result["errors"])
+            if index % 50 == 0:
+                logger.info(
+                    "Tushare 个股回填进度: %s/%s 日期=%s",
+                    index,
+                    len(trading_days),
+                    trade_date,
+                )
+        return {
+            "start": start,
+            "end": end,
+            "trading_days": len(trading_days),
+            "synced_dates": synced_dates,
+            "skipped_dates": skipped_dates,
+            "records": records,
+            "upstream_empty": {
+                key: sorted(values) for key, values in upstream_empty.items()
+            },
+            "errors": errors[:50],
+        }
+
+    def sync_missing_recent(
+        self,
+        *,
+        lookback_days: int = 15,
+        datasets: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """补齐最近一段时间的 Tushare 个股缺口，供每日调度使用。
+
+        Args:
+            lookback_days: 每个数据集最多向前回看的自然日数，避免调度任务全量回填。
+            datasets: 需要补缺的数据集；None 表示全部个股数据集。
+
+        Returns:
+            {expected_date, datasets, records, errors, results}。
+        """
+        selected = self._normalize_datasets(datasets)
+        expected = self._latest_trading_day()
+        floor = max(_STOCK_FETCH_EPOCH, expected - timedelta(days=lookback_days))
+        records = {key: 0 for key in selected}
+        errors: list[str] = []
+        results: dict[str, Any] = {}
+        for key in selected:
+            latest = self._dataset_latest_date(key)
+            start = floor if latest is None else max(floor, latest + timedelta(days=1))
+            if start > expected:
+                results[key] = {"skipped": True, "start": start, "end": expected}
+                continue
+            result = self.sync_range(start, expected, datasets=[key])
+            results[key] = result
+            records[key] += int(result["records"].get(key) or 0)
+            errors.extend(result["errors"])
+        return {
+            "expected_date": expected,
+            "datasets": selected,
+            "records": records,
+            "errors": errors[:50],
+            "results": results,
+        }
+
+    def prune_before(
+        self,
+        before: date,
+        *,
+        dry_run: bool = True,
+        batch_size: int = 50000,
+    ) -> dict[str, Any]:
+        """删除指定日期之前的个股日线（分批提交，默认仅预演）。
+
+        Args:
+            before: 截止日期（不含）。
+            dry_run: 为 True 时只统计不删除。
+            batch_size: 单批删除行数。
+
+        Returns:
+            {before, matched, deleted, dry_run}。
+        """
+        matched = self._close_repo.count_before(before)
+        if dry_run:
+            return {"before": before, "matched": matched, "deleted": 0, "dry_run": True}
+        deleted = 0
+        while True:
+            count = self._close_repo.delete_before_batch(before, batch_size)
+            self._db.commit()
+            deleted += count
+            if count == 0:
+                break
+        return {"before": before, "matched": matched, "deleted": deleted, "dry_run": False}
+
+    def prune_non_tushare(
+        self,
+        start: date,
+        *,
+        dry_run: bool = True,
+        batch_size: int = 50000,
+    ) -> dict[str, Any]:
+        """删除指定日期之后非 Tushare 或非沪深 A 股的个股日线（默认仅预演）。
+
+        Args:
+            start: 起始日期（含）。
+            dry_run: 为 True 时只统计不删除。
+            batch_size: 单批删除行数。
+
+        Returns:
+            {start, matched, deleted, dry_run}。
+        """
+        matched = self._close_repo.count_non_tushare(start)
+        if dry_run:
+            return {"start": start, "matched": matched, "deleted": 0, "dry_run": True}
+        deleted = 0
+        while True:
+            count = self._close_repo.delete_non_tushare_batch(start, batch_size)
+            self._db.commit()
+            deleted += count
+            if count == 0:
+                break
+        return {"start": start, "matched": matched, "deleted": deleted, "dry_run": False}
 
     def bulk_fill(
         self,
@@ -576,74 +1090,48 @@ class StockDataService:
         start_date: date | None = None,
         only_missing: bool = False,
         rebuild: bool = False,
+        datasets: list[str] | None = None,
     ) -> dict[str, Any]:
-        """批量补全/重拉股票日线（仅 CLI 使用，复用单次 baostock 会话）。"""
+        """批量补全/重拉股票 Tushare 明细（仅 CLI 使用）。
+
+        Args:
+            codes: 股票代码列表；None 表示 stock_universe 全部代码。
+            start_date: 起始日覆盖。
+            only_missing: 仅处理健康快照缺失或异常的分区。
+            rebuild: 为 True 时走全量重拉。
+            datasets: 需要处理的数据集；None 表示全部个股数据集。
+
+        Returns:
+            {codes, ok, records, rebuild, datasets, errors}。
+        """
+        selected = self._normalize_datasets(datasets)
         target_codes = self._resolve_codes(codes)
         if only_missing and not codes:
-            rows = self._universe_repo.find_all(codes=target_codes)
+            health = self._health_repo.find_by_dataset_and_partitions(
+                "stock_daily_close", target_codes
+            )
             target_codes = [
-                row.stock_code
-                for row in rows
-                if row.bar_count is None or row.bar_count == 0 or (row.missing_day_count or 0) > 0
+                code
+                for code in target_codes
+                if health.get(code) is None or health[code].health_status != "healthy"
             ]
         records = 0
         errors: list[str] = []
-        other_codes = [code for code in target_codes if _market_prefix(code) not in ("sh", "sz")]
-        shsz_codes = [code for code in target_codes if _market_prefix(code) in ("sh", "sz")]
-        records += self._bulk_process_codes(
-            other_codes,
-            in_session=False,
-            rebuild=rebuild,
-            start_date=start_date,
-            errors=errors,
-        )
-        if shsz_codes:
+        for code in target_codes:
             try:
-                with self._close_client.baostock_session():
-                    records += self._bulk_process_codes(
-                        shsz_codes,
-                        in_session=True,
-                        rebuild=rebuild,
-                        start_date=start_date,
-                        errors=errors,
-                    )
+                if rebuild:
+                    result = self.rebuild_stock(code, start_date=start_date, datasets=selected)
+                else:
+                    result = self.fill_stock(code, start_date=start_date, datasets=selected)
+                records += int(result.get("upserted_total") or 0)
             except Exception as exc:
-                # 会话级登录失败时退化为逐只登录方式，保证 AkShare 兜底仍可用
-                logger.warning("baostock 批量会话失败，退化逐只登录: %s", exc)
-                records += self._bulk_process_codes(
-                    shsz_codes,
-                    in_session=False,
-                    rebuild=rebuild,
-                    start_date=start_date,
-                    errors=errors,
-                )
+                errors.append(f"{code}: {type(exc).__name__}: {exc}")
+                logger.warning("个股 %s 批量补全失败: %s", code, exc)
         return {
             "codes": len(target_codes),
             "ok": len(target_codes) - len(errors),
             "records": records,
             "rebuild": rebuild,
+            "datasets": selected,
             "errors": errors,
         }
-
-    def _bulk_process_codes(
-        self,
-        codes: list[str],
-        *,
-        in_session: bool,
-        rebuild: bool,
-        start_date: date | None,
-        errors: list[str],
-    ) -> int:
-        """批量处理一组股票并就地累积错误列表，返回成功写入行数。"""
-        records = 0
-        for i, code in enumerate(codes, start=1):
-            try:
-                if rebuild:
-                    result = self.rebuild_stock(code, in_session=in_session, start_date=start_date)
-                else:
-                    result = self.fill_stock(code, in_session=in_session, start_date=start_date)
-                records += int(result.get("upserted_rows") or 0)
-            except Exception as exc:
-                errors.append(f"{code}: {type(exc).__name__}: {exc}")
-                logger.warning("个股 %s 批量补全失败: %s", code, exc)
-        return records

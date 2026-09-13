@@ -87,6 +87,7 @@ class TestTushareIndexValuationClient:
 
     def test_fetch_uses_pe_ttm_and_source(self, monkeypatch) -> None:
         """pe 取 pe_ttm、pb 直取，source=tushare，百分位可用。"""
+
         def handler(**kwargs):
             # 只在 2026 年窗口返回数据，其余年份为空，模拟全历史分页
             if str(kwargs.get("start_date", "")).startswith("2026"):
@@ -153,9 +154,7 @@ class TestTushareMacroClient:
 
     def test_fetch_lpr_tolerant_columns(self, monkeypatch) -> None:
         """shibor_lpr 兼容 date/1y/5y 列名。"""
-        df = pd.DataFrame(
-            {"date": ["20260820"], "1y": [3.0], "5y": [3.5]}
-        )
+        df = pd.DataFrame({"date": ["20260820"], "1y": [3.0], "5y": [3.5]})
         fake, _ = _make_fake_tushare({"shibor_lpr": lambda **kw: df})
         with monkeypatch.context() as mp:
             mp.setitem(sys.modules, "tushare", fake)
@@ -226,10 +225,11 @@ class TestTushareStockClient:
     """Tushare 个股数据客户端。"""
 
     def test_fetch_close_by_trade_date(self, monkeypatch) -> None:
-        """全市场收盘返回代码/收盘价，覆盖沪深京后缀。"""
+        """全市场收盘返回代码/收盘价，覆盖沪深京后缀并保持排序。"""
         df = pd.DataFrame(
             {
                 "ts_code": ["600000.SH", "000001.SZ", "920000.BJ"],
+                "trade_date": ["20260908", "20260908", "20260908"],
                 "close": [10.0, 11.0, 5.0],
             }
         )
@@ -238,8 +238,98 @@ class TestTushareStockClient:
             mp.setitem(sys.modules, "tushare", fake)
             client = TushareStockClient(token="test-token")
             rows = client.fetch_close_by_trade_date(date(2026, 9, 8))
-        assert [r["stock_code"] for r in rows] == ["600000", "000001", "920000"]
+        assert [r["stock_code"] for r in rows] == ["000001", "600000", "920000"]
         assert rows[0]["source"] == "tushare"
+
+    def test_fetch_daily_full_fields(self, monkeypatch) -> None:
+        """日线全市场抓取返回 OHLC、量额、盘后成交与复权因子。"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["600000.SH"],
+                "trade_date": ["20260908"],
+                "open": [10.0],
+                "high": [10.5],
+                "low": [9.8],
+                "close": [10.2],
+                "pre_close": [10.0],
+                "change": [0.2],
+                "pct_chg": [2.0],
+                "vol": [1000.0],
+                "amount": [1020.0],
+                "ah_vol": [10.0],
+                "ah_amount": [10.2],
+            }
+        )
+        fake, _ = _make_fake_tushare({"daily": lambda **kw: df})
+        with monkeypatch.context() as mp:
+            mp.setitem(sys.modules, "tushare", fake)
+            client = TushareStockClient(token="test-token")
+            rows = client.fetch_daily_by_trade_date(date(2026, 9, 8))
+        assert rows[0]["open"] == 10.0
+        assert rows[0]["amount"] == 1020.0
+        assert rows[0]["ah_vol"] == 10.0
+
+    def test_fetch_daily_basic_limit_status(self, monkeypatch) -> None:
+        """每日指标包含 limit_status 且缺字段安全为 None。"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["600000.SH"],
+                "trade_date": ["20260908"],
+                "close": [10.2],
+                "pe_ttm": [None],
+                "limit_status": [1],
+            }
+        )
+        fake, _ = _make_fake_tushare({"daily_basic": lambda **kw: df})
+        with monkeypatch.context() as mp:
+            mp.setitem(sys.modules, "tushare", fake)
+            client = TushareStockClient(token="test-token")
+            rows = client.fetch_daily_basic_by_trade_date(date(2026, 9, 8))
+        assert rows[0]["limit_status"] == 1
+        assert rows[0]["pe_ttm"] is None
+
+    def test_fetch_moneyflow_volume_int_amount_float(self, monkeypatch) -> None:
+        """资金流向成交量转 int，金额保持 float。"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["600000.SH"],
+                "trade_date": ["20260908"],
+                "buy_sm_vol": [100],
+                "buy_sm_amount": [12.5],
+                "net_mf_vol": [-5],
+                "net_mf_amount": [-0.5],
+            }
+        )
+        fake, _ = _make_fake_tushare({"moneyflow": lambda **kw: df})
+        with monkeypatch.context() as mp:
+            mp.setitem(sys.modules, "tushare", fake)
+            client = TushareStockClient(token="test-token")
+            rows = client.fetch_moneyflow_by_trade_date(date(2026, 9, 8))
+        assert rows[0]["buy_sm_vol"] == 100
+        assert isinstance(rows[0]["net_mf_vol"], int)
+        assert rows[0]["buy_sm_amount"] == 12.5
+
+    def test_fetch_adj_factor_by_trade_date(self, monkeypatch) -> None:
+        """复权因子按交易日抓取并归一化代码。"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["600000.SH"],
+                "trade_date": ["20260908"],
+                "adj_factor": [139.008],
+            }
+        )
+        fake, _ = _make_fake_tushare({"adj_factor": lambda **kw: df})
+        with monkeypatch.context() as mp:
+            mp.setitem(sys.modules, "tushare", fake)
+            client = TushareStockClient(token="test-token")
+            rows = client.fetch_adj_factor_by_trade_date(date(2026, 9, 8))
+        assert rows == [
+            {
+                "trade_date": date(2026, 9, 8),
+                "stock_code": "600000",
+                "adj_factor": 139.008,
+            }
+        ]
 
     def test_fetch_history_close_sorted(self, monkeypatch) -> None:
         """单股历史收盘按日期升序，忽略缺失收盘。"""
@@ -263,7 +353,7 @@ class TestTushareStockClient:
         assert [r["close"] for r in rows] == [10.0, 10.2]
 
     def test_fetch_stock_basics_active_and_delisted(self, monkeypatch) -> None:
-        """上市名单 L 与退市名单 D 分别映射 is_active。"""
+        """上市名单 L 与退市名单 D 分别映射 is_active，并过滤北交所。"""
 
         def handler(**kwargs):
             if kwargs.get("list_status") == "L":
@@ -272,10 +362,20 @@ class TestTushareStockClient:
                         "ts_code": ["600000.SH", "920000.BJ"],
                         "name": ["浦发银行", "某北交所"],
                         "list_date": ["19991110", "20220301"],
+                        "market": ["主板", "北交所"],
+                        "exchange": ["SSE", "BSE"],
+                        "delist_date": [None, None],
                     }
                 )
             return pd.DataFrame(
-                {"ts_code": ["600001.SH"], "name": ["已退市股"], "list_date": [None]}
+                {
+                    "ts_code": ["600001.SH"],
+                    "name": ["已退市股"],
+                    "list_date": ["19900101"],
+                    "market": ["主板"],
+                    "exchange": ["SSE"],
+                    "delist_date": ["20020614"],
+                }
             )
 
         fake, _ = _make_fake_tushare({"stock_basic": handler})
@@ -284,7 +384,11 @@ class TestTushareStockClient:
             client = TushareStockClient(token="test-token")
             rows = client.fetch_stock_basics()
         by_code = {row["stock_code"]: row for row in rows}
+        assert set(by_code) == {"600000", "600001"}
         assert by_code["600000"]["is_active"] is True
         assert by_code["600000"]["ipo_date"] == date(1999, 11, 10)
+        assert by_code["600000"]["ts_code"] == "600000.SH"
+        assert by_code["600000"]["exchange"] == "SSE"
         assert by_code["600001"]["is_active"] is False
+        assert by_code["600001"]["delist_date"] == date(2002, 6, 14)
         assert all(row["source"] == "tushare" for row in rows)

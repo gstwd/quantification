@@ -98,9 +98,7 @@ def probe_index_daily(db) -> None:
         return
     end = date(2026, 9, 8)
     start = end - timedelta(days=30)
-    bars = client.fetch_index_daily(
-        "000300", start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
-    )
+    bars = client.fetch_index_daily("000300", start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))
     if not bars:
         _fail("000300 返回空")
         return
@@ -197,21 +195,27 @@ def probe_index_member() -> None:
 
 
 def probe_stock(db) -> None:
-    """实测个股日线与元数据（daily / stock_basic）。"""
-    _section("5. 个股日线收盘 daily")
+    """实测个股 Tushare 全字段（daily / adj_factor / daily_basic / moneyflow / stock_basic）。"""
+    _section("5. 个股日线全字段 daily")
     client = TushareStockClient()
     if not client.is_configured():
         _fail("未配置 Token")
         return
     trade_date = date(2026, 9, 8)
-    rows = client.fetch_close_by_trade_date(trade_date)
+    rows = client.fetch_daily_by_trade_date(trade_date)
     if not rows:
-        _fail(f"{trade_date} 全市场收盘返回空")
+        _fail(f"{trade_date} 全市场日线返回空")
     else:
         sh = sum(1 for r in rows if r["stock_code"].startswith(("60", "68", "90")))
         sz = sum(1 for r in rows if r["stock_code"].startswith(("00", "30")))
         bj = len(rows) - sh - sz
         _ok(f"{trade_date} 全市场 {len(rows)} 只（沪 {sh} / 深 {sz} / 京 {bj}）")
+        sample = rows[0]
+        _ok(
+            f"字段样本：open={sample['open']} high={sample['high']} "
+            f"low={sample['low']} close={sample['close']} amount={sample['amount']} "
+            f"ah_vol={sample['ah_vol']}"
+        )
         from quant_etf_api.infra.db.models.industry import StockDailyCloseModel
 
         db_count = (
@@ -219,16 +223,39 @@ def probe_stock(db) -> None:
             .filter(StockDailyCloseModel.trade_date == trade_date)
             .count()
         )
-        _ok(f"库内同日收盘行数 {db_count}（AkShare 快照口径）")
+        _ok(f"库内同日收盘行数 {db_count}")
 
-    _section("6. 个股元数据 stock_basic")
+    _section("6. 复权因子 adj_factor")
+    factors = client.fetch_adj_factor_by_trade_date(trade_date)
+    if factors:
+        _ok(f"{trade_date} 复权因子返回 {len(factors)} 条，样本 {factors[0]}")
+    else:
+        _fail(f"{trade_date} 复权因子返回空")
+
+    _section("7. 每日指标 daily_basic")
+    basics_daily = client.fetch_daily_basic_by_trade_date(trade_date)
+    if basics_daily:
+        sample = next((r for r in basics_daily if r.get("limit_status") is not None), None)
+        _ok(f"{trade_date} 每日指标返回 {len(basics_daily)} 条，limit_status 样本={sample}")
+    else:
+        _fail(f"{trade_date} 每日指标返回空")
+
+    _section("8. 个股资金流向 moneyflow")
+    flows = client.fetch_moneyflow_by_trade_date(trade_date)
+    if flows:
+        _ok(f"{trade_date} 资金流向返回 {len(flows)} 条，样本 {flows[0]}")
+    else:
+        _fail(f"{trade_date} 资金流向返回空")
+
+    _section("9. 个股元数据 stock_basic")
     basics = client.fetch_stock_basics()
     if not basics:
         _fail("stock_basic 返回空")
         return
     active = sum(1 for row in basics if row["is_active"])
     delisted = len(basics) - active
-    _ok(f"stock_basic 返回 {len(basics)} 行（上市 {active} / 退市 {delisted}）")
+    exchanges = sorted({row["exchange"] for row in basics})
+    _ok(f"stock_basic 返回 {len(basics)} 行（上市 {active} / 退市 {delisted}），交易所={exchanges}")
 
 
 def probe_index_basic() -> None:
@@ -253,9 +280,7 @@ def probe_sw_daily() -> None:
 
     ts.set_token(settings.tushare_token)
     try:
-        ts.pro_api().sw_daily(
-            ts_code="801010.SI", start_date="20260901", end_date="20260908"
-        )
+        ts.pro_api().sw_daily(ts_code="801010.SI", start_date="20260901", end_date="20260908")
         _ok("sw_daily 可用（当前账号已具备权限）")
     except Exception as exc:
         _fail(f"sw_daily 无权限：{exc}；行业日线维持申万官网/AkShare 数据源")

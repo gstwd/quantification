@@ -42,6 +42,24 @@ _VALUATION_START_YEAR = 2006
 # 申万成分单次请求上限（单次最大 5000 行），成分按 L1 行业分批拉取
 _INDEX_MEMBER_PAGE_ROWS = 5000
 
+# 个股接口字段清单：显式声明避免 Tushare 默认列裁剪导致扩展字段缺失
+_STOCK_BASIC_FIELDS = "ts_code,symbol,name,market,exchange,list_status,list_date,delist_date"
+_STOCK_DAILY_FIELDS = (
+    "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount,ah_vol,ah_amount"
+)
+_STOCK_ADJ_FACTOR_FIELDS = "ts_code,trade_date,adj_factor"
+_STOCK_DAILY_BASIC_FIELDS = (
+    "ts_code,trade_date,close,turnover_rate,turnover_rate_f,volume_ratio,pe,pe_ttm,pb,"
+    "ps,ps_ttm,dv_ratio,dv_ttm,total_share,float_share,free_share,total_mv,circ_mv,"
+    "limit_status"
+)
+_STOCK_MONEYFLOW_FIELDS = (
+    "ts_code,trade_date,buy_sm_vol,buy_sm_amount,sell_sm_vol,sell_sm_amount,"
+    "buy_md_vol,buy_md_amount,sell_md_vol,sell_md_amount,buy_lg_vol,buy_lg_amount,"
+    "sell_lg_vol,sell_lg_amount,buy_elg_vol,buy_elg_amount,sell_elg_vol,"
+    "sell_elg_amount,net_mf_vol,net_mf_amount"
+)
+
 # 估值全量历史按“北京日期”做进程级缓存：当日多次补拉（日频摄取/手动刷新/
 # 数据管理操作）只触发一次全量分页，避免重复消耗接口频次
 _VALUATION_DAILY_CACHE: dict[str, tuple[str, list[IndexValuation]]] = {}
@@ -144,16 +162,12 @@ class _TushareBaseMixin:
         try:
             pro = self._get_pro()
             self._throttle()
-            future = _TUSHARE_EXECUTOR.submit(
-                lambda: getattr(pro, endpoint)(**params)
-            )
+            future = _TUSHARE_EXECUTOR.submit(lambda: getattr(pro, endpoint)(**params))
             try:
                 df = future.result(timeout=_TUSHARE_CALL_TIMEOUT)
             except FutureTimeoutError:
                 future.cancel()
-                raise TimeoutError(
-                    f"tushare {endpoint} 调用超过 {_TUSHARE_CALL_TIMEOUT}s"
-                )
+                raise TimeoutError(f"tushare {endpoint} 调用超过 {_TUSHARE_CALL_TIMEOUT}s")
             elapsed = (time.perf_counter() - start) * 1000
             rows = 0 if df is None or df.empty else len(df)
             self._log_response(endpoint, rows, elapsed)
@@ -216,9 +230,7 @@ class TushareIndexValuationClient(_TushareBaseMixin, BaseDataClient):
         if ts_code is None or not self.is_configured():
             return []
         cache_key = f"{self._token}:{ts_code}"
-        cache_date, cached = _VALUATION_DAILY_CACHE.get(
-            cache_key, (None, [])
-        )
+        cache_date, cached = _VALUATION_DAILY_CACHE.get(cache_key, (None, []))
         today_key = today_cn().isoformat()
         if cache_date == today_key and cached:
             return list(cached)
@@ -500,9 +512,7 @@ class TushareIndexMemberClient(_TushareBaseMixin, BaseDataClient):
             return [f"{index_code}.SH"]
         return [f"{index_code}.SZ"]
 
-    def fetch_weight_snapshot(
-        self, index_code: str, trade_date: date
-    ) -> list[dict[str, Any]]:
+    def fetch_weight_snapshot(self, index_code: str, trade_date: date) -> list[dict[str, Any]]:
         """获取指数在指定交易日可用的最近一次月度成分/权重快照。
 
         Args:
@@ -550,18 +560,216 @@ class TushareIndexMemberClient(_TushareBaseMixin, BaseDataClient):
 
 
 class TushareStockClient(_TushareBaseMixin, BaseDataClient):
-    """Tushare Pro 个股数据客户端（stock_basic / daily）。
+    """Tushare Pro 个股数据客户端（stock_basic / daily / adj_factor / daily_basic / moneyflow）。
 
-    覆盖沪深京 A 股：daily 按交易日返回全市场收盘（约 5500 行/日），
-    也可按 ts_code+日期区间拉单只股票历史；stock_basic 提供上市/退市名单。
-    本客户端只处理“收盘价/元数据”两类数据，行情单位无需换算（不落地
-    volume/amount，仅使用 close 点位）。
+    覆盖沪深 A 股：daily 按交易日返回全市场行情（约 5500 行/日），也支持
+    按 ts_code+日期区间拉单只股票历史。库存字段保持 Tushare 原生单位：
+    daily.vol 为手、amount 为千元、ah_vol/ah_amount 为盘后成交；moneyflow
+    量为手、金额为万元。前/后复权不在此客户端落库，由领域层使用复权因子计算。
     """
 
     source_name = "tushare_stock"
 
+    @staticmethod
+    def _split_ts_code(ts_code: Any) -> tuple[str, str] | None:
+        """拆分 Tushare ts_code 为 6 位代码与交易所后缀。
+
+        Args:
+            ts_code: Tushare 代码，如 600000.SH。
+
+        Returns:
+            (stock_code, suffix)；格式非法时返回 None。
+        """
+        text = str(ts_code or "").strip().upper()
+        if "." not in text:
+            return None
+        stock_code, suffix = text.split(".", 1)
+        if not stock_code.isdigit() or suffix not in {"SH", "SZ", "BJ"}:
+            return None
+        return stock_code.zfill(6), suffix
+
+    def _daily_rows(self, df: Any) -> list[dict[str, Any]]:
+        """把 daily 返回 DataFrame 归一化为个股日线行。
+
+        Args:
+            df: Tushare daily 返回的 DataFrame。
+
+        Returns:
+            含 OHLC、量额、盘后成交与 source 的字典列表。
+        """
+        rows: list[dict[str, Any]] = []
+        if df is None or df.empty:
+            return rows
+        for _, row in df.iterrows():
+            split = self._split_ts_code(row.get("ts_code"))
+            trade_date = _parse_yyyymmdd(row.get("trade_date"))
+            if split is None or trade_date is None:
+                continue
+            stock_code, _suffix = split
+            rows.append(
+                {
+                    "trade_date": trade_date,
+                    "stock_code": stock_code,
+                    "open": _to_float(row.get("open")),
+                    "high": _to_float(row.get("high")),
+                    "low": _to_float(row.get("low")),
+                    "close": _to_float(row.get("close")),
+                    "pre_close": _to_float(row.get("pre_close")),
+                    "change": _to_float(row.get("change")),
+                    "pct_chg": _to_float(row.get("pct_chg")),
+                    "vol": _to_float(row.get("vol")),
+                    "amount": _to_float(row.get("amount")),
+                    "ah_vol": _to_float(row.get("ah_vol")),
+                    "ah_amount": _to_float(row.get("ah_amount")),
+                    "source": "tushare",
+                }
+            )
+        rows.sort(key=lambda item: (item["trade_date"], item["stock_code"]))
+        return rows
+
+    def _daily_basic_rows(self, df: Any) -> list[dict[str, Any]]:
+        """把 daily_basic 返回 DataFrame 归一化为每日指标行。
+
+        Args:
+            df: Tushare daily_basic 返回的 DataFrame。
+
+        Returns:
+            含全部每日指标字段的字典列表。
+        """
+        rows: list[dict[str, Any]] = []
+        if df is None or df.empty:
+            return rows
+        for _, row in df.iterrows():
+            split = self._split_ts_code(row.get("ts_code"))
+            trade_date = _parse_yyyymmdd(row.get("trade_date"))
+            if split is None or trade_date is None:
+                continue
+            stock_code, _suffix = split
+            rows.append(
+                {
+                    "trade_date": trade_date,
+                    "stock_code": stock_code,
+                    "close": _to_float(row.get("close")),
+                    "turnover_rate": _to_float(row.get("turnover_rate")),
+                    "turnover_rate_f": _to_float(row.get("turnover_rate_f")),
+                    "volume_ratio": _to_float(row.get("volume_ratio")),
+                    "pe": _to_float(row.get("pe")),
+                    "pe_ttm": _to_float(row.get("pe_ttm")),
+                    "pb": _to_float(row.get("pb")),
+                    "ps": _to_float(row.get("ps")),
+                    "ps_ttm": _to_float(row.get("ps_ttm")),
+                    "dv_ratio": _to_float(row.get("dv_ratio")),
+                    "dv_ttm": _to_float(row.get("dv_ttm")),
+                    "total_share": _to_float(row.get("total_share")),
+                    "float_share": _to_float(row.get("float_share")),
+                    "free_share": _to_float(row.get("free_share")),
+                    "total_mv": _to_float(row.get("total_mv")),
+                    "circ_mv": _to_float(row.get("circ_mv")),
+                    "limit_status": _to_int(row.get("limit_status")),
+                    "source": "tushare",
+                }
+            )
+        rows.sort(key=lambda item: (item["trade_date"], item["stock_code"]))
+        return rows
+
+    def _moneyflow_rows(self, df: Any) -> list[dict[str, Any]]:
+        """把 moneyflow 返回 DataFrame 归一化为资金流向行。
+
+        Args:
+            df: Tushare moneyflow 返回的 DataFrame。
+
+        Returns:
+            含全部资金流向字段的字典列表。
+        """
+        volume_fields = (
+            "buy_sm_vol",
+            "sell_sm_vol",
+            "buy_md_vol",
+            "sell_md_vol",
+            "buy_lg_vol",
+            "sell_lg_vol",
+            "buy_elg_vol",
+            "sell_elg_vol",
+            "net_mf_vol",
+        )
+        amount_fields = (
+            "buy_sm_amount",
+            "sell_sm_amount",
+            "buy_md_amount",
+            "sell_md_amount",
+            "buy_lg_amount",
+            "sell_lg_amount",
+            "buy_elg_amount",
+            "sell_elg_amount",
+            "net_mf_amount",
+        )
+        rows: list[dict[str, Any]] = []
+        if df is None or df.empty:
+            return rows
+        for _, row in df.iterrows():
+            split = self._split_ts_code(row.get("ts_code"))
+            trade_date = _parse_yyyymmdd(row.get("trade_date"))
+            if split is None or trade_date is None:
+                continue
+            stock_code, _suffix = split
+            item: dict[str, Any] = {
+                "trade_date": trade_date,
+                "stock_code": stock_code,
+                "source": "tushare",
+            }
+            item.update({field: _to_int(row.get(field)) for field in volume_fields})
+            item.update({field: _to_float(row.get(field)) for field in amount_fields})
+            rows.append(item)
+        rows.sort(key=lambda item: (item["trade_date"], item["stock_code"]))
+        return rows
+
+    @staticmethod
+    def _adj_factor_rows(df: Any) -> list[dict[str, Any]]:
+        """把 adj_factor 返回 DataFrame 归一化为复权因子行。
+
+        Args:
+            df: Tushare adj_factor 返回的 DataFrame。
+
+        Returns:
+            [{trade_date, stock_code, adj_factor}]。
+        """
+        rows: list[dict[str, Any]] = []
+        if df is None or df.empty:
+            return rows
+        for _, row in df.iterrows():
+            split = TushareStockClient._split_ts_code(row.get("ts_code"))
+            trade_date = _parse_yyyymmdd(row.get("trade_date"))
+            factor = _to_float(row.get("adj_factor"))
+            if split is None or trade_date is None:
+                continue
+            rows.append(
+                {
+                    "trade_date": trade_date,
+                    "stock_code": split[0],
+                    "adj_factor": factor,
+                }
+            )
+        rows.sort(key=lambda item: (item["trade_date"], item["stock_code"]))
+        return rows
+
+    def fetch_daily_by_trade_date(self, trade_date: date) -> list[dict[str, Any]]:
+        """拉取指定交易日全市场个股日线（含 OHLC、量额、盘后成交）。
+
+        Args:
+            trade_date: 交易日。
+
+        Returns:
+            Tushare daily 归一化行列表，source="tushare"。
+        """
+        df = self._fetch(
+            "daily",
+            trade_date=trade_date.strftime("%Y%m%d"),
+            fields=_STOCK_DAILY_FIELDS,
+        )
+        return self._daily_rows(df)
+
     def fetch_close_by_trade_date(self, trade_date: date) -> list[dict[str, Any]]:
-        """拉取指定交易日全 A 收盘价（一次调用覆盖沪深京）。
+        """拉取指定交易日全市场收盘价（兼容旧调用，返回 close 轻量行）。
 
         Args:
             trade_date: 交易日。
@@ -569,36 +777,24 @@ class TushareStockClient(_TushareBaseMixin, BaseDataClient):
         Returns:
             [{trade_date, stock_code, close, source}]，source="tushare"。
         """
-        df = self._fetch(
-            "daily",
-            trade_date=trade_date.strftime("%Y%m%d"),
-            fields="ts_code,close",
-        )
-        rows: list[dict[str, Any]] = []
-        if df is None or df.empty:
-            return rows
-        for _, row in df.iterrows():
-            ts_code = str(row.get("ts_code") or "")
-            close = _to_float(row.get("close"))
-            if "." not in ts_code or close is None:
-                continue
-            rows.append(
-                {
-                    "trade_date": trade_date,
-                    "stock_code": ts_code.split(".", 1)[0],
-                    "close": close,
-                    "source": "tushare",
-                }
-            )
-        return rows
+        return [
+            {
+                "trade_date": row["trade_date"],
+                "stock_code": row["stock_code"],
+                "close": row["close"],
+                "source": row["source"],
+            }
+            for row in self.fetch_daily_by_trade_date(trade_date)
+            if row.get("close") is not None
+        ]
 
-    def fetch_history_close(
+    def fetch_history_daily(
         self,
         stock_code: str,
         start_date: str,
         end_date: str,
     ) -> list[dict[str, Any]]:
-        """拉取单只股票历史收盘价（Tushare daily，ts_code 模式）。
+        """拉取单只股票历史日线（Tushare daily，ts_code 模式）。
 
         Args:
             stock_code: 6 位股票代码。
@@ -606,7 +802,7 @@ class TushareStockClient(_TushareBaseMixin, BaseDataClient):
             end_date: 结束日 'YYYYMMDD'。
 
         Returns:
-            [{trade_date, close}] 按日期升序；未覆盖/无数据返回空列表。
+            按日期升序的日线行；未覆盖/无数据返回空列表。
         """
         suffix = _stock_ts_suffix(stock_code)
         if suffix is None or not self.is_configured():
@@ -616,48 +812,203 @@ class TushareStockClient(_TushareBaseMixin, BaseDataClient):
             ts_code=f"{stock_code}.{suffix}",
             start_date=start_date,
             end_date=end_date,
-            fields="trade_date,close",
+            fields=_STOCK_DAILY_FIELDS,
         )
-        rows: list[dict[str, Any]] = []
-        if df is None or df.empty:
-            return rows
-        for _, row in df.iterrows():
-            trade_date = _parse_yyyymmdd(row.get("trade_date"))
-            close = _to_float(row.get("close"))
-            if trade_date is not None and close is not None:
-                rows.append({"trade_date": trade_date, "close": close})
-        rows.sort(key=lambda item: item["trade_date"])
-        return rows
+        return self._daily_rows(df)
 
-    def fetch_stock_basics(self) -> list[dict[str, Any]]:
-        """拉取沪深京 A 股名单（上市 L + 退市 D）。
+    def fetch_history_close(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[dict[str, Any]]:
+        """拉取单只股票历史收盘价（兼容旧调用）。
 
-        stock_basic 不提供退市日期字段，退市日期沿用库内已有值；is_active
-        与名称/上市日以 Tushare 为准。
+        Args:
+            stock_code: 6 位股票代码。
+            start_date: 起始日 'YYYYMMDD'。
+            end_date: 结束日 'YYYYMMDD'。
 
         Returns:
-            [{stock_code, name_cn, ipo_date, delist_date: None, is_active, source}]。
+            [{trade_date, close}] 按日期升序；未覆盖/无数据返回空列表。
+        """
+        return [
+            {"trade_date": row["trade_date"], "close": row["close"]}
+            for row in self.fetch_history_daily(stock_code, start_date, end_date)
+            if row.get("close") is not None
+        ]
+
+    def fetch_adj_factor_by_trade_date(self, trade_date: date) -> list[dict[str, Any]]:
+        """拉取指定交易日全市场复权因子。
+
+        Args:
+            trade_date: 交易日。
+
+        Returns:
+            [{trade_date, stock_code, adj_factor}]。
+        """
+        df = self._fetch(
+            "adj_factor",
+            trade_date=trade_date.strftime("%Y%m%d"),
+            fields=_STOCK_ADJ_FACTOR_FIELDS,
+        )
+        return self._adj_factor_rows(df)
+
+    def fetch_history_adj_factor(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[dict[str, Any]]:
+        """拉取单只股票历史复权因子。
+
+        Args:
+            stock_code: 6 位股票代码。
+            start_date: 起始日 'YYYYMMDD'。
+            end_date: 结束日 'YYYYMMDD'。
+
+        Returns:
+            [{trade_date, stock_code, adj_factor}]。
+        """
+        suffix = _stock_ts_suffix(stock_code)
+        if suffix is None or not self.is_configured():
+            return []
+        df = self._fetch(
+            "adj_factor",
+            ts_code=f"{stock_code}.{suffix}",
+            start_date=start_date,
+            end_date=end_date,
+            fields=_STOCK_ADJ_FACTOR_FIELDS,
+        )
+        return self._adj_factor_rows(df)
+
+    def fetch_daily_basic_by_trade_date(self, trade_date: date) -> list[dict[str, Any]]:
+        """拉取指定交易日全市场每日指标。
+
+        Args:
+            trade_date: 交易日。
+
+        Returns:
+            Tushare daily_basic 归一化行列表。
+        """
+        df = self._fetch(
+            "daily_basic",
+            trade_date=trade_date.strftime("%Y%m%d"),
+            fields=_STOCK_DAILY_BASIC_FIELDS,
+        )
+        return self._daily_basic_rows(df)
+
+    def fetch_history_daily_basic(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[dict[str, Any]]:
+        """拉取单只股票历史每日指标。
+
+        Args:
+            stock_code: 6 位股票代码。
+            start_date: 起始日 'YYYYMMDD'。
+            end_date: 结束日 'YYYYMMDD'。
+
+        Returns:
+            按日期升序的每日指标行。
+        """
+        suffix = _stock_ts_suffix(stock_code)
+        if suffix is None or not self.is_configured():
+            return []
+        df = self._fetch(
+            "daily_basic",
+            ts_code=f"{stock_code}.{suffix}",
+            start_date=start_date,
+            end_date=end_date,
+            fields=_STOCK_DAILY_BASIC_FIELDS,
+        )
+        return self._daily_basic_rows(df)
+
+    def fetch_moneyflow_by_trade_date(self, trade_date: date) -> list[dict[str, Any]]:
+        """拉取指定交易日全市场个股资金流向。
+
+        Args:
+            trade_date: 交易日。
+
+        Returns:
+            Tushare moneyflow 归一化行列表。
+        """
+        df = self._fetch(
+            "moneyflow",
+            trade_date=trade_date.strftime("%Y%m%d"),
+            fields=_STOCK_MONEYFLOW_FIELDS,
+        )
+        return self._moneyflow_rows(df)
+
+    def fetch_history_moneyflow(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[dict[str, Any]]:
+        """拉取单只股票历史资金流向。
+
+        Args:
+            stock_code: 6 位股票代码。
+            start_date: 起始日 'YYYYMMDD'。
+            end_date: 结束日 'YYYYMMDD'。
+
+        Returns:
+            按日期升序的资金流向行。
+        """
+        suffix = _stock_ts_suffix(stock_code)
+        if suffix is None or not self.is_configured():
+            return []
+        df = self._fetch(
+            "moneyflow",
+            ts_code=f"{stock_code}.{suffix}",
+            start_date=start_date,
+            end_date=end_date,
+            fields=_STOCK_MONEYFLOW_FIELDS,
+        )
+        return self._moneyflow_rows(df)
+
+    def fetch_stock_basics(self) -> list[dict[str, Any]]:
+        """拉取沪深 A 股名单（上市 L + 退市 D）。
+
+        只保留 `exchange` 为 SSE/SZSE 的标的，排除北交所与 CDR；退市名单
+        保留 delist_date，供个股目录与质量快照使用。
+
+        Returns:
+            [{stock_code, ts_code, name_cn, market, exchange, ipo_date,
+            delist_date, is_active, source}]。
         """
         results: list[dict[str, Any]] = []
         for status in ("L", "D"):
             df = self._fetch(
                 "stock_basic",
                 list_status=status,
-                fields="ts_code,name,list_date,market",
+                fields=_STOCK_BASIC_FIELDS,
             )
             if df is None or df.empty:
                 continue
             for _, row in df.iterrows():
-                ts_code = str(row.get("ts_code") or "")
-                if "." not in ts_code:
+                split = self._split_ts_code(row.get("ts_code"))
+                if split is None:
                     continue
-                stock_code = ts_code.split(".", 1)[0]
+                stock_code, suffix = split
+                exchange = str(row.get("exchange") or "").strip().upper()
+                if exchange not in {"SSE", "SZSE"}:
+                    continue
+                market = str(row.get("market") or "").strip()
+                if market == "CDR":
+                    continue
                 results.append(
                     {
                         "stock_code": stock_code,
+                        "ts_code": f"{stock_code}.{suffix}",
                         "name_cn": str(row.get("name") or "").strip(),
+                        "market": market or None,
+                        "exchange": exchange,
                         "ipo_date": _parse_yyyymmdd(row.get("list_date")),
-                        "delist_date": None,
+                        "delist_date": _parse_yyyymmdd(row.get("delist_date")),
                         "is_active": status == "L",
                         "source": "tushare",
                     }
@@ -719,6 +1070,19 @@ def _to_float(value: Any) -> float | None:
     if result != result:  # NaN
         return None
     return result
+
+
+def _to_int(value: Any) -> int | None:
+    """把上游数值安全转为 int，NaN/None/空串返回 None。
+
+    Args:
+        value: 上游单元格值。
+
+    Returns:
+        整数值；无法转换时返回 None。
+    """
+    number = _to_float(value)
+    return int(number) if number is not None else None
 
 
 def today_cn() -> date:

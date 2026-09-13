@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
-from sqlalchemy import Date, case, cast, func, or_
+from sqlalchemy import Date, and_, case, cast, func, or_
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.db.base import utcnow
@@ -32,7 +32,11 @@ from quant_etf_api.infra.db.models.industry import (
     IndustryUniverseModel,
     StockDailyCloseModel,
 )
-from quant_etf_api.infra.db.models.stock import StockUniverseModel
+from quant_etf_api.infra.db.models.stock import (
+    StockDailyBasicModel,
+    StockMoneyflowModel,
+    StockUniverseModel,
+)
 from quant_etf_api.infra.time import today_cn
 from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.schemas.data_management import (
@@ -51,8 +55,12 @@ logger = logging.getLogger(__name__)
 _operation_lock = threading.Lock()
 # 低频数据集（成分/目录）在同步时按此天数判断是否需要再次拉取上游
 _LOW_FREQ_REFRESH_DAYS = 7
+# 个股 Tushare 回填统一起点，与 StockDataService._STOCK_FETCH_EPOCH 保持一致
+_STOCK_TUSHARE_EPOCH = date(2013, 1, 1)
 _VALUATION_SUPPORTED_CODES = {
-    "000016", "000300", "000905",
+    "000016",
+    "000300",
+    "000905",
 }
 
 
@@ -85,36 +93,114 @@ class DataSetDefinition:
 
 
 DATASETS: tuple[DataSetDefinition, ...] = (
-    DataSetDefinition("trading_calendar", "A 股交易日历", "日历", "Tushare / AkShare 兜底", None,
-                      ("sync_latest", "check", "repair_gaps", "rebuild"),
-                      ("日期连续性", "最近交易日可用性")),
-    DataSetDefinition("index_daily_bar", "指数日线行情", "日频", "Tushare 优先 · 多源兜底", "指数",
-                      ("sync_latest", "check", "repair_gaps", "rebuild"),
-                      ("交易日连续性", "OHLC 与收盘价合法性", "最近交易日覆盖")),
-    DataSetDefinition("index_valuation", "指数估值", "日频", "Tushare / AkShare 兜底", "指数",
-                      ("sync_latest", "check", "repair_gaps", "rebuild"),
-                      ("估值覆盖率", "PE/PB 与百分位合法性", "最近可用日期")),
-    DataSetDefinition("macro_indicator", "宏观指标", "月频/事件", "Tushare / AkShare 兜底", "指标",
-                      ("sync_latest", "check", "repair_gaps", "rebuild"),
-                      ("发布周期新鲜度", "数值字段完整性")),
-    DataSetDefinition("index_membership", "指数成分", "月频/快照", "Tushare / AkShare / Baostock", "指数",
-                      ("sync_latest", "check", "repair_gaps", "rebuild"),
-                      ("当前快照新鲜度", "成员代码与生效日期完整性")),
-    DataSetDefinition("industry_universe", "申万行业基础信息", "低频", "申万官网", None,
-                      ("sync_latest", "check", "repair_gaps", "rebuild"),
-                      ("目录数量", "行业代码与名称完整性")),
-    DataSetDefinition("industry_daily_bar", "申万行业日线", "日频", "申万官网 / AkShare", "行业",
-                      ("sync_latest", "check", "repair_gaps", "rebuild"),
-                      ("交易日连续性", "OHLC 与涨跌幅完整性", "最近交易日覆盖")),
-    DataSetDefinition("industry_membership", "申万行业成分", "低频", "申万官网", "行业",
-                      ("sync_latest", "check", "repair_gaps", "rebuild"),
-                      ("刷新期限", "股票、行业与生效日期完整性")),
-    DataSetDefinition("stock_universe", "证券基础信息", "低频", "Tushare / 交易所 / AkShare", None,
-                      ("sync_latest", "check", "repair_gaps", "rebuild"),
-                      ("代码、名称与状态完整性")),
-    DataSetDefinition("stock_daily_close", "个股日线收盘", "日频", "Tushare / Baostock / AkShare", "股票",
-                      ("sync_latest", "check", "repair_gaps", "rebuild"),
-                      ("交易日连续性", "收盘价合法性", "最近交易日覆盖")),
+    DataSetDefinition(
+        "trading_calendar",
+        "A 股交易日历",
+        "日历",
+        "Tushare / AkShare 兜底",
+        None,
+        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("日期连续性", "最近交易日可用性"),
+    ),
+    DataSetDefinition(
+        "index_daily_bar",
+        "指数日线行情",
+        "日频",
+        "Tushare 优先 · 多源兜底",
+        "指数",
+        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("交易日连续性", "OHLC 与收盘价合法性", "最近交易日覆盖"),
+    ),
+    DataSetDefinition(
+        "index_valuation",
+        "指数估值",
+        "日频",
+        "Tushare / AkShare 兜底",
+        "指数",
+        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("估值覆盖率", "PE/PB 与百分位合法性", "最近可用日期"),
+    ),
+    DataSetDefinition(
+        "macro_indicator",
+        "宏观指标",
+        "月频/事件",
+        "Tushare / AkShare 兜底",
+        "指标",
+        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("发布周期新鲜度", "数值字段完整性"),
+    ),
+    DataSetDefinition(
+        "index_membership",
+        "指数成分",
+        "月频/快照",
+        "Tushare / AkShare / Baostock",
+        "指数",
+        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("当前快照新鲜度", "成员代码与生效日期完整性"),
+    ),
+    DataSetDefinition(
+        "industry_universe",
+        "申万行业基础信息",
+        "低频",
+        "申万官网",
+        None,
+        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("目录数量", "行业代码与名称完整性"),
+    ),
+    DataSetDefinition(
+        "industry_daily_bar",
+        "申万行业日线",
+        "日频",
+        "申万官网 / AkShare",
+        "行业",
+        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("交易日连续性", "OHLC 与涨跌幅完整性", "最近交易日覆盖"),
+    ),
+    DataSetDefinition(
+        "industry_membership",
+        "申万行业成分",
+        "低频",
+        "申万官网",
+        "行业",
+        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("刷新期限", "股票、行业与生效日期完整性"),
+    ),
+    DataSetDefinition(
+        "stock_universe",
+        "证券基础信息",
+        "低频",
+        "Tushare",
+        None,
+        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("代码、名称、ts_code 与状态完整性"),
+    ),
+    DataSetDefinition(
+        "stock_daily_close",
+        "个股日线行情",
+        "日频",
+        "Tushare",
+        "股票",
+        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("交易日连续性", "OHLC 与量额完整性", "复权因子可用性", "最近交易日覆盖"),
+    ),
+    DataSetDefinition(
+        "stock_daily_basic",
+        "个股每日指标",
+        "日频",
+        "Tushare",
+        "股票",
+        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("交易日连续性", "估值与股本字段完整性", "最近交易日覆盖"),
+    ),
+    DataSetDefinition(
+        "stock_moneyflow",
+        "个股资金流向",
+        "日频",
+        "Tushare",
+        "股票",
+        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("交易日连续性", "资金流向字段完整性", "最近交易日覆盖"),
+    ),
 )
 _DATASET_BY_KEY = {item.key: item for item in DATASETS}
 
@@ -181,7 +267,9 @@ class DataManagementService:
         if partition_key:
             query = query.filter(DataHealthSnapshotModel.partition_key == partition_key)
         total = query.count()
-        rows = query.order_by(DataHealthSnapshotModel.partition_key).offset(offset).limit(limit).all()
+        rows = (
+            query.order_by(DataHealthSnapshotModel.partition_key).offset(offset).limit(limit).all()
+        )
         return DataSetDetailResponse(
             dataset=self._summary(definition),
             quality_rules=list(definition.quality_rules),
@@ -224,13 +312,17 @@ class DataManagementService:
                         definition, operation, partition_key, run_id, force
                     )
                     status = _dataset_status(metrics)
-                    result_items.append({"dataset_key": definition.key, "status": status, **metrics})
+                    result_items.append(
+                        {"dataset_key": definition.key, "status": status, **metrics}
+                    )
                     run_service.add_item(run_id, definition.key, status, metrics=metrics)
                 except Exception as exc:
                     self._db.rollback()
                     message = f"{type(exc).__name__}: {exc}"
                     self._mark_failure(definition, partition_key, run_id, message)
-                    result_items.append({"dataset_key": definition.key, "status": "failed", "error": message})
+                    result_items.append(
+                        {"dataset_key": definition.key, "status": "failed", "error": message}
+                    )
                     run_service.add_item(run_id, definition.key, "failed", message)
             statuses = [item["status"] for item in result_items]
             success_count = sum(status == "success" for status in statuses)
@@ -353,7 +445,12 @@ class DataManagementService:
                         .filter(IndexDailyBarModel.index_code == code)
                         .scalar()
                     )
-                    if latest is not None and latest >= expected and not force and operation == "sync_latest":
+                    if (
+                        latest is not None
+                        and latest >= expected
+                        and not force
+                        and operation == "sync_latest"
+                    ):
                         skipped = True
                         continue
                     records += service._fetch_and_upsert_index_bars(
@@ -373,7 +470,12 @@ class DataManagementService:
                         .filter(IndexValuationModel.index_code == code)
                         .scalar()
                     )
-                    if latest is not None and latest >= expected and not force and operation == "sync_latest":
+                    if (
+                        latest is not None
+                        and latest >= expected
+                        and not force
+                        and operation == "sync_latest"
+                    ):
                         skipped = True
                         continue
                     records += service._fetch_and_upsert_index_valuation(code)
@@ -399,8 +501,7 @@ class DataManagementService:
                 latest_by = dict(rows)
                 cutoff = today_cn() - timedelta(days=_LOW_FREQ_REFRESH_DAYS)
                 if all(
-                    latest_by.get(code) is not None
-                    and latest_by[code].date() >= cutoff
+                    latest_by.get(code) is not None and latest_by[code].date() >= cutoff
                     for code in codes
                 ):
                     skipped = True
@@ -462,24 +563,44 @@ class DataManagementService:
                     records += int(result.get("added") or 0) + int(result.get("updated") or 0)
                 except Exception as exc:  # noqa: PERF203
                     _fail("stock_universe", exc)
-        elif dataset_key == "stock_daily_close":
+        elif dataset_key in {
+            "stock_daily_close",
+            "stock_daily_basic",
+            "stock_moneyflow",
+        }:
+            service = StockDataService(self._db)
             if partition_key:
-                service = StockDataService(self._db)
                 try:
                     if operation == "rebuild":
-                        result = service.rebuild_stock(partition_key)
-                        records += int(result.get("upserted_rows") or 0)
+                        result = service.rebuild_stock(partition_key, datasets=[dataset_key])
+                        records += int(result.get("upserted_total") or 0)
                     else:
-                        result = service.fill_stock(partition_key)
-                        records += int(result.get("fetched_rows") or 0)
+                        result = service.fill_stock(partition_key, datasets=[dataset_key])
+                        records += int(result.get("upserted_total") or 0)
                 except Exception as exc:  # noqa: PERF203
                     _fail(partition_key, exc)
             else:
-                # 全局日频同步只补当天快照，不在调度器中重拉全部历史个股。
                 try:
-                    records += IndustryDataService(self._db).refresh_stock_close_snapshot(expected)
+                    if operation == "rebuild":
+                        # 全量重建属于显式高风险操作，由页面确认令牌保护。
+                        result = service.sync_range(
+                            _STOCK_TUSHARE_EPOCH,
+                            expected,
+                            datasets=[dataset_key],
+                            force=True,
+                        )
+                    elif operation == "repair_gaps":
+                        # 缺口修复扫描全历史，但只抓取尚未完整的交易日。
+                        result = service.sync_range(
+                            _STOCK_TUSHARE_EPOCH,
+                            expected,
+                            datasets=[dataset_key],
+                        )
+                    else:
+                        result = service.sync_missing_recent(datasets=[dataset_key])
+                    records += int(result["records"].get(dataset_key) or 0)
                 except Exception as exc:  # noqa: PERF203
-                    _fail("stock_daily_close", exc)
+                    _fail(dataset_key, exc)
         else:
             raise ValueError(f"未实现数据集同步: {dataset_key}")
         return {"records": records, "errors": errors, "skipped": skipped}
@@ -513,10 +634,7 @@ class DataManagementService:
             .all()
         )
         latest_by = dict(latest_rows)
-        return any(
-            latest_by.get(code) is None or latest_by[code] < expected
-            for code in codes
-        )
+        return any(latest_by.get(code) is None or latest_by[code] < expected for code in codes)
 
     def _ensure_replacement_span(
         self,
@@ -574,9 +692,9 @@ class DataManagementService:
             existing_max,
             {b.trade_date for b in bars},
         )
-        self._db.query(IndexDailyBarModel).filter(
-            IndexDailyBarModel.index_code == code
-        ).delete(synchronize_session=False)
+        self._db.query(IndexDailyBarModel).filter(IndexDailyBarModel.index_code == code).delete(
+            synchronize_session=False
+        )
         service._insert_index_bars(code, bars, source=source)
         self._db.commit()
         return len(bars)
@@ -602,9 +720,9 @@ class DataManagementService:
             existing_max,
             {v.trade_date for v in values},
         )
-        self._db.query(IndexValuationModel).filter(
-            IndexValuationModel.index_code == code
-        ).delete(synchronize_session=False)
+        self._db.query(IndexValuationModel).filter(IndexValuationModel.index_code == code).delete(
+            synchronize_session=False
+        )
         service._insert_index_valuations(code, values)
         self._db.commit()
         return len(values)
@@ -653,15 +771,36 @@ class DataManagementService:
     def _partitions(self, dataset_key: str) -> list[str]:
         """返回数据集当前可维护分区列表。"""
         if dataset_key in {"index_daily_bar", "index_valuation", "index_membership"}:
-            return [r[0] for r in self._db.query(BenchmarkIndexModel.index_code).filter(BenchmarkIndexModel.is_active.is_(True)).all()]
+            return [
+                r[0]
+                for r in self._db.query(BenchmarkIndexModel.index_code)
+                .filter(BenchmarkIndexModel.is_active.is_(True))
+                .all()
+            ]
         if dataset_key == "macro_indicator":
-            return [r[0] for r in self._db.query(MacroIndicatorModel.indicator_code).distinct().all()] or ["cpi", "pmi", "lpr1y", "lpr5y"]
+            return [
+                r[0] for r in self._db.query(MacroIndicatorModel.indicator_code).distinct().all()
+            ] or ["cpi", "pmi", "lpr1y", "lpr5y"]
         if dataset_key == "industry_daily_bar":
-            return [r[0] for r in self._db.query(IndustryUniverseModel.industry_code).filter(IndustryUniverseModel.is_active.is_(True)).all()]
+            return [
+                r[0]
+                for r in self._db.query(IndustryUniverseModel.industry_code)
+                .filter(IndustryUniverseModel.is_active.is_(True))
+                .all()
+            ]
         if dataset_key == "industry_membership":
             return [r[0] for r in self._db.query(IndustryUniverseModel.industry_code).all()]
-        if dataset_key == "stock_daily_close":
-            return [r[0] for r in self._db.query(StockUniverseModel.stock_code).filter(StockUniverseModel.is_active.is_(True)).all()]
+        if dataset_key in {
+            "stock_daily_close",
+            "stock_daily_basic",
+            "stock_moneyflow",
+        }:
+            return [
+                r[0]
+                for r in self._db.query(StockUniverseModel.stock_code)
+                .filter(StockUniverseModel.is_active.is_(True))
+                .all()
+            ]
         return []
 
     def _inspect_many(
@@ -681,13 +820,17 @@ class DataManagementService:
         columns: list[Any] = [
             func.count().label("record_count"),
             func.coalesce(func.sum(case((error_condition, 1), else_=0)), 0).label("error_count"),
-            func.coalesce(func.sum(case((warning_condition, 1), else_=0)), 0).label("warning_count"),
+            func.coalesce(func.sum(case((warning_condition, 1), else_=0)), 0).label(
+                "warning_count"
+            ),
         ]
         if date_expression is not None:
-            columns.extend([
-                func.min(date_expression).label("earliest_date"),
-                func.max(date_expression).label("latest_date"),
-            ])
+            columns.extend(
+                [
+                    func.min(date_expression).label("earliest_date"),
+                    func.max(date_expression).label("latest_date"),
+                ]
+            )
         if source_column is not None:
             columns.append(func.max(source_column).label("source_name"))
 
@@ -695,19 +838,27 @@ class DataManagementService:
             row = self._db.query(*columns).select_from(model).one()
             raw_rows = {"": row}
         else:
-            query = self._db.query(partition_column.label("partition_key"), *columns).select_from(model)
+            query = self._db.query(partition_column.label("partition_key"), *columns).select_from(
+                model
+            )
             if partitions:
                 query = query.filter(partition_column.in_(partitions))
-            raw_rows = {str(row.partition_key): row for row in query.group_by(partition_column).all()}
+            raw_rows = {
+                str(row.partition_key): row for row in query.group_by(partition_column).all()
+            }
 
         keys = [""] if definition.partition_label is None else partitions
         expected = self._expected_date(definition.key)
-        calendar_days = self._calendar_days_until(expected) if self._is_daily(definition.key) else []
+        calendar_days = (
+            self._calendar_days_until(expected) if self._is_daily(definition.key) else []
+        )
         result: dict[str, dict[str, Any]] = {}
         for key in keys:
             row = raw_rows.get(key)
             record_count = int(row.record_count) if row is not None else 0
-            earliest = row.earliest_date if row is not None and date_expression is not None else None
+            earliest = (
+                row.earliest_date if row is not None and date_expression is not None else None
+            )
             latest = row.latest_date if row is not None and date_expression is not None else None
             hard_errors = int(row.error_count) if row is not None else 0
             warnings = int(row.warning_count) if row is not None else 0
@@ -735,14 +886,18 @@ class DataManagementService:
             result[key] = {
                 "partition_name": self._partition_name(definition.key, key),
                 "health_status": status,
-                "source_name": row.source_name if row is not None and source_column is not None else None,
+                "source_name": row.source_name
+                if row is not None and source_column is not None
+                else None,
                 "earliest_date": earliest,
                 "latest_date": latest,
                 "expected_date": expected,
                 "record_count": record_count,
                 "missing_count": missing,
                 "invalid_count": hard_errors,
-                "issue_summary": issues if any(issues.values()) or status in {"error", "warning", "unknown"} else None,
+                "issue_summary": issues
+                if any(issues.values()) or status in {"error", "warning", "unknown"}
+                else None,
             }
         return result
 
@@ -750,21 +905,86 @@ class DataManagementService:
         """返回数据集对应 ORM 模型及分区、日期、来源列。"""
         mapping: dict[str, tuple[type[Any], Any, Any, Any]] = {
             "trading_calendar": (TradingCalendarModel, None, TradingCalendarModel.trade_date, None),
-            "index_daily_bar": (IndexDailyBarModel, IndexDailyBarModel.index_code, IndexDailyBarModel.trade_date, IndexDailyBarModel.source),
-            "index_valuation": (IndexValuationModel, IndexValuationModel.index_code, IndexValuationModel.trade_date, IndexValuationModel.source),
-            "macro_indicator": (MacroIndicatorModel, MacroIndicatorModel.indicator_code, MacroIndicatorModel.period_date, MacroIndicatorModel.source),
-            "index_membership": (IndexMemberEventModel, IndexMemberEventModel.index_code, IndexMemberEventModel.updated_at, IndexMemberEventModel.source),
-            "industry_universe": (IndustryUniverseModel, None, IndustryUniverseModel.updated_at, None),
-            "industry_daily_bar": (IndustryDailyBarModel, IndustryDailyBarModel.industry_code, IndustryDailyBarModel.trade_date, IndustryDailyBarModel.source),
-            "industry_membership": (IndustryMembershipEventModel, IndustryMembershipEventModel.industry_code, IndustryMembershipEventModel.fetched_at, IndustryMembershipEventModel.source),
-            "stock_universe": (StockUniverseModel, None, StockUniverseModel.updated_at, StockUniverseModel.source),
-            "stock_daily_close": (StockDailyCloseModel, StockDailyCloseModel.stock_code, StockDailyCloseModel.trade_date, StockDailyCloseModel.source),
+            "index_daily_bar": (
+                IndexDailyBarModel,
+                IndexDailyBarModel.index_code,
+                IndexDailyBarModel.trade_date,
+                IndexDailyBarModel.source,
+            ),
+            "index_valuation": (
+                IndexValuationModel,
+                IndexValuationModel.index_code,
+                IndexValuationModel.trade_date,
+                IndexValuationModel.source,
+            ),
+            "macro_indicator": (
+                MacroIndicatorModel,
+                MacroIndicatorModel.indicator_code,
+                MacroIndicatorModel.period_date,
+                MacroIndicatorModel.source,
+            ),
+            "index_membership": (
+                IndexMemberEventModel,
+                IndexMemberEventModel.index_code,
+                IndexMemberEventModel.updated_at,
+                IndexMemberEventModel.source,
+            ),
+            "industry_universe": (
+                IndustryUniverseModel,
+                None,
+                IndustryUniverseModel.updated_at,
+                None,
+            ),
+            "industry_daily_bar": (
+                IndustryDailyBarModel,
+                IndustryDailyBarModel.industry_code,
+                IndustryDailyBarModel.trade_date,
+                IndustryDailyBarModel.source,
+            ),
+            "industry_membership": (
+                IndustryMembershipEventModel,
+                IndustryMembershipEventModel.industry_code,
+                IndustryMembershipEventModel.fetched_at,
+                IndustryMembershipEventModel.source,
+            ),
+            "stock_universe": (
+                StockUniverseModel,
+                None,
+                StockUniverseModel.updated_at,
+                StockUniverseModel.source,
+            ),
+            "stock_daily_close": (
+                StockDailyCloseModel,
+                StockDailyCloseModel.stock_code,
+                StockDailyCloseModel.trade_date,
+                StockDailyCloseModel.source,
+            ),
+            "stock_daily_basic": (
+                StockDailyBasicModel,
+                StockDailyBasicModel.stock_code,
+                StockDailyBasicModel.trade_date,
+                StockDailyBasicModel.source,
+            ),
+            "stock_moneyflow": (
+                StockMoneyflowModel,
+                StockMoneyflowModel.stock_code,
+                StockMoneyflowModel.trade_date,
+                StockMoneyflowModel.source,
+            ),
         }
         return mapping[dataset_key]
 
     def _expected_date(self, dataset_key: str) -> date | None:
         """按数据集频率计算当前应达到的业务日期。"""
-        if dataset_key in {"index_daily_bar", "index_valuation", "industry_daily_bar", "stock_daily_close", "trading_calendar"}:
+        if dataset_key in {
+            "index_daily_bar",
+            "index_valuation",
+            "industry_daily_bar",
+            "stock_daily_close",
+            "stock_daily_basic",
+            "stock_moneyflow",
+            "trading_calendar",
+        }:
             return self._latest_trading_day()
         if dataset_key in {"index_membership", "industry_membership"}:
             return today_cn() - timedelta(days=35)
@@ -782,13 +1002,19 @@ class DataManagementService:
         """返回可由数据库执行的硬错误与告警条件。"""
         false = False
         if dataset_key in {"index_daily_bar", "industry_daily_bar"}:
-            model = IndexDailyBarModel if dataset_key == "index_daily_bar" else IndustryDailyBarModel
+            model = (
+                IndexDailyBarModel if dataset_key == "index_daily_bar" else IndustryDailyBarModel
+            )
             hard_error = or_(
                 func.abs(model.change_pct) > 15,
-                model.close_price.is_(None), model.close_price <= 0,
-                model.open_price.is_(None), model.open_price <= 0,
-                model.high_price.is_(None), model.high_price <= 0,
-                model.low_price.is_(None), model.low_price <= 0,
+                model.close_price.is_(None),
+                model.close_price <= 0,
+                model.open_price.is_(None),
+                model.open_price <= 0,
+                model.high_price.is_(None),
+                model.high_price <= 0,
+                model.low_price.is_(None),
+                model.low_price <= 0,
             )
             warning = (model.volume == 0) & (func.abs(model.change_pct) > 0.01)
             return hard_error, warning
@@ -803,22 +1029,68 @@ class DataManagementService:
                 or_(IndexValuationModel.pe < 0, IndexValuationModel.pb < 0),
             )
         if dataset_key == "stock_daily_close":
-            return or_(StockDailyCloseModel.close.is_(None), StockDailyCloseModel.close <= 0), false
+            hard_error = or_(
+                StockDailyCloseModel.close.is_(None),
+                StockDailyCloseModel.close <= 0,
+                StockDailyCloseModel.open.is_(None),
+                StockDailyCloseModel.open <= 0,
+                StockDailyCloseModel.high.is_(None),
+                StockDailyCloseModel.high <= 0,
+                StockDailyCloseModel.low.is_(None),
+                StockDailyCloseModel.low <= 0,
+                StockDailyCloseModel.high < StockDailyCloseModel.low,
+                StockDailyCloseModel.high < StockDailyCloseModel.open,
+                StockDailyCloseModel.high < StockDailyCloseModel.close,
+                StockDailyCloseModel.low > StockDailyCloseModel.open,
+                StockDailyCloseModel.low > StockDailyCloseModel.close,
+            )
+            return hard_error, false
+        if dataset_key == "stock_daily_basic":
+            hard_error = or_(
+                StockDailyBasicModel.close.is_(None),
+                StockDailyBasicModel.close <= 0,
+                StockDailyBasicModel.total_mv < 0,
+                StockDailyBasicModel.circ_mv < 0,
+                StockDailyBasicModel.total_share < 0,
+                StockDailyBasicModel.float_share < 0,
+            )
+            warning = and_(
+                StockDailyBasicModel.pe_ttm.is_(None),
+                StockDailyBasicModel.pb.is_(None),
+                StockDailyBasicModel.total_mv.is_(None),
+            )
+            return hard_error, warning
+        if dataset_key == "stock_moneyflow":
+            return false, false
         if dataset_key == "macro_indicator":
             return MacroIndicatorModel.value.is_(None), false
         if dataset_key == "industry_universe":
-            return or_(IndustryUniverseModel.industry_code == "", IndustryUniverseModel.name_cn == ""), false
+            return or_(
+                IndustryUniverseModel.industry_code == "", IndustryUniverseModel.name_cn == ""
+            ), false
         if dataset_key == "stock_universe":
             return or_(StockUniverseModel.stock_code == "", StockUniverseModel.name_cn == ""), false
         if dataset_key == "index_membership":
-            return or_(IndexMemberEventModel.stock_code == "", IndexMemberEventModel.start_date.is_(None)), false
+            return or_(
+                IndexMemberEventModel.stock_code == "", IndexMemberEventModel.start_date.is_(None)
+            ), false
         if dataset_key == "industry_membership":
-            return or_(IndustryMembershipEventModel.stock_code == "", IndustryMembershipEventModel.start_date.is_(None)), false
+            return or_(
+                IndustryMembershipEventModel.stock_code == "",
+                IndustryMembershipEventModel.start_date.is_(None),
+            ), false
         return false, false
 
     def _is_daily(self, dataset_key: str) -> bool:
         """判断数据集是否按交易日连续性统计缺口。"""
-        return dataset_key in {"index_daily_bar", "index_valuation", "industry_daily_bar", "stock_daily_close"}
+        return dataset_key in {
+            "index_daily_bar",
+            "index_valuation",
+            "industry_daily_bar",
+            "stock_daily_close",
+            "stock_daily_basic",
+            "stock_moneyflow",
+        }
 
     def _calendar_days_until(self, expected: date | None) -> list[date]:
         """一次读取交易日集合，为所有分区复用日期边界。"""
@@ -853,13 +1125,21 @@ class DataManagementService:
         warnings: int,
     ) -> str:
         """按硬错误、缺口、告警和时效确定单分区状态。"""
-        if dataset_key == "index_valuation" and partition_key not in _VALUATION_SUPPORTED_CODES and record_count == 0:
+        if (
+            dataset_key == "index_valuation"
+            and partition_key not in _VALUATION_SUPPORTED_CODES
+            and record_count == 0
+        ):
             return "unsupported"
         if record_count == 0:
             return "error"
         if hard_errors:
             return "error"
-        if missing or warnings or (latest is not None and expected is not None and latest < expected):
+        if (
+            missing
+            or warnings
+            or (latest is not None and expected is not None and latest < expected)
+        ):
             return "warning"
         return "healthy"
 
@@ -875,9 +1155,11 @@ class DataManagementService:
         """写入或更新一条当前分区健康快照。"""
         row = existing
         if row is None:
-            row = self._db.query(DataHealthSnapshotModel).filter_by(
-                dataset_key=definition.key, partition_key=partition_key
-            ).one_or_none()
+            row = (
+                self._db.query(DataHealthSnapshotModel)
+                .filter_by(dataset_key=definition.key, partition_key=partition_key)
+                .one_or_none()
+            )
         if row is None:
             row = DataHealthSnapshotModel(dataset_key=definition.key, partition_key=partition_key)
             self._db.add(row)
@@ -913,9 +1195,13 @@ class DataManagementService:
             "partition_name": None,
             "health_status": status if rows else "unknown",
             "source_name": " / ".join(sorted(sources)) if sources else None,
-            "earliest_date": min((row.earliest_date for row in rows if row.earliest_date), default=None),
+            "earliest_date": min(
+                (row.earliest_date for row in rows if row.earliest_date), default=None
+            ),
             "latest_date": max((row.latest_date for row in rows if row.latest_date), default=None),
-            "expected_date": max((row.expected_date for row in rows if row.expected_date), default=None),
+            "expected_date": max(
+                (row.expected_date for row in rows if row.expected_date), default=None
+            ),
             "record_count": sum(row.record_count for row in rows),
             "missing_count": sum(row.missing_count for row in rows),
             "invalid_count": sum(row.invalid_count for row in rows),
@@ -923,15 +1209,23 @@ class DataManagementService:
                 "partition_count": len(rows),
                 "error_partitions": sum(row.health_status == "error" for row in rows),
                 "warning_partitions": sum(row.health_status == "warning" for row in rows),
-            } if rows else {"reason": "尚未检查"},
+            }
+            if rows
+            else {"reason": "尚未检查"},
         }
         return self._save_snapshot(definition, "", run_id, operation, payload, existing)
 
-    def _mark_failure(self, definition: DataSetDefinition, partition_key: str | None, run_id: str, message: str) -> None:
+    def _mark_failure(
+        self, definition: DataSetDefinition, partition_key: str | None, run_id: str, message: str
+    ) -> None:
         """将维护失败写回当前快照，确保前端可见真实抓取状态。"""
         keys = [partition_key] if partition_key else [""]
         for key in keys:
-            row = self._db.query(DataHealthSnapshotModel).filter_by(dataset_key=definition.key, partition_key=key).one_or_none()
+            row = (
+                self._db.query(DataHealthSnapshotModel)
+                .filter_by(dataset_key=definition.key, partition_key=key)
+                .one_or_none()
+            )
             if row is None:
                 row = DataHealthSnapshotModel(dataset_key=definition.key, partition_key=key)
                 self._db.add(row)
@@ -944,14 +1238,32 @@ class DataManagementService:
 
     def _summary(self, definition: DataSetDefinition) -> DataSetHealthSummary:
         """将数据集级快照转换为接口摘要；首次检查前返回 unknown。"""
-        row = self._db.query(DataHealthSnapshotModel).filter_by(dataset_key=definition.key, partition_key="").one_or_none()
+        row = (
+            self._db.query(DataHealthSnapshotModel)
+            .filter_by(dataset_key=definition.key, partition_key="")
+            .one_or_none()
+        )
         values: dict[str, Any] = {}
         if row is not None:
-            values = {key: getattr(row, key) for key in (
-                "health_status", "earliest_date", "latest_date", "expected_date", "record_count",
-                "missing_count", "invalid_count", "issue_summary", "source_name", "last_run_id", "last_run_status",
-                "last_checked_at", "last_synced_at", "last_success_at",
-            )}
+            values = {
+                key: getattr(row, key)
+                for key in (
+                    "health_status",
+                    "earliest_date",
+                    "latest_date",
+                    "expected_date",
+                    "record_count",
+                    "missing_count",
+                    "invalid_count",
+                    "issue_summary",
+                    "source_name",
+                    "last_run_id",
+                    "last_run_status",
+                    "last_checked_at",
+                    "last_synced_at",
+                    "last_success_at",
+                )
+            }
         return DataSetHealthSummary(
             dataset_key=definition.key,
             display_name=definition.name,
@@ -963,7 +1275,9 @@ class DataManagementService:
             **values,
         )
 
-    def _partition_schema(self, definition: DataSetDefinition, row: DataHealthSnapshotModel) -> DataPartitionHealth:
+    def _partition_schema(
+        self, definition: DataSetDefinition, row: DataHealthSnapshotModel
+    ) -> DataPartitionHealth:
         """将 ORM 分区快照转换为 API 模型。"""
         return DataPartitionHealth(
             **self._summary_values(definition, row),
@@ -971,17 +1285,30 @@ class DataManagementService:
             partition_name=row.partition_name,
         )
 
-    def _summary_values(self, definition: DataSetDefinition, row: DataHealthSnapshotModel) -> dict[str, Any]:
+    def _summary_values(
+        self, definition: DataSetDefinition, row: DataHealthSnapshotModel
+    ) -> dict[str, Any]:
         """构建摘要模型共享字段。"""
         return {
-            "dataset_key": definition.key, "display_name": definition.name, "frequency": definition.frequency,
-            "partition_label": definition.partition_label, "source_label": definition.source_label,
+            "dataset_key": definition.key,
+            "display_name": definition.name,
+            "frequency": definition.frequency,
+            "partition_label": definition.partition_label,
+            "source_label": definition.source_label,
             "source_name": row.source_name,
-            "supported_operations": list(definition.operations), "health_status": row.health_status,
-            "earliest_date": row.earliest_date, "latest_date": row.latest_date, "expected_date": row.expected_date,
-            "record_count": row.record_count, "missing_count": row.missing_count, "invalid_count": row.invalid_count,
-            "issue_summary": row.issue_summary, "last_run_id": row.last_run_id, "last_run_status": row.last_run_status,
-            "last_checked_at": row.last_checked_at, "last_synced_at": row.last_synced_at,
+            "supported_operations": list(definition.operations),
+            "health_status": row.health_status,
+            "earliest_date": row.earliest_date,
+            "latest_date": row.latest_date,
+            "expected_date": row.expected_date,
+            "record_count": row.record_count,
+            "missing_count": row.missing_count,
+            "invalid_count": row.invalid_count,
+            "issue_summary": row.issue_summary,
+            "last_run_id": row.last_run_id,
+            "last_run_status": row.last_run_status,
+            "last_checked_at": row.last_checked_at,
+            "last_synced_at": row.last_synced_at,
             "last_success_at": row.last_success_at,
         }
 
@@ -1001,7 +1328,11 @@ class DataManagementService:
         if dataset_key in {"industry_daily_bar", "industry_membership"}:
             row = self._db.get(IndustryUniverseModel, partition_key)
             return row.name_cn if row else partition_key
-        if dataset_key == "stock_daily_close":
+        if dataset_key in {
+            "stock_daily_close",
+            "stock_daily_basic",
+            "stock_moneyflow",
+        }:
             row = self._db.get(StockUniverseModel, partition_key)
             return row.name_cn if row else partition_key
         return partition_key

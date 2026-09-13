@@ -71,6 +71,8 @@ def test_all_non_news_external_datasets_are_registered() -> None:
         "industry_membership",
         "stock_universe",
         "stock_daily_close",
+        "stock_daily_basic",
+        "stock_moneyflow",
     } <= keys
     # research_run_item.index_code 已加宽到 64；此断言防止未来键超长再次触发截断
     assert all(len(item.key) <= 64 for item in DATASETS)
@@ -157,9 +159,7 @@ def test_rebuild_replacement_span_guard() -> None:
         existing_min + timedelta(days=i)
         for i in range(0, (existing_max - existing_min).days + 1, 1)
     }
-    svc._ensure_replacement_span(
-        "指数 000300", len(fetched), existing_min, existing_max, fetched
-    )
+    svc._ensure_replacement_span("指数 000300", len(fetched), existing_min, existing_max, fetched)
 
     with pytest.raises(RuntimeError, match="明显少于库内现有数据"):
         svc._ensure_replacement_span(

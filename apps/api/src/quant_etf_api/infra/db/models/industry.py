@@ -147,7 +147,7 @@ class IndustryMembershipEventModel(Base):
 
 
 class StockDailyCloseModel(Base):
-    """个股收盘价（仅用于数量占比扩散，不保存 OHLC）。"""
+    """个股日线行情（Tushare 原始口径，保存 OHLC、量额与复权因子）。"""
 
     __tablename__ = "stock_daily_close"
     __table_args__ = (
@@ -163,7 +163,22 @@ class StockDailyCloseModel(Base):
         String(16), nullable=False, comment="个股代码，如 600000"
     )
     close: Mapped[float | None] = mapped_column(Float, comment="收盘价（元）")
-    source: Mapped[str] = mapped_column(String(32), default="akshare_em", comment="数据来源")
+    open: Mapped[float | None] = mapped_column(Float, comment="开盘价（元）")
+    high: Mapped[float | None] = mapped_column(Float, comment="最高价（元）")
+    low: Mapped[float | None] = mapped_column(Float, comment="最低价（元）")
+    pre_close: Mapped[float | None] = mapped_column(Float, comment="除权后昨收价（元）")
+    change: Mapped[float | None] = mapped_column(Float, comment="涨跌额（元）")
+    pct_chg: Mapped[float | None] = mapped_column(Float, comment="涨跌幅，单位 %")
+    vol: Mapped[float | None] = mapped_column(Float, comment="成交量（手，Tushare 原生口径）")
+    amount: Mapped[float | None] = mapped_column(Float, comment="成交额（千元，Tushare 原生口径）")
+    ah_vol: Mapped[float | None] = mapped_column(Float, comment="盘后成交量（手，2026-07-06 起）")
+    ah_amount: Mapped[float | None] = mapped_column(
+        Float, comment="盘后成交额（千元，2026-07-06 起）"
+    )
+    adj_factor: Mapped[float | None] = mapped_column(Float, comment="Tushare 复权因子")
+    source: Mapped[str] = mapped_column(
+        String(32), default="tushare", server_default="tushare", comment="数据来源"
+    )
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, comment="数据入库时间（UTC）"
     )

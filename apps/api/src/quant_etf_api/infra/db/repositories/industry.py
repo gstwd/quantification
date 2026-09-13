@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, or_, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -122,9 +122,7 @@ class IndustryUniverseRepository(BaseRepository):
                 },
             )
         else:
-            stmt = stmt.on_conflict_do_nothing(
-                index_elements=[IndustryUniverseModel.industry_code]
-            )
+            stmt = stmt.on_conflict_do_nothing(index_elements=[IndustryUniverseModel.industry_code])
         self._db.execute(stmt)
         return len(rows)
 
@@ -477,21 +475,150 @@ class StockDailyCloseRepository(BaseRepository):
         )
         return [r[0] for r in rows]
 
+    def trading_dates_with_open(self, start: date, end: date) -> list[date]:
+        """查询区间内已具备 Tushare 开盘价的交易日（去重升序）。"""
+        rows = (
+            self._db.query(StockDailyCloseModel.trade_date)
+            .filter(
+                and_(
+                    StockDailyCloseModel.trade_date >= start,
+                    StockDailyCloseModel.trade_date <= end,
+                    StockDailyCloseModel.open.isnot(None),
+                )
+            )
+            .distinct()
+            .order_by(StockDailyCloseModel.trade_date.asc())
+            .all()
+        )
+        return [r[0] for r in rows]
+
     def latest_date(self) -> date | None:
         """查询个股收盘最新日期。"""
         return self._db.query(func.max(StockDailyCloseModel.trade_date)).scalar()
 
+    def latest_complete_date(self) -> date | None:
+        """查询 OHLC 完整的最新交易日（用于 Tushare 缺口续跑）。"""
+        return (
+            self._db.query(func.max(StockDailyCloseModel.trade_date))
+            .filter(StockDailyCloseModel.open.isnot(None))
+            .scalar()
+        )
+
+    def count_trade_date(self, trade_date: date, *, require_open: bool = True) -> int:
+        """统计指定交易日已写入的个股行数。
+
+        Args:
+            trade_date: 交易日。
+            require_open: 为 True 时只统计开盘价非空的行，避免把旧 close-only 行
+                误判为已完整回填。
+
+        Returns:
+            行数。
+        """
+        query = self._db.query(func.count()).filter(StockDailyCloseModel.trade_date == trade_date)
+        if require_open:
+            query = query.filter(StockDailyCloseModel.open.isnot(None))
+        return int(query.scalar() or 0)
+
+    def count_before(self, before: date) -> int:
+        """统计指定日期之前的个股日线行数（删除前预演）。"""
+        return int(
+            self._db.query(func.count()).filter(StockDailyCloseModel.trade_date < before).scalar()
+            or 0
+        )
+
+    def delete_before_batch(self, before: date, limit: int) -> int:
+        """按批删除指定日期之前的个股日线，返回本批删除行数。
+
+        Args:
+            before: 截止日期（不含）。
+            limit: 单批最大删除行数。
+
+        Returns:
+            本批删除行数。
+        """
+        result = self._db.execute(
+            text(
+                "DELETE FROM stock_daily_close WHERE id IN ("
+                "SELECT id FROM stock_daily_close WHERE trade_date < :before "
+                "ORDER BY id LIMIT :limit)"
+            ),
+            {"before": before, "limit": limit},
+        )
+        return int(result.rowcount or 0)
+
+    def count_non_tushare(self, start: date) -> int:
+        """统计指定日期之后待清理行数（非 Tushare 或非沪深 A 股代码）。"""
+        return int(
+            self._db.query(func.count())
+            .filter(
+                and_(
+                    StockDailyCloseModel.trade_date >= start,
+                    or_(
+                        func.coalesce(StockDailyCloseModel.source, "") != "tushare",
+                        ~StockDailyCloseModel.stock_code.like("00%"),
+                        ~StockDailyCloseModel.stock_code.like("30%"),
+                        ~StockDailyCloseModel.stock_code.like("60%"),
+                        ~StockDailyCloseModel.stock_code.like("68%"),
+                    ),
+                )
+            )
+            .scalar()
+            or 0
+        )
+
+    def delete_non_tushare_batch(self, start: date, limit: int) -> int:
+        """按批删除指定日期之后待清理行（非 Tushare 或非沪深 A 股代码）。
+
+        Args:
+            start: 起始日期（含）。
+            limit: 单批最大删除行数。
+
+        Returns:
+            本批删除行数。
+        """
+        result = self._db.execute(
+            text(
+                "DELETE FROM stock_daily_close WHERE id IN ("
+                "SELECT id FROM stock_daily_close "
+                "WHERE trade_date >= :start AND ("
+                "COALESCE(source, '') <> 'tushare' "
+                "OR NOT (stock_code LIKE '00%' OR stock_code LIKE '30%' "
+                "OR stock_code LIKE '60%' OR stock_code LIKE '68%')"
+                ") "
+                "ORDER BY id LIMIT :limit)"
+            ),
+            {"start": start, "limit": limit},
+        )
+        return int(result.rowcount or 0)
+
     def bulk_upsert(self, rows: list[dict[str, Any]]) -> int:
-        """批量幂等写入个股收盘（ON CONFLICT DO NOTHING）。"""
+        """批量幂等写入个股日线（冲突时更新全部行情扩展字段）。"""
         if not rows:
             return 0
 
         def _build(chunk: list[dict[str, Any]]) -> Any:
-            """构造单块个股收盘 ON CONFLICT DO NOTHING 语句。"""
-            return (
-                pg_insert(StockDailyCloseModel)
-                .values(chunk)
-                .on_conflict_do_nothing(constraint="uq_stock_daily_close")
+            """构造单块个股日线 ON CONFLICT DO UPDATE 语句。"""
+            stmt = pg_insert(StockDailyCloseModel).values(chunk)
+            update_cols = {
+                "close",
+                "open",
+                "high",
+                "low",
+                "pre_close",
+                "change",
+                "pct_chg",
+                "vol",
+                "amount",
+                "ah_vol",
+                "ah_amount",
+                "adj_factor",
+                "source",
+                "ingested_at",
+            }
+            return stmt.on_conflict_do_update(
+                constraint="uq_stock_daily_close",
+                set_={column: getattr(stmt.excluded, column) for column in update_cols},
             )
 
         return _exec_pg_insert_chunks(self._db, rows, _build)
