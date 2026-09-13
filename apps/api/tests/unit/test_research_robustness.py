@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from quant_etf_api.domain.research.robustness import (
@@ -190,6 +192,56 @@ class TestVariantGeneration:
             "filters": {"rules": [{"factor": "return_20d"}]},
         }
         assert build_ablation_variants(config) == []
+
+    def test_knob_variants_do_not_mutate_input_config(self) -> None:
+        """派生单旋钮变体不得就地改写输入配置。
+
+        历史缺陷：变体与基线共享嵌套字典，某个越界档位（如把
+        ``risk.max_portfolio_exposure`` 从 1 扰动到 2）会顺带污染全部候选，
+        导致整批变体在校验阶段被判定无效——``robustness scan`` 因此报
+        "未派生任何有效变体"。
+        """
+        config = copy.deepcopy(self._CONFIG)
+        build_knob_variants(config, max_knobs=50)
+        assert config == self._CONFIG
+
+    def test_knob_variants_are_independent(self) -> None:
+        """单个越界档位只影响自身变体，不得泄漏到其他变体。"""
+        config = copy.deepcopy(self._CONFIG)
+        config["risk"] = {"max_asset_weight": 0.5, "max_portfolio_exposure": 1}
+        variants = build_knob_variants(config, max_knobs=50)
+        assert any(item["knob"] == "risk.max_portfolio_exposure" for item in variants)
+        for item in variants:
+            if item["knob"] == "risk.max_portfolio_exposure":
+                continue
+            assert item["config"]["risk"]["max_portfolio_exposure"] == 1
+
+    def test_knob_variants_include_filter_rule_thresholds(self) -> None:
+        """过滤规则里的数值阈值也要参与扰动（列表路径需可定位）。"""
+        config = copy.deepcopy(self._CONFIG)
+        config["filters"]["rules"][0]["value"] = -5
+        variants = build_knob_variants(config, max_knobs=50)
+        knobs = {item["knob"] for item in variants}
+        assert "filters.rules[0].value" in knobs
+        values = {
+            item["value"]
+            for item in variants
+            if item["knob"] == "filters.rules[0].value"
+        }
+        assert values == {-6, -4}
+        # 扰动只落在目标叶子上，其余结构保持一致
+        for item in variants:
+            if item["knob"] != "filters.rules[0].value":
+                continue
+            assert item["config"]["filters"]["logic"] == "AND"
+            assert len(item["config"]["filters"]["rules"]) == 1
+            assert item["config"]["rank"]["top_n"] == 3
+
+    def test_ablation_variants_do_not_mutate_input_config(self) -> None:
+        """消融变体同样不得改写输入配置。"""
+        config = copy.deepcopy(self._CONFIG)
+        build_ablation_variants(config)
+        assert config == self._CONFIG
 
 
 class TestDistributionShape:

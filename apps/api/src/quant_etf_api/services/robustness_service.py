@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import random
 import re
+from copy import deepcopy
 from hashlib import md5
 from datetime import date, timedelta
 from typing import Any
@@ -176,7 +177,9 @@ class RobustnessService:
         ]
 
         robustness_id = uuid4().hex
-        config = dict(baseline.config_json or {})
+        # 深拷贝：变体派生会在嵌套字典上就地改写，浅拷贝会让基线与其他变体
+        # 共享同一份嵌套结构，单个越界档位即可污染整批候选
+        config = deepcopy(dict(baseline.config_json or {}))
         candidates = self._build_variants(
             robustness_id, strategy_id, config, kind, pool_samples, max_knobs
         )
@@ -903,7 +906,8 @@ def build_knob_variants(config: dict[str, Any], max_knobs: int) -> list[dict[str
         for new_value in _knob_values(path, value):
             if new_value == value:
                 continue
-            variant_config = dict(config)
+            # 每个变体使用独立深拷贝，避免就地改写泄漏到基线与相邻变体
+            variant_config = deepcopy(config)
             try:
                 _set_leaf(variant_config, path, new_value)
             except (KeyError, TypeError):
@@ -939,7 +943,7 @@ def build_ablation_variants(config: dict[str, Any]) -> list[dict[str, Any]]:
     factors = dict(score.get("factors") or {})
     if len(factors) > 1:
         for factor_id in sorted(factors):
-            variant_config = dict(config)
+            variant_config = deepcopy(config)
             variant_score = dict(score)
             variant_score["factors"] = {
                 k: v for k, v in factors.items() if k != factor_id
@@ -958,7 +962,7 @@ def build_ablation_variants(config: dict[str, Any]) -> list[dict[str, Any]]:
     rules = list(filters.get("rules") or [])
     if len(rules) > 1:
         for index, rule in enumerate(rules):
-            variant_config = dict(config)
+            variant_config = deepcopy(config)
             variant_filters = dict(filters)
             variant_filters["rules"] = [r for i, r in enumerate(rules) if i != index]
             variant_config["filters"] = variant_filters
@@ -994,6 +998,13 @@ def iter_numeric_leaves(
                 continue
             path = f"{prefix}.{key}" if prefix else str(key)
             leaves.extend(iter_numeric_leaves(value, path))
+    elif isinstance(node, list):
+        # 列表元素用 ``[下标]`` 定位（如 ``filters.rules[2].value``），
+        # 否则过滤阈值这类"列表里的数值"无法被扰动
+        for index, value in enumerate(node):
+            if not prefix:
+                continue
+            leaves.extend(iter_numeric_leaves(value, f"{prefix}[{index}]"))
     elif isinstance(node, bool):
         return leaves
     elif isinstance(node, (int, float)):
@@ -1017,6 +1028,11 @@ def _knob_values(path: str, value: int | float) -> list[int | float]:
         扰动后的候选取值列表。
     """
     if isinstance(value, int):
+        if value < 0:
+            # 负整数阈值（如过滤条件 return_5d > -5）允许继续取负档位，
+            # 不能按"周期/持仓数至少为 1"的规则抬到正数
+            step = max(1, int(round(abs(value) * 0.25)))
+            return [value - step, value + step]
         if value <= 1:
             return [value + 1]
         step = max(1, int(round(abs(value) * 0.25)))
@@ -1043,7 +1059,7 @@ def _is_ratio_like(path: str) -> bool:
 
 
 def _set_leaf(config: dict[str, Any], path: str, value: int | float) -> None:
-    """按点号路径写入配置叶子（就地修改）。
+    """按点号路径写入配置叶子（就地修改，支持 ``name[下标]`` 列表定位）。
 
     Args:
         config: 配置字典。
@@ -1052,13 +1068,41 @@ def _set_leaf(config: dict[str, Any], path: str, value: int | float) -> None:
 
     Raises:
         KeyError: 路径不存在时抛出。
-        TypeError: 中间节点不是字典时抛出。
+        TypeError: 中间节点不是字典/列表，或列表下标非法时抛出。
+        IndexError: 列表下标越界时抛出。
     """
     parts = path.split(".")
     node: Any = config
     for part in parts[:-1]:
-        node = node[part]
-    node[parts[-1]] = value
+        name, index = _split_index(part)
+        if index is None:
+            node = node[name]
+            continue
+        node = node[name][index]
+    name, index = _split_index(parts[-1])
+    if index is None:
+        if not isinstance(node, dict):
+            raise TypeError(f"路径 {path} 的父节点不是字典")
+        node[name] = value
+        return
+    if not isinstance(node, dict):
+        raise TypeError(f"路径 {path} 的父节点不是字典")
+    node[name][index] = value
+
+
+def _split_index(part: str) -> tuple[str, int | None]:
+    """拆分 ``name[下标]`` 形式的路径段。
+
+    Args:
+        part: 路径段，如 ``rules[2]`` 或 ``top_n``。
+
+    Returns:
+        (名称, 下标或 None)。
+    """
+    match = re.fullmatch(r"([^\[\]]+)\[(\d+)\]", part)
+    if match is None:
+        return part, None
+    return match.group(1), int(match.group(2))
 
 
 def _slug(text: str) -> str:
