@@ -275,6 +275,54 @@ export interface BacktestMetrics {
   annualized_turnover?: number | null
 }
 
+/** 单个成本档位下的净口径指标（C3） */
+export interface CostLadderEntry {
+  /** 单边交易成本（基点），0 表示毛口径 */
+  cost_bps: number
+  /** 扣成本后累计收益率（%） */
+  net_cumulative_return_pct: number
+  /** 扣成本后年化收益率（%） */
+  net_annualized_return_pct: number
+  /** 扣成本后年化夏普 */
+  net_sharpe_ratio: number
+  /** 扣成本后年化超额（百分点），无基准时为 null */
+  net_excess_return_pct: number | null
+  /** 该档位的成本拖累（百分点/年） */
+  cost_drag_pct_per_year: number
+}
+
+/** 有效候选池规模的游程段（C6） */
+export interface CandidatePoolSegment {
+  start_date: string
+  end_date: string
+  trading_days: number
+  size: number
+}
+
+/** 因数据缺失被剔除的指数—日期区间（C6） */
+export interface CandidatePoolExclusion {
+  index_code: string
+  first_date: string
+  last_date: string
+  trading_days: number
+  reasons: string[]
+}
+
+/** 回测逐日有效候选池时间线（C6） */
+export interface BacktestCandidatePool {
+  /** 回测标的池的理论规模 */
+  base_size: number
+  min_size: number
+  max_size: number
+  median_size: number
+  trading_days: number
+  /** 逐日有效规模之和 / (理论规模 × 交易日数) */
+  pool_coverage_ratio: number
+  segments: CandidatePoolSegment[]
+  exclusions: CandidatePoolExclusion[]
+  truncated_exclusions: boolean
+}
+
 /** 回测稳健性指标：描述结果对历史细节的依赖程度（读取路径现算） */
 export interface BacktestStability {
   /** 成本折算使用的单边成本（基点） */
@@ -285,6 +333,14 @@ export interface BacktestStability {
   data_quality_mode: string | null
   /** 指标口径指纹：基准指数代码 */
   benchmark_index_code: string | null
+  /** 指标口径指纹：调仓日历来源（upstream / database / not_required），null=早于 C1 */
+  calendar_source?: string | null
+  /** 指标口径指纹：换手口径（delta_w_v2 含清仓/建仓腿；legacy_v1 未含） */
+  turnover_model?: string | null
+  /** 多档成本并列的净口径指标（C3） */
+  cost_ladder?: CostLadderEntry[]
+  /** 逐日有效候选池时间线（C6），存量回测为 null */
+  candidate_pool?: BacktestCandidatePool | null
   /** 年化单边换手率（倍） */
   annualized_turnover: number
   /** 成本拖累（百分点/年） */
@@ -383,6 +439,32 @@ export interface BacktestCancelResponse {
   job_status?: string | null
   /** true 表示任务运行中，已打协作取消标记 */
   cancel_requested: boolean
+  message: string
+}
+
+/** 一条悬挂引用：持有者引用的回测已不存在（C5） */
+export interface DanglingReferenceItem {
+  /** 持有者类型：robustness_run.variants / strategy_optimization / strategy_optimization.fold_backtests */
+  holder: string
+  /** 持有者主键（批次 ID / 优化会话 ID） */
+  holder_id: string
+  /** 持有者内部字段路径 */
+  field: string
+  /** 已不存在的回测 ID 列表 */
+  missing_backtest_ids: string[]
+}
+
+/** 悬挂引用审计报告（C5） */
+export interface DanglingReferenceReport {
+  total: number
+  items: DanglingReferenceItem[]
+}
+
+/** 回测删除结果（C5） */
+export interface BacktestDeleteResponse {
+  backtest_id: string
+  deleted: boolean
+  holders: DanglingReferenceItem[]
   message: string
 }
 

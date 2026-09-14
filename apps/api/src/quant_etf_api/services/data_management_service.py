@@ -1093,12 +1093,16 @@ class DataManagementService:
         }
 
     def _calendar_days_until(self, expected: date | None) -> list[date]:
-        """一次读取交易日集合，为所有分区复用日期边界。"""
+        """一次读取交易日集合，为所有分区复用日期边界。
+
+        Raises:
+            TradingCalendarUnavailableError: 交易日历不可用时抛出（严格口径 C1）。
+                此处不允许退化为空列表——空列表会被解读为"没有缺口"，
+                属于把"不知道"伪装成"健康"。
+        """
         if expected is None:
             return []
-        days = TradingCalendar().get_trading_days_set()
-        if days is None:
-            return []
+        days = TradingCalendar().require_trading_days()
         return sorted(day for day in days if day <= expected)
 
     def _missing_count_from_bounds(

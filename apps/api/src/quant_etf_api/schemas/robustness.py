@@ -24,6 +24,7 @@ class RobustnessVariantSchema(BaseModel):
         value: 扰动后的取值，池扰动为资产代码列表。
         strategy_id: 该变体对应的草稿策略 ID。
         backtest_ids: 窗口标签 → 回测 ID 的映射。
+        deleted_windows: 已被清理的窗口标签（其回测已被删除，C5）。
     """
 
     label: str
@@ -32,6 +33,7 @@ class RobustnessVariantSchema(BaseModel):
     value: Any = None
     strategy_id: str | None = None
     backtest_ids: dict[str, str] = Field(default_factory=dict)
+    deleted_windows: list[str] = Field(default_factory=list)
 
 
 class RobustnessSummary(BaseModel):
@@ -73,6 +75,7 @@ class RobustnessDetail(RobustnessSummary):
         variants: 变体列表。
         summary: 邻域稳定度 / 边际贡献 / 池扰动汇总。
         statistics: PBO、Deflated Sharpe、块自助法置信区间。
+        missing_backtest_ids: 引用但已不存在的回测 ID（C5 悬挂引用提示）。
     """
 
     baseline_config_hash: str = ""
@@ -80,6 +83,7 @@ class RobustnessDetail(RobustnessSummary):
     variants: list[RobustnessVariantSchema] = Field(default_factory=list)
     summary: dict[str, Any] | None = None
     statistics: dict[str, Any] | None = None
+    missing_backtest_ids: list[str] = Field(default_factory=list)
 
 
 class RobustnessListResponse(BaseModel):

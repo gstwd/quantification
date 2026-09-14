@@ -238,13 +238,131 @@
             </tbody>
           </table>
         </div>
+        <div v-if="costLadder.length" class="annual-table-wrap">
+          <div class="section-label" style="margin-top: 12px;">
+            净口径成本档位（并列）
+            <HelpTip :text="'按单边换手率在各成本档位下现算净口径指标，无需重跑回测。0bp 即毛口径；切换主口径可让上方卡片与净口径指标联动。'" />
+          </div>
+          <table class="annual-table">
+            <thead>
+              <tr>
+                <th>成本档位</th>
+                <th>净累计收益</th>
+                <th>净年化收益</th>
+                <th>净夏普</th>
+                <th>净超额</th>
+                <th>成本拖累/年</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="row in costLadder"
+                :key="row.cost_bps"
+                :class="{ 'row-active': selectedCostBps === row.cost_bps }"
+              >
+                <td>
+                  <button
+                    type="button"
+                    class="preset-btn"
+                    @click="selectCostBps(row.cost_bps)"
+                  >{{ row.cost_bps === 0 ? '毛口径' : row.cost_bps + 'bp' }}</button>
+                </td>
+                <td :class="pctClass(row.net_cumulative_return_pct)">
+                  {{ formatPct(row.net_cumulative_return_pct) }}
+                </td>
+                <td :class="pctClass(row.net_annualized_return_pct)">
+                  {{ formatPct(row.net_annualized_return_pct) }}
+                </td>
+                <td>{{ row.net_sharpe_ratio.toFixed(2) }}</td>
+                <td :class="pctClass(row.net_excess_return_pct ?? 0)">
+                  {{ row.net_excess_return_pct !== null ? formatPct(row.net_excess_return_pct) : '-' }}
+                </td>
+                <td>{{ formatPct(row.cost_drag_pct_per_year) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
         <div class="stability-note">
           指标口径：{{ store.current.stability.execution_model || '—' }} /
           {{ store.current.stability.data_quality_mode || '—' }} /
-          基准 {{ store.current.stability.benchmark_index_code || '未启用' }}
+          基准 {{ store.current.stability.benchmark_index_code || '未启用' }} /
+          日历 {{ calendarSourceLabel }} /
+          换手 {{ turnoverModelLabel }}
           <template v-if="store.current.purpose && store.current.purpose !== 'research'">
             ｜用途：{{ store.current.purpose }}
           </template>
+          <div v-if="isLegacyTurnover" class="legacy-warning">
+            ⚠ 该回测使用历史换手口径（未计入清仓/建仓腿），净口径指标偏低，
+            需重跑后才能与当前口径的回测比较。
+          </div>
+        </div>
+      </div>
+
+      <!-- 有效候选池时间线（C6） -->
+      <div v-if="candidatePool" class="metrics-section">
+        <div class="section-label">
+          有效候选池
+          <HelpTip :text="'逐日实际可参与选股的指数个数（游程编码）。早期因指数无行情/因子缺失而缩水时，历史结论可能建立在更小的池子上。'" />
+        </div>
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-label">理论池规模</div>
+            <div class="metric-value">{{ candidatePool.base_size }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">最小 / 最大</div>
+            <div class="metric-value">{{ candidatePool.min_size }} / {{ candidatePool.max_size }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">中位规模</div>
+            <div class="metric-value">{{ candidatePool.median_size }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">池覆盖率</div>
+            <div class="metric-value">{{ (candidatePool.pool_coverage_ratio * 100).toFixed(1) }}%</div>
+          </div>
+        </div>
+        <div class="annual-table-wrap">
+          <table class="annual-table">
+            <thead>
+              <tr>
+                <th>区间</th>
+                <th>交易日数</th>
+                <th>有效池规模</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="seg in candidatePool.segments" :key="seg.start_date + seg.end_date">
+                <td>{{ seg.start_date }} ~ {{ seg.end_date }}</td>
+                <td>{{ seg.trading_days }}</td>
+                <td>{{ seg.size }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="candidatePool.exclusions.length" class="annual-table-wrap">
+          <div class="section-label" style="margin-top: 12px;">
+            因数据缺失被剔除的指数区间
+            <span v-if="candidatePool.truncated_exclusions">（已截断）</span>
+          </div>
+          <table class="annual-table">
+            <thead>
+              <tr>
+                <th>指数</th>
+                <th>区间</th>
+                <th>交易日数</th>
+                <th>原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="exc in candidatePool.exclusions" :key="exc.index_code">
+                <td>{{ exc.index_code }}</td>
+                <td>{{ exc.first_date }} ~ {{ exc.last_date }}</td>
+                <td>{{ exc.trading_days }}</td>
+                <td>{{ exc.reasons.join(', ') }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
 
@@ -319,11 +437,13 @@ const drawdownChartEl = ref<HTMLElement | null>(null)
 const rollingChartEl = ref<HTMLElement | null>(null)
 const positionsChartEl = ref<HTMLElement | null>(null)
 const timingChartEl = ref<HTMLElement | null>(null)
+/** 当前选中的净口径主成本档位（null 表示使用回测固化成本，C3） */
+const selectedCostBps = ref<number | null>(null)
 /** 轮询回测执行状态，组件卸载时自动停止 */
 /** 已弹过的警告 key，轮询期间同一警告只弹一次 */
 const seenWarningKeys = new Set<string>()
 const { polling, start: startPolling } = usePolling({
-  fetcher: () => store.refreshOne(props.backtestId),
+  fetcher: () => store.refreshOne(props.backtestId, selectedCostBps.value),
   isDone: (detail) => detail.status !== 'pending' && detail.status !== 'running',
   onData: (detail) => notifyWarnings(detail.warnings ?? []),
   onMaxErrors: () => toast.error('回测状态刷新失败，请检查后端服务是否可用', {
@@ -351,6 +471,42 @@ function statusLabel(status: string): string {
 
 /** 结构化警告列表（内联展示） */
 const warnings = computed(() => store.current?.warnings ?? [])
+
+/** 多档成本并列（C3） */
+const costLadder = computed(() => store.current?.stability?.cost_ladder ?? [])
+
+/** 切换净口径主成本档位：仅影响本次展示，不重跑回测 */
+async function selectCostBps(costBps: number) {
+  selectedCostBps.value = costBps
+  await store.refreshOne(props.backtestId, costBps)
+}
+
+/** 调仓日历来源中文标签（C1） */
+const calendarSourceLabel = computed(() => {
+  const source = store.current?.stability?.calendar_source
+  const map: Record<string, string> = {
+    upstream: '上游数据源',
+    database: '本地日历快照',
+    not_required: '每日调仓（不需要）',
+  }
+  return source ? map[source] ?? source : '未知（早于口径指纹）'
+})
+
+/** 换手口径中文标签（C2） */
+const turnoverModelLabel = computed(() => {
+  const model = store.current?.stability?.turnover_model
+  if (model === 'delta_w_v2') return '含清仓/建仓腿（当前口径）'
+  if (model === 'legacy_v1') return '历史口径（未含清仓/建仓腿）'
+  return model ?? '未知'
+})
+
+/** 是否为历史换手口径（净口径指标偏低，需重跑后可比） */
+const isLegacyTurnover = computed(
+  () => (store.current?.stability?.turnover_model ?? 'legacy_v1') === 'legacy_v1',
+)
+
+/** 有效候选池时间线（C6） */
+const candidatePool = computed(() => store.current?.stability?.candidate_pool ?? null)
 
 const executionModelLabel = computed(() => {
   const value = store.current?.params?.['_execution_model']
@@ -790,6 +946,33 @@ onUnmounted(() => {
 .loading { padding: 60px; text-align: center; color: var(--text-muted); }
 
 .stability-note { margin-top: 8px; font-size: 12px; color: var(--text-muted); }
+
+/* 历史换手口径提示（C2）：净口径指标偏低，需重跑后可比 */
+.legacy-warning {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--warning, #d97706);
+  font-size: 12px;
+}
+
+/* 成本档位主口径行高亮（C3） */
+.annual-table tr.row-active td {
+  background: rgba(59, 130, 246, 0.1);
+  font-weight: 600;
+}
+
+.preset-btn {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.preset-btn:hover { border-color: var(--primary, #3b82f6); color: var(--primary, #3b82f6); }
 
 .annual-table-wrap {
   overflow-x: auto;

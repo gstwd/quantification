@@ -3,6 +3,10 @@
 支持 daily / weekly / monthly 频率，并支持交易日历对齐：
 调仓目标日如遇非交易日，自动顺延至下一交易日。
 领域层仅依赖 TradingCalendarLike 协议，不依赖任何 infra 实现。
+
+严格口径（C1）：交易日历为**必填依赖**，不再提供"未注入时降级为周末判断"
+的兜底实现。日历不可用时异常直接上抛，避免同一配置在不同环境下产生
+两套调仓日历、进而产生两套回测结果。
 """
 
 from __future__ import annotations
@@ -42,22 +46,25 @@ class RebalanceScheduler(Protocol):
 class DefaultRebalanceScheduler:
     """默认调仓调度器（纯领域实现）。
 
-    通过 TradingCalendarLike 协议注入交易日历，
-    未提供时降级为周末判断，便于单元测试。
+    交易日历通过 TradingCalendarLike 协议**必填**注入；不提供任何降级实现，
+    因此周度/月度调仓的对齐结果完全由真实日历决定（可复现、可比对）。
     """
 
-    def __init__(self, trading_calendar: TradingCalendarLike | None = None) -> None:
+    def __init__(self, trading_calendar: TradingCalendarLike) -> None:
         """初始化调仓调度器。
 
         Args:
-            trading_calendar: 交易日历实现，未提供时降级为周末判断。
-        """
-        if trading_calendar is not None:
-            self._cal = trading_calendar
-        else:
-            from quant_etf_api.domain.common.trading_calendar import WeekendFallbackCalendar
+            trading_calendar: 交易日历实现（上游数据源或本地日历表快照）。
 
-            self._cal = WeekendFallbackCalendar()
+        Raises:
+            ValueError: 未提供交易日历时抛出（严格口径，不允许降级）。
+        """
+        if trading_calendar is None:
+            raise ValueError(
+                "交易日历为必填依赖：系统不允许按星期近似判断交易日，"
+                "请先通过 resolve_trading_calendar() 解析出有效日历"
+            )
+        self._cal = trading_calendar
 
     def should_rebalance(
         self,
@@ -81,6 +88,9 @@ class DefaultRebalanceScheduler:
 
         Returns:
             是否应该调仓。
+
+        Raises:
+            TradingCalendarUnavailableError: 交易日历不可用时抛出。
         """
         if config.frequency == "daily":
             return True
@@ -109,6 +119,9 @@ class DefaultRebalanceScheduler:
         算法：从目标日向后查找，第一个交易日即为调仓日。
         如果该交易日就是 current_date，则调仓。
 
+        日历异常（TradingCalendarUnavailableError）**直接上抛**，不再降级为
+        "按星期比较"——那正是 C1 记录的静默口径分叉来源。
+
         Args:
             current_date: 当前日期。
             target: 目标 weekday(0-6) 或 day_of_month(1-31)。
@@ -116,45 +129,42 @@ class DefaultRebalanceScheduler:
 
         Returns:
             是否应在当前日调仓。
+
+        Raises:
+            TradingCalendarUnavailableError: 交易日历不可用时抛出。
         """
-        try:
-            if window == "week":
-                # 查找本周内 >= 目标 weekday 的最近交易日
-                days_since_target = current_date.weekday() - target
-                if days_since_target < 0:
-                    return False  # 还没到目标 weekday
-                # 从目标 weekday 开始，找到的第一个交易日
-                target_date = current_date - timedelta(days=days_since_target)
-            else:
-                # 查找本月内 >= 目标 day_of_month 的最近交易日
-                if current_date.day < target:
-                    return False  # 还没到目标日
-                target_date = current_date.replace(day=target)
+        if window == "week":
+            # 查找本周内 >= 目标 weekday 的最近交易日
+            days_since_target = current_date.weekday() - target
+            if days_since_target < 0:
+                return False  # 还没到目标 weekday
+            # 从目标 weekday 开始，找到的第一个交易日
+            target_date = current_date - timedelta(days=days_since_target)
+        else:
+            # 查找本月内 >= 目标 day_of_month 的最近交易日
+            if current_date.day < target:
+                return False  # 还没到目标日
+            target_date = current_date.replace(day=target)
 
-            # 从目标日起向前查找，检查 current_date 是否为第一个交易日
-            check = target_date
-            max_days = 10  # 最多查找 10 天
-            for _ in range(max_days):
-                if self._cal.is_trading_day(check):
-                    return check == current_date
-                check += timedelta(days=1)
-                # 如果跨出当前周/月，停止
-                if window == "week" and check.weekday() == 0:
-                    break
-                if window == "month" and check.day == 1:
-                    break
+        # 从目标日起向前查找，检查 current_date 是否为第一个交易日
+        check = target_date
+        max_days = 10  # 最多查找 10 天，足以覆盖春节等最长休市
+        for _ in range(max_days):
+            if self._cal.is_trading_day(check):
+                return check == current_date
+            check += timedelta(days=1)
+            # 如果跨出当前周/月，停止
+            if window == "week" and check.weekday() == 0:
+                break
+            if window == "month" and check.day == 1:
+                break
 
-            # 降级：如果窗口内无交易日，当前日就是最后的选项
-            logger.warning(
-                "%s 调仓窗口内未找到交易日: target=%s current=%s, 降级使用当前日",
-                window,
-                target,
-                current_date,
-            )
-            return True
-        except Exception:
-            logger.warning("交易日历对齐失败，降级为原始判断", exc_info=True)
-            # 降级：不做交易日历对齐
-            if window == "week":
-                return current_date.weekday() == target
-            return current_date.day == target
+        # 窗口内确实无交易日：真实日历下意味着日历数据异常（如区间缺失），
+        # 记录告警并使用当前日，避免整段无调仓；但绝不按星期近似。
+        logger.warning(
+            "%s 调仓窗口内未找到交易日: target=%s current=%s, 使用当前日",
+            window,
+            target,
+            current_date,
+        )
+        return True

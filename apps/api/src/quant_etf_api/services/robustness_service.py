@@ -50,6 +50,7 @@ from quant_etf_api.schemas.robustness import (
     RobustnessVariantSchema,
 )
 from quant_etf_api.schemas.strategy import StrategyConfigCreate
+from quant_etf_api.services.backtest_reference_service import BacktestReferenceService
 from quant_etf_api.services.backtest_service import BacktestService
 from quant_etf_api.services.strategy_config_service import (
     StrategyConfigService,
@@ -120,6 +121,13 @@ class RobustnessService:
         if row is None:
             return None
         summary = self._to_summary(row)
+        referenced = [
+            bid
+            for variant in (row.variants or [])
+            for bid in (variant.get("backtest_ids") or {}).values()
+            if bid
+        ]
+        missing_ids = BacktestReferenceService(self._db).missing_ids_for(referenced)
         return RobustnessDetail(
             **summary.model_dump(),
             baseline_config_hash=row.baseline_config_hash,
@@ -127,6 +135,7 @@ class RobustnessService:
             variants=[RobustnessVariantSchema(**item) for item in (row.variants or [])],
             summary=row.summary,
             statistics=row.statistics,
+            missing_backtest_ids=missing_ids,
         )
 
     # ── 批次创建 ──────────────────────────────────────────────────────────
@@ -187,8 +196,7 @@ class RobustnessService:
         )
         if not candidates:
             raise ValueError(
-                f"未派生任何 {kind} 变体（配置可能缺少可扰动字段或资产池）；"
-                "请检查策略配置"
+                f"未派生任何 {kind} 变体（配置可能缺少可扰动字段或资产池）；请检查策略配置"
             )
 
         variants: list[dict[str, Any]] = [
@@ -202,9 +210,7 @@ class RobustnessService:
             }
         ]
         for candidate in candidates:
-            variant_strategy_id = self._create_variant_strategy(
-                robustness_id, baseline, candidate
-            )
+            variant_strategy_id = self._create_variant_strategy(robustness_id, baseline, candidate)
             if variant_strategy_id is None:
                 continue
             variants.append(
@@ -287,6 +293,7 @@ class RobustnessService:
             raise ValueError(f"稳健性验证批次 {robustness_id} 不存在")
         variants = list(row.variants or [])
         pending = 0
+        missing = 0
         failed: list[str] = []
         completed = 0
         expected = 0
@@ -294,7 +301,12 @@ class RobustnessService:
             for window_label, backtest_id in (variant.get("backtest_ids") or {}).items():
                 expected += 1
                 detail = self._backtest_repo.find_by_id(backtest_id)
-                if detail is None or detail.status in ("pending", "running"):
+                if detail is None:
+                    # 回测已被删除（C5）：既不是 pending 也不能算 completed，
+                    # 否则批次会永远停在 running（"等待一个不存在的结果"）
+                    missing += 1
+                    failed.append(f"{variant['label']}/{window_label}:回测已删除")
+                elif detail.status in ("pending", "running"):
                     pending += 1
                 elif detail.status in ("failed", "cancelled"):
                     failed.append(f"{variant['label']}/{window_label}")
@@ -302,11 +314,16 @@ class RobustnessService:
                     completed += 1
         if failed and not allow_partial:
             row.status = "failed"
-            row.error_message = f"部分回测失败：{', '.join(failed[:5])}"
+            row.error_message = f"部分回测失败或缺失：{', '.join(failed[:5])}"
             row.finished_at = utcnow()
             row.updated_at = utcnow()
             self._db.commit()
-            return {"robustness_id": robustness_id, "status": "failed", "failed": failed}
+            return {
+                "robustness_id": robustness_id,
+                "status": "failed",
+                "failed": failed,
+                "missing_backtests": missing,
+            }
         if pending and not allow_partial:
             return {
                 "robustness_id": robustness_id,
@@ -331,6 +348,7 @@ class RobustnessService:
                 "expected_windows": expected,
                 "completed_windows": completed,
                 "pending_windows": pending,
+                "missing_windows": [item for item in failed if "回测已删除" in item],
                 "failed_windows": failed,
                 "is_partial": True,
             }
@@ -340,6 +358,7 @@ class RobustnessService:
                 "expected_windows": expected,
                 "completed_windows": completed,
                 "pending_windows": 0,
+                "missing_windows": [],
                 "failed_windows": [],
                 "is_partial": False,
             }
@@ -369,9 +388,7 @@ class RobustnessService:
             raise ValueError(f"稳健性验证批次 {robustness_id} 不存在")
         from quant_etf_api.infra.job_queue.queue import get_job_queue
 
-        result = get_job_queue().cancel_batch(
-            robustness_id, f"用户取消稳健性批次 {robustness_id}"
-        )
+        result = get_job_queue().cancel_batch(robustness_id, f"用户取消稳健性批次 {robustness_id}")
         # 只把"任务已被取消、永远不会再跑"的 pending 回测直接落为 cancelled；
         # 运行中的回测交给协作取消路径（主循环退出后自行落 cancelled），
         # 避免在回测仍可能写成 success 时被提前改写状态。
@@ -380,9 +397,7 @@ class RobustnessService:
             for backtest_id in (variant.get("backtest_ids") or {}).values():
                 detail = self._backtest_repo.find_by_id(backtest_id)
                 if detail is not None and detail.status == "pending":
-                    self._backtest_repo.mark_cancelled(
-                        backtest_id, f"批次 {robustness_id} 已取消"
-                    )
+                    self._backtest_repo.mark_cancelled(backtest_id, f"批次 {robustness_id} 已取消")
                     stale += 1
         if row.status == "running":
             row.status = "cancelled"
@@ -467,8 +482,7 @@ class RobustnessService:
             raise ValueError(f"稳健性验证批次 {robustness_id} 不存在")
         if row.status != "success":
             raise ValueError(
-                f"批次 {robustness_id} 当前状态为 {row.status}，"
-                "请先执行 collect 汇总全部回测结果"
+                f"批次 {robustness_id} 当前状态为 {row.status}，请先执行 collect 汇总全部回测结果"
             )
         windows = list(row.windows or [])
         variants = list(row.variants or [])
@@ -496,23 +510,17 @@ class RobustnessService:
         baseline_returns = self._baseline_daily_returns(row, cost_bps)
         trials = n_trials if n_trials is not None else self._trial_ledger(row.strategy_id)
         dsr = (
-            deflated_sharpe_ratio(baseline_returns, trials)
-            if len(baseline_returns) >= 3
-            else None
+            deflated_sharpe_ratio(baseline_returns, trials) if len(baseline_returns) >= 3 else None
         )
         ci = (
-            block_bootstrap_sharpe_ci(
-                baseline_returns, block=block, n_bootstrap=n_bootstrap
-            )
+            block_bootstrap_sharpe_ci(baseline_returns, block=block, n_bootstrap=n_bootstrap)
             if len(baseline_returns) >= 3
             else None
         )
         statistics = {
             "n_trials": trials,
             "n_windows": n_blocks,
-            "cost_bps": (
-                cost_bps if cost_bps is not None else get_settings().default_cost_bps
-            ),
+            "cost_bps": (cost_bps if cost_bps is not None else get_settings().default_cost_bps),
             "pbo": (
                 {
                     "value": round(pbo_result.pbo, 4),
@@ -526,9 +534,7 @@ class RobustnessService:
             "deflated_sharpe": (
                 {
                     "sharpe_annualized": round(dsr.sharpe_annualized, 4),
-                    "expected_max_sharpe_annualized": round(
-                        dsr.expected_max_sharpe_annualized, 4
-                    ),
+                    "expected_max_sharpe_annualized": round(dsr.expected_max_sharpe_annualized, 4),
                     "deflated_sharpe": round(dsr.deflated_sharpe, 4),
                     "n_observations": dsr.n_observations,
                     "n_trials": dsr.n_trials,
@@ -720,9 +726,7 @@ class RobustnessService:
         except Exception:
             logger.warning("查询指数首个行情日失败", exc_info=True)
             return []
-        return [
-            code for code, first_date in rows if first_date is not None and first_date > cutoff
-        ]
+        return [code for code, first_date in rows if first_date is not None and first_date > cutoff]
 
     def _create_variant_strategy(
         self, robustness_id: str, baseline: Any, candidate: dict[str, Any]
@@ -808,9 +812,7 @@ class RobustnessService:
                 )
             )
         except Exception:
-            logger.warning(
-                "创建稳健性回测失败：%s %s~%s", strategy_id, start, end, exc_info=True
-            )
+            logger.warning("创建稳健性回测失败：%s %s~%s", strategy_id, start, end, exc_info=True)
             return None
         if async_mode:
             from quant_etf_api.infra.job_queue.queue import backtest_job_key, get_job_queue
@@ -829,9 +831,7 @@ class RobustnessService:
 
     # ── 汇总与统计辅助 ────────────────────────────────────────────────────
 
-    def _summarize(
-        self, row: RobustnessRunModel, variants: list[dict[str, Any]]
-    ) -> dict[str, Any]:
+    def _summarize(self, row: RobustnessRunModel, variants: list[dict[str, Any]]) -> dict[str, Any]:
         """按验证类型汇总变体结果（邻域稳定度 / 边际贡献 / 池扰动分布）。
 
         Args:
@@ -849,9 +849,7 @@ class RobustnessService:
             sharpes: list[float] = []
             returns: list[float] = []
             for window in windows:
-                metrics = self._metrics_of(
-                    (variant.get("backtest_ids") or {}).get(window["label"])
-                )
+                metrics = self._metrics_of((variant.get("backtest_ids") or {}).get(window["label"]))
                 if metrics is None:
                     continue
                 if metrics.get("sharpe_ratio") is not None:
@@ -952,9 +950,7 @@ class RobustnessService:
             拼接后的日收益率序列（小数口径），无数据时返回空列表。
         """
         window_labels = [w["label"] for w in (row.windows or [])]
-        baseline = next(
-            (v for v in (row.variants or []) if v.get("label") == "baseline"), None
-        )
+        baseline = next((v for v in (row.variants or []) if v.get("label") == "baseline"), None)
         if baseline is None:
             return []
         bps = cost_bps if cost_bps is not None else get_settings().default_cost_bps
@@ -1078,9 +1074,7 @@ def build_ablation_variants(config: dict[str, Any]) -> list[dict[str, Any]]:
         for factor_id in sorted(factors):
             variant_config = deepcopy(config)
             variant_score = dict(score)
-            variant_score["factors"] = {
-                k: v for k, v in factors.items() if k != factor_id
-            }
+            variant_score["factors"] = {k: v for k, v in factors.items() if k != factor_id}
             variant_config["score"] = variant_score
             candidates.append(
                 {
@@ -1112,9 +1106,7 @@ def build_ablation_variants(config: dict[str, Any]) -> list[dict[str, Any]]:
     return candidates
 
 
-def iter_numeric_leaves(
-    node: Any, prefix: str = ""
-) -> list[tuple[str, int | float]]:
+def iter_numeric_leaves(node: Any, prefix: str = "") -> list[tuple[str, int | float]]:
     """递归收集配置中的数值叶子（跳过列表、布尔与版本号字段）。
 
     Args:
@@ -1184,10 +1176,7 @@ def _is_ratio_like(path: str) -> bool:
     """判断配置路径是否属于"0-1 比例类"字段。"""
     lowered = path.lower()
     return (
-        "exposure" in lowered
-        or "ratio" in lowered
-        or lowered.endswith("_pct")
-        or "cash" in lowered
+        "exposure" in lowered or "ratio" in lowered or lowered.endswith("_pct") or "cash" in lowered
     )
 
 
@@ -1244,9 +1233,7 @@ def _slug(text: str) -> str:
     return cleaned[:40] or "knob"
 
 
-def build_variant_strategy_id(
-    base_strategy_id: str, robustness_id: str, label: str
-) -> str:
+def build_variant_strategy_id(base_strategy_id: str, robustness_id: str, label: str) -> str:
     """生成不超过 64 字符的变体策略 ID（``strategy_config.strategy_id`` 的列宽）。
 
     基线 ID 与变体标签都可能较长，直接拼接会超长导致入库失败；
@@ -1260,7 +1247,9 @@ def build_variant_strategy_id(
     Returns:
         形如 ``<基线前20>__rb<批次前4>_<标签>`` 的策略 ID，长度 ≤ 64。
     """
-    suffix = label if len(label) <= 30 else f"{label[:22]}{md5(label.encode('utf-8')).hexdigest()[:8]}"
+    suffix = (
+        label if len(label) <= 30 else f"{label[:22]}{md5(label.encode('utf-8')).hexdigest()[:8]}"
+    )
     return f"{base_strategy_id[:20]}__rb{robustness_id[:4]}_{suffix}"
 
 

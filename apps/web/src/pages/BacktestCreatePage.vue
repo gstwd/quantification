@@ -75,6 +75,10 @@
             <input v-model="form.end_date" type="date" class="form-input" />
           </div>
         </div>
+        <div class="form-hint">
+          任意跨度均可（研究期内 1 个月 ~ 研究期全段 10 年都能一次跑完，无需分段）；
+          长区间建议同时查看分年度绩效与三段一致性。
+        </div>
       </div>
 
       <div class="form-section">

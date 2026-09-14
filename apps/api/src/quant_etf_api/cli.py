@@ -141,6 +141,31 @@ def _emit(data: Any, as_json: bool) -> None:
         print(data)
 
 
+def _parse_cost_ladder(raw: str | None) -> list[float] | None:
+    """解析逗号分隔的成本档位参数（C3）。
+
+    Args:
+        raw: 形如 "0,10,20,30,50" 的字符串；为空时返回 None。
+
+    Returns:
+        成本档位列表（基点）；未提供时返回 None。
+    """
+    if not raw:
+        return None
+    values: list[float] = []
+    for item in raw.split(","):
+        text = item.strip()
+        if not text:
+            continue
+        try:
+            values.append(float(text))
+        except ValueError:
+            _fail(f"--cost-ladder 含非法数字: {text}")
+    if not values:
+        _fail("--cost-ladder 不能为空")
+    return values
+
+
 def _read_json_file(path: str) -> dict[str, Any]:
     """读取 UTF-8 JSON 配置文件。
 
@@ -227,7 +252,12 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
 
     p = sub.add_parser("run", help="创建并执行回测")
     p.add_argument("--strategy", dest="strategy_id", required=True)
-    p.add_argument("--start", type=date.fromisoformat, help="起始日期，默认今天往前 2 年")
+    p.add_argument(
+        "--start",
+        type=date.fromisoformat,
+        help="起始日期；支持任意跨度（研究期内 1 个月~10 年均可单次回测，无需分段），"
+        "不传时默认末端前 2 年",
+    )
     p.add_argument(
         "--end",
         type=date.fromisoformat,
@@ -255,15 +285,19 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_json_flag(p)
 
-    p = sub.add_parser("list", help="列出回测（支持状态/用途/时间范围过滤）")
+    p = sub.add_parser("list", help="列出回测（支持状态/用途/时间范围/日历来源过滤）")
     p.add_argument("--strategy", dest="strategy_id", help="按策略 ID 过滤")
     p.add_argument(
         "--status",
         choices=["pending", "running", "success", "failed", "cancelled"],
         help="按状态过滤",
     )
+    p.add_argument("--purpose", choices=["research", "validation", "monitor"], help="按用途过滤")
     p.add_argument(
-        "--purpose", choices=["research", "validation", "monitor"], help="按用途过滤"
+        "--calendar-source",
+        dest="calendar_source",
+        choices=["upstream", "database", "not_required"],
+        help="按调仓日历来源过滤（C1）：审计同一配置是否跑在两套日历上",
     )
     p.add_argument("--created-from", type=date.fromisoformat, help="创建日期起点（含）")
     p.add_argument("--created-to", type=date.fromisoformat, help="创建日期终点（含）")
@@ -287,8 +321,37 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--timeout", type=float, default=600.0, help="等待超时秒数")
     _add_json_flag(p)
 
-    p = sub.add_parser("show", help="查看回测详情（含配置快照与指标）")
+    p = sub.add_parser("show", help="查看回测详情（含配置快照、口径指纹与多档成本）")
     p.add_argument("backtest_id")
+    p.add_argument(
+        "--cost-bps",
+        type=float,
+        help="净口径成本覆盖（基点，C3）；留空使用回测固化的成本",
+    )
+    p.add_argument(
+        "--cost-ladder",
+        help="多档成本覆盖，逗号分隔（如 0,10,20,30,50）；0 表示毛口径",
+    )
+    _add_json_flag(p)
+
+    p = sub.add_parser("pool", help="查看有效候选池逐日时间线与剔除区间（C6）")
+    p.add_argument("backtest_id")
+    _add_json_flag(p)
+
+    p = sub.add_parser("orphans", help="审计指向已删除回测的悬挂引用（C5）")
+    p.add_argument("--limit", type=int, default=200, help="明细条数上限")
+    _add_json_flag(p)
+
+    p = sub.add_parser("delete", help="删除回测记录（C5，存在 JSONB 引用时需 --force）")
+    p.add_argument("backtest_id")
+    p.add_argument("--force", action="store_true", help="存在 JSONB 引用时仍强制删除")
+    _add_json_flag(p)
+
+    p = sub.add_parser(
+        "prune-dangling-refs",
+        help="清理 JSONB 中的悬挂回测引用（C5，默认预演）",
+    )
+    p.add_argument("--apply", action="store_true", help="实际写库（默认仅预演）")
     _add_json_flag(p)
 
     p = sub.add_parser("results", help="查看回测明细结果")
@@ -720,9 +783,7 @@ def _build_stock_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--confirm-token", default=None, help="删除确认令牌")
     _add_json_flag(p)
 
-    p = sub.add_parser(
-        "prune-non-tushare", help="删除非 Tushare 或非沪深 A 股旧行（默认预演）"
-    )
+    p = sub.add_parser("prune-non-tushare", help="删除非 Tushare 或非沪深 A 股旧行（默认预演）")
     p.add_argument("--start", default="20130101", help="起始日 YYYYMMDD（含）")
     p.add_argument("--confirm-token", default=None, help="删除确认令牌")
     _add_json_flag(p)
@@ -958,6 +1019,7 @@ def _run_backtest(args: argparse.Namespace) -> None:
                 purpose=args.purpose,
                 order_by=args.order_by,
                 descending=not args.asc,
+                calendar_source=args.calendar_source,
             )
             _emit(
                 {
@@ -984,10 +1046,49 @@ def _run_backtest(args: argparse.Namespace) -> None:
             if detail.status == "failed":
                 sys.exit(1)
         elif args.subcommand == "show":
-            detail = svc.get_backtest(args.backtest_id)
+            detail = svc.get_backtest(
+                args.backtest_id,
+                cost_bps=getattr(args, "cost_bps", None),
+                cost_ladder=_parse_cost_ladder(getattr(args, "cost_ladder", None)),
+            )
             if detail is None:
                 _fail(f"回测 {args.backtest_id} 不存在")
             _emit(detail.model_dump(), not args.no_json)
+        elif args.subcommand == "pool":
+            detail = svc.get_backtest(args.backtest_id)
+            if detail is None:
+                _fail(f"回测 {args.backtest_id} 不存在")
+            pool = detail.stability.candidate_pool if detail.stability else None
+            if pool is None:
+                _fail(
+                    f"回测 {args.backtest_id} 无候选池时间线"
+                    "（存量回测早于 C6 字段，或回测未成功完成）"
+                )
+            _emit(
+                {
+                    "backtest_id": args.backtest_id,
+                    "base_size": pool.base_size,
+                    "min_size": pool.min_size,
+                    "max_size": pool.max_size,
+                    "median_size": pool.median_size,
+                    "pool_coverage_ratio": pool.pool_coverage_ratio,
+                    "truncated_exclusions": pool.truncated_exclusions,
+                    "segments": [seg.model_dump() for seg in pool.segments],
+                    "exclusions": [exc.model_dump() for exc in pool.exclusions],
+                },
+                not args.no_json,
+            )
+        elif args.subcommand == "orphans":
+            report = svc.find_dangling_references(limit=args.limit)
+            _emit(report.model_dump(), not args.no_json)
+            if report.total:
+                sys.exit(1)
+        elif args.subcommand == "delete":
+            result = svc.delete_backtest(args.backtest_id, force=args.force)
+            _emit(result.model_dump(), not args.no_json)
+        elif args.subcommand == "prune-dangling-refs":
+            result = svc.prune_dangling_references(dry_run=not args.apply)
+            _emit(result.model_dump(), not args.no_json)
         elif args.subcommand == "results":
             detail = svc.get_backtest(args.backtest_id)
             if detail is None:
@@ -1066,9 +1167,7 @@ def _run_robustness(args: argparse.Namespace) -> None:
         elif args.subcommand == "collect":
             deadline = time.monotonic() + args.timeout
             while True:
-                result = svc.collect(
-                    args.robustness_id, allow_partial=args.allow_partial
-                )
+                result = svc.collect(args.robustness_id, allow_partial=args.allow_partial)
                 if not args.wait or result.get("status") != "running":
                     break
                 if time.monotonic() >= deadline:
@@ -1210,13 +1309,9 @@ def _run_queue(args: argparse.Namespace) -> None:
             "finished_at": row.finished_at,
         }
         if row.status == "pending" and row.created_at is not None:
-            item["queued_seconds"] = round(
-                max(0.0, (now - row.created_at).total_seconds()), 1
-            )
+            item["queued_seconds"] = round(max(0.0, (now - row.created_at).total_seconds()), 1)
         if row.status == "running" and row.started_at is not None:
-            item["elapsed_seconds"] = round(
-                max(0.0, (now - row.started_at).total_seconds()), 1
-            )
+            item["elapsed_seconds"] = round(max(0.0, (now - row.started_at).total_seconds()), 1)
         items.append(item)
     _emit({"total": len(items), "items": items}, not args.no_json)
 
@@ -1242,7 +1337,28 @@ def main() -> None:
     _build_stock_group(subparsers)
 
     args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        return
 
+    # 严格口径（C1）：交易日历不可用时统一转为可读错误（退出码 1），
+    # 不打印 traceback，也不允许任何"按星期近似"的降级结果流出
+    from quant_etf_api.domain.common.trading_calendar import (  # noqa: PLC0415
+        TradingCalendarUnavailableError,
+    )
+
+    try:
+        _dispatch(args)
+    except TradingCalendarUnavailableError as exc:
+        _fail(str(exc))
+
+
+def _dispatch(args: argparse.Namespace) -> None:
+    """按 command 分发到各命令组（供 main 统一兜底异常）。
+
+    Args:
+        args: argparse 解析结果。
+    """
     if args.command == "strategy":
         _run_strategy(args)
     elif args.command == "backtest":
@@ -1266,7 +1382,7 @@ def main() -> None:
     elif args.command == "recompute-valuation-percentiles":
         recompute_valuation_percentiles()
     else:
-        parser.print_help()
+        raise ValueError(f"未知命令: {args.command}")
 
 
 if __name__ == "__main__":

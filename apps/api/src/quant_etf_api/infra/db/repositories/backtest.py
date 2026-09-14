@@ -17,6 +17,22 @@ from quant_etf_api.infra.db.repositories.base import BaseRepository
 from quant_etf_api.infra.time import utcnow_aware
 
 
+def calendar_source_filter(value: str) -> Any:
+    """构造"调仓日历来源等于指定值"的过滤表达式（C1）。
+
+    ``backtest_run.params`` 在 ORM 中声明为通用 ``JSON``，其比较器没有
+    PostgreSQL 专有的 ``astext``，因此用 ``->>`` 操作符取文本值；该表达式
+    与列的真实类型 jsonb 无关，json/jsonb 都支持。
+
+    Args:
+        value: 目标来源（upstream / database / not_required）。
+
+    Returns:
+        可直接用于 ``Query.filter()`` 的 SQL 表达式。
+    """
+    return BacktestRunModel.params.op("->>")("_calendar_source") == value
+
+
 class BacktestRepository(BaseRepository):
     """回测相关表的查询与状态更新仓库。"""
 
@@ -31,8 +47,9 @@ class BacktestRepository(BaseRepository):
         purpose: str | None = None,
         order_by: str = "created_at",
         descending: bool = True,
+        calendar_source: str | None = None,
     ) -> tuple[list[BacktestRunModel], int]:
-        """分页查询回测记录，支持状态/用途/时间范围筛选（B4）。
+        """分页查询回测记录，支持状态/用途/时间范围/日历来源筛选（B4/C1）。
 
         Args:
             offset: 偏移量。
@@ -44,6 +61,8 @@ class BacktestRepository(BaseRepository):
             purpose: 回测用途（research/validation/monitor）。
             order_by: 排序字段，可选 created_at / started_at / finished_at。
             descending: 是否倒序。
+            calendar_source: 调仓日历来源过滤（upstream/database/not_required），
+                用于找出"调仓日历口径不同"的存量回测（C1）。
 
         Returns:
             (items, total) 元组。
@@ -55,6 +74,9 @@ class BacktestRepository(BaseRepository):
             base_q = base_q.filter(BacktestRunModel.status == status)
         if purpose:
             base_q = base_q.filter(BacktestRunModel.purpose == purpose)
+        if calendar_source:
+            # 口径指纹存放在 params JSONB 的 _calendar_source 键中
+            base_q = base_q.filter(calendar_source_filter(calendar_source))
         if created_from is not None:
             base_q = base_q.filter(BacktestRunModel.created_at >= created_from)
         if created_to is not None:
@@ -80,6 +102,41 @@ class BacktestRepository(BaseRepository):
     def find_by_id(self, backtest_id: str) -> BacktestRunModel | None:
         """按主键查询回测记录。"""
         return self._db.get(BacktestRunModel, backtest_id)
+
+    def find_many_by_ids(self, backtest_ids: list[str]) -> dict[str, BacktestRunModel]:
+        """按主键批量查询回测记录。
+
+        Args:
+            backtest_ids: 回测 ID 列表。
+
+        Returns:
+            backtest_id → ORM 行 的字典；不存在的 ID 不出现。
+        """
+        if not backtest_ids:
+            return {}
+        rows = (
+            self._db.query(BacktestRunModel)
+            .filter(BacktestRunModel.backtest_id.in_(list(backtest_ids)))
+            .all()
+        )
+        return {row.backtest_id: row for row in rows}
+
+    def delete(self, backtest_id: str) -> bool:
+        """删除回测主记录（外键负责级联清理日结果与置空外部引用）。
+
+        Args:
+            backtest_id: 回测标识。
+
+        Returns:
+            True 表示确实删除了 1 行；False 表示记录不存在。
+        """
+        deleted = (
+            self._db.query(BacktestRunModel)
+            .filter(BacktestRunModel.backtest_id == backtest_id)
+            .delete(synchronize_session=False)
+        )
+        self._db.commit()
+        return bool(deleted)
 
     def find_daily_results(self, backtest_id: str) -> list[BacktestDailyResultModel]:
         """查询回测的每日组合结果（按日期升序）。"""
@@ -155,13 +212,15 @@ class BacktestRepository(BaseRepository):
         backtest_id: str,
         metrics: dict[str, Any] | None = None,
         warnings: list[dict[str, Any]] | None = None,
+        candidate_pool: dict[str, Any] | None = None,
     ) -> None:
-        """将回测标记为成功，可附带结构化提示。
+        """将回测标记为成功，可附带结构化提示与候选池时间线。
 
         Args:
             backtest_id: 回测标识。
             metrics: 汇总绩效指标。
             warnings: 执行过程中的结构化提示列表（BacktestWarning 的 dict 形式）。
+            candidate_pool: 有效候选池时间线（C6），None 表示不写入。
         """
         # 如果 session 处于 pending rollback 状态，先回滚以恢复可用状态
         if self._db.is_active is False:
@@ -176,6 +235,8 @@ class BacktestRepository(BaseRepository):
             run.metrics = metrics
         if warnings is not None:
             run.warnings = warnings
+        if candidate_pool is not None:
+            run.candidate_pool = candidate_pool
         self._db.commit()
 
     def mark_running(self, backtest_id: str) -> None:

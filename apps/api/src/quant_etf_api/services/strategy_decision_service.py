@@ -36,7 +36,7 @@ from quant_etf_api.infra.db.repositories.index_factor_value import IndexFactorVa
 from quant_etf_api.infra.db.repositories.index_signal import IndexSignalRepository
 from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
-from quant_etf_api.infra.trading_calendar import TradingCalendar
+from quant_etf_api.infra.trading_calendar import TradingCalendar, resolve_trading_calendar
 from quant_etf_api.schemas.backtest import BacktestWarning
 from quant_etf_api.schemas.strategy import (
     AllocationResponse,
@@ -55,11 +55,17 @@ def resolve_effective_date(trade_date: date | None = None) -> date:
     当 trade_date 为 None 时，使用今天；若今天为非交易日（周末/节假日），
     则回退至最近一个交易日。确保调仓日判断和分配管线基于真实交易日执行。
 
+    严格口径（C1）：日历不可用时抛 ``TradingCalendarUnavailableError``，
+    由 HTTP 层转换为 503；调用方可显式传入 trade_date 绕过日历。
+
     Args:
         trade_date: 指定日期，为 None 时自动对齐。
 
     Returns:
         对齐后的有效交易日。
+
+    Raises:
+        TradingCalendarUnavailableError: 交易日历不可用时抛出。
     """
     if trade_date is not None:
         return trade_date
@@ -463,7 +469,8 @@ class StrategyDecisionService:
         starred_rows = self._config_svc._repo.find_starred()
 
         items: list[StarredStrategyItem] = []
-        scheduler = DefaultRebalanceScheduler()
+        # 严格口径（C1）：解析出真实日历后注入调度器；不可用时上抛由 HTTP 层转 503
+        scheduler = DefaultRebalanceScheduler(resolve_trading_calendar(self._db)[0])
 
         for row in starred_rows:
             try:

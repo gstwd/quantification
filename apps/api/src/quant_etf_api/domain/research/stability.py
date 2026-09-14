@@ -125,9 +125,7 @@ def compute_stability_metrics(
     net_excess: float | None = None
     clean_benchmark = clean_returns_series(benchmark_returns, n)
     if clean_benchmark is not None:
-        net_excess = net_annualized - _annualized_return(
-            clean_benchmark, trading_days_per_year
-        )
+        net_excess = net_annualized - _annualized_return(clean_benchmark, trading_days_per_year)
 
     concentration = _yearly_concentration(daily_returns, trade_dates, trading_days_per_year)
     segments = _segment_sharpes(daily_returns, trading_days_per_year)
@@ -159,6 +157,85 @@ def compute_stability_metrics(
     )
 
 
+@dataclass(frozen=True)
+class CostLadderEntry:
+    """单个成本档位下的净口径指标（C3）。
+
+    Attributes:
+        cost_bps: 该档位的单边交易成本（基点），0 表示毛口径。
+        net_cumulative_return_pct: 扣成本后累计收益率（%）。
+        net_annualized_return_pct: 扣成本后年化收益率（%）。
+        net_sharpe_ratio: 扣成本后年化夏普比率。
+        net_excess_return_pct: 扣成本后相对基准的年化超额（百分点），无基准时为 None。
+        cost_drag_pct_per_year: 该档位的成本拖累（百分点/年）。
+    """
+
+    cost_bps: float
+    net_cumulative_return_pct: float
+    net_annualized_return_pct: float
+    net_sharpe_ratio: float
+    net_excess_return_pct: float | None = None
+    cost_drag_pct_per_year: float = 0.0
+
+
+def compute_cost_ladder(
+    daily_returns: list[float],
+    turnovers: list[float | None] | None,
+    ladder: list[float],
+    benchmark_returns: list[float | None] | None = None,
+    trading_days_per_year: int = DEFAULT_TRADING_DAYS_PER_YEAR,
+) -> list[CostLadderEntry]:
+    """按多档成本并列计算净口径指标（C3）。
+
+    只重算与成本有关的量（成本序列、累计/年化/夏普/超额），**不重算**
+    年集中度、分段一致性与回撤结构——那些指标与成本无关，重复计算是浪费。
+    因此复杂度为 O(len(ladder) × n)，可在读取路径直接现算，无需重跑回测。
+
+    Args:
+        daily_returns: 组合日收益率序列（%），按日期升序。
+        turnovers: 与 ``daily_returns`` 等长的单边换手率序列，缺失日按 0 处理。
+        ladder: 成本档位列表（基点），0 表示毛口径。
+        benchmark_returns: 基准日收益率序列（%），长度不一致时视为无基准。
+        trading_days_per_year: 年化系数，默认 252。
+
+    Returns:
+        CostLadderEntry 列表，顺序与 ``ladder`` 一致；输入为空时返回空列表。
+    """
+    n = len(daily_returns)
+    if n == 0:
+        return []
+    normalized_turnovers = _align_optional(turnovers, n, 0.0)
+    years = n / trading_days_per_year
+    annualized_turnover = sum(normalized_turnovers) / years if years > 0 else 0.0
+    clean_benchmark = clean_returns_series(benchmark_returns, n)
+    benchmark_annualized = (
+        _annualized_return(clean_benchmark, trading_days_per_year)
+        if clean_benchmark is not None
+        else None
+    )
+
+    entries: list[CostLadderEntry] = []
+    for cost_bps in ladder:
+        costs = [t * cost_bps / 100.0 for t in normalized_turnovers]
+        net_returns = [gross - cost for gross, cost in zip(daily_returns, costs)]
+        net_annualized = _annualized_return(net_returns, trading_days_per_year)
+        entries.append(
+            CostLadderEntry(
+                cost_bps=cost_bps,
+                net_cumulative_return_pct=round(_total_return(net_returns), 4),
+                net_annualized_return_pct=round(net_annualized, 4),
+                net_sharpe_ratio=_sharpe_ratio(net_returns, trading_days_per_year),
+                net_excess_return_pct=(
+                    round(net_annualized - benchmark_annualized, 4)
+                    if benchmark_annualized is not None
+                    else None
+                ),
+                cost_drag_pct_per_year=round(annualized_turnover * cost_bps / 100.0, 4),
+            )
+        )
+    return entries
+
+
 def net_return_series(
     daily_returns: list[float],
     turnovers: list[float | None] | None = None,
@@ -181,9 +258,7 @@ def net_return_series(
     return [gross - t * cost_bps / 100.0 for gross, t in zip(daily_returns, normalized)]
 
 
-def clean_returns_series(
-    values: list[float | None] | None, length: int
-) -> list[float] | None:
+def clean_returns_series(values: list[float | None] | None, length: int) -> list[float] | None:
     """把可选的收益序列对齐并清洗，任一位置缺失时整体作废。
 
     基准收益序列只要有一天缺失，后续的超额/Alpha 计算就会被 None 污染；
@@ -206,9 +281,7 @@ def clean_returns_series(
     return cleaned
 
 
-def _align_optional(
-    values: list[float | None] | None, length: int, default: float
-) -> list[float]:
+def _align_optional(values: list[float | None] | None, length: int, default: float) -> list[float]:
     """把可选序列对齐到指定长度，缺失或 None 的位置填默认值。
 
     Args:

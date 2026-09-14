@@ -107,6 +107,17 @@ class Settings(BaseSettings):
     default_cost_bps: float = Field(
         default=10.0, ge=0.0, description="默认单边交易成本（基点），用于净口径指标折算"
     )
+    # 净口径多档并列（C3）：读取路径按该梯子现算，无需重跑回测；0 表示毛口径
+    stability_cost_ladder: list[float] = Field(
+        default_factory=lambda: [0.0, 10.0, 20.0, 30.0, 50.0],
+        description=("回测详情并列展示的净口径成本档位（基点，JSON 数组）；0 表示毛口径"),
+    )
+    # 有效候选池时间线（C6）：剔除明细最多保留多少条指数区间
+    candidate_pool_exclusion_limit: int = Field(
+        default=50,
+        ge=1,
+        description="回测有效候选池剔除明细（指数—日期区间）保留条数上限，超出按天数截断",
+    )
 
     # LLM 配置（可选，不配置则 AI 分析功能不可用）
     llm_api_key: str | None = Field(default=None, description="LLM API Key")

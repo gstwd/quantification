@@ -7,7 +7,10 @@ from datetime import time
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.infra.job_queue.queue import get_job_queue
-from quant_etf_api.infra.trading_calendar import TradingCalendar
+from quant_etf_api.infra.trading_calendar import (
+    TradingCalendar,
+    TradingCalendarUnavailableError,
+)
 from quant_etf_api.infra.time import now_cn, today_cn
 from quant_etf_api.services.run_service import RunService
 
@@ -188,7 +191,14 @@ class AIAnalysisScheduler:
         db = SessionLocal()
         try:
             today = today_cn()
-            if not TradingCalendar().is_trading_day(today):
+            try:
+                is_trading = TradingCalendar().is_trading_day(today)
+            except TradingCalendarUnavailableError as exc:
+                # 严格口径（C1）：日历不可用时拒绝执行本轮，而不是按星期近似。
+                # 调度线程必须存活，因此只记录错误并跳过，下一轮自动重试。
+                logger.error("AI 调度器: 交易日历不可用，跳过本次触发: %s", exc)
+                return
+            if not is_trading:
                 logger.info("AI 调度器: 非交易日跳过 %s", today)
                 return
 

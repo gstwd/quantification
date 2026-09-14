@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import {
   createBacktest,
   createComparison,
+  deleteBacktest,
   fetchBacktest,
   fetchBacktestDaily,
   fetchBacktestIndexResults,
@@ -65,13 +66,17 @@ export const useBacktestStore = defineStore('backtests', {
       this.indexResults = await fetchBacktestIndexResults(backtestId, indexCode)
     },
     /** 拉取单个回测详情并同步到 current 与 items（轮询由 usePolling 驱动） */
-    async refreshOne(backtestId: string): Promise<BacktestDetail> {
-      const detail = await fetchBacktest(backtestId)
+    async refreshOne(backtestId: string, costBps?: number | null): Promise<BacktestDetail> {
+      const detail = await fetchBacktest(backtestId, costBps)
       // 每次轮询都更新 current，确保进度条等 UI 实时刷新
       this.current = detail
       const idx = this.items.findIndex((i) => i.backtest_id === backtestId)
       if (idx !== -1) this.items[idx] = detail
       return detail
+    },
+    /** 删除回测记录（C5）；存在 JSONB 引用时需 force=true */
+    async remove(backtestId: string, force = false) {
+      return deleteBacktest(backtestId, force)
     },
     async submit(req: BacktestCreateRequest): Promise<BacktestSummary> {
       this.submitting = true

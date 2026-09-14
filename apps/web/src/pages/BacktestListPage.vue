@@ -61,6 +61,15 @@
           </select>
         </div>
         <div class="filter-item">
+          <label class="form-label" for="calendar-filter">调仓日历</label>
+          <select id="calendar-filter" v-model="calendarFilter" class="form-input">
+            <option value="">全部</option>
+            <option value="upstream">上游数据源</option>
+            <option value="database">本地日历快照</option>
+            <option value="not_required">每日调仓（不需要）</option>
+          </select>
+        </div>
+        <div class="filter-item">
           <label class="form-label" for="created-from">创建日期起</label>
           <input id="created-from" v-model="createdFrom" class="form-input" type="date" />
         </div>
@@ -128,7 +137,15 @@
                 >
                   取消
                 </button>
-                <span v-else class="text-muted">—</span>
+                <button
+                  v-else
+                  class="btn btn-secondary btn-sm"
+                  type="button"
+                  :disabled="deletingId === item.backtest_id"
+                  @click.stop="removeRun(item)"
+                >
+                  删除
+                </button>
               </td>
             </tr>
           </tbody>
@@ -213,6 +230,7 @@ import { RouterLink } from 'vue-router'
 import { cancelBacktest } from '../api/backtests'
 import { useBacktestStore } from '../stores/backtests'
 import { toast } from '../stores/toast'
+import type { BacktestSummary } from '../types/api'
 
 const store = useBacktestStore()
 const loading = ref(false)
@@ -225,9 +243,11 @@ const compPageSize = 50
 const strategyFilter = ref('')
 const statusFilter = ref('')
 const purposeFilter = ref('')
+const calendarFilter = ref('')
 const createdFrom = ref('')
 const createdTo = ref('')
 const cancellingId = ref('')
+const deletingId = ref('')
 
 /** 汇总当前筛选条件为请求参数。 */
 function currentFilters() {
@@ -235,6 +255,7 @@ function currentFilters() {
     strategyId: strategyFilter.value || undefined,
     status: statusFilter.value || undefined,
     purpose: purposeFilter.value || undefined,
+    calendarSource: calendarFilter.value || undefined,
     createdFrom: createdFrom.value || undefined,
     createdTo: createdTo.value || undefined,
   }
@@ -277,6 +298,39 @@ async function cancelRun(backtestId: string): Promise<void> {
   } finally {
     cancellingId.value = ''
   }
+}
+
+/** 删除回测记录（C5）：存在 JSONB 引用时后端返回 409，确认后带 force 重试。 */
+async function removeRun(item: BacktestSummary): Promise<void> {
+  if (!window.confirm(`确认删除回测 ${item.backtest_id}？日结果与对比记录会一并清理。`)) return
+  deletingId.value = item.backtest_id
+  try {
+    const result = await store.remove(item.backtest_id)
+    toast.info(result.message)
+  } catch (error) {
+    const detail = extractErrorDetail(error)
+    if (!detail.includes('仍被引用')) {
+      toast.error(detail || '删除失败')
+      return
+    }
+    if (!window.confirm(`${detail}\n\n仍要强制删除吗？`)) return
+    try {
+      const forced = await store.remove(item.backtest_id, true)
+      toast.warning(forced.message)
+    } catch (forceError) {
+      toast.error(extractErrorDetail(forceError) || '强制删除失败')
+      return
+    }
+  } finally {
+    deletingId.value = ''
+    await store.loadAll(singleOffset.value, singlePageSize, currentFilters())
+  }
+}
+
+/** 从 axios 错误中提取后端 detail 文案。 */
+function extractErrorDetail(error: unknown): string {
+  const response = (error as { response?: { data?: { detail?: string } } })?.response
+  return response?.data?.detail ?? ''
 }
 
 /** 状态中文标签。 */
@@ -330,6 +384,7 @@ async function clearFilters() {
   strategyFilter.value = ''
   statusFilter.value = ''
   purposeFilter.value = ''
+  calendarFilter.value = ''
   createdFrom.value = ''
   createdTo.value = ''
   await applyFilters()

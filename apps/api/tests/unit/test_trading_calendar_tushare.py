@@ -1,4 +1,4 @@
-"""测试交易日历的 Tushare 优先加载与 AkShare 兜底。"""
+"""测试交易日历的 Tushare 优先加载与 AkShare 兜底（严格口径 C1）。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import quant_etf_api.infra.trading_calendar as calendar_module
 
 
 def test_upstream_falls_back_to_akshare_when_no_token(monkeypatch) -> None:
-    """未配置 Token 时直接使用 AkShare 兜底。"""
+    """未配置 Token 时直接使用 AkShare 兜底，并标明来源。"""
     monkeypatch.setattr(
         calendar_module,
         "get_settings",
@@ -19,7 +19,7 @@ def test_upstream_falls_back_to_akshare_when_no_token(monkeypatch) -> None:
     ak_days = {date(2026, 9, 7), date(2026, 9, 8)}
     monkeypatch.setattr(calendar_module, "_load_from_akshare", lambda: ak_days)
     monkeypatch.setattr(calendar_module, "_load_from_tushare", lambda: None)
-    assert calendar_module._load_from_upstream() == ak_days
+    assert calendar_module._load_from_upstream() == (ak_days, "akshare")
 
 
 def test_upstream_prefers_tushare_when_configured(monkeypatch) -> None:
@@ -28,7 +28,14 @@ def test_upstream_prefers_tushare_when_configured(monkeypatch) -> None:
     ak_days = {date(2026, 9, 1)}
     monkeypatch.setattr(calendar_module, "_load_from_tushare", lambda: ts_days)
     monkeypatch.setattr(calendar_module, "_load_from_akshare", lambda: ak_days)
-    assert calendar_module._load_from_upstream() == ts_days
+    assert calendar_module._load_from_upstream() == (ts_days, "tushare")
+
+
+def test_upstream_returns_none_when_both_fail(monkeypatch) -> None:
+    """上游两个数据源都失败时返回 (None, None)——不再降级为周末判断（C1）。"""
+    monkeypatch.setattr(calendar_module, "_load_from_tushare", lambda: None)
+    monkeypatch.setattr(calendar_module, "_load_from_akshare", lambda: None)
+    assert calendar_module._load_from_upstream() == (None, None)
 
 
 def test_tushare_loader_parses_paged_calendar(monkeypatch) -> None:

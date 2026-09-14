@@ -8,6 +8,7 @@ import pytest
 
 from quant_etf_api.domain.research.stability import (
     clean_returns_series,
+    compute_cost_ladder,
     compute_stability_metrics,
     net_return_series,
 )
@@ -42,9 +43,7 @@ class TestCostConversion:
 
     def test_missing_benchmark_disables_excess(self) -> None:
         """基准序列含缺失时整体作废，不产生超额指标。"""
-        metrics = compute_stability_metrics(
-            [1.0, 1.0], _dates(2), benchmark_returns=[0.5, None]
-        )
+        metrics = compute_stability_metrics([1.0, 1.0], _dates(2), benchmark_returns=[0.5, None])
         assert metrics.net_excess_return_pct is None
 
     def test_clean_returns_series_rejects_partial_input(self) -> None:
@@ -118,3 +117,41 @@ class TestSegmentsAndDrawdown:
         """收益与日期长度不一致时抛 ValueError。"""
         with pytest.raises(ValueError):
             compute_stability_metrics([1.0, 2.0], _dates(1))
+
+
+class TestCostLadder:
+    """多档成本并列（C3）。"""
+
+    def test_zero_bp_equals_gross(self) -> None:
+        """0bp 档位等于毛口径。"""
+        entries = compute_cost_ladder([1.0, -0.5, 0.5], [0.5, 0.0, 1.0], [0.0, 10.0])
+        assert entries[0].cost_bps == 0.0
+        gross = (1.0 + 0.01) * (1.0 - 0.005) * (1.0 + 0.005) * 100 - 100
+        assert entries[0].net_cumulative_return_pct == pytest.approx(round(gross, 4))
+        assert entries[0].cost_drag_pct_per_year == 0.0
+
+    def test_cost_monotonically_reduces_returns(self) -> None:
+        """成本越高净年化收益与净夏普越低。"""
+        entries = compute_cost_ladder(
+            [1.0, -0.5, 0.5, 0.2], [0.5, 0.0, 1.0, 0.3], [0.0, 10.0, 20.0, 50.0]
+        )
+        annualized = [e.net_annualized_return_pct for e in entries]
+        assert annualized == sorted(annualized, reverse=True)
+        assert entries[-1].cost_drag_pct_per_year > entries[0].cost_drag_pct_per_year
+
+    def test_excess_requires_benchmark(self) -> None:
+        """无基准时不给出净超额；有基准时随成本下降。"""
+        without = compute_cost_ladder([1.0, 1.0], [0.5, 0.5], [0.0, 10.0])
+        assert all(entry.net_excess_return_pct is None for entry in without)
+        with_bench = compute_cost_ladder(
+            [1.0, 1.0],
+            [0.5, 0.5],
+            [0.0, 10.0],
+            benchmark_returns=[0.5, 0.5],
+        )
+        assert with_bench[0].net_excess_return_pct is not None
+        assert with_bench[0].net_excess_return_pct > with_bench[1].net_excess_return_pct
+
+    def test_empty_input_returns_empty(self) -> None:
+        """空序列返回空列表（不抛错）。"""
+        assert compute_cost_ladder([], [], [0.0, 10.0]) == []

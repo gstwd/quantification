@@ -63,8 +63,13 @@ python -m quant_etf_api.cli init-factors   # 将代码中的因子元数据同�
 python -m quant_etf_api.cli strategy list/show/validate/create/update/diff     # 策略配置读写与校验
 python -m quant_etf_api.cli backtest run --strategy <id> [--start --end --async --priority N]  # 回测（默认同步执行）
 python -m quant_etf_api.cli backtest status <id> --wait                         # 轮询等待回测终态
-python -m quant_etf_api.cli backtest list [--status --purpose --limit]          # 回测列表过滤（B4）
+python -m quant_etf_api.cli backtest list [--status --purpose --calendar-source --limit]  # 回测列表过滤（B4/C1）
 python -m quant_etf_api.cli backtest cancel <id>                                # 取消回测（运行中在安全检查点退出）
+python -m quant_etf_api.cli backtest show <id> [--cost-bps N --cost-ladder 0,10,20,30,50]  # 详情 + 多档成本（C3）
+python -m quant_etf_api.cli backtest pool <id>                                   # 有效候选池时间线（C6）
+python -m quant_etf_api.cli backtest orphans [--limit N]                         # 悬挂引用审计（C5）
+python -m quant_etf_api.cli backtest delete <id> [--force]                       # 受控删除回测（C5）
+python -m quant_etf_api.cli backtest prune-dangling-refs [--apply]               # 清理 JSONB 悬挂引用（C5，默认预演）
 python -m quant_etf_api.cli queue stats|jobs [--status --job-type --limit]      # 队列积压/吞吐/运行中任务（B3）
 python -m quant_etf_api.cli queue worker                                        # 独立 worker 进程（前台阻塞，B1）
 python -m quant_etf_api.cli robustness collect <batch> [--allow-partial]        # 部分汇总并标记 coverage（B7）
@@ -139,15 +144,15 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - **`infra/clients/`** — 2 data source clients, all inherit from `base.py`:
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
   - `retry_decorator.py` — `@with_retry()` 装饰器，指数退避重试，参数可通过环境变量 `AKSHARE_RETRY_MAX_ATTEMPTS` / `AKSHARE_RETRY_BASE_DELAY` 配置
-- **`infra/trading_calendar.py`** — `TradingCalendar` 类，通过 `akshare.tool_trade_date_hist_sina()` 获取 A 股交易日历，内存缓存 TTL=1 天，API 不可用时降级为周末判断
+- **`infra/trading_calendar.py`** — `TradingCalendar` 类，**严格口径（C1）**：上游按 Tushare Pro `trade_cal`（优先）→ AkShare `tool_trade_date_hist_sina()` 加载，内存缓存成功 TTL=1 天、失败负缓存仅 60 秒；取不到日历时 `is_trading_day/latest_trading_day/next_trading_day/trading_days_between` 抛 `TradingCalendarUnavailableError`，**不存在周末降级**。离线兜底走 `resolve_trading_calendar(db, required_range=...)`：上游 → 本地 `trading_calendar` 表快照（`DbTradingCalendar`）→ 报错。
 - **`infra/job_queue/`** — **统一后台任务队列**：`background_job` 表（迁移 0023，迁移 0046 增加 `batch_id`/`heartbeat_at`/`cancel_requested` 并把时间戳改为 timestamptz）+ `JobRepository`（`FOR UPDATE SKIP LOCKED` 认领）+ `JobQueue`（**按 lane 划分**的 worker 线程池：回测 lane `job_queue_backtest_workers` 默认 1，通用 lane `job_queue_workers` 默认 2）+ `context.py`（协作取消上下文）+ `handlers.py`（`JOB_HANDLERS` / `JOB_ABANDON_HANDLERS` 分发表）。所有后台任务（摄取/因子/回测/对比/AI/日历预热/GET 补数）统一 `enqueue(job_type, payload, job_key=..., priority=..., batch_id=...)`，支持 `job_key` 幂等去重、`priority` 抢跑、`max_attempts` 重试与批次级取消/暂停。独立 worker 进程入口为 `python -m quant_etf_api.worker`（API 侧配 `QUANT_ETF_JOB_QUEUE_EMBEDDED=false`）。`recover_stuck_jobs()` 仍用于进程重启恢复；运行期由心跳 + 僵尸扫描回收异常任务。
 - **`infra/scheduler/`** — `DailyIngestScheduler` / `AIAnalysisScheduler`: daemon `Thread` + `Event` 定时器，仅负责在预定时间将任务入队（`job_key="daily_ingest"` / `ai_analysis:{date}`），实际执行在任务队列 worker 中，调度线程不做任何同步外部调用。数据摄取调度器不做交易日判断：周末/节假日也会入队，由摄取任务按"最近交易日缺口"决定是否补拉。
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
-  - `common/` — `bar_metrics.py` (BAR computation), `numeric.py`（NaN/Inf 和价格字段容错）、`enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）、`trading_calendar.py`（`TradingCalendarLike` 协议 + 周末兜底实现）
-  - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, UniverseAsset dataclasses)、`rebalance.py`（纯调仓规则，engine/rebalance.py 为兼容转发层）
-  - `portfolio/` — `turnover.py`（换手率）、`returns.py`（T+1 收益）、`benchmark.py`（回测基准收益）、`accounting.py`（`BacktestDayAccumulator` 累计/回撤记账）、`universe.py`（universe 构建与 subset 过滤）
+  - `common/` — `bar_metrics.py` (BAR computation), `numeric.py`（NaN/Inf 和价格字段容错）、`enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）、`trading_calendar.py`（`TradingCalendarLike` 协议 + `TradingCalendarUnavailableError`；**不再有周末兜底实现**，C1）
+  - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, UniverseAsset dataclasses)、`rebalance.py`（纯调仓规则，**日历必填**；engine/rebalance.py 为兼容转发层）
+  - `portfolio/` — `turnover.py`（换手率，含 `TURNOVER_MODEL_DELTA_W`/`TURNOVER_MODEL_LEGACY` 口径常量）、`returns.py`（T+1 收益）、`benchmark.py`（回测基准收益）、`accounting.py`（`BacktestDayAccumulator` 累计/回撤记账）、`universe.py`（universe 构建与 subset 过滤）
   - `market_data/` — `quality.py`（日线、估值与连续性质量规则）
-  - `research/` — 研究评估领域规则（绩效指标、walk-forward 窗口切分）
+  - `research/` — 研究评估领域规则（绩效指标、walk-forward 窗口切分、`stability.py` 稳健性与多档成本并列 `compute_cost_ladder`）
 - **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `normalization.py` (zscore/rank/minmax/winsorize/MAD 横截面标准化), `builtins/`（价格/动量/波动/估值/量能/技术/月线等指数因子 + `index_panel_factors.py` 的指数成分扩散与 RRG 行业匹配两类面板因子）。**指数因子值写入 `index_factor_value` 表；行业/个股数据只作为面板因子的内部输入，不出现在策略资产域**。
 - **`config/`** — Pydantic settings loaded from `.env`
 - **`schemas/`** — 10 个 Pydantic schema 文件：`factor.py`、`market_data.py`、`pagination.py`、`run.py`、`signal.py`、`strategy.py`、`system.py`、`types.py`、`backtest.py`、`__init__.py`
@@ -200,7 +205,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 | Market data | `index_daily_bar`, `index_valuation`, `macro_indicator`, `source_payload_log` |
 | Analytics | `factor_definition`, `index_factor_value`, `signal_definition`, `index_signal` |
 | Runtime | `research_run`, `research_run_item` |
-| Backtest | `backtest_run`（含 progress 列）, `backtest_daily_result`, `backtest_index_result`, `backtest_comparison` |
+| Backtest | `backtest_run`（含 `progress` / `candidate_pool` 列）, `backtest_daily_result`, `backtest_index_result`, `backtest_comparison` |
 | Strategy | `strategy_config` |
 | Task queue | `background_job` |
 
@@ -211,6 +216,9 @@ Key migrations:
 - 0009–0012: 回测模式字段、`index_signal` 表、回测日基准收益和换手率、回测指数原始得分
 - 0013: `trading_calendar` 表、`benchmark_index` 增加 `is_active`/`delisting_date`、`macro_indicator` 增加 `period_date`
 - 0016: `backtest_run` 增加 `progress` 列（回测执行进度 0-100）
+- 0046: 队列容量与可观测性（`background_job` 批次/心跳/取消 + 队列与回测时间戳 timestamptz）
+- 0047: `backtest_run.candidate_pool`（逐日有效候选池时间线，C6）
+- 0048: 回测引用完整性（外键 `ON DELETE CASCADE`/`SET NULL` + 存量悬挂引用预清理，C5）
 
 ### Frontend
 
@@ -231,7 +239,7 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 
 > 因子元数据轴（value_shape/usage/default_params）与“因子中心=正式因子、研究页=独立实验”的研发流程见 [`docs/architecture/因子研发与集成指引.md`](docs/architecture/因子研发与集成指引.md)；行业 RRG/扩散面板仅作为指数级因子的内部数据输入（`rrg_industry_match_score` / `index_diffusion_ratio`），策略配置不含 rotation 模块或行业资产域。
 
-**Backtesting**: `BacktestService` 使用统一 `_run_backtest_loop`。集成 `FactorProvider` 预计算因子、`ContextBuilder` 构建上下文、专业绩效指标（`metrics.py`）、基准对比（`benchmark.py`）。回测收益为**毛收益**：系统当前阶段不考虑实盘交易与交易成本，仅研究策略理想效果。支持调仓频率控制和换手率计算。回测仅支持配置模式（策略需配置 portfolio 模块）。
+**Backtesting**: `BacktestService` 使用统一 `_run_backtest_loop`。集成 `FactorProvider` 预计算因子、`ContextBuilder` 构建上下文、专业绩效指标（`metrics.py`）、基准对比（`benchmark.py`）。回测收益为**毛收益**：系统当前阶段不考虑实盘交易与交易成本，仅研究策略理想效果。支持调仓频率控制和换手率计算（C2 起含清仓/建仓腿）。回测仅支持配置模式（策略需配置 portfolio 模块）。**口径可信度（C1~C6）**：调仓日历严格解析并写入口径指纹（`_calendar_source`）、换手口径有指纹（`_turnover_model`）、净口径多档成本在读取路径并列现算（`stability.cost_ladder`）、任意跨度可直接回测（无强制分段）、删除回测有外键级联/置空 + 悬挂引用审计、候选池逐日时间线落 `backtest_run.candidate_pool`。
 
 **Asset allocation API**: `GET /strategies/{strategy_id}/allocation` runs the full decision pipeline and returns timing signal, asset rankings, and allocation plan.
 
@@ -256,7 +264,7 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 - **Backend venv on Windows**: Executables are at `apps/api/.venv/Scripts/` (e.g. `.venv/Scripts/alembic`, `.venv/Scripts/python`). Source code is at `apps/api/src/quant_etf_api/`.
 - **`universe` 字典 key**: `build_universe_items()` 输出的 universe 字典以 `index_code` 为资产主键，引擎层统一通过 `item["index_code"]` 读取。
 - **AkShare index valuation**: Only 沪深300(000300), 上证50(000016), 中证500(000905) return PE/PB from legulegu.com. Other indexes (000688/399001/399006) return empty — must handle gracefully in frontend.
-- **Backend GET endpoints never return 500**: External API failures are caught/logged, returning `[]`. A 200 OK with empty array can mean either "no data yet" or "upstream error".
+- **Backend GET endpoints never return 500**: External API failures are caught/logged, returning `[]`. A 200 OK with empty array can mean either "no data yet" or "upstream error". **唯一例外是交易日历不可用**：此时返回 503（`main.py` 的 `TradingCalendarUnavailableError` 全局处理器），因为按星期近似的日期/缺口结论比直接报错更危险（C1）。
 - **AkShare API instability**: Upstream network errors (ConnectionResetError, AttributeError) are common. Tests use `_retry_fetch()` with 3 attempts. Frontend pages catch errors silently and show "暂无数据".
 - **数据源架构为单源（P6 已收敛）**: `infra/data_sources/` 多源管理框架（DataSourceManager / CircuitBreaker / 适配器 / Tushare-YFinance 占位）已删除，摄取链路统一走 `infra/clients/`（AkShareFund / AkShareIndex / AkShareMacro / ExchangeReference）。容灾边界 = 单客户端内多端点降级 + `@with_retry`。不要再引入平行数据源抽象层；若未来接入 Tushare 等第二源，需重新设计统一抽象。
 - **多源日线量/额字段单位不统一（暂不处理）**: 五源降级链的 OHLC 点位一致（指数点位无复权概念），但 `volume`/`turnover` 单位混用：腾讯源无 volume（补 0）、成交额单位"元"；中证源成交量"股"、成交额"亿元"（差 1e8 倍）；新浪无成交额；东财通常返回"手"。`_build_index_bars` 只做缺失补 0，无单位归一化；`volume_ratio_*` 对腾讯源指数恒为 None。详见 `docs/架构问题分析.md` 7.2 第 5 条。
@@ -268,7 +276,7 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 - **Engine transform 函数**: 内置变换函数在 `engine/score.py` 的 `_TRANSFORM_REGISTRY` 中注册。新增 transform 只需在该注册表中添加。
 - **FactorProvider 依赖注入**: `FactorProvider` 需要 `db: Session`（实时模式）和 `registry: FactorRegistry`（回测模式）。回测服务在 `__init__` 中构建 `FactorRegistry` 和 `FactorProvider`，通过 `ContextBuilder` 注入。
 - **回测仅支持配置模式**: 策略必须配置 `portfolio` 模块，`create_backtest` 会校验并拒绝无 portfolio 的策略。`backtest_mode` 和 `weighting` 字段已移除。
-- **回测日收益基准（benchmark_return）和换手率（turnover）**: 存储在 `backtest_daily_result` 表中（migration 0011），前端 `BacktestDailyResult` 接口包含这两个可选字段。
+- **回测日收益基准（benchmark_return）和换手率（turnover）**: 存储在 `backtest_daily_result` 表中（migration 0011），前端 `BacktestDailyResult` 接口包含这两个可选字段。**换手口径（C2）**：统一按 `Σ|Δw|/2` 计算，清仓腿（旧仓位 → 空仓）与建仓腿（空仓 → 新仓位）全额计入；新建回测写 `params["_turnover_model"]="delta_w_v2"`，缺该键的存量回测按 `legacy_v1` 标注（`stability.turnover_model`），两者净口径指标**不可直接比较**。回归测试：`tests/unit/test_backtest_turnover.py`。
 - **index_signal 表** (migration 0010): 存储策略引擎对指数的信号计算结果，以 `index_code` 关联指数。
 - **信号等级判定常量**: 定义在 `domain/common/constants.py`（`SIGNAL_THRESHOLD_HIGH=70`、`SIGNAL_THRESHOLD_MID=50`），引擎和回测服务统一引用，避免硬编码散落。
 - **`backtest_index_result.signal_score` / `target_weight`** (migration 0024): 回测信号口径与实时一致 —— `signal_score` 为综合得分（0-100），`target_weight` 为信号目标仓位权重（0-1，与实时 `payload.target_weight` 同义）；原 `original_score` 列已删除（语义与新 `signal_score` 重复）。
@@ -301,8 +309,13 @@ Key rules (details in the doc):
 - **FactorSpec.lookback_days**: 新增因子时必须设置合理的 `lookback_days`（自然日），`FactorService._load_context()` 取所有因子的最大值。参考：5d→15, 20d→40, 60d→90, 估值百分位→730（2年），技术指标→period×1.5+5。
 - **volume_ratio_20d 返回值变更**: 数据不足时返回 `None`（原为 1.0），区分"无数据"与"量比恰好为 1"。`calc_volume_ratio_20d()` 返回 `float | None`，`calc_5d_return()` 仍返回 `float`（默认 0.0）。
 - **BenchmarkIndexModel.is_active**: `ContextBuilder._build_live()` 和 `BacktestService._resolve_index_universe()` 只查询 `is_active=True` 的指数。新增指数默认 `is_active=True`。
-- **TradingCalendar 缓存**: 首次调用时从 AkShare 加载（`tool_trade_date_hist_sina()`），TTL=1 天。`ingest_service.run_daily_ingest` 和 `check_data_freshness` 已接入，不再用 `weekday()>=5`。
-- **rebalance.py 交易日历对齐**: `DefaultRebalanceScheduler` 接受 `TradingCalendar` 实例，周度/月度调仓如遇非交易日自动顺延至下一交易日。
+- **交易日历严格口径与调用点分级（C1）**: 交易日历只接受**真实日历**（上游 Tushare/AkShare 或本地 `trading_calendar` 表快照），`WeekendFallbackCalendar` 已彻底删除。解析入口是 `infra.trading_calendar.resolve_trading_calendar(db, required_range=...)`；"只想探测上游是否可用"用 `TradingCalendar().get_trading_days_set()`（返回 `None` 不抛错），"必须有日历"用 `TradingCalendar().require_trading_days()`（不可用时抛 `TradingCalendarUnavailableError`）。调用点按三类语义处理：① 后台任务/CLI **上抛落 failed**（调用方已有 `mark_failed`/`_fail` 兜底）；② daemon 调度线程 **catch + 记 error + 跳过本轮**（不产出错误结果、不拖死线程）；③ HTTP 读端点返回 **503**（全局异常处理器，`GET /system/data-quality`、`GET /ai-factors/previous-trading-day`、`GET /strategies/{id}/allocation` 等；显式传 `trade_date` 可绕过日历）。回测侧：周度/月度调仓解析失败 → 回测落 `failed`；每日调仓与日历无关，指纹记 `not_required`。来源写 `params["_calendar_source"]`（upstream/database/not_required）并透出为 `stability.calendar_source`，可用 `GET /backtests?calendar_source=` / `cli backtest list --calendar-source` 审计。回归测试：`tests/unit/test_trading_calendar_strict.py`、`test_rebalance_calendar.py`、`test_calendar_http_errors.py`。
+- **rebalance.py 交易日历必填**: `DefaultRebalanceScheduler(trading_calendar)` 的日历是**必填位置参数**，未注入直接 `ValueError`；`_is_nearest_in_window` 不再有"日历异常 → 按星期比较"的降级分支。`BacktestService._run_backtest_loop` 在循环开始前按策略频率解析并注入日历（`_resolve_rebalance_calendar`），`StrategyDecisionService` 同样注入。
+- **回测口径指纹（C1/C2）**: 口径相关信息统一放在 `backtest_run.params` 的 `_` 前缀键：`_execution_model`/`_data_quality_mode`/`_benchmark_index_code`/`_cost_bps`（创建时写入）、`_calendar_source`（执行前解析后立即提交，即使回测随后失败也留痕）、`_turnover_model`（创建时写入）。`BacktestStability` 把 `calendar_source` / `turnover_model` 与 `cost_ladder` / `candidate_pool` 一并返回，前端在详情页展示"口径指纹"。
+- **净口径多档成本在读取路径现算（C3）**: `stability.cost_ladder` 由 `domain/research/stability.py::compute_cost_ladder` 计算（只重算与成本有关的量，O(档位×交易日)），档位来自 `QUANT_ETF_STABILITY_COST_LADDER`（默认 `[0,10,20,30,50]`，0=毛口径）。`GET /backtests/{id}?cost_bps=`、`cli backtest show --cost-bps/--cost-ladder` 只覆盖展示口径，**不落库、不重跑**。
+- **回测跨度不受限制（C4）**: 研究期内任意跨度（1 个月 ~ 研究期全段 10 年）都可单次回测，**不存在**跨度上限、也**不再要求**"> 5 年必须分段"。时间分段只是可选的观察视角（分年度绩效 + 三段一致性）。研究/验证期边界规则不变：研究类回测不得越过 2025-12-31，跨界需 `purpose=validation`。回归测试：`tests/unit/test_backtest_span.py`。
+- **回测删除的引用完整性（C5）**: 迁移 `0048` 后 `backtest_daily_result`/`backtest_index_result`/`backtest_comparison` 对 `backtest_run` 是 `ON DELETE CASCADE`，`strategy_optimization.{baseline,candidate}_backtest_id` 与 `strategy_lifecycle.{research,validation}_backtest_id` 是 `ON DELETE SET NULL`。**JSONB 引用无法加外键**（`robustness_run.variants[*].backtest_ids`、`strategy_optimization.fold_backtests[*].*`），只能靠 `GET /backtests/orphans`（`cli backtest orphans`）审计、`cli backtest prune-dangling-refs [--apply]`（默认预演）清理。`robustness collect` 必须把"回测已删除"计入 `coverage.missing_windows` 而不是 `pending`，否则批次会永远停在 running。删除接口：`DELETE /backtests/{id}?force=` / `cli backtest delete <id> [--force]`（运行中先取消；存在 JSONB 引用默认 409）。
+- **回测有效候选池时间线（C6）**: 主循环对逐日候选池规模做游程编码，随 `mark_success` 写入 `backtest_run.candidate_pool`（迁移 `0047`），读取路径透出为 `stability.candidate_pool`（含 `base_size/min_size/median_size/pool_coverage_ratio/segments/exclusions/truncated_exclusions`），池缩水时追加 `CANDIDATE_POOL_SHRINK` 信息级告警。剔除明细条数上限由 `QUANT_ETF_CANDIDATE_POOL_EXCLUSION_LIMIT`（默认 50）控制；CLI 用 `backtest pool <id>` 查看。
 - **StrategyConfig.index_codes**: 存储在 `config_json` 内部（非独立 DB 列），通过 `**row.config_json` 展开到 engine 的 `StrategyConfig` 模型。前端 API 请求中 `index_codes` 应在 `config_json` 内传递，非顶层字段。非空时 `_filter_by_scope()` 仅保留指定指数（实时和回测模式均生效）。
 - **index_codes 回测强制应用**: `BacktestService.create_backtest()` 检查策略的 `config.index_codes`，非空时强制覆盖 `universe_filter` 为 subset 模式；`ContextBuilder._build_backtest()` 对传入的 index_codes 做交集过滤（双重保护）。
 - **StrategyConfigForm 与 engine/config.py 的 StrategyConfig 同步**: 引擎新增配置模块时，需同步更新 `StrategyConfigForm.vue`（表单）、`StrategyDetailPage.vue`（详情展示）。目前已覆盖全部 7 个模块（score/timing/filters/rank/portfolio/risk/rebalance）+ 资产范围 index_codes。

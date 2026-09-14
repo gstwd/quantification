@@ -4,10 +4,12 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from quant_etf_api.api.middleware import RequestIdMiddleware, RequestLoggingMiddleware
+from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
 from quant_etf_api.api.routers import (
     ai_factors,
     backtests,
@@ -102,6 +104,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
+
+
+@app.exception_handler(TradingCalendarUnavailableError)
+async def trading_calendar_unavailable_handler(
+    request: Request, exc: TradingCalendarUnavailableError
+) -> JSONResponse:
+    """交易日历不可用统一返回 503（严格口径 C1）。
+
+    这是对"GET 端点不返回 500 / 不返回空数组"规则的显式例外：按星期近似
+    得出的日期或缺口结论比直接报错更危险，因此这里明确告知调用方"无法给出
+    正确日期"，并提示可显式传 trade_date 绕过日历。
+    """
+    logger.warning("交易日历不可用: path=%s detail=%s", request.url.path, exc)
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
     CORSMiddleware,

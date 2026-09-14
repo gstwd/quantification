@@ -444,10 +444,17 @@ def handle_factor_computation(payload: dict) -> None:
 
 
 def handle_warm_calendar(payload: dict) -> None:
-    """预热交易日历缓存，避免首个请求触发慢速加载。"""
+    """预热交易日历缓存，避免首个请求触发慢速加载。
+
+    严格口径（C1）：刷新后仍拿不到有效日历时抛错，让任务在 ``queue jobs``
+    中显式落为失败，而不是"预热成功但日历为空"。
+    """
     from quant_etf_api.infra.trading_calendar import TradingCalendar
 
-    TradingCalendar().refresh()
+    calendar = TradingCalendar()
+    calendar.refresh()
+    # 刷新后仍拿不到日历时抛错（含修复指引），让队列记录失败原因
+    calendar.require_trading_days()
 
 
 def handle_industry_daily_ingest(payload: dict) -> None:

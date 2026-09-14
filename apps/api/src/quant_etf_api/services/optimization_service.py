@@ -37,6 +37,7 @@ from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRep
 from quant_etf_api.infra.db.repositories.optimization import OptimizationRepository
 from quant_etf_api.schemas.backtest import BacktestCreateRequest
 from quant_etf_api.schemas.strategy import StrategyConfigCreate, StrategyConfigUpdate
+from quant_etf_api.services.backtest_reference_service import BacktestReferenceService
 from quant_etf_api.services.backtest_service import BacktestService
 from quant_etf_api.services.strategy_config_service import (
     StrategyConfigService,
@@ -132,9 +133,7 @@ class OptimizationService:
             raise ValueError("folds 必须 >= 1")
         # 研究期/验证期硬约束：优化属于研究行为，不得使用验证期数据，
         # 否则"看了样本外再调参"会让验证期失去样本外意义
-        validate_backtest_period(
-            _period_boundaries(), PURPOSE_RESEARCH, start_date, end_date
-        )
+        validate_backtest_period(_period_boundaries(), PURPOSE_RESEARCH, start_date, end_date)
 
         baseline = self._config_svc.get_config(strategy_id)
         if baseline is None:
@@ -248,9 +247,7 @@ class OptimizationService:
         for i, fold in enumerate(fold_list):
             fs = date.fromisoformat(fold["start"])
             fe = date.fromisoformat(fold["end"])
-            b_id = self._run_backtest(
-                session.strategy_id, fs, fe, optimization_id, async_mode
-            )
+            b_id = self._run_backtest(session.strategy_id, fs, fe, optimization_id, async_mode)
             c_id = self._run_backtest(
                 session.candidate_strategy_id, fs, fe, optimization_id, async_mode
             )
@@ -274,9 +271,7 @@ class OptimizationService:
         )
 
         if async_mode:
-            logger.info(
-                "优化会话 %s 已入队 %d 个回测任务", optimization_id, 2 + 2 * len(fold_list)
-            )
+            logger.info("优化会话 %s 已入队 %d 个回测任务", optimization_id, 2 + 2 * len(fold_list))
             return self._to_dict(self._repo.find_by_id(optimization_id))
 
         self._finalize(session)
@@ -355,14 +350,43 @@ class OptimizationService:
     # ── 查询与报告 ────────────────────────────────────────────────────────
 
     def show(self, optimization_id: str) -> dict[str, Any] | None:
-        """返回会话详情；异步回测全部完成后自动补齐指标汇总。"""
+        """返回会话详情；异步回测全部完成后自动补齐指标汇总。
+
+        额外返回 ``missing_backtest_ids``（C5）：会话引用的回测若已被删除，
+        指标会静默变成 None，这里显式列出，避免把"数据缺失"读成"指标为 0"。
+        """
         session = self._repo.find_by_id(optimization_id)
         if session is None:
             return None
         if session.fold_summary is None:
             self._finalize_if_ready(session)
             session = self._repo.find_by_id(optimization_id)
-        return self._to_dict(session)
+        payload = self._to_dict(session)
+        payload["missing_backtest_ids"] = self._missing_backtest_ids(session)
+        return payload
+
+    def _missing_backtest_ids(self, session: StrategyOptimizationModel) -> list[str]:
+        """返回会话引用的、但已不存在的回测 ID（保序去重）。
+
+        Args:
+            session: 优化会话 ORM 行。
+
+        Returns:
+            已不存在的回测 ID 列表。
+        """
+        referenced: list[str] = []
+        if session.baseline_backtest_id:
+            referenced.append(session.baseline_backtest_id)
+        if session.candidate_backtest_id:
+            referenced.append(session.candidate_backtest_id)
+        for fold in session.fold_backtests or []:
+            for key in ("baseline_backtest_id", "candidate_backtest_id"):
+                value = fold.get(key)
+                if value:
+                    referenced.append(value)
+        if not referenced:
+            return []
+        return BacktestReferenceService(self._db).missing_ids_for(referenced)
 
     def list(
         self,
@@ -407,6 +431,17 @@ class OptimizationService:
         lines.append(f"| 评估区间 | {session.start_date} ~ {session.end_date} |")
         lines.append(f"| 验证窗口数 | {len(session.folds or [])} |")
         lines.append("")
+        missing_ids = self._missing_backtest_ids(session)
+        if missing_ids:
+            # C5：回测被删除后指标会静默变成 None，报告里必须显式标注，
+            # 否则复核者会把"数据缺失"误读为"指标为 0/未改善"
+            lines.append("## ⚠ 缺失引用")
+            lines.append("")
+            lines.append(
+                f"以下 {len(missing_ids)} 个回测已不存在，对应指标为缺失而非 0："
+                f"{', '.join(missing_ids[:10])}"
+            )
+            lines.append("")
         lines.append("## 假设")
         lines.append("")
         lines.append(session.hypothesis)
@@ -609,9 +644,7 @@ class OptimizationService:
             return None
         return row.metrics or None
 
-    def _acceptance_checklist(
-        self, session: StrategyOptimizationModel
-    ) -> list[dict[str, Any]]:
+    def _acceptance_checklist(self, session: StrategyOptimizationModel) -> list[dict[str, Any]]:
         """按默认阈值计算验收清单（严格模式强制全部通过）。"""
         summary_metrics = (session.fold_summary or {}).get("metrics", {})
         sharpe = summary_metrics.get("sharpe_ratio", {})
@@ -728,9 +761,7 @@ class OptimizationService:
             bool(neighborhood.get("is_plateau")) and not bool(neighborhood.get("reversal")),
         )
 
-    def _check_segment_consistency(
-        self, session: StrategyOptimizationModel
-    ) -> dict[str, Any]:
+    def _check_segment_consistency(self, session: StrategyOptimizationModel) -> dict[str, Any]:
         """要求改善不是只来自某一个验证折（剔除最好折后仍不劣于基线）。
 
         Args:
@@ -828,9 +859,7 @@ def _compute_fold_summary(metrics_folds: list[dict[str, Any]]) -> dict[str, Any]
             "candidate_mean": _mean(candidate_values),
             "baseline_median": _median(baseline_values),
             "candidate_median": _median(candidate_values),
-            "candidate_wins": sum(
-                1 for a, b in zip(baseline_values, candidate_values) if b > a
-            ),
+            "candidate_wins": sum(1 for a, b in zip(baseline_values, candidate_values) if b > a),
             "total_folds": len(metrics_folds),
         }
     return summary

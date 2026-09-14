@@ -14,7 +14,11 @@ from quant_etf_api.domain.portfolio.returns import (
     count_missing_rebalance_assets,
     get_index_return,
 )
-from quant_etf_api.domain.portfolio.turnover import compute_turnover
+from quant_etf_api.domain.portfolio.turnover import (
+    TURNOVER_MODEL_DELTA_W,
+    TURNOVER_MODEL_LEGACY,
+    compute_turnover,
+)
 from quant_etf_api.domain.portfolio.universe import (
     build_universe_items,
     filter_universe_rows,
@@ -22,6 +26,8 @@ from quant_etf_api.domain.portfolio.universe import (
 
 __all__ = [
     "BacktestDayAccumulator",
+    "TURNOVER_MODEL_DELTA_W",
+    "TURNOVER_MODEL_LEGACY",
     "build_universe_items",
     "compute_buy_hold_benchmark",
     "compute_equal_weight_benchmark",

@@ -148,7 +148,7 @@ class FactorDefinitionModel(Base):
         JSON,
         nullable=False,
         default=list,
-        server_default=sa.text("'[\"timing\",\"score\",\"filter\",\"rank\"]'::json"),
+        server_default=sa.text('\'["timing","score","filter","rank"]\'::json'),
         comment="适用位置：timing/score/filter/rank（rotation_input 为历史遗留值）",
     )
     default_params: Mapped[dict | None] = mapped_column(
@@ -468,6 +468,10 @@ class BacktestRunModel(Base):
         String(64),
         comment="关联的策略优化会话 ID（由优化 CLI 写入），普通回测为 NULL",
     )
+    candidate_pool: Mapped[dict | None] = mapped_column(
+        JSONB,
+        comment="逐日有效候选池时间线（游程编码）与数据缺口剔除区间（C6），由回测成功收尾时写入",
+    )
 
 
 class BacktestDailyResultModel(Base):
@@ -483,7 +487,9 @@ class BacktestDailyResultModel(Base):
         BigInteger, primary_key=True, autoincrement=True, comment="自增主键"
     )
     backtest_id: Mapped[str] = mapped_column(
-        ForeignKey("backtest_run.backtest_id"), nullable=False, comment="所属回测 ID"
+        ForeignKey("backtest_run.backtest_id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属回测 ID（回测删除时级联清理）",
     )
     trade_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="交易日期")
     portfolio_return: Mapped[float] = mapped_column(
@@ -535,7 +541,9 @@ class BacktestIndexResultModel(Base):
         BigInteger, primary_key=True, autoincrement=True, comment="自增主键"
     )
     backtest_id: Mapped[str] = mapped_column(
-        ForeignKey("backtest_run.backtest_id"), nullable=False, comment="所属回测 ID"
+        ForeignKey("backtest_run.backtest_id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属回测 ID（回测删除时级联清理）",
     )
     trade_date: Mapped[Date] = mapped_column(Date, nullable=False, comment="信号生成日期（T 日）")
     index_code: Mapped[str] = mapped_column(
@@ -544,7 +552,9 @@ class BacktestIndexResultModel(Base):
         comment="资产代码（统一为 benchmark_index 指数代码）",
     )
     signal_score: Mapped[float] = mapped_column(
-        Float, nullable=False, comment="信号综合得分，0-100（与实时 index_signal.signal_score 同义）"
+        Float,
+        nullable=False,
+        comment="信号综合得分，0-100（与实时 index_signal.signal_score 同义）",
     )
     signal_level: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="信号等级：HIGH/MID/LOW"
@@ -579,14 +589,14 @@ class BacktestComparisonModel(Base):
     strategy_a_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="策略 A 的 ID")
     strategy_b_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="策略 B 的 ID")
     backtest_a_id: Mapped[str] = mapped_column(
-        ForeignKey("backtest_run.backtest_id"),
+        ForeignKey("backtest_run.backtest_id", ondelete="CASCADE"),
         nullable=False,
-        comment="策略 A 的子回测 ID",
+        comment="策略 A 的子回测 ID（回测删除时级联清理对比记录）",
     )
     backtest_b_id: Mapped[str] = mapped_column(
-        ForeignKey("backtest_run.backtest_id"),
+        ForeignKey("backtest_run.backtest_id", ondelete="CASCADE"),
         nullable=False,
-        comment="策略 B 的子回测 ID",
+        comment="策略 B 的子回测 ID（回测删除时级联清理对比记录）",
     )
     start_date: Mapped[Date] = mapped_column(
         Date, nullable=False, comment="回测起始日期（两个策略共享）"
@@ -724,9 +734,7 @@ class StrategyOptimizationModel(Base):
     optimization_id: Mapped[str] = mapped_column(
         String(64), primary_key=True, comment="优化会话唯一 ID"
     )
-    strategy_id: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="基线策略 ID"
-    )
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="基线策略 ID")
     baseline_version: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="基线策略版本"
     )
@@ -751,20 +759,20 @@ class StrategyOptimizationModel(Base):
         default="running",
         comment="状态：running/evaluated/accepted/rejected/failed",
     )
-    start_date: Mapped[date] = mapped_column(
-        Date, nullable=False, comment="评估区间起始日期（含）"
-    )
-    end_date: Mapped[date] = mapped_column(
-        Date, nullable=False, comment="评估区间截止日期（含）"
-    )
+    start_date: Mapped[date] = mapped_column(Date, nullable=False, comment="评估区间起始日期（含）")
+    end_date: Mapped[date] = mapped_column(Date, nullable=False, comment="评估区间截止日期（含）")
     folds: Mapped[list | None] = mapped_column(
         JSONB, comment="验证折边界列表，元素为 {start, end} 字典"
     )
     baseline_backtest_id: Mapped[str | None] = mapped_column(
-        String(64), comment="基线策略全区间回测 ID"
+        String(64),
+        ForeignKey("backtest_run.backtest_id", ondelete="SET NULL"),
+        comment="基线策略全区间回测 ID（回测删除时置空）",
     )
     candidate_backtest_id: Mapped[str | None] = mapped_column(
-        String(64), comment="候选策略全区间回测 ID"
+        String(64),
+        ForeignKey("backtest_run.backtest_id", ondelete="SET NULL"),
+        comment="候选策略全区间回测 ID（回测删除时置空）",
     )
     fold_backtests: Mapped[list | None] = mapped_column(
         JSONB,
@@ -779,9 +787,7 @@ class StrategyOptimizationModel(Base):
     fold_summary: Mapped[dict | None] = mapped_column(
         JSONB, comment="逐折聚合统计：均值/中位数/候选胜出折数"
     )
-    report: Mapped[str | None] = mapped_column(
-        Text, comment="最终优化报告 Markdown 全文"
-    )
+    report: Mapped[str | None] = mapped_column(Text, comment="最终优化报告 Markdown 全文")
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, comment="会话创建时间（UTC）"
     )
@@ -875,21 +881,36 @@ class DataHealthSnapshotModel(Base):
     )
     partition_name: Mapped[str | None] = mapped_column(String(128), comment="分区展示名称")
     health_status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="unknown", comment="healthy/warning/error/unknown/unsupported"
+        String(16),
+        nullable=False,
+        default="unknown",
+        comment="healthy/warning/error/unknown/unsupported",
     )
     source_name: Mapped[str | None] = mapped_column(String(128), comment="最近实际提供数据的来源")
     earliest_date: Mapped[date | None] = mapped_column(Date, comment="库内最早业务日期")
     latest_date: Mapped[date | None] = mapped_column(Date, comment="库内最新业务日期")
     expected_date: Mapped[date | None] = mapped_column(Date, comment="按数据集规则计算的目标日期")
-    record_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="记录数量")
-    missing_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="缺口数量")
-    invalid_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="字段异常数量")
+    record_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="记录数量"
+    )
+    missing_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="缺口数量"
+    )
+    invalid_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="字段异常数量"
+    )
     issue_summary: Mapped[dict | None] = mapped_column(JSON, comment="当前问题摘要与样例")
     last_run_id: Mapped[str | None] = mapped_column(String(64), comment="最近维护运行 ID")
     last_run_status: Mapped[str | None] = mapped_column(String(32), comment="最近维护运行状态")
-    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最近检查时间（UTC）")
-    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最近同步尝试时间（UTC）")
-    last_success_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最近成功同步时间（UTC）")
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="最近检查时间（UTC）"
+    )
+    last_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="最近同步尝试时间（UTC）"
+    )
+    last_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="最近成功同步时间（UTC）"
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow, comment="快照更新时间（UTC）"
     )
@@ -1047,9 +1068,7 @@ class MarketSynthesisModel(Base):
     trade_date: Mapped[date] = mapped_column(
         Date, unique=True, nullable=False, comment="交易日，每天一条综合研判"
     )
-    content: Mapped[str] = mapped_column(
-        Text, nullable=False, comment="200-300 字中文市场研判正文"
-    )
+    content: Mapped[str] = mapped_column(Text, nullable=False, comment="200-300 字中文市场研判正文")
     sentiment_summary: Mapped[dict] = mapped_column(
         JSON, nullable=False, default=dict, comment="关键指数情绪摘要"
     )
@@ -1082,9 +1101,7 @@ class KeywordTagConfigModel(Base):
     keyword: Mapped[str] = mapped_column(
         String(128), unique=True, nullable=False, comment="匹配关键词"
     )
-    tag: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="映射到的资产标签"
-    )
+    tag: Mapped[str] = mapped_column(String(64), nullable=False, comment="映射到的资产标签")
     is_active: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False, comment="是否启用"
     )
@@ -1206,9 +1223,7 @@ class RobustnessRunModel(Base):
     robustness_id: Mapped[str] = mapped_column(
         String(64), primary_key=True, comment="稳健性验证唯一 ID，UUID 格式"
     )
-    strategy_id: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="基线策略 ID"
-    )
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="基线策略 ID")
     strategy_version: Mapped[str] = mapped_column(
         String(32), nullable=False, default="", comment="基线策略版本号"
     )
@@ -1226,12 +1241,8 @@ class RobustnessRunModel(Base):
         default="running",
         comment="状态：running=执行中，success=汇总完成，failed=失败",
     )
-    start_date: Mapped[date] = mapped_column(
-        Date, nullable=False, comment="验证区间起始日期（含）"
-    )
-    end_date: Mapped[date] = mapped_column(
-        Date, nullable=False, comment="验证区间截止日期（含）"
-    )
+    start_date: Mapped[date] = mapped_column(Date, nullable=False, comment="验证区间起始日期（含）")
+    end_date: Mapped[date] = mapped_column(Date, nullable=False, comment="验证区间截止日期（含）")
     windows: Mapped[list | None] = mapped_column(
         JSONB, comment="评估窗口列表，元素为 {label, start, end}"
     )
@@ -1275,9 +1286,7 @@ class StrategyLifecycleModel(Base):
 
     __tablename__ = "strategy_lifecycle"
 
-    strategy_id: Mapped[str] = mapped_column(
-        String(64), primary_key=True, comment="策略 ID"
-    )
+    strategy_id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="策略 ID")
     lifecycle_status: Mapped[str] = mapped_column(
         String(16),
         nullable=False,
@@ -1287,9 +1296,7 @@ class StrategyLifecycleModel(Base):
     live_at: Mapped[date] = mapped_column(
         Date, nullable=False, comment="标记上线的业务日期（含），监控区间起点"
     )
-    retired_at: Mapped[date | None] = mapped_column(
-        Date, comment="退役日期，未退役时为 NULL"
-    )
+    retired_at: Mapped[date | None] = mapped_column(Date, comment="退役日期，未退役时为 NULL")
     frozen_config_hash: Mapped[str] = mapped_column(
         String(64), nullable=False, default="", comment="上线时冻结的配置哈希"
     )
@@ -1297,10 +1304,14 @@ class StrategyLifecycleModel(Base):
         JSONB, comment="上线时冻结的配置快照（元数据 + config_json）"
     )
     research_backtest_id: Mapped[str | None] = mapped_column(
-        String(64), comment="研究期（2016-01-01~2025-12-31）基线回测 ID"
+        String(64),
+        ForeignKey("backtest_run.backtest_id", ondelete="SET NULL"),
+        comment="研究期（2016-01-01~2025-12-31）基线回测 ID（回测删除时置空）",
     )
     validation_backtest_id: Mapped[str | None] = mapped_column(
-        String(64), comment="最近一次验证期（上线后）回测 ID，每次刷新更新"
+        String(64),
+        ForeignKey("backtest_run.backtest_id", ondelete="SET NULL"),
+        comment="最近一次验证期（上线后）回测 ID，每次刷新更新（回测删除时置空）",
     )
     baseline_distribution: Mapped[dict | None] = mapped_column(
         JSONB,
@@ -1343,27 +1354,21 @@ class StrategyHealthSnapshotModel(Base):
     id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, autoincrement=True, comment="自增主键"
     )
-    strategy_id: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="策略 ID"
-    )
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="策略 ID")
     as_of_date: Mapped[date] = mapped_column(
         Date, nullable=False, comment="快照对应的业务日期（监控区间截止日）"
     )
     live_start: Mapped[date] = mapped_column(
         Date, nullable=False, comment="监控区间起始日（即上线日）"
     )
-    live_end: Mapped[date] = mapped_column(
-        Date, nullable=False, comment="监控区间截止日"
-    )
+    live_end: Mapped[date] = mapped_column(Date, nullable=False, comment="监控区间截止日")
     metrics: Mapped[dict | None] = mapped_column(
         JSONB, comment="体检指标：滚动收益/超额分位/回撤分位/IC/净成本口径等"
     )
     health_level: Mapped[str] = mapped_column(
         String(16), nullable=False, comment="健康等级：HEALTHY/WATCH/WARNING/CRITICAL"
     )
-    diagnosis: Mapped[str] = mapped_column(
-        String(32), nullable=False, comment="诊断结论"
-    )
+    diagnosis: Mapped[str] = mapped_column(String(32), nullable=False, comment="诊断结论")
     recommended_action: Mapped[str] = mapped_column(
         String(16), nullable=False, comment="建议动作：KEEP/WATCH/REDUCE_RISK/RESEARCH"
     )

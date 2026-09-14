@@ -107,6 +107,12 @@ class BacktestStability(BaseModel):
         execution_model: 该回测使用的执行模型。
         data_quality_mode: 数据缺口提示口径。
         benchmark_index_code: 基准指数代码，未启用基准时为 None。
+        calendar_source: 调仓日历来源（upstream/database/not_required），
+            None 表示该回测早于 C1 口径指纹引入（无法判定）。
+        turnover_model: 换手口径（delta_w_v2=计入清仓/建仓腿；
+            legacy_v1=历史口径，未计入）。
+        cost_ladder: 多档成本并列的净口径指标（C3）。
+        candidate_pool: 逐日有效候选池时间线（C6），存量回测为 None。
         annualized_turnover: 年化单边换手率（倍）。
         cost_drag_pct_per_year: 成本拖累（百分点/年）。
         net_cumulative_return_pct: 扣成本后累计收益率（%）。
@@ -134,6 +140,10 @@ class BacktestStability(BaseModel):
     execution_model: str | None = None
     data_quality_mode: str | None = None
     benchmark_index_code: str | None = None
+    calendar_source: str | None = None
+    turnover_model: str | None = None
+    cost_ladder: list[CostLadderEntry] = Field(default_factory=list)
+    candidate_pool: BacktestCandidatePool | None = None
     annualized_turnover: float = 0.0
     cost_drag_pct_per_year: float = 0.0
     net_cumulative_return_pct: float = 0.0
@@ -155,6 +165,156 @@ class BacktestStability(BaseModel):
     max_drawdown_days: int = 0
     average_exposure: float | None = None
     position_concentration: float | None = None
+
+
+class CostLadderEntry(BaseModel):
+    """单个成本档位下的净口径指标（C3）。
+
+    Attributes:
+        cost_bps: 该档位的单边交易成本（基点），0 表示毛口径。
+        net_cumulative_return_pct: 扣成本后累计收益率（%）。
+        net_annualized_return_pct: 扣成本后年化收益率（%）。
+        net_sharpe_ratio: 扣成本后年化夏普比率。
+        net_excess_return_pct: 扣成本后相对基准的年化超额（百分点），无基准时为 None。
+        cost_drag_pct_per_year: 该档位的成本拖累（百分点/年）。
+    """
+
+    cost_bps: float
+    net_cumulative_return_pct: float
+    net_annualized_return_pct: float
+    net_sharpe_ratio: float
+    net_excess_return_pct: float | None = None
+    cost_drag_pct_per_year: float = 0.0
+
+
+class CandidatePoolSegment(BaseModel):
+    """有效候选池规模的游程段（C6）。
+
+    Attributes:
+        start_date: 该段起始交易日（含）。
+        end_date: 该段结束交易日（含）。
+        trading_days: 该段交易日数。
+        size: 该段逐日有效候选池规模（指数个数）。
+    """
+
+    start_date: date
+    end_date: date
+    trading_days: int
+    size: int
+
+
+class CandidatePoolExclusion(BaseModel):
+    """因数据缺失被剔除的指数—日期区间（C6）。
+
+    Attributes:
+        index_code: 指数代码。
+        first_date: 首次被剔除的交易日。
+        last_date: 末次被剔除的交易日。
+        trading_days: 被剔除的交易日数。
+        reasons: 剔除原因集合（MISSING_CLOSE / MISSING_FACTOR / MISSING_OPEN /
+            MISSING_HIGH_LOW）。
+    """
+
+    index_code: str
+    first_date: date
+    last_date: date
+    trading_days: int
+    reasons: list[str] = Field(default_factory=list)
+
+
+class BacktestCandidatePool(BaseModel):
+    """回测逐日"有效候选池"时间线（C6）。
+
+    回测只在 warnings 里给一条汇总提示时，看不出"早期实际可交易池只有 13~16 个"；
+    本结构给出逐日规模（游程编码）与剔除区间，用于判断早期结论是否建立在
+    缩水的候选池上。
+
+    Attributes:
+        base_size: 回测标的池的理论规模（策略限定范围后的指数个数）。
+        min_size: 逐日有效候选池的最小规模。
+        max_size: 逐日有效候选池的最大规模。
+        median_size: 逐日有效候选池的中位数规模。
+        trading_days: 参与统计的交易日数。
+        pool_coverage_ratio: 逐日有效规模之和 / (理论规模 × 交易日数)。
+        segments: 规模游程段（连续相同规模合并）。
+        exclusions: 因数据缺失被剔除的指数—日期区间（按天数降序、已截断）。
+        truncated_exclusions: 剔除明细是否被截断。
+    """
+
+    base_size: int
+    min_size: int
+    max_size: int
+    median_size: int
+    trading_days: int
+    pool_coverage_ratio: float
+    segments: list[CandidatePoolSegment] = Field(default_factory=list)
+    exclusions: list[CandidatePoolExclusion] = Field(default_factory=list)
+    truncated_exclusions: bool = False
+
+
+class DanglingReferenceItem(BaseModel):
+    """一条悬挂引用（C5）：持有者引用的回测已不存在。
+
+    Attributes:
+        holder: 持有者类型（robustness_run.variants / strategy_optimization /
+            strategy_optimization.fold_backtests）。
+        holder_id: 持有者主键（批次 ID / 优化会话 ID）。
+        field: 持有者内部字段路径。
+        missing_backtest_ids: 已不存在的回测 ID 列表。
+    """
+
+    holder: str
+    holder_id: str
+    field: str
+    missing_backtest_ids: list[str] = Field(default_factory=list)
+
+
+class DanglingReferenceReport(BaseModel):
+    """悬挂引用审计报告（C5）。
+
+    Attributes:
+        total: 悬挂引用条数（按回测 ID 计）。
+        items: 明细（最多 limit 条）。
+    """
+
+    total: int = 0
+    items: list[DanglingReferenceItem] = Field(default_factory=list)
+
+
+class BacktestDeleteResponse(BaseModel):
+    """回测删除结果（C5）。
+
+    Attributes:
+        backtest_id: 被删除的回测 ID。
+        deleted: 是否确实删除了记录。
+        holders: 删除前检测到的引用持有者（JSONB 类引用需 force 才会删除）。
+        candidate_pool_removed: 说明日结果/对比记录由外键级联清理。
+    """
+
+    backtest_id: str
+    deleted: bool
+    holders: list[DanglingReferenceItem] = Field(default_factory=list)
+    message: str
+
+
+class BacktestPruneResponse(BaseModel):
+    """JSONB 悬挂引用清理结果（C5）。
+
+    Attributes:
+        dry_run: 是否为预演（True 时不写库）。
+        robustness_batches: 被处理的稳健性批次数量。
+        removed_windows: 移除的窗口引用数量。
+        optimization_sessions: 被处理的优化会话数量。
+        nulled_folds: 置空的折回测引用数量。
+        items: 明细（批次/会话级）。
+    """
+
+    dry_run: bool = True
+    robustness_batches: int = 0
+    removed_windows: int = 0
+    optimization_sessions: int = 0
+    nulled_folds: int = 0
+    items: list[DanglingReferenceItem] = Field(default_factory=list)
 
 
 class ValidationUsageItem(BaseModel):

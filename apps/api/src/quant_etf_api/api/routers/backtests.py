@@ -17,10 +17,12 @@ from quant_etf_api.schemas.backtest import (
     BacktestComparisonSummary,
     BacktestCreateRequest,
     BacktestDailyResult,
+    BacktestDeleteResponse,
     BacktestDetail,
     BacktestIndexResult,
     BacktestSummary,
     ComparisonDailyResponse,
+    DanglingReferenceReport,
     ValidationUsageResponse,
 )
 from quant_etf_api.schemas.pagination import PaginatedResponse
@@ -43,7 +45,8 @@ def create_backtest(req: BacktestCreateRequest, db: Session = Depends(get_db)) -
         # 回测区间越过研究期边界 → 422
         raise HTTPException(status_code=422, detail=str(e))
     get_job_queue().enqueue(
-        "backtest", {"backtest_id": summary.backtest_id},
+        "backtest",
+        {"backtest_id": summary.backtest_id},
         job_key=backtest_job_key(summary.backtest_id),
     )
     return summary
@@ -64,6 +67,20 @@ def get_validation_usage(
     return BacktestService(db).list_validation_usage(limit=limit)
 
 
+# 同样必须定义在 /backtests/{backtest_id} 之前
+@router.get("/backtests/orphans", response_model=DanglingReferenceReport)
+def list_orphan_references(
+    limit: int = Query(default=200, ge=1, le=2000, description="明细条数上限"),
+    db: Session = Depends(get_db),
+) -> DanglingReferenceReport:
+    """审计指向已删除回测的悬挂引用（C5）。
+
+    稳健性变体的窗口映射与优化会话的折窗口存放在 JSONB 中，无法加外键；
+    删除回测后这些引用会变成"静默 None"，本端点把它们显式列出来。
+    """
+    return BacktestService(db).find_dangling_references(limit=limit)
+
+
 @router.get("/backtests", response_model=PaginatedResponse[BacktestSummary])
 def list_backtests(
     offset: int = Query(default=0, ge=0),
@@ -82,9 +99,13 @@ def list_backtests(
         default="created_at", description="排序字段"
     ),
     descending: bool = Query(default=True, description="是否倒序"),
+    calendar_source: Literal["upstream", "database", "not_required"] | None = Query(
+        default=None,
+        description="调仓日历来源过滤（C1）：用于审计同一配置是否跑在两套日历上",
+    ),
     db: Session = Depends(get_db),
 ) -> PaginatedResponse[BacktestSummary]:
-    """分页返回回测列表，支持状态/用途/策略/时间范围筛选与排序（B4）。"""
+    """分页返回回测列表，支持状态/用途/策略/时间范围/日历来源筛选（B4/C1）。"""
     if created_from and created_to and created_from > created_to:
         raise HTTPException(status_code=422, detail="创建日期起点不能晚于终点")
     items, total = BacktestService(db).list_backtests(
@@ -97,6 +118,7 @@ def list_backtests(
         purpose=purpose,
         order_by=order_by,
         descending=descending,
+        calendar_source=calendar_source,
     )
     return PaginatedResponse(items=items, total=total, offset=offset, limit=limit)
 
@@ -167,12 +189,41 @@ def get_comparison_daily(
 
 
 @router.get("/backtests/{backtest_id}", response_model=BacktestDetail)
-def get_backtest(backtest_id: str, db: Session = Depends(get_db)) -> BacktestDetail:
-    """返回回测详情，含配置信息和汇总指标。"""
-    detail = BacktestService(db).get_backtest(backtest_id)
+def get_backtest(
+    backtest_id: str,
+    cost_bps: float | None = Query(
+        default=None,
+        ge=0.0,
+        description="净口径成本覆盖（基点，C3）；留空使用回测固化的成本。"
+        "多档成本始终并列返回在 stability.cost_ladder",
+    ),
+    db: Session = Depends(get_db),
+) -> BacktestDetail:
+    """返回回测详情，含配置信息、口径指纹、多档成本与候选池时间线。"""
+    detail = BacktestService(db).get_backtest(backtest_id, cost_bps=cost_bps)
     if detail is None:
         raise HTTPException(status_code=404, detail="回测记录不存在")
     return detail
+
+
+@router.delete("/backtests/{backtest_id}", response_model=BacktestDeleteResponse)
+def delete_backtest(
+    backtest_id: str,
+    force: bool = Query(default=False, description="存在 JSONB 引用时是否强制删除"),
+    db: Session = Depends(get_db),
+) -> BacktestDeleteResponse:
+    """删除回测记录（C5）。
+
+    日结果/对比记录由外键级联清理，优化与生命周期上的回测列置空；
+    稳健性变体与优化折窗口的 JSONB 引用无法加外键，因此存在引用时
+    默认拒绝（409），需显式 force 才会删除。
+    """
+    try:
+        return BacktestService(db).delete_backtest(backtest_id, force=force)
+    except ValueError as e:
+        detail = str(e)
+        status_code = 404 if "不存在" in detail else 409
+        raise HTTPException(status_code=status_code, detail=detail)
 
 
 @router.post(

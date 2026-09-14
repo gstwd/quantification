@@ -75,6 +75,11 @@ class TestTurnoverAndReturns:
         curr = {"a": 0.8, "b": 0.2}
         assert compute_turnover(prev, curr) == pytest.approx(0.3)
 
+    def test_compute_turnover_includes_open_close_legs(self) -> None:
+        """C2：建仓腿与清仓腿同样计入换手（不再因一侧为空而记 0）。"""
+        assert compute_turnover({}, {"a": 1.0}) == pytest.approx(0.5)
+        assert compute_turnover({"a": 1.0}, {}) == pytest.approx(0.5)
+
     def test_get_index_return(self) -> None:
         """T+1 收益率按收盘价计算。"""
         bars = {
@@ -102,17 +107,16 @@ class TestTurnoverAndReturns:
             ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0, open_price=None),
             ("a", date(2025, 1, 16)): SimpleNamespace(close_price=105.0, open_price=None),
         }
-        assert compute_close_execution_return(
-            {"a": 1.0}, date(2025, 1, 15), date(2025, 1, 16), bars
-        ) == 5.0
+        assert (
+            compute_close_execution_return({"a": 1.0}, date(2025, 1, 15), date(2025, 1, 16), bars)
+            == 5.0
+        )
 
     def test_compute_rebalance_day_return_split(self) -> None:
         """调仓日收益拆分为旧仓位隔夜段 + 新仓位日内段。"""
         bars = {
             ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
-            ("a", date(2025, 1, 16)): SimpleNamespace(
-                open_price=102.0, close_price=104.0
-            ),
+            ("a", date(2025, 1, 16)): SimpleNamespace(open_price=102.0, close_price=104.0),
         }
         # 旧仓位 100% 持有 a：隔夜段 = 102/100 - 1 = 2%
         # 新仓位 100% 持有 a：日内段 = 104/102 - 1 ≈ 1.9608%
@@ -130,13 +134,9 @@ class TestTurnoverAndReturns:
         """调仓换仓：旧仓位吃隔夜，新仓位吃日内。"""
         bars = {
             ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
-            ("a", date(2025, 1, 16)): SimpleNamespace(
-                open_price=101.0, close_price=102.0
-            ),
+            ("a", date(2025, 1, 16)): SimpleNamespace(open_price=101.0, close_price=102.0),
             ("b", date(2025, 1, 15)): SimpleNamespace(close_price=200.0),
-            ("b", date(2025, 1, 16)): SimpleNamespace(
-                open_price=210.0, close_price=200.0
-            ),
+            ("b", date(2025, 1, 16)): SimpleNamespace(open_price=210.0, close_price=200.0),
         }
         # 旧仓位 a：隔夜 101/100 - 1 = 1%
         # 新仓位 b：日内 200/210 - 1 ≈ -4.7619%
@@ -187,17 +187,18 @@ class TestTurnoverAndReturns:
             ("a", date(2025, 1, 16)): SimpleNamespace(close_price=103.0),
             # open 为 NaN → 隔夜/日内两段均为 None
             ("b", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
-            ("b", date(2025, 1, 16)): SimpleNamespace(
-                open_price=float("nan"), close_price=102.0
-            ),
+            ("b", date(2025, 1, 16)): SimpleNamespace(open_price=float("nan"), close_price=102.0),
         }
         assert get_index_return("a", date(2025, 1, 15), date(2025, 1, 16), bars) is None
-        assert compute_allocation_return(
-            {"a": 1.0}, date(2025, 1, 15), date(2025, 1, 16), bars
-        ) == 0.0
-        assert compute_rebalance_day_return(
-            {"b": 1.0}, {"b": 1.0}, date(2025, 1, 15), date(2025, 1, 16), bars
-        ) == 0.0
+        assert (
+            compute_allocation_return({"a": 1.0}, date(2025, 1, 15), date(2025, 1, 16), bars) == 0.0
+        )
+        assert (
+            compute_rebalance_day_return(
+                {"b": 1.0}, {"b": 1.0}, date(2025, 1, 15), date(2025, 1, 16), bars
+            )
+            == 0.0
+        )
 
     def test_count_missing_allocation_assets(self) -> None:
         """持仓中缺行情的资产计数（B10）。"""
@@ -220,13 +221,9 @@ class TestTurnoverAndReturns:
         """调仓日旧/新仓位任一腿缺失都计数（B10）。"""
         bars = {
             ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
-            ("a", date(2025, 1, 16)): SimpleNamespace(
-                open_price=float("nan"), close_price=102.0
-            ),
+            ("a", date(2025, 1, 16)): SimpleNamespace(open_price=float("nan"), close_price=102.0),
             ("b", date(2025, 1, 15)): SimpleNamespace(close_price=200.0),
-            ("b", date(2025, 1, 16)): SimpleNamespace(
-                open_price=210.0, close_price=200.0
-            ),
+            ("b", date(2025, 1, 16)): SimpleNamespace(open_price=210.0, close_price=200.0),
         }
         assert (
             count_missing_rebalance_assets(

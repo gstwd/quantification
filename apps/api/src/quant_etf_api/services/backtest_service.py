@@ -16,14 +16,21 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
-from quant_etf_api.domain.common.signal_level import determine_signal_level
+from quant_etf_api.config.settings import get_settings
 from quant_etf_api.domain.common.numeric import (
     price_invalid as _price_invalid,
+)
+from quant_etf_api.domain.common.numeric import (
     safe_metric_diff as _safe_metric_diff,
+)
+from quant_etf_api.domain.common.numeric import (
     sanitize_metric_value as _sanitize_metric_value,
 )
+from quant_etf_api.domain.common.signal_level import determine_signal_level
 from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
+from quant_etf_api.domain.portfolio.benchmark import compute_buy_hold_benchmark
 from quant_etf_api.domain.portfolio.returns import (
     compute_allocation_return,
     compute_close_execution_return,
@@ -32,71 +39,108 @@ from quant_etf_api.domain.portfolio.returns import (
     count_missing_rebalance_assets,
     get_index_return,
 )
-from quant_etf_api.domain.portfolio.turnover import compute_turnover
+from quant_etf_api.domain.portfolio.turnover import (
+    TURNOVER_MODEL_DELTA_W,
+    TURNOVER_MODEL_LEGACY,
+    compute_turnover,
+)
 from quant_etf_api.domain.portfolio.universe import (
     build_universe_items,
     filter_universe_rows,
 )
+from quant_etf_api.domain.research.metrics import (
+    compute_annual_breakdown,
+    compute_performance_metrics,
+    compute_rolling_metrics,
+)
+from quant_etf_api.domain.research.periods import (
+    PURPOSE_RESEARCH,
+    PeriodBoundaries,
+    validate_backtest_period,
+)
+from quant_etf_api.domain.research.stability import (
+    compute_cost_ladder,
+    compute_stability_metrics,
+)
 from quant_etf_api.engine.config import StrategyConfig
-from quant_etf_api.engine.rebalance import DefaultRebalanceScheduler
 from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.orchestrator import StrategyEngine
+from quant_etf_api.engine.rebalance import DefaultRebalanceScheduler
 from quant_etf_api.factors.registry import max_lookback_days
 from quant_etf_api.infra.db.models.core import (
     BacktestComparisonModel,
     BacktestDailyResultModel,
     BacktestIndexResultModel,
     BacktestRunModel,
+    RobustnessRunModel,
+    StrategyOptimizationModel,
 )
-from quant_etf_api.infra.time import CHINA_TZ
-from quant_etf_api.infra.job_queue.context import JobCancelledError, ensure_not_cancelled
-from quant_etf_api.infra.job_queue.queue import BACKTEST_LANE_JOB_TYPES, backtest_job_key
-from quant_etf_api.infra.job_queue.repository import JobRepository
-from quant_etf_api.infra.time import utcnow_aware
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
 from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
 from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
+from quant_etf_api.infra.job_queue.context import JobCancelledError, ensure_not_cancelled
+from quant_etf_api.infra.job_queue.queue import BACKTEST_LANE_JOB_TYPES, backtest_job_key
+from quant_etf_api.infra.job_queue.repository import JobRepository
+from quant_etf_api.infra.time import CHINA_TZ, utcnow_aware
+from quant_etf_api.infra.trading_calendar import resolve_trading_calendar
 from quant_etf_api.schemas.backtest import (
     AnnualMetrics,
+    BacktestCandidatePool,
     BacktestComparisonCreateRequest,
     BacktestComparisonDetail,
     BacktestComparisonSummary,
     BacktestCreateRequest,
     BacktestDailyResult,
+    BacktestDeleteResponse,
     BacktestDetail,
     BacktestIndexResult,
     BacktestMetrics,
+    BacktestPruneResponse,
     BacktestStability,
     BacktestSummary,
     BacktestWarning,
     ComparisonDailyPoint,
     ComparisonDailyResponse,
     ComparisonMetrics,
+    CostLadderEntry,
+    DanglingReferenceItem,
+    DanglingReferenceReport,
     ValidationUsageItem,
     ValidationUsageResponse,
 )
-from quant_etf_api.domain.portfolio.benchmark import compute_buy_hold_benchmark
-from quant_etf_api.domain.research.periods import (
-    PURPOSE_RESEARCH,
-    PeriodBoundaries,
-    validate_backtest_period,
+from quant_etf_api.services.backtest_reference_service import (
+    HOLDER_OPTIMIZATION_FOLDS,
+    HOLDER_ROBUSTNESS_VARIANTS,
+    BacktestReferenceService,
 )
-from quant_etf_api.domain.research.stability import compute_stability_metrics
-from quant_etf_api.domain.research.metrics import (
-    compute_annual_breakdown,
-    compute_performance_metrics,
-    compute_rolling_metrics,
-)
-from quant_etf_api.config.settings import get_settings
 from quant_etf_api.services.strategy_config_service import (
     StrategyConfigService,
     compute_config_hash,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_candidate_pool(raw: Any) -> BacktestCandidatePool | None:
+    """把落库的 candidate_pool JSONB 解析为 schema，非法/缺失时返回 None。
+
+    Args:
+        raw: ``backtest_run.candidate_pool`` 的原始值。
+
+    Returns:
+        BacktestCandidatePool 实例；无数据或结构不合法时返回 None。
+    """
+    if not isinstance(raw, dict):
+        return None
+    try:
+        # 嵌套的 segments/exclusions 由 pydantic 自动还原（日期字符串 → date）
+        return BacktestCandidatePool(**raw)
+    except Exception:
+        logger.warning("candidate_pool 解析失败，按缺失处理", exc_info=True)
+        return None
 
 
 class BacktestService:
@@ -119,7 +163,10 @@ class BacktestService:
         self._engine = StrategyEngine()
         self._backtest_repo = backtest_repo or BacktestRepository(db)
         self._index_bar_repo = index_bar_repo or IndexDailyBarRepository(db)
-        self._rebalance_scheduler = DefaultRebalanceScheduler()
+        # 严格口径（C1）：调仓调度器不再自带"周末降级"日历，
+        # 而是在 _run_backtest_loop 里按回测区间解析真实日历后注入；
+        # 每日调仓（或未配置 rebalance）不要求日历，此处保持为 None。
+        self._rebalance_scheduler: DefaultRebalanceScheduler | None = None
 
         # 使用进程级单例注册表，避免每次请求重建
         from quant_etf_api.factors.registry import get_default_factor_registry
@@ -155,9 +202,7 @@ class BacktestService:
         now = utcnow_aware()
 
         # 研究期/验证期硬约束：研究类回测越过研究期末端直接拒绝
-        validate_backtest_period(
-            _period_boundaries(), req.purpose, req.start_date, req.end_date
-        )
+        validate_backtest_period(_period_boundaries(), req.purpose, req.start_date, req.end_date)
 
         # 加载策略配置，检查是否有 index_codes 限定
         config_svc = StrategyConfigService(self._db)
@@ -199,6 +244,9 @@ class BacktestService:
         # 保存基准配置到 params，供执行时读取；基准统一采用买入持有口径。
         params["_enable_benchmark"] = req.enable_benchmark
         params["_benchmark_index_code"] = req.benchmark_index_code
+        # 换手口径指纹（C2）：存量回测无该键，读取时按历史口径（legacy_v1）标注，
+        # 避免"含清仓/建仓腿"与"未含"的净口径指标被直接比较
+        params["_turnover_model"] = TURNOVER_MODEL_DELTA_W
 
         # 创建时快照策略配置，保证回测结果与当时配置严格对应
         config_snapshot: dict[str, Any] | None = None
@@ -262,8 +310,9 @@ class BacktestService:
         purpose: str | None = None,
         order_by: str = "created_at",
         descending: bool = True,
+        calendar_source: str | None = None,
     ) -> tuple[list[BacktestSummary], int]:
-        """分页返回回测列表，支持状态/用途/时间范围筛选（B4）。
+        """分页返回回测列表，支持状态/用途/时间范围/日历来源筛选（B4/C1）。
 
         Args:
             offset: 偏移量。
@@ -275,6 +324,8 @@ class BacktestService:
             purpose: 回测用途（research/validation/monitor）。
             order_by: 排序字段：created_at / started_at / finished_at。
             descending: 是否倒序，默认 True。
+            calendar_source: 调仓日历来源过滤（upstream/database/not_required），
+                用于审计"同一配置是否跑在两种调仓日历上"（C1）。
 
         Returns:
             筛选后的回测摘要和总数。
@@ -292,11 +343,10 @@ class BacktestService:
                 purpose=purpose,
                 order_by=order_by,
                 descending=descending,
+                calendar_source=calendar_source,
             )
             queue_info = self._queue_info([r.backtest_id for r in rows])
-            items = [
-                self._row_to_summary(r, queue_info.get(r.backtest_id)) for r in rows
-            ]
+            items = [self._row_to_summary(r, queue_info.get(r.backtest_id)) for r in rows]
             return items, total
         except Exception:
             logger.warning("list_backtests DB query failed", exc_info=True)
@@ -323,9 +373,7 @@ class BacktestService:
             return {}
         try:
             repo = JobRepository()
-            snapshots = repo.find_snapshots_by_keys(
-                [backtest_job_key(bid) for bid in backtest_ids]
-            )
+            snapshots = repo.find_snapshots_by_keys([backtest_job_key(bid) for bid in backtest_ids])
         except Exception:
             logger.debug("查询回测队列信息失败", exc_info=True)
             return {}
@@ -359,8 +407,24 @@ class BacktestService:
             result[backtest_id] = info
         return result
 
-    def get_backtest(self, backtest_id: str) -> BacktestDetail | None:
-        """返回回测详情。"""
+    def get_backtest(
+        self,
+        backtest_id: str,
+        *,
+        cost_bps: float | None = None,
+        cost_ladder: list[float] | None = None,
+    ) -> BacktestDetail | None:
+        """返回回测详情。
+
+        Args:
+            backtest_id: 回测标识。
+            cost_bps: 可选的成本口径覆盖（基点，C3）；None 时使用回测固化的成本。
+                多档成本始终并列返回在 ``stability.cost_ladder`` 中。
+            cost_ladder: 可选的多档成本覆盖（基点列表）；None 时使用系统配置的梯子。
+
+        Returns:
+            回测详情；不存在或查询失败时返回 None。
+        """
         try:
             row = self._backtest_repo.find_by_id(backtest_id)
             if row is None:
@@ -377,7 +441,9 @@ class BacktestService:
                     )
                     # 稳健性指标与净成本口径同样在读取路径现算：与分年度表共用
                     # 已落库的逐日序列，存量回测无需重跑即可获得
-                    stability = self._compute_stability(row, daily_rows)
+                    stability = self._compute_stability(
+                        row, daily_rows, cost_bps=cost_bps, cost_ladder=cost_ladder
+                    )
                     detail = detail.model_copy(
                         update={
                             "annual_metrics": [
@@ -451,37 +517,228 @@ class BacktestService:
             ),
         }
 
+    def find_dangling_references(self, limit: int = 200) -> DanglingReferenceReport:
+        """审计全部悬挂回测引用（C5）。
+
+        Args:
+            limit: 明细条数上限。
+
+        Returns:
+            DanglingReferenceReport。
+        """
+        report = BacktestReferenceService(self._db).find_dangling_references(limit=limit)
+        return DanglingReferenceReport(
+            total=report["total"],
+            items=[DanglingReferenceItem(**item) for item in report["items"]],
+        )
+
+    def delete_backtest(self, backtest_id: str, *, force: bool = False) -> BacktestDeleteResponse:
+        """删除一条回测记录（C5，受控删除）。
+
+        数据库外键负责结构清理：日结果/对比记录 ``ON DELETE CASCADE``，
+        优化会话与生命周期上的回测列 ``ON DELETE SET NULL``。JSONB 引用
+        （稳健性变体、优化折窗口）无法加外键，因此：
+
+        - 不存在引用时直接删除；
+        - 存在 JSONB 引用且 ``force=False`` 时拒绝（409），列出持有者；
+        - ``force=True`` 时删除，并保留持有者信息供 ``backtest orphans`` 审计。
+
+        Args:
+            backtest_id: 回测标识。
+            force: 是否在存在 JSONB 引用时仍强制删除。
+
+        Returns:
+            BacktestDeleteResponse。
+
+        Raises:
+            ValueError: 回测不存在、仍处于 pending/running，或存在 JSONB 引用
+                而未指定 force 时抛出。
+        """
+        row = self._backtest_repo.find_by_id(backtest_id)
+        if row is None:
+            raise ValueError(f"回测 {backtest_id} 不存在")
+        if row.status in ("pending", "running"):
+            raise ValueError(
+                f"回测 {backtest_id} 仍处于 {row.status}，请先取消（backtest cancel）再删除"
+            )
+
+        holders = BacktestReferenceService(self._db).find_referencing_holders(backtest_id)
+        if holders and not force:
+            detail = "；".join(
+                f"{item['holder']}:{item['holder_id']}.{item['field']}" for item in holders
+            )
+            raise ValueError(
+                f"回测 {backtest_id} 仍被引用（{detail}），"
+                "删除会留下悬挂引用；确认后请带 force=True 重试"
+            )
+        self._backtest_repo.delete(backtest_id)
+        logger.info(
+            "回测已删除: backtest_id=%s force=%s holders=%s",
+            backtest_id,
+            force,
+            len(holders),
+        )
+        return BacktestDeleteResponse(
+            backtest_id=backtest_id,
+            deleted=True,
+            holders=[DanglingReferenceItem(**item, missing_backtest_ids=[]) for item in holders],
+            message=(
+                "回测已删除；日结果与对比记录已级联清理，优化/生命周期中的引用已置空"
+                + ("（JSONB 引用仍指向该回测，可用 backtest orphans 审计）" if holders else "")
+            ),
+        )
+
+    def prune_dangling_references(self, *, dry_run: bool = True) -> BacktestPruneResponse:
+        """清理 JSONB 中的悬挂回测引用（C5）。
+
+        - ``robustness_run.variants[*].backtest_ids``：移除指向已删除回测的窗口，
+          并把窗口标签写入同一变体的 ``deleted_windows``（保留"曾经有这些窗口"
+          的信息，而不是静默消失）；
+        - ``strategy_optimization.fold_backtests[*].{baseline,candidate}_backtest_id``：
+          置为 ``null``（回测已删除，折窗口无法再评估）。
+
+        Args:
+            dry_run: True 时只统计不写库（默认）。
+
+        Returns:
+            BacktestPruneResponse。
+        """
+        reference_svc = BacktestReferenceService(self._db)
+        existing = reference_svc.existing_ids()
+        result = BacktestPruneResponse(dry_run=dry_run)
+
+        for row in self._db.query(RobustnessRunModel).all():
+            variants = list(row.variants or [])
+            changed = False
+            for variant in variants:
+                mapping = dict(variant.get("backtest_ids") or {})
+                missing_labels = [label for label, bid in mapping.items() if bid not in existing]
+                if not missing_labels:
+                    continue
+                changed = True
+                result.removed_windows += len(missing_labels)
+                result.items.append(
+                    DanglingReferenceItem(
+                        holder=HOLDER_ROBUSTNESS_VARIANTS,
+                        holder_id=row.robustness_id,
+                        field=f"variants[{variant.get('label')}].backtest_ids",
+                        missing_backtest_ids=[
+                            mapping[label] for label in missing_labels if mapping[label]
+                        ],
+                    )
+                )
+                if dry_run:
+                    continue
+                for label in missing_labels:
+                    mapping.pop(label, None)
+                variant["backtest_ids"] = mapping
+                variant["deleted_windows"] = sorted(
+                    set(variant.get("deleted_windows") or []) | set(missing_labels)
+                )
+            if changed:
+                result.robustness_batches += 1
+                if not dry_run:
+                    row.variants = variants
+                    # JSONB 就地修改不会被 SQLAlchemy 的变更检测捕获
+                    # （赋值前后内容相等 → 不产生 UPDATE），必须显式标记脏
+                    flag_modified(row, "variants")
+
+        for opt in self._db.query(StrategyOptimizationModel).all():
+            folds = list(opt.fold_backtests or [])
+            changed = False
+            for fold in folds:
+                for key in ("baseline_backtest_id", "candidate_backtest_id"):
+                    bid = fold.get(key)
+                    if not bid or bid in existing:
+                        continue
+                    changed = True
+                    result.nulled_folds += 1
+                    result.items.append(
+                        DanglingReferenceItem(
+                            holder=HOLDER_OPTIMIZATION_FOLDS,
+                            holder_id=opt.optimization_id,
+                            field=f"fold_backtests[{fold.get('fold')}].{key}",
+                            missing_backtest_ids=[bid],
+                        )
+                    )
+                    if not dry_run:
+                        fold[key] = None
+            if changed:
+                result.optimization_sessions += 1
+                if not dry_run:
+                    opt.fold_backtests = folds
+                    # 同上：JSONB 就地修改需显式标记脏才会落库
+                    flag_modified(opt, "fold_backtests")
+
+        if not dry_run:
+            self._db.commit()
+        return result
+
     def _compute_stability(
-        self, row: BacktestRunModel, daily_rows: list
+        self,
+        row: BacktestRunModel,
+        daily_rows: list,
+        cost_bps: float | None = None,
+        cost_ladder: list[float] | None = None,
     ) -> BacktestStability:
         """从已落库的逐日结果现算稳健性指标与净成本口径。
 
-        成本取创建回测时固化的 ``params["_cost_bps"]``，缺失时回退系统默认值；
-        执行模型、数据质量口径与基准一并写入结果，作为指标口径指纹，避免
-        不同口径的回测指标被相互比较（历史上 warn/strict 口径分叉曾导致同一
-        配置出现两套结果）。
+        成本默认取创建回测时固化的 ``params["_cost_bps"]``，缺失时回退系统默认值；
+        调用方可传 ``cost_bps`` 覆盖主口径（C3：想看 20/30/50bp 无需重跑回测），
+        并始终并列输出多档成本（``cost_ladder``）。执行模型、数据质量口径、
+        基准、调仓日历来源与换手口径一并写入结果，作为指标口径指纹，避免
+        不同口径的回测指标被相互比较（历史上 warn/strict 口径分叉、周末降级
+        日历、换手未计清仓腿都曾导致同一配置出现两套结果）。
 
         Args:
             row: 回测 ORM 行。
             daily_rows: 该回测的逐日结果行（按日期升序）。
+            cost_bps: 可选的成本覆盖（基点）；None 时使用回测固化的成本。
+            cost_ladder: 可选的多档成本覆盖（基点列表）；None 时使用系统配置梯子。
 
         Returns:
             BacktestStability 实例。
         """
         params = row.params or {}
-        cost_bps = params.get("_cost_bps")
-        if cost_bps is None:
-            cost_bps = get_settings().default_cost_bps
+        effective_cost_bps = params.get("_cost_bps") if cost_bps is None else cost_bps
+        if effective_cost_bps is None:
+            effective_cost_bps = get_settings().default_cost_bps
         enable_benchmark = params.get("_enable_benchmark", True)
+        daily_returns = [r.portfolio_return for r in daily_rows]
+        trade_dates = [r.trade_date for r in daily_rows]
+        turnovers = [getattr(r, "turnover", None) for r in daily_rows]
+        benchmark_returns = [getattr(r, "benchmark_return", None) for r in daily_rows]
         stability = compute_stability_metrics(
-            [r.portfolio_return for r in daily_rows],
-            [r.trade_date for r in daily_rows],
-            benchmark_returns=[getattr(r, "benchmark_return", None) for r in daily_rows],
-            turnovers=[getattr(r, "turnover", None) for r in daily_rows],
+            daily_returns,
+            trade_dates,
+            benchmark_returns=benchmark_returns,
+            turnovers=turnovers,
             exposures=[getattr(r, "total_exposure", None) for r in daily_rows],
             positions=[getattr(r, "positions", None) for r in daily_rows],
-            cost_bps=float(cost_bps),
+            cost_bps=float(effective_cost_bps),
         )
+        # 多档成本并列（C3）：只重算与成本有关的量，读取路径零可感额外成本
+        ladder_config = (
+            cost_ladder
+            if cost_ladder is not None
+            else [float(item) for item in get_settings().stability_cost_ladder]
+        )
+        ladder = [
+            CostLadderEntry(
+                cost_bps=entry.cost_bps,
+                net_cumulative_return_pct=entry.net_cumulative_return_pct,
+                net_annualized_return_pct=entry.net_annualized_return_pct,
+                net_sharpe_ratio=entry.net_sharpe_ratio,
+                net_excess_return_pct=entry.net_excess_return_pct,
+                cost_drag_pct_per_year=entry.cost_drag_pct_per_year,
+            )
+            for entry in compute_cost_ladder(
+                daily_returns,
+                turnovers,
+                [float(item) for item in ladder_config],
+                benchmark_returns=benchmark_returns,
+            )
+        ]
         return BacktestStability(
             cost_bps=stability.cost_bps,
             execution_model=params.get("_execution_model"),
@@ -489,6 +746,10 @@ class BacktestService:
             benchmark_index_code=(
                 params.get("_benchmark_index_code") if enable_benchmark else None
             ),
+            calendar_source=params.get("_calendar_source"),
+            turnover_model=params.get("_turnover_model") or TURNOVER_MODEL_LEGACY,
+            cost_ladder=ladder,
+            candidate_pool=_parse_candidate_pool(getattr(row, "candidate_pool", None)),
             annualized_turnover=stability.annualized_turnover,
             cost_drag_pct_per_year=stability.cost_drag_pct_per_year,
             net_cumulative_return_pct=stability.net_cumulative_return_pct,
@@ -498,9 +759,7 @@ class BacktestService:
             year_return_share_max=stability.year_return_share_max,
             year_return_share_hhi=stability.year_return_share_hhi,
             best_year=stability.best_year,
-            ex_best_year_annualized_return_pct=(
-                stability.ex_best_year_annualized_return_pct
-            ),
+            ex_best_year_annualized_return_pct=(stability.ex_best_year_annualized_return_pct),
             ex_best_year_sharpe_ratio=stability.ex_best_year_sharpe_ratio,
             annual_sharpe_positive_ratio=stability.annual_sharpe_positive_ratio,
             segment_sharpe_positive_ratio=stability.segment_sharpe_positive_ratio,
@@ -514,9 +773,7 @@ class BacktestService:
             position_concentration=stability.position_concentration,
         )
 
-    def list_validation_usage(
-        self, limit: int = 200
-    ) -> ValidationUsageResponse:
+    def list_validation_usage(self, limit: int = 200) -> ValidationUsageResponse:
         """列出所有使用验证期（2026-01-01 起）数据的回测，用于留痕审计。
 
         验证期数据只能用于否决、不能用于确认；只要看过就应留痕，避免
@@ -732,7 +989,8 @@ class BacktestService:
 
         流程：
         1. 准备数据（标的、交易日、行情、估值，回望窗口按因子 lookback 推导）
-        2. 预计算全区间因子值
+        2. 解析交易日历并注入口径指纹（C1）
+        3. 预计算全区间因子值
         3. 逐日执行引擎管线
         4. 按仓位/排名计算组合收益（毛收益，不扣除交易成本）
         5. 计算基准收益（如启用）
@@ -742,6 +1000,9 @@ class BacktestService:
         # 回测使用一次性行情快照；关闭 checkpoint commit 后的 ORM 对象过期，
         # 避免收尾数据质量扫描访问行情字段时逐条触发隐式 SELECT。
         self._db.expire_on_commit = False
+        # 严格口径（C1）：周度/月度调仓强依赖真实交易日历，解析失败即失败；
+        # 每日调仓（或未配置 rebalance）与日历无关，记为 not_required。
+        self._resolve_rebalance_calendar(row, config)
         universe, index_codes, trading_dates, all_bars, all_valuation, all_macro = (
             self._prepare_backtest_data(row)
         )
@@ -848,6 +1109,8 @@ class BacktestService:
         # 仅提示详细程度不同（strict 逐指数、warn 汇总）
         exclusion_dates: dict[str, list[date]] = {}
         exclusion_reasons: dict[str, set[str]] = {}
+        # 有效候选池逐日规模（C6）：用于还原"早期实际可交易池只有 N 个"这类事实
+        pool_sizes: list[int] = []
         # 进度跟踪：每完成约 10% 交易日写一次进度
         last_progress = 0
         total_dates = len(trading_dates)
@@ -883,6 +1146,8 @@ class BacktestService:
                 exclusion_reasons.setdefault(excluded_code, set()).update(
                     day_exclusion_reasons.get(excluded_code, {"DATA_EXCLUDED"})
                 )
+            # 逐日有效候选池规模（C6）：与剔除记录共用同一次池计算，零额外开销
+            pool_sizes.append(len(day_codes))
             day_universe = build_universe_items(
                 [{"index_code": c, "name_cn": c} for c in day_codes]
             )
@@ -936,10 +1201,9 @@ class BacktestService:
                 next_positions = new_positions
                 day_total_exposure = round(sum(positions.values()), 4)
                 day_cash_ratio = round(1.0 - day_total_exposure, 4)
-                # 换手率基于新旧目标仓位计算
-                turnover = 0.0
-                if prev_positions and new_positions:
-                    turnover = compute_turnover(prev_positions, new_positions)
+                # 换手率基于新旧目标仓位计算（C2）：统一按 Σ|Δw|/2，
+                # 不再在 prev/new 为空时跳过——清仓腿与建仓腿同样是真实成本
+                turnover = compute_turnover(prev_positions, new_positions)
                 last_rebalance_date = trade_date
             else:
                 # 非调仓日：沿用上次持仓，按收盘对收盘计算收益
@@ -1014,8 +1278,7 @@ class BacktestService:
             total_in_pos_positive += day_pos_positive
 
             logger.debug(
-                "[backtest] 日结果: backtest_id=%s date=%s regime=%s exposure=%s "
-                "持仓=%s 收益=%s%%",
+                "[backtest] 日结果: backtest_id=%s date=%s regime=%s exposure=%s 持仓=%s 收益=%s%%",
                 backtest_id,
                 trade_date,
                 result.timing.regime if result.timing else None,
@@ -1033,8 +1296,7 @@ class BacktestService:
                     self._backtest_repo.update_progress(backtest_id, new_progress)
                     last_progress = new_progress
                     logger.info(
-                        "[backtest] 进度: backtest_id=%s %s/%s (%s%%) date=%s "
-                        "累计收益=%s%%",
+                        "[backtest] 进度: backtest_id=%s %s/%s (%s%%) date=%s 累计收益=%s%%",
                         backtest_id,
                         i + 1,
                         total_dates,
@@ -1085,6 +1347,19 @@ class BacktestService:
         # 随成功状态一并持久化，前端轮询时按 key 去重弹窗。
         warnings_started = perf_counter()
         run_warnings: list[BacktestWarning] = []
+        # 口径提示（C1）：使用本地日历表快照而非上游数据源时显式告知，
+        # 便于判断"同一配置两条回测的调仓日历是否来自同一来源"
+        if (row.params or {}).get("_calendar_source") == "database":
+            run_warnings.append(
+                BacktestWarning(
+                    level="info",
+                    code="CALENDAR_SOURCE_DATABASE",
+                    message=(
+                        "交易日历来自本地 trading_calendar 表快照"
+                        "（上游 Tushare/AkShare 当前不可用，快照可能滞后于官方日历）"
+                    ),
+                )
+            )
         if warmup_trading_days > 0:
             run_warnings.append(
                 BacktestWarning(
@@ -1093,6 +1368,36 @@ class BacktestService:
                     message=(
                         f"回测前 {warmup_trading_days} 个交易日长周期因子数据不足"
                         "（预热期），前段信号与绩效参考价值有限"
+                    ),
+                )
+            )
+        # 有效候选池时间线（C6）：逐日规模游程编码 + 剔除指数区间，
+        # 随 mark_success 落库；缩水到理论池以下时补一条信息级提示
+        candidate_pool = self._build_candidate_pool_timeline(
+            trading_dates, pool_sizes, len(codes), exclusion_dates, exclusion_reasons
+        )
+        if candidate_pool["min_size"] < candidate_pool["base_size"]:
+            shrunk = next(
+                (
+                    seg
+                    for seg in candidate_pool["segments"]
+                    if seg["size"] == candidate_pool["min_size"]
+                ),
+                None,
+            )
+            run_warnings.append(
+                BacktestWarning(
+                    level="info",
+                    code="CANDIDATE_POOL_SHRINK",
+                    message=(
+                        f"有效候选池 {candidate_pool['base_size']} → 最小 "
+                        f"{candidate_pool['min_size']}"
+                        + (
+                            f"（{shrunk['start_date']}~{shrunk['end_date']}）"
+                            if shrunk is not None
+                            else ""
+                        )
+                        + "，逐日时间线见 stability.candidate_pool"
                     ),
                 )
             )
@@ -1190,8 +1495,7 @@ class BacktestService:
                     )
                 )
             logger.info(
-                "[backtest] 基准缺口告警完成: backtest_id=%s missing_dates=%s "
-                "耗时=%.3fs",
+                "[backtest] 基准缺口告警完成: backtest_id=%s missing_dates=%s 耗时=%.3fs",
                 backtest_id,
                 len(bench_missing),
                 perf_counter() - benchmark_warning_started,
@@ -1217,6 +1521,7 @@ class BacktestService:
             backtest_id,
             metrics,
             warnings=[w.model_dump() for w in run_warnings],
+            candidate_pool=candidate_pool,
         )
         logger.info(
             "[backtest] 最终状态提交完成: backtest_id=%s 耗时=%.3fs 总收尾耗时=%.3fs",
@@ -1224,6 +1529,96 @@ class BacktestService:
             perf_counter() - mark_success_started,
             perf_counter() - finalize_started,
         )
+
+    def _build_candidate_pool_timeline(
+        self,
+        trading_dates: list[date],
+        pool_sizes: list[int],
+        base_size: int,
+        exclusion_dates: dict[str, list[date]],
+        exclusion_reasons: dict[str, set[str]],
+    ) -> dict[str, Any]:
+        """构建逐日有效候选池时间线（C6）。
+
+        - 逐日规模做**游程编码**（连续相同规模合并为一段），避免把 2400 个交易日
+          逐条落库；
+        - 剔除明细按"指数—日期区间"聚合，按交易日数降序截断到
+          ``candidate_pool_exclusion_limit``。
+
+        Args:
+            trading_dates: 回测交易日列表（升序）。
+            pool_sizes: 与 ``trading_dates`` 等长的逐日有效候选池规模。
+            base_size: 回测标的池的理论规模。
+            exclusion_dates: 指数 → 被剔除交易日列表。
+            exclusion_reasons: 指数 → 剔除原因集合。
+
+        Returns:
+            可直接写入 ``backtest_run.candidate_pool`` 的字典。
+        """
+        total_days = len(trading_dates)
+        if not pool_sizes or total_days == 0:
+            return {
+                "base_size": base_size,
+                "min_size": 0,
+                "max_size": 0,
+                "median_size": 0,
+                "trading_days": 0,
+                "pool_coverage_ratio": 0.0,
+                "segments": [],
+                "exclusions": [],
+                "truncated_exclusions": False,
+            }
+
+        # 游程编码：把连续相同规模合并为一段
+        # 日期统一转 ISO 字符串——candidate_pool 列是 JSONB，psycopg 的 json
+        # 编码器不认 date 对象（读取时由 pydantic 还原为 date）
+        segments: list[dict[str, Any]] = []
+        start_index = 0
+        for index in range(1, len(pool_sizes) + 1):
+            if index < len(pool_sizes) and pool_sizes[index] == pool_sizes[start_index]:
+                continue
+            segments.append(
+                {
+                    "start_date": trading_dates[start_index].isoformat(),
+                    "end_date": trading_dates[index - 1].isoformat(),
+                    "trading_days": index - start_index,
+                    "size": pool_sizes[start_index],
+                }
+            )
+            start_index = index
+
+        sorted_sizes = sorted(pool_sizes)
+        median_size = sorted_sizes[len(sorted_sizes) // 2]
+        total_slots = base_size * total_days
+        coverage = (sum(pool_sizes) / total_slots) if total_slots > 0 else 0.0
+
+        limit = get_settings().candidate_pool_exclusion_limit
+        exclusions = sorted(
+            (
+                {
+                    "index_code": code,
+                    "first_date": dates[0].isoformat(),
+                    "last_date": dates[-1].isoformat(),
+                    "trading_days": len(dates),
+                    "reasons": sorted(exclusion_reasons.get(code, set())),
+                }
+                for code, dates in exclusion_dates.items()
+                if dates
+            ),
+            key=lambda item: item["trading_days"],
+            reverse=True,
+        )
+        return {
+            "base_size": base_size,
+            "min_size": min(pool_sizes),
+            "max_size": max(pool_sizes),
+            "median_size": median_size,
+            "trading_days": total_days,
+            "pool_coverage_ratio": round(coverage, 4),
+            "segments": segments,
+            "exclusions": exclusions[:limit],
+            "truncated_exclusions": len(exclusions) > limit,
+        }
 
     def _prepare_backtest_data(
         self, row: BacktestRunModel
@@ -1277,7 +1672,7 @@ class BacktestService:
 
         active = BenchmarkIndexRepository(self._db).find_active()
         market_codes = [idx.index_code for idx in active]
-        loaded_codes = {code for code, _ in all_bars.keys()}
+        loaded_codes = {code for code, _ in all_bars}
         missing = [code for code in market_codes if code not in loaded_codes]
         if not missing:
             return
@@ -1415,15 +1810,11 @@ class BacktestService:
                     if rule.compare_to:
                         required_ids.add(rule.compare_to)
         asset_factor_ids = {
-            spec.factor_id
-            for spec in self._registry.specs()
-            if spec.value_shape == "asset"
+            spec.factor_id for spec in self._registry.specs() if spec.value_shape == "asset"
         }
         required_ids &= asset_factor_ids
         needs_high_low = any(
-            factor_id.startswith(
-                ("atr_", "donchian_", "monthly_", "rsrs", "price_position_ir_")
-            )
+            factor_id.startswith(("atr_", "donchian_", "monthly_", "rsrs", "price_position_ir_"))
             for factor_id in required_ids
         )
         result: list[str] = []
@@ -1461,6 +1852,64 @@ class BacktestService:
             result.append(code)
         return result, reasons
 
+    def _resolve_rebalance_calendar(self, row: BacktestRunModel, config: StrategyConfig) -> str:
+        """解析调仓所需的交易日历，并把来源写入口径指纹（C1）。
+
+        严格口径：周度/月度调仓必须有真实交易日历（上游数据源或本地
+        `trading_calendar` 表快照），解析失败直接抛
+        ``TradingCalendarUnavailableError``，回测落 failed——不允许按星期近似，
+        否则同一 ``config_hash`` 会出现两套调仓日历、两套结果。
+
+        每日调仓（或策略未配置 rebalance）与日历无关，记为 ``not_required``。
+
+        Args:
+            row: 回测 ORM 行（提供区间与研究区间校验）。
+            config: 策略配置。
+
+        Returns:
+            口径指纹值：upstream / database / not_required。
+
+        Raises:
+            TradingCalendarUnavailableError: 需要日历但无法解析出有效日历时抛出。
+        """
+        frequency = config.rebalance.frequency if config.rebalance is not None else None
+        needs_calendar = frequency in ("weekly", "monthly")
+
+        if not needs_calendar:
+            self._set_param(row, "_calendar_source", "not_required", commit=True)
+            return "not_required"
+
+        calendar, source = resolve_trading_calendar(
+            self._db, required_range=(row.start_date, row.end_date)
+        )
+        self._rebalance_scheduler = DefaultRebalanceScheduler(calendar)
+        # 立即提交：即使回测随后失败，口径指纹也应落库以便审计
+        self._set_param(row, "_calendar_source", source, commit=True)
+        logger.info(
+            "[backtest] 调仓日历已解析: backtest_id=%s frequency=%s source=%s",
+            row.backtest_id,
+            frequency,
+            source,
+        )
+        return source
+
+    def _set_param(
+        self, row: BacktestRunModel, key: str, value: Any, *, commit: bool = False
+    ) -> None:
+        """写入回测 params 的口径指纹键（``_`` 前缀元数据）。
+
+        Args:
+            row: 回测 ORM 行。
+            key: 键名（如 ``_calendar_source``）。
+            value: 键值。
+            commit: 是否立即提交（默认随 checkpoint 一起提交）。
+        """
+        params = dict(row.params or {})
+        params[key] = value
+        row.params = params
+        if commit:
+            self._db.commit()
+
     def _check_rebalance(
         self,
         config: StrategyConfig,
@@ -1482,6 +1931,8 @@ class BacktestService:
         """
         if config.rebalance is None:
             return True
+        if self._rebalance_scheduler is None:
+            raise ValueError("调仓调度器未初始化：周度/月度调仓前必须先解析交易日历（C1）")
         return self._rebalance_scheduler.should_rebalance(
             config.rebalance, trade_date, last_rebalance_date
         )

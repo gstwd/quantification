@@ -92,6 +92,8 @@
             <div><span class="k">上线日期</span><span class="v">{{ detail.live_at }}</span></div>
             <div><span class="k">监控天数</span><span class="v">{{ detail.live_days }}</span></div>
             <div><span class="k">冻结配置哈希</span><span class="v mono">{{ shortHash(detail.frozen_config_hash) }}</span></div>
+            <div><span class="k">研究期基线回测</span><span class="v mono">{{ backtestRefLabel(detail.research_backtest_id) }}</span></div>
+            <div><span class="k">验证期回测</span><span class="v mono">{{ backtestRefLabel(detail.validation_backtest_id) }}</span></div>
             <div v-if="detail.note" class="wide">
               <span class="k">上线备注</span><span class="v">{{ detail.note }}</span>
             </div>
@@ -296,6 +298,12 @@ const onlineCandidates = computed(() => {
 
 // 最新一次体检快照
 const latest = computed(() => detail.value?.snapshots?.[0] ?? null)
+
+/** 回测引用文案（C5）：外键置空后显示"已删除或未记录"，避免看着像"无数据"。 */
+function backtestRefLabel(backtestId?: string | null): string {
+  if (!backtestId) return '未记录（或已被删除）'
+  return backtestId
+}
 
 /** 单个监控窗口的体检结果（后端 JSONB 结构） */
 interface WindowEntry {
