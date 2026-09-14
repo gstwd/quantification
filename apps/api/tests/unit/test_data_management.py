@@ -78,11 +78,13 @@ def test_all_non_news_external_datasets_are_registered() -> None:
     assert all(len(item.key) <= 64 for item in DATASETS)
 
 
-def test_all_datasets_support_the_standard_maintenance_operations() -> None:
-    """验证所有受管数据集统一声明四类维护操作。"""
-    expected = {"sync_latest", "check", "repair_gaps", "rebuild"}
+def test_dataset_operation_capabilities_match_data_semantics() -> None:
+    """目录数据只支持检查/同步，其他数据集保留完整维护能力。"""
     for item in DATASETS:
-        assert expected <= set(item.operations)
+        if item.key in {"industry_universe", "stock_universe"}:
+            assert set(item.operations) == {"sync_latest", "check"}
+        else:
+            assert {"sync_latest", "check", "repair_gaps", "rebuild"} <= set(item.operations)
 
 
 def test_warning_quality_rule_does_not_upgrade_to_error() -> None:

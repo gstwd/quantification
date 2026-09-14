@@ -155,6 +155,7 @@ class IngestService:
         self._macro_repo = MacroIndicatorRepository(db)
         self._index_repo = BenchmarkIndexRepository(db)
         self._freshness_svc = DataFreshnessService(db)
+        self._last_fallbacks: list[dict[str, str]] = []
 
     def _enqueue_data_fill(self, resource: str, code: str | None = None) -> None:
         """查询未命中时入队后台补数任务，不在请求线程同步抓取。
@@ -207,7 +208,14 @@ class IngestService:
     # 指数日线（AkShare）
     # ==================================================================
 
-    def _insert_index_bars(self, index_code: str, bars: list[Any], source: str = "akshare") -> int:
+    def _insert_index_bars(
+        self,
+        index_code: str,
+        bars: list[Any],
+        source: str = "akshare",
+        *,
+        overwrite: bool = False,
+    ) -> int:
         """将日线数据批量幂等写入 index_daily_bar（不提交，由调用方统一提交）。
 
         分批写入，避免单条 INSERT 参数超过 PostgreSQL 65535 限制。
@@ -240,11 +248,25 @@ class IngestService:
         ]
         for i in range(0, len(values), batch_size):
             batch = values[i : i + batch_size]
-            stmt = (
-                insert(IndexDailyBarModel)
-                .values(batch)
-                .on_conflict_do_nothing(constraint="uq_index_daily_bar")
-            )
+            stmt = insert(IndexDailyBarModel).values(batch)
+            if overwrite:
+                stmt = stmt.on_conflict_do_update(
+                    constraint="uq_index_daily_bar",
+                    set_={
+                        "open_price": stmt.excluded.open_price,
+                        "high_price": stmt.excluded.high_price,
+                        "low_price": stmt.excluded.low_price,
+                        "close_price": stmt.excluded.close_price,
+                        "prev_close_price": stmt.excluded.prev_close_price,
+                        "change_pct": stmt.excluded.change_pct,
+                        "volume": stmt.excluded.volume,
+                        "turnover": stmt.excluded.turnover,
+                        "source": stmt.excluded.source,
+                        "ingested_at": stmt.excluded.ingested_at,
+                    },
+                )
+            else:
+                stmt = stmt.on_conflict_do_nothing(constraint="uq_index_daily_bar")
             self._db.execute(stmt)
         return len(bars)
 
@@ -306,8 +328,10 @@ class IngestService:
             (日线列表, 数据源标识)；全部失败时返回 ([], "")。
         """
         sources = self._build_index_daily_sources()
+        attempts: list[tuple[str, str]] = []
         if not sources:
             logger.warning("指数 %s 无可用日线数据源", index_code)
+            self._last_fallbacks = []
             return [], ""
 
         last_error: Exception | None = None
@@ -319,6 +343,7 @@ class IngestService:
                 bars = client.fetch_index_daily(index_code, start_date, end_date)
             except Exception as e:
                 last_error = e
+                attempts.append((source, type(e).__name__))
                 logger.warning(
                     "指数 %s 日线源 %s 拉取失败，降级到下一源: %s",
                     index_code,
@@ -327,9 +352,12 @@ class IngestService:
                 )
                 continue
             if not bars:
+                attempts.append((source, "empty_response"))
                 logger.info("指数 %s 日线源 %s 返回空数据，降级到下一源", index_code, source)
                 continue
             missing = ohlc_missing_count(bars)
+            if missing:
+                attempts.append((source, "invalid_ohlc"))
             if missing == 0:
                 # 与前一非空候选（若有）对比收盘点位，核对跨源数据一致性
                 if best_bars:
@@ -344,6 +372,7 @@ class IngestService:
                             max_diff,
                         )
                 logger.info("指数 %s 日线最终由 %s 提供，共 %d 条", index_code, source, len(bars))
+                self._record_fallbacks(index_code, source, attempts)
                 return bars, source
             if best_bars and missing < best_missing:
                 common, max_diff = compare_index_bar_overlap(best_bars, bars)
@@ -375,12 +404,37 @@ class IngestService:
                 best_missing,
                 len(best_bars),
             )
+            self._record_fallbacks(index_code, best_source, attempts)
             return best_bars, best_source
         if last_error is not None:
+            self._last_fallbacks = []
             raise last_error
+        self._last_fallbacks = []
         return [], ""
 
-    def _fetch_and_upsert_index_bars(self, index_code: str, incremental: bool = True) -> int:
+    def _record_fallbacks(
+        self, partition_key: str, selected_source: str, attempts: list[tuple[str, str]]
+    ) -> None:
+        """记录本次请求的来源降级链，不保存上游原始响应。"""
+        if attempts and attempts[0][0] != selected_source:
+            self._last_fallbacks = [
+                {
+                    "partition_key": partition_key,
+                    "from": attempts[0][0],
+                    "to": selected_source,
+                    "reason": attempts[0][1],
+                }
+            ]
+        else:
+            self._last_fallbacks = []
+
+    def _fetch_and_upsert_index_bars(
+        self,
+        index_code: str,
+        incremental: bool = True,
+        *,
+        overwrite: bool = False,
+    ) -> int:
         """从多数据源拉取指数日线并幂等写入 index_daily_bar。
 
         增量模式（默认）：从 DB 最新日期回退缓冲窗口拉取，仅写入最新日期之后的数据；
@@ -419,7 +473,12 @@ class IngestService:
         if not bars:
             return 0
 
-        count = self._insert_index_bars(index_code, bars, source=source)
+        if overwrite:
+            count = self._insert_index_bars(
+                index_code, bars, source=source, overwrite=True
+            )
+        else:
+            count = self._insert_index_bars(index_code, bars, source=source)
         self._db.commit()
         return count
 
@@ -582,7 +641,13 @@ class IngestService:
     # 指数估值 PE/PB（Tushare 优先，AkShare 兜底）
     # ==================================================================
 
-    def _insert_index_valuations(self, index_code: str, valuations: list[Any]) -> int:
+    def _insert_index_valuations(
+        self,
+        index_code: str,
+        valuations: list[Any],
+        *,
+        overwrite: bool = False,
+    ) -> int:
         """将估值数据批量幂等写入 index_valuation（不提交，由调用方统一提交）。
 
         分批写入，避免单条 INSERT 参数超过 PostgreSQL 65535 限制
@@ -612,11 +677,22 @@ class IngestService:
         ]
         for i in range(0, len(values), batch_size):
             batch = values[i : i + batch_size]
-            stmt = (
-                insert(IndexValuationModel)
-                .values(batch)
-                .on_conflict_do_nothing(constraint="uq_index_valuation")
-            )
+            stmt = insert(IndexValuationModel).values(batch)
+            if overwrite:
+                stmt = stmt.on_conflict_do_update(
+                    constraint="uq_index_valuation",
+                    set_={
+                        "pe": stmt.excluded.pe,
+                        "pe_percentile": stmt.excluded.pe_percentile,
+                        "pb": stmt.excluded.pb,
+                        "pb_percentile": stmt.excluded.pb_percentile,
+                        "dividend_yield": stmt.excluded.dividend_yield,
+                        "source": stmt.excluded.source,
+                        "ingested_at": stmt.excluded.ingested_at,
+                    },
+                )
+            else:
+                stmt = stmt.on_conflict_do_nothing(constraint="uq_index_valuation")
             self._db.execute(stmt)
         return len(valuations)
 
@@ -634,26 +710,37 @@ class IngestService:
             按日期升序排列的估值列表；两个来源都无数据时返回空列表。
         """
         tushare_client = TushareIndexValuationClient()
+        attempts: list[tuple[str, str]] = []
         if tushare_client.is_configured() and tushare_client.supports(index_code):
             try:
                 values = tushare_client.fetch_index_valuation(index_code)
                 if values:
+                    self._record_fallbacks(index_code, "tushare", attempts)
                     logger.info(
                         "指数 %s 估值由 tushare 提供，共 %d 条",
                         index_code,
                         len(values),
                     )
                     return values
+                attempts.append(("tushare", "empty_response"))
                 logger.info("指数 %s tushare 估值返回空，回退 AkShare", index_code)
             except Exception as exc:
+                attempts.append(("tushare", type(exc).__name__))
                 logger.warning(
                     "指数 %s tushare 估值拉取失败，回退 AkShare: %s",
                     index_code,
                     exc,
                 )
-        return AkShareIndexClient().fetch_index_valuation(index_code)
+        values = AkShareIndexClient().fetch_index_valuation(index_code)
+        self._record_fallbacks(index_code, "akshare", attempts)
+        return values
 
-    def _fetch_and_upsert_index_valuation(self, index_code: str) -> int:
+    def _fetch_and_upsert_index_valuation(
+        self,
+        index_code: str,
+        *,
+        overwrite: bool = False,
+    ) -> int:
         """拉取指数 PE/PB 估值（Tushare 优先）并幂等写入 index_valuation。
 
         Returns:
@@ -662,7 +749,10 @@ class IngestService:
         valuations = self._fetch_index_valuation_preferred(index_code)
         if not valuations:
             return 0
-        count = self._insert_index_valuations(index_code, valuations)
+        if overwrite:
+            count = self._insert_index_valuations(index_code, valuations, overwrite=True)
+        else:
+            count = self._insert_index_valuations(index_code, valuations)
         self._db.commit()
         return count
 
@@ -803,12 +893,17 @@ class IngestService:
             ("LPR", tushare_client.fetch_lpr, akshare_client.fetch_lpr),
         ]
         results: list[Any] = []
+        fallbacks: list[dict[str, str]] = []
         for name, tushare_fetch, akshare_fetch in groups:
             rows: list[Any] = []
+            tushare_attempted = False
+            tushare_reason = ""
             if tushare_client.is_configured():
+                tushare_attempted = True
                 try:
                     rows = list(tushare_fetch() or [])
                 except Exception as exc:
+                    tushare_reason = type(exc).__name__
                     logger.warning(
                         "tushare %s 拉取失败，回退 AkShare: %s",
                         name,
@@ -819,10 +914,20 @@ class IngestService:
                     rows = list(akshare_fetch() or [])
                 except Exception as exc:
                     logger.warning("AkShare %s 拉取失败: %s", name, exc)
+                if tushare_attempted and rows:
+                    fallbacks.append(
+                        {
+                            "partition_key": name.lower(),
+                            "from": "tushare",
+                            "to": "akshare",
+                            "reason": tushare_reason or "empty_response",
+                        }
+                    )
             results.extend(rows)
+        self._last_fallbacks = fallbacks
         return results
 
-    def _fetch_and_upsert_macro(self) -> int:
+    def _fetch_and_upsert_macro(self, *, overwrite: bool = False) -> int:
         """拉取所有宏观指标（Tushare 优先）并幂等写入 macro_indicator。
 
         Returns:
@@ -831,25 +936,35 @@ class IngestService:
         indicators = self._fetch_macro_indicators_preferred()
         if not indicators:
             return 0
-        stmt = (
-            insert(MacroIndicatorModel)
-            .values(
-                [
-                    {
-                        "indicator_code": i.indicator_code,
-                        "indicator_name": i.indicator_name,
-                        "period": i.period,
-                        "value": i.value,
-                        "unit": i.unit,
-                        "source": getattr(i, "source", None) or "akshare",
-                        "period_date": i.period_date,
-                        "ingested_at": utcnow(),
-                    }
-                    for i in indicators
-                ]
-            )
-            .on_conflict_do_nothing(constraint="uq_macro_indicator")
+        stmt = insert(MacroIndicatorModel).values(
+            [
+                {
+                    "indicator_code": i.indicator_code,
+                    "indicator_name": i.indicator_name,
+                    "period": i.period,
+                    "value": i.value,
+                    "unit": i.unit,
+                    "source": getattr(i, "source", None) or "akshare",
+                    "period_date": i.period_date,
+                    "ingested_at": utcnow(),
+                }
+                for i in indicators
+            ]
         )
+        if overwrite:
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_macro_indicator",
+                set_={
+                    "indicator_name": stmt.excluded.indicator_name,
+                    "value": stmt.excluded.value,
+                    "unit": stmt.excluded.unit,
+                    "source": stmt.excluded.source,
+                    "period_date": stmt.excluded.period_date,
+                    "ingested_at": stmt.excluded.ingested_at,
+                },
+            )
+        else:
+            stmt = stmt.on_conflict_do_nothing(constraint="uq_macro_indicator")
         self._db.execute(stmt)
         self._db.commit()
         return len(indicators)

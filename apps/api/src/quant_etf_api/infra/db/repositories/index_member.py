@@ -80,6 +80,18 @@ class IndexMemberEventRepository(BaseRepository):
         self._db.bulk_insert_mappings(IndexMemberEventModel, rows)
         return int(deleted) + len(rows)
 
+    def delete_pit_by_code(self, index_code: str) -> int:
+        """删除单个指数的 PIT 历史事件，调用方负责事务提交。"""
+        result = (
+            self._db.query(IndexMemberEventModel)
+            .filter(
+                IndexMemberEventModel.index_code == index_code,
+                IndexMemberEventModel.snapshot_type == "pit",
+            )
+            .delete(synchronize_session=False)
+        )
+        return int(result)
+
     def bulk_upsert_pit(self, rows: list[dict[str, Any]]) -> int:
         """幂等写入 PIT 取样行（冲突时保留已有行，不覆盖）。"""
         if not rows:

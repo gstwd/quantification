@@ -91,6 +91,8 @@ class IndexMembershipDataService:
         index_codes: list[str],
         start: date,
         end: date,
+        *,
+        commit: bool = True,
     ) -> dict[str, Any]:
         """按每交易月月末取样回填 PIT 历史成分（Tushare 优先，baostock 兜底）。
 
@@ -188,8 +190,38 @@ class IndexMembershipDataService:
                 index_code,
                 total,
             )
-        self._db.commit()
+        if commit:
+            self._db.commit()
         return {"start": start.isoformat(), "end": end.isoformat(), "items": items, "errors": errors}
+
+    def rebuild_index(self, index_code: str, start: date, end: date) -> dict[str, Any]:
+        """安全重建单个指数的当前快照与 PIT 历史。
+
+        PIT 数据先在当前事务中删除并重建，只有完整拉取成功且至少得到一批
+        有效事件后才提交；任何异常都会回滚并保留旧 PIT 数据。
+        """
+        try:
+            current = self.refresh_current_snapshots([index_code])
+            if current.get("errors"):
+                raise RuntimeError("当前成分快照刷新失败: " + "; ".join(current["errors"]))
+            deleted = self._repo.delete_pit_by_code(index_code)
+            pit = self.backfill_pit([index_code], start, end, commit=False)
+            inserted = int(pit.get("items", {}).get(index_code) or 0)
+            errors = pit.get("errors") or []
+            if not inserted or errors:
+                raise RuntimeError(
+                    f"PIT 成分重建失败: rows={inserted}, errors={errors[:3]}"
+                )
+            self._db.commit()
+            return {
+                "index_code": index_code,
+                "deleted_pit_rows": deleted,
+                "inserted_pit_rows": inserted,
+                "snapshot_date": current.get("snapshot_date"),
+            }
+        except Exception:
+            self._db.rollback()
+            raise
 
     def status(self, index_codes: list[str]) -> list[dict[str, Any]]:
         """返回各指数成分事件覆盖状态。"""

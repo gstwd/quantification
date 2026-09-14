@@ -224,6 +224,58 @@ class IndustryDataService:
             **snapshot,
         }
 
+    def repair_industry_gaps(self, industry_code: str, expected_end: date) -> dict[str, Any]:
+        """修复单个行业的历史缺口和异常日线。
+
+        申万接口不支持可靠的日期增量，因此仍然全量拉取后本地裁剪写入；
+        与 fill_industry 的区别是该入口无论最新日期是否正常都会执行，并
+        返回修复前后的精确统计。
+        """
+        code = self._ensure_universe_row(industry_code)
+        actual_dates = set(self._bar_repo.find_trade_dates_by_code(code))
+        before = self._quality_snapshot(code)
+        invalid_before = self._invalid_bar_count(code)
+        rows = self._sw_client.fetch_daily(code)
+        fetched_dates = {row["trade_date"] for row in rows if row.get("trade_date")}
+        inserted_rows = len(fetched_dates - actual_dates)
+        updated_rows = len(fetched_dates & actual_dates)
+        self._upsert_bars(code, rows)
+        self._db.commit()
+        after = self._quality_snapshot(code)
+        self._persist_quality_snapshots([after])
+        self._db.commit()
+        gaps_found = int(before.get("missing_day_count") or 0)
+        gaps_after = int(after.get("missing_day_count") or 0)
+        invalid_after = self._invalid_bar_count(code)
+        return {
+            "industry_code": code,
+            "fetched_rows": len(rows),
+            "upserted_rows": inserted_rows + updated_rows,
+            "inserted_rows": inserted_rows,
+            "updated_rows": updated_rows,
+            "gaps_found": gaps_found,
+            "gaps_repaired": max(0, gaps_found - gaps_after),
+            "invalid_found": invalid_before,
+            "invalid_repaired": max(0, invalid_before - invalid_after),
+            **after,
+        }
+
+    def _invalid_bar_count(self, industry_code: str) -> int:
+        """统计单行业日线的基础字段异常数量。"""
+        return sum(
+            1
+            for row in self._bar_repo.find_by_code(industry_code)
+            if any(
+                value is None or value <= 0
+                for value in (
+                    row.open_price,
+                    row.high_price,
+                    row.low_price,
+                    row.close_price,
+                )
+            )
+        )
+
     def rebuild_industry(self, industry_code: str) -> dict[str, Any]:
         """全量重拉单个行业日线并刷新质量快照。
 
@@ -237,11 +289,22 @@ class IndustryDataService:
         """
         code = self._ensure_universe_row(industry_code)
         rows = self._sw_client.fetch_daily(code)
-        deleted = 0
-        if rows:
-            deleted = self._bar_repo.delete_by_code(code)
-            self._upsert_bars(code, rows)
-            self._db.commit()
+        if not rows:
+            raise RuntimeError(f"行业 {code} 未获取到可替换日线，已保留旧数据")
+        existing = self._bar_repo.find_by_code(code)
+        if existing:
+            existing_dates = {row.trade_date for row in existing}
+            fetched_dates = {row.trade_date for row in rows}
+            if len(fetched_dates) < max(1, int(len(existing_dates) * 0.99)):
+                raise RuntimeError(
+                    f"行业 {code} 新抓取数据（{len(fetched_dates)} 天）明显少于"
+                    f"库内现有数据（{len(existing_dates)} 天），已保留旧数据"
+                )
+            if min(fetched_dates) > min(existing_dates) or max(fetched_dates) < max(existing_dates):
+                raise RuntimeError(f"行业 {code} 新数据日期范围未覆盖旧数据，已保留旧数据")
+        deleted = self._bar_repo.delete_by_code(code)
+        self._upsert_bars(code, rows)
+        self._db.commit()
         snapshot = self._quality_snapshot(code)
         self._persist_quality_snapshots([snapshot])
         self._db.commit()

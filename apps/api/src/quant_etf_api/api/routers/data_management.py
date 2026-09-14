@@ -54,6 +54,16 @@ def create_operation(
     keys = {definition.key for definition in DATASETS}
     if request.dataset_key is not None and request.dataset_key not in keys:
         raise HTTPException(status_code=422, detail=f"未知数据集: {request.dataset_key}")
+    if request.dataset_key is not None:
+        definition = next(item for item in DATASETS if item.key == request.dataset_key)
+        if request.operation not in definition.operations:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"数据集 {request.dataset_key} 不支持操作 {request.operation}；"
+                    f"支持操作：{', '.join(definition.operations)}"
+                ),
+            )
     if request.dataset_key is None and request.operation not in {"sync_latest", "check"}:
         raise HTTPException(status_code=422, detail="全局范围仅支持同步最新或质量检查")
     if request.partition_key and request.dataset_key is None:

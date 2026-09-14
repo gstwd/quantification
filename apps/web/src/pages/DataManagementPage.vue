@@ -29,6 +29,7 @@
       <span class="spinner" aria-hidden="true"></span>
       数据维护任务执行中，完成后自动刷新健康状态…
     </div>
+    <div v-if="resultNotice" class="notice success">{{ resultNotice }}</div>
 
     <!-- 健康概览卡片 -->
     <section v-if="overview" class="overview-grid">
@@ -121,10 +122,10 @@
               <template v-else>尚未执行统一检查</template>
             </span>
             <div class="mini-actions">
-              <button class="btn-mini" :disabled="busy" @click="runOperation('check', item.dataset_key)">检查</button>
-              <button class="btn-mini" :disabled="busy" @click="runOperation('sync_latest', item.dataset_key)">补最新</button>
-              <button class="btn-mini" :disabled="busy" @click="runOperation('repair_gaps', item.dataset_key)">修复缺口</button>
-              <button class="btn-mini danger" :disabled="busy" @click="runOperation('rebuild', item.dataset_key)">全量重拉</button>
+              <button v-if="supports(item, 'check')" class="btn-mini" :disabled="busy" @click="runOperation('check', item.dataset_key)">检查</button>
+              <button v-if="supports(item, 'sync_latest')" class="btn-mini" :disabled="busy" @click="runOperation('sync_latest', item.dataset_key)">补最新</button>
+              <button v-if="supports(item, 'repair_gaps')" class="btn-mini" :disabled="busy" @click="runOperation('repair_gaps', item.dataset_key)">修复缺口</button>
+              <button v-if="supports(item, 'rebuild')" class="btn-mini danger" :disabled="busy" @click="runOperation('rebuild', item.dataset_key)">全量重拉</button>
             </div>
           </footer>
         </article>
@@ -197,10 +198,10 @@
               <td class="issue-cell">{{ formatIssue(item) || '正常' }}</td>
               <td>
                 <div class="mini-actions" @click.stop>
-                  <button class="btn-mini" :disabled="busy" @click="runOperation('check', detail.dataset.dataset_key, item.partition_key)">检查</button>
-                  <button class="btn-mini" :disabled="busy" @click="runOperation('sync_latest', detail.dataset.dataset_key, item.partition_key)">补最新</button>
-                  <button class="btn-mini" :disabled="busy" @click="runOperation('repair_gaps', detail.dataset.dataset_key, item.partition_key)">修复</button>
-                  <button class="btn-mini danger" :disabled="busy" @click="runOperation('rebuild', detail.dataset.dataset_key, item.partition_key)">重拉</button>
+                  <button v-if="supports(detail.dataset, 'check')" class="btn-mini" :disabled="busy" @click="runOperation('check', detail.dataset.dataset_key, item.partition_key)">检查</button>
+                  <button v-if="supports(detail.dataset, 'sync_latest')" class="btn-mini" :disabled="busy" @click="runOperation('sync_latest', detail.dataset.dataset_key, item.partition_key)">补最新</button>
+                  <button v-if="supports(detail.dataset, 'repair_gaps')" class="btn-mini" :disabled="busy" @click="runOperation('repair_gaps', detail.dataset.dataset_key, item.partition_key)">修复</button>
+                  <button v-if="supports(detail.dataset, 'rebuild')" class="btn-mini danger" :disabled="busy" @click="runOperation('rebuild', detail.dataset.dataset_key, item.partition_key)">重拉</button>
                 </div>
               </td>
             </tr>
@@ -252,6 +253,7 @@ const activeRunId = ref<string | null>(null)
 const loading = ref(false)
 const submitting = ref(false)
 const error = ref<string | null>(null)
+const resultNotice = ref<string | null>(null)
 const route = useRoute()
 
 /** 是否有维护任务正在执行。 */
@@ -328,6 +330,11 @@ function runStatusText(status: string | null): string {
   return status ? labels[status] ?? status : '—'
 }
 
+/** 判断数据集是否声明支持某项维护操作。 */
+function supports(item: { supported_operations: string[] }, operation: DataManagementOperation): boolean {
+  return item.supported_operations.includes(operation)
+}
+
 /** 将 UTC 时间串展示为本地可读时间。 */
 function formatClock(value: string | null | undefined): string {
   if (!value) return '—'
@@ -383,6 +390,7 @@ async function runOperation(
     confirmationToken = expected
   }
   submitting.value = true
+  resultNotice.value = null
   try {
     const accepted = await triggerDataManagementOperation({
       operation,
@@ -407,6 +415,16 @@ const { start, polling } = usePolling<ResearchRunDetail>({
   intervalMs: 2000,
   onData: (run) => {
     if (['success', 'partial_success', 'failed', 'skipped'].includes(run.status)) {
+      const metrics = run.metrics ?? {}
+      const inserted = typeof metrics.records_inserted === 'number' ? metrics.records_inserted : null
+      const repaired = typeof metrics.gaps_repaired === 'number' ? metrics.gaps_repaired : null
+      const found = typeof metrics.gaps_found === 'number' ? metrics.gaps_found : null
+      const updated = typeof metrics.records_updated === 'number' ? metrics.records_updated : null
+      const skipped = typeof metrics.records_skipped === 'number' ? metrics.records_skipped : null
+      const failed = Array.isArray(metrics.failed_partitions) ? metrics.failed_partitions.length : null
+      if (inserted !== null || repaired !== null || updated !== null || found !== null) {
+        resultNotice.value = `任务${run.status === 'success' ? '完成' : '结束'}：插入 ${inserted ?? 0} · 更新 ${updated ?? 0} · 跳过 ${skipped ?? 0} · 发现缺口 ${found ?? 0} · 修复缺口 ${repaired ?? 0}${failed ? ` · 失败分区 ${failed}` : ''}`
+      }
       void loadOverview()
       if (selectedKey.value) void loadDetail()
     }
@@ -453,6 +471,7 @@ onMounted(async () => {
 }
 .notice.error { color: var(--danger); background: rgba(239, 68, 68, .08); }
 .notice.polling { color: var(--accent); background: rgba(59, 130, 246, .08); }
+.notice.success { color: #15803d; background: rgba(34, 197, 94, .08); }
 .spinner {
   width: 13px;
   height: 13px;

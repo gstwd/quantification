@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
-from sqlalchemy import Date, and_, case, cast, func, or_
+from sqlalchemy import Date, and_, case, cast, func, not_, or_
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.db.base import utcnow
@@ -39,6 +39,7 @@ from quant_etf_api.infra.db.models.stock import (
 )
 from quant_etf_api.infra.time import today_cn
 from quant_etf_api.infra.trading_calendar import TradingCalendar
+from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
 from quant_etf_api.schemas.data_management import (
     DataManagementOverview,
     DataPartitionHealth,
@@ -144,7 +145,7 @@ DATASETS: tuple[DataSetDefinition, ...] = (
         "低频",
         "申万官网",
         None,
-        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("sync_latest", "check"),
         ("目录数量", "行业代码与名称完整性"),
     ),
     DataSetDefinition(
@@ -171,7 +172,7 @@ DATASETS: tuple[DataSetDefinition, ...] = (
         "低频",
         "Tushare",
         None,
-        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("sync_latest", "check"),
         ("代码、名称、ts_code 与状态完整性"),
     ),
     DataSetDefinition(
@@ -319,7 +320,13 @@ class DataManagementService:
                 except Exception as exc:
                     self._db.rollback()
                     message = f"{type(exc).__name__}: {exc}"
-                    self._mark_failure(definition, partition_key, run_id, message)
+                    # 质量检查依赖本地交易日历快照；日历不可用时不能把未知状态
+                    # 覆盖成错误快照，否则会丢失上一次有效检查结果。
+                    if not (
+                        operation == "check"
+                        and isinstance(exc, TradingCalendarUnavailableError)
+                    ):
+                        self._mark_failure(definition, partition_key, run_id, message)
                     result_items.append(
                         {"dataset_key": definition.key, "status": "failed", "error": message}
                     )
@@ -365,19 +372,51 @@ class DataManagementService:
         """
         if operation not in definition.operations:
             raise ValueError(f"数据集 {definition.key} 不支持操作 {operation}")
-        sync_result: dict[str, Any] = {"records": 0, "errors": [], "skipped": False}
+        sync_result: dict[str, Any] = {
+            "records": 0,
+            "errors": [],
+            "skipped": False,
+            "records_inserted": 0,
+            "records_updated": 0,
+            "records_skipped": 0,
+            "gaps_found": 0,
+            "gaps_repaired": 0,
+            "invalid_found": 0,
+            "invalid_repaired": 0,
+            "failed_partitions": [],
+            "source_usage": {},
+            "requested_ranges": [],
+            "fallbacks": [],
+        }
         if operation != "check":
             sync_result = self._sync(definition.key, partition_key, operation, force)
-        snapshots = self._check(definition, partition_key, run_id, operation)
+        snapshots = self._check(
+            definition,
+            partition_key,
+            run_id,
+            operation,
+            local_calendar=operation == "check",
+        )
         self._db.commit()
         errors = list(sync_result.get("errors") or [])
         return {
             "checked_partitions": len(snapshots),
             "operation": operation,
             "records": int(sync_result.get("records") or 0),
+            "records_inserted": int(sync_result.get("records_inserted") or 0),
+            "records_updated": int(sync_result.get("records_updated") or 0),
+            "records_skipped": int(sync_result.get("records_skipped") or 0),
+            "gaps_found": int(sync_result.get("gaps_found") or 0),
+            "gaps_repaired": int(sync_result.get("gaps_repaired") or 0),
+            "invalid_found": int(sync_result.get("invalid_found") or 0),
+            "invalid_repaired": int(sync_result.get("invalid_repaired") or 0),
             "error_count": len(errors),
             "errors": errors[:20],
             "skipped": bool(sync_result.get("skipped")),
+            "failed_partitions": list(sync_result.get("failed_partitions") or []),
+            "source_usage": dict(sync_result.get("source_usage") or {}),
+            "requested_ranges": list(sync_result.get("requested_ranges") or []),
+            "fallbacks": list(sync_result.get("fallbacks") or []),
         }
 
     def _sync(
@@ -410,11 +449,44 @@ class DataManagementService:
         errors: list[str] = []
         skipped = False
         expected = self._latest_trading_day()
+        stats: dict[str, Any] = {
+            "records_inserted": 0,
+            "records_updated": 0,
+            "records_skipped": 0,
+            "gaps_found": 0,
+            "gaps_repaired": 0,
+            "invalid_found": 0,
+            "invalid_repaired": 0,
+            "failed_partitions": [],
+            "source_usage": {},
+            "requested_ranges": [],
+            "fallbacks": [],
+        }
 
         def _fail(scope: str, exc: Exception) -> None:
             """回滚当前会话并记录分区级失败。"""
             self._db.rollback()
             errors.append(f"{scope}: {type(exc).__name__}: {exc}")
+            stats["failed_partitions"].append(scope)
+
+        def _add_records(count: int, *, updated: int = 0) -> None:
+            """Accumulate compatibility and detailed write counters."""
+            nonlocal records
+            records += count
+            stats["records_updated"] += updated
+            stats["records_inserted"] += max(0, count - updated)
+
+        def _add_source(source: str | None) -> None:
+            """Accumulate the selected source count for this operation."""
+            if source:
+                stats["source_usage"][source] = stats["source_usage"].get(source, 0) + 1
+
+        def _add_fallbacks(service: Any, partition: str | None = None) -> None:
+            """Merge client-side source fallback metadata into run metrics."""
+            for item in getattr(service, "_last_fallbacks", []):
+                fallback = dict(item)
+                fallback.setdefault("partition_key", partition)
+                stats["fallbacks"].append(fallback)
 
         if dataset_key == "trading_calendar":
             try:
@@ -437,8 +509,19 @@ class DataManagementService:
             service = IngestService(self._db)
             for code in self._partitions(dataset_key) if not partition_key else [partition_key]:
                 try:
+                    gaps_before = (
+                        self._partition_missing_count(dataset_key, code)
+                        if operation == "repair_gaps"
+                        else 0
+                    )
+                    invalid_before = (
+                        self._partition_invalid_count(dataset_key, code)
+                        if operation == "repair_gaps"
+                        else 0
+                    )
                     if operation == "rebuild":
-                        records += self._safe_replace_index_bars(service, code)
+                        _add_records(self._safe_replace_index_bars(service, code))
+                        _add_fallbacks(service, code)
                         continue
                     latest = (
                         self._db.query(func.max(IndexDailyBarModel.trade_date))
@@ -453,17 +536,43 @@ class DataManagementService:
                     ):
                         skipped = True
                         continue
-                    records += service._fetch_and_upsert_index_bars(
-                        code, incremental=operation != "repair_gaps"
+                    fetched = service._fetch_and_upsert_index_bars(
+                        code,
+                        incremental=operation != "repair_gaps",
+                        overwrite=operation == "repair_gaps",
                     )
+                    _add_fallbacks(service, code)
+                    _add_records(fetched)
+                    if operation == "repair_gaps":
+                        stats["records_updated"] += fetched
+                        stats["records_inserted"] = max(0, stats["records_inserted"] - fetched)
+                    _add_source(self._latest_source(IndexDailyBarModel, code))
+                    if operation == "repair_gaps":
+                        gaps_after = self._partition_missing_count(dataset_key, code)
+                        invalid_after = self._partition_invalid_count(dataset_key, code)
+                        stats["gaps_found"] += gaps_before
+                        stats["gaps_repaired"] += max(0, gaps_before - gaps_after)
+                        stats["invalid_found"] += invalid_before
+                        stats["invalid_repaired"] += max(0, invalid_before - invalid_after)
                 except Exception as exc:  # noqa: PERF203
                     _fail(code, exc)
         elif dataset_key == "index_valuation":
             service = IngestService(self._db)
             for code in self._partitions(dataset_key) if not partition_key else [partition_key]:
                 try:
+                    gaps_before = (
+                        self._partition_missing_count(dataset_key, code)
+                        if operation == "repair_gaps"
+                        else 0
+                    )
+                    invalid_before = (
+                        self._partition_invalid_count(dataset_key, code)
+                        if operation == "repair_gaps"
+                        else 0
+                    )
                     if operation == "rebuild":
-                        records += self._safe_replace_index_valuations(service, code)
+                        _add_records(self._safe_replace_index_valuations(service, code))
+                        _add_fallbacks(service, code)
                         continue
                     latest = (
                         self._db.query(func.max(IndexValuationModel.trade_date))
@@ -478,17 +587,38 @@ class DataManagementService:
                     ):
                         skipped = True
                         continue
-                    records += service._fetch_and_upsert_index_valuation(code)
+                    fetched = service._fetch_and_upsert_index_valuation(
+                        code, overwrite=operation == "repair_gaps"
+                    )
+                    _add_fallbacks(service, code)
+                    _add_records(fetched)
+                    if operation == "repair_gaps":
+                        stats["records_updated"] += fetched
+                        stats["records_inserted"] = max(0, stats["records_inserted"] - fetched)
+                    _add_source(self._latest_source(IndexValuationModel, code))
+                    if operation == "repair_gaps":
+                        gaps_after = self._partition_missing_count(dataset_key, code)
+                        invalid_after = self._partition_invalid_count(dataset_key, code)
+                        stats["gaps_found"] += gaps_before
+                        stats["gaps_repaired"] += max(0, gaps_before - gaps_after)
+                        stats["invalid_found"] += invalid_before
+                        stats["invalid_repaired"] += max(0, invalid_before - invalid_after)
                 except Exception as exc:  # noqa: PERF203
                     _fail(code, exc)
         elif dataset_key == "macro_indicator":
             try:
-                records += IngestService(self._db)._fetch_and_upsert_macro()
+                service = IngestService(self._db)
+                _add_records(
+                    service._fetch_and_upsert_macro(
+                        overwrite=operation in {"repair_gaps", "rebuild"}
+                    )
+                )
+                _add_fallbacks(service)
             except Exception as exc:  # noqa: PERF203
                 _fail("macro_indicator", exc)
         elif dataset_key == "index_membership":
             codes = self._partitions(dataset_key) if not partition_key else [partition_key]
-            if codes and not force:
+            if operation == "sync_latest" and codes and not force:
                 rows = (
                     self._db.query(
                         IndexMemberEventModel.index_code,
@@ -505,17 +635,39 @@ class DataManagementService:
                     for code in codes
                 ):
                     skipped = True
-            if not skipped:
+            if operation == "rebuild":
+                service = IndexMembershipDataService(self._db)
+                for code in codes:
+                    try:
+                        service.rebuild_index(code, date(2013, 1, 1), today_cn())
+                        stats["source_usage"]["membership"] = (
+                            stats["source_usage"].get("membership", 0) + 1
+                        )
+                        _add_records(1)
+                    except Exception as exc:  # noqa: PERF203
+                        _fail(code, exc)
+            elif operation == "repair_gaps":
+                try:
+                    service = IndexMembershipDataService(self._db)
+                    for code in codes:
+                        result = service.backfill_pit(
+                            [code], date(2013, 1, 1), today_cn()
+                        )
+                        _add_records(int(result.get("items", {}).get(code) or 0))
+                        errors.extend(str(e) for e in result.get("errors", []))
+                except Exception as exc:  # noqa: PERF203
+                    _fail("index_membership", exc)
+            elif not skipped:
                 try:
                     result = IndexMembershipDataService(self._db).refresh_current_snapshots(codes)
-                    records += sum(int(v) for v in result.get("items", {}).values())
+                    _add_records(sum(int(v) for v in result.get("items", {}).values()))
                     errors.extend(str(e) for e in result.get("errors", []))
                 except Exception as exc:  # noqa: PERF203
                     _fail("index_membership", exc)
         elif dataset_key == "industry_universe":
             try:
                 result = IndustryDataService(self._db).sync_universe()
-                records += int(result.get("added") or 0) + int(result.get("updated") or 0)
+                _add_records(int(result.get("added") or 0) + int(result.get("updated") or 0))
             except Exception as exc:  # noqa: PERF203
                 _fail("industry_universe", exc)
         elif dataset_key == "industry_daily_bar":
@@ -524,18 +676,46 @@ class DataManagementService:
                 try:
                     if operation == "rebuild":
                         result = service.rebuild_industry(partition_key)
-                        records += int(result.get("upserted_rows") or 0)
+                        _add_records(int(result.get("upserted_rows") or 0))
+                    elif operation == "repair_gaps":
+                        result = service.repair_industry_gaps(partition_key, expected)
+                        _add_records(int(result.get("upserted_rows") or 0), updated=int(result.get("updated_rows") or 0))
+                        stats["gaps_found"] += int(result.get("gaps_found") or 0)
+                        stats["gaps_repaired"] += int(result.get("gaps_repaired") or 0)
+                        stats["invalid_found"] += int(result.get("invalid_found") or 0)
+                        stats["invalid_repaired"] += int(result.get("invalid_repaired") or 0)
                     elif force or self._industry_code_behind(partition_key, expected):
                         result = service.fill_industry(partition_key)
-                        records += int(result.get("fetched_rows") or 0)
+                        _add_records(int(result.get("fetched_rows") or 0))
                     else:
                         skipped = True
                 except Exception as exc:  # noqa: PERF203
                     _fail(partition_key, exc)
+            elif operation == "rebuild":
+                for code in self._partitions(dataset_key):
+                    try:
+                        result = service.rebuild_industry(code)
+                        _add_records(int(result.get("upserted_rows") or 0))
+                    except Exception as exc:  # noqa: PERF203
+                        _fail(code, exc)
+            elif operation == "repair_gaps":
+                for code in self._partitions(dataset_key):
+                    try:
+                        result = service.repair_industry_gaps(code, expected)
+                        _add_records(
+                            int(result.get("upserted_rows") or 0),
+                            updated=int(result.get("updated_rows") or 0),
+                        )
+                        stats["gaps_found"] += int(result.get("gaps_found") or 0)
+                        stats["gaps_repaired"] += int(result.get("gaps_repaired") or 0)
+                        stats["invalid_found"] += int(result.get("invalid_found") or 0)
+                        stats["invalid_repaired"] += int(result.get("invalid_repaired") or 0)
+                    except Exception as exc:  # noqa: PERF203
+                        _fail(code, exc)
             elif force or self._industry_dataset_behind(expected):
                 try:
                     result = service.refresh_industry_bars_incremental()
-                    records += int(result.get("records") or 0)
+                    _add_records(int(result.get("records") or 0))
                     errors.extend(str(e) for e in result.get("errors", []))
                 except Exception as exc:  # noqa: PERF203
                     _fail("industry_daily_bar", exc)
@@ -548,7 +728,7 @@ class DataManagementService:
                 )
                 if result.get("skipped"):
                     skipped = True
-                records += int(result.get("total") or 0)
+                _add_records(int(result.get("total") or 0))
             except Exception as exc:  # noqa: PERF203
                 _fail("industry_membership", exc)
         elif dataset_key == "stock_universe":
@@ -560,7 +740,7 @@ class DataManagementService:
             if not skipped:
                 try:
                     result = StockDataService(self._db).sync_universe()
-                    records += int(result.get("added") or 0) + int(result.get("updated") or 0)
+                    _add_records(int(result.get("added") or 0) + int(result.get("updated") or 0))
                 except Exception as exc:  # noqa: PERF203
                     _fail("stock_universe", exc)
         elif dataset_key in {
@@ -573,10 +753,10 @@ class DataManagementService:
                 try:
                     if operation == "rebuild":
                         result = service.rebuild_stock(partition_key, datasets=[dataset_key])
-                        records += int(result.get("upserted_total") or 0)
+                        _add_records(int(result.get("upserted_total") or 0))
                     else:
                         result = service.fill_stock(partition_key, datasets=[dataset_key])
-                        records += int(result.get("upserted_total") or 0)
+                        _add_records(int(result.get("upserted_total") or 0))
                 except Exception as exc:  # noqa: PERF203
                     _fail(partition_key, exc)
             else:
@@ -598,12 +778,133 @@ class DataManagementService:
                         )
                     else:
                         result = service.sync_missing_recent(datasets=[dataset_key])
-                    records += int(result["records"].get(dataset_key) or 0)
+                    _add_records(int(result["records"].get(dataset_key) or 0))
                 except Exception as exc:  # noqa: PERF203
                     _fail(dataset_key, exc)
         else:
             raise ValueError(f"未实现数据集同步: {dataset_key}")
-        return {"records": records, "errors": errors, "skipped": skipped}
+        stats["failed_partitions"] = sorted(
+            set(stats["failed_partitions"])
+            | {error.split(":", 1)[0] for error in errors if ":" in error}
+        )
+        if dataset_key in {
+            "index_daily_bar",
+            "index_valuation",
+            "industry_daily_bar",
+            "stock_daily_close",
+            "stock_daily_basic",
+            "stock_moneyflow",
+            "macro_indicator",
+        }:
+            stats["source_usage"] = self._source_counts(dataset_key, partition_key)
+            stats["requested_ranges"] = self._requested_ranges(
+                dataset_key, partition_key, expected, operation
+            )
+        stats.update({"records": records, "errors": errors, "skipped": skipped})
+        stats["records_skipped"] += 1 if skipped else 0
+        return stats
+
+    def _latest_source(self, model: Any, partition_key: str) -> str | None:
+        """Return the latest persisted source for a partition, if available."""
+        date_column = next(
+            (
+                getattr(model, name, None)
+                for name in ("trade_date", "period_date", "updated_at", "fetched_at")
+                if getattr(model, name, None) is not None
+            ),
+            None,
+        )
+        partition_column = next(
+            (
+                getattr(model, name, None)
+                for name in ("index_code", "industry_code", "stock_code", "indicator_code")
+                if getattr(model, name, None) is not None
+            ),
+            None,
+        )
+        if date_column is None or partition_column is None:
+            return None
+        row = (
+            self._db.query(model.source)
+            .filter(partition_column == partition_key)
+            .order_by(date_column.desc())
+            .first()
+        )
+        return row[0] if row else None
+
+    def _source_counts(self, dataset_key: str, partition_key: str | None) -> dict[str, int]:
+        """汇总目标数据集当前落库记录的来源分布。"""
+        model, partition_column, _, source_column = self._model_columns(dataset_key)
+        if source_column is None:
+            return {}
+        query = self._db.query(source_column, func.count()).select_from(model)
+        if partition_column is not None and partition_key:
+            query = query.filter(partition_column == partition_key)
+        rows = query.group_by(source_column).all()
+        return {str(source or "unknown"): int(count) for source, count in rows}
+
+    def _partition_missing_count(self, dataset_key: str, partition_key: str) -> int:
+        """Return the current exact missing-date count for one daily partition."""
+        definition = self._definition(dataset_key)
+        payload = self._inspect_many(definition, [partition_key]).get(partition_key, {})
+        return int(payload.get("missing_count") or 0)
+
+    def _partition_invalid_count(self, dataset_key: str, partition_key: str) -> int:
+        """Return the current invalid-row count for one partition."""
+        definition = self._definition(dataset_key)
+        payload = self._inspect_many(definition, [partition_key]).get(partition_key, {})
+        return int(payload.get("invalid_count") or 0)
+
+    def _requested_ranges(
+        self,
+        dataset_key: str,
+        partition_key: str | None,
+        expected: date,
+        operation: str,
+    ) -> list[dict[str, Any]]:
+        """Return compact request-range metadata for a maintenance run."""
+        if dataset_key not in {
+            "index_daily_bar",
+            "index_valuation",
+            "industry_daily_bar",
+            "stock_daily_close",
+            "stock_daily_basic",
+            "stock_moneyflow",
+            "macro_indicator",
+        }:
+            return []
+        keys = [partition_key] if partition_key else self._partitions(dataset_key)
+        model, partition_column, date_column, _ = self._model_columns(dataset_key)
+        counts: dict[str, int] = {}
+        earliest: dict[str, date] = {}
+        if partition_column is not None and keys:
+            rows = (
+                self._db.query(
+                    partition_column,
+                    func.count(),
+                    func.min(cast(date_column, Date)),
+                )
+                .filter(partition_column.in_(keys))
+                .group_by(partition_column)
+                .all()
+            )
+            counts = {str(key): int(count) for key, count, _ in rows}
+            earliest = {str(key): value for key, _, value in rows if value is not None}
+        return [
+            {
+                "partition_key": key,
+                "source": self._latest_source(model, key),
+                "start": (
+                    earliest.get(key).isoformat()
+                    if operation == "sync_latest" and earliest.get(key) is not None
+                    else "2013-01-01"
+                ),
+                "end": expected.isoformat(),
+                "records": counts.get(key, 0),
+                "operation": operation,
+            }
+            for key in keys[:2000]
+        ]
 
     def _industry_code_behind(self, industry_code: str, expected: date) -> bool:
         """判断单行业日线是否落后于目标交易日。"""
@@ -733,6 +1034,8 @@ class DataManagementService:
         partition_key: str | None,
         run_id: str,
         operation: str,
+        *,
+        local_calendar: bool = False,
     ) -> list[DataHealthSnapshotModel]:
         """重算指定数据集范围的健康快照并持久化。
 
@@ -741,7 +1044,11 @@ class DataManagementService:
         才重算汇总行，单分区检查只更新对应分区。
         """
         partitions = [partition_key] if partition_key else self._partitions(definition.key)
-        payloads = self._inspect_many(definition, partitions)
+        if local_calendar:
+            payloads = self._inspect_many(definition, partitions, local_calendar=True)
+        else:
+            # 保留旧的无关键字调用形态，便于已有测试和扩展服务替换检查器。
+            payloads = self._inspect_many(definition, partitions)
         existing_rows = (
             self._db.query(DataHealthSnapshotModel)
             .filter(DataHealthSnapshotModel.dataset_key == definition.key)
@@ -807,6 +1114,8 @@ class DataManagementService:
         self,
         definition: DataSetDefinition,
         partitions: list[str],
+        *,
+        local_calendar: bool = False,
     ) -> dict[str, dict[str, Any]]:
         """用聚合 SQL 一次计算一个数据集的所有分区健康指标。
 
@@ -848,10 +1157,32 @@ class DataManagementService:
             }
 
         keys = [""] if definition.partition_label is None else partitions
-        expected = self._expected_date(definition.key)
+        expected = self._expected_date(definition.key, local_calendar=local_calendar)
         calendar_days = (
-            self._calendar_days_until(expected) if self._is_daily(definition.key) else []
+            self._calendar_days_until(expected, local_calendar=local_calendar)
+            if self._is_daily(definition.key)
+            else []
         )
+        stock_boundaries: dict[str, tuple[date, date]] = {}
+        if definition.key in {
+            "stock_daily_close",
+            "stock_daily_basic",
+            "stock_moneyflow",
+        }:
+            universe_rows = (
+                self._db.query(
+                    StockUniverseModel.stock_code,
+                    StockUniverseModel.ipo_date,
+                    StockUniverseModel.delist_date,
+                )
+                .filter(StockUniverseModel.stock_code.in_(partitions))
+                .all()
+            )
+            for stock_code, ipo_date, delist_date in universe_rows:
+                start = max(date(2013, 1, 1), ipo_date or date(2013, 1, 1))
+                end = min(expected, delist_date) if expected is not None and delist_date else expected
+                if end is not None:
+                    stock_boundaries[stock_code] = (start, end)
         result: dict[str, dict[str, Any]] = {}
         for key in keys:
             row = raw_rows.get(key)
@@ -862,7 +1193,26 @@ class DataManagementService:
             latest = row.latest_date if row is not None and date_expression is not None else None
             hard_errors = int(row.error_count) if row is not None else 0
             warnings = int(row.warning_count) if row is not None else 0
-            missing = self._missing_count_from_bounds(earliest, record_count, calendar_days)
+            range_start = earliest
+            range_end = expected
+            if key in stock_boundaries:
+                range_start, range_end = stock_boundaries[key]
+            partition_calendar_days = (
+                [day for day in calendar_days if range_end is None or day <= range_end]
+                if range_end is not None
+                else []
+            )
+            missing = self._missing_count_from_bounds(
+                range_start,
+                record_count,
+                partition_calendar_days,
+                valid_count=max(0, record_count - hard_errors),
+            )
+            missing_sample: list[str] = []
+            if self._is_daily(definition.key) and key and missing:
+                missing, missing_sample = self._exact_missing_dates(
+                    definition.key, key, range_start, range_end, missing
+                )
             status = self._health_status(
                 definition.key, key, record_count, latest, expected, missing, hard_errors, warnings
             )
@@ -883,6 +1233,9 @@ class DataManagementService:
                 "warning_count": warnings,
                 "reasons": reasons,
             }
+            if missing_sample:
+                issues["missing_dates_sample"] = missing_sample
+                issues["missing_dates_truncated"] = missing > len(missing_sample)
             result[key] = {
                 "partition_name": self._partition_name(definition.key, key),
                 "health_status": status,
@@ -900,6 +1253,46 @@ class DataManagementService:
                 else None,
             }
         return result
+
+    def _exact_missing_dates(
+        self,
+        dataset_key: str,
+        partition_key: str,
+        earliest: date | None,
+        expected: date | None,
+        fallback_count: int,
+    ) -> tuple[int, list[str]]:
+        """Use a calendar anti-join to count and sample real missing dates.
+
+        The initial aggregate count is retained as a cheap fallback for empty
+        partitions. For populated partitions this query excludes non-trading
+        dates and avoids loading historical market rows into Python.
+        """
+        if earliest is None or expected is None:
+            return fallback_count, []
+        model, partition_column, date_column, _ = self._model_columns(dataset_key)
+        if partition_column is None or date_column is None:
+            return fallback_count, []
+        error_condition, _ = self._quality_conditions(dataset_key)
+        join_condition = and_(
+            partition_column == partition_key,
+            date_column == TradingCalendarModel.trade_date,
+            not_(error_condition),
+        )
+        base = (
+            self._db.query(TradingCalendarModel.trade_date)
+            .select_from(TradingCalendarModel)
+            .outerjoin(model, join_condition)
+            .filter(
+                TradingCalendarModel.is_trading_day.is_(True),
+                TradingCalendarModel.trade_date >= earliest,
+                TradingCalendarModel.trade_date <= expected,
+                getattr(model, "id").is_(None),
+            )
+        )
+        exact_count = int(base.count())
+        sample_rows = base.order_by(TradingCalendarModel.trade_date.asc()).limit(20).all()
+        return exact_count, [row[0].isoformat() for row in sample_rows]
 
     def _model_columns(self, dataset_key: str) -> tuple[type[Any], Any, Any, Any]:
         """返回数据集对应 ORM 模型及分区、日期、来源列。"""
@@ -974,7 +1367,7 @@ class DataManagementService:
         }
         return mapping[dataset_key]
 
-    def _expected_date(self, dataset_key: str) -> date | None:
+    def _expected_date(self, dataset_key: str, *, local_calendar: bool = False) -> date | None:
         """按数据集频率计算当前应达到的业务日期。"""
         if dataset_key in {
             "index_daily_bar",
@@ -985,7 +1378,7 @@ class DataManagementService:
             "stock_moneyflow",
             "trading_calendar",
         }:
-            return self._latest_trading_day()
+            return self._latest_trading_day(local_only=local_calendar)
         if dataset_key in {"index_membership", "industry_membership"}:
             return today_cn() - timedelta(days=35)
         if dataset_key in {"industry_universe", "stock_universe"}:
@@ -994,8 +1387,20 @@ class DataManagementService:
             return today_cn() - timedelta(days=70)
         return None
 
-    def _latest_trading_day(self) -> date:
+    def _latest_trading_day(self, *, local_only: bool = False) -> date:
         """获取不晚于当前业务日期的最近交易日。"""
+        if local_only:
+            latest = (
+                self._db.query(func.max(TradingCalendarModel.trade_date))
+                .filter(
+                    TradingCalendarModel.is_trading_day.is_(True),
+                    TradingCalendarModel.trade_date <= today_cn(),
+                )
+                .scalar()
+            )
+            if latest is None:
+                raise TradingCalendarUnavailableError("本地交易日历快照为空")
+            return latest
         return TradingCalendar().latest_trading_day(today_cn())
 
     def _quality_conditions(self, dataset_key: str) -> tuple[Any, Any]:
@@ -1061,7 +1466,13 @@ class DataManagementService:
             )
             return hard_error, warning
         if dataset_key == "stock_moneyflow":
-            return false, false
+            return (
+                false,
+                and_(
+                    StockMoneyflowModel.net_mf_vol.is_(None),
+                    StockMoneyflowModel.net_mf_amount.is_(None),
+                ),
+            )
         if dataset_key == "macro_indicator":
             return MacroIndicatorModel.value.is_(None), false
         if dataset_key == "industry_universe":
@@ -1092,7 +1503,9 @@ class DataManagementService:
             "stock_moneyflow",
         }
 
-    def _calendar_days_until(self, expected: date | None) -> list[date]:
+    def _calendar_days_until(
+        self, expected: date | None, *, local_calendar: bool = False
+    ) -> list[date]:
         """一次读取交易日集合，为所有分区复用日期边界。
 
         Raises:
@@ -1102,7 +1515,17 @@ class DataManagementService:
         """
         if expected is None:
             return []
-        days = TradingCalendar().require_trading_days()
+        if local_calendar:
+            days = {
+                row[0]
+                for row in self._db.query(TradingCalendarModel.trade_date)
+                .filter(TradingCalendarModel.is_trading_day.is_(True))
+                .all()
+            }
+            if not days:
+                raise TradingCalendarUnavailableError("本地交易日历快照为空")
+        else:
+            days = TradingCalendar().require_trading_days()
         return sorted(day for day in days if day <= expected)
 
     def _missing_count_from_bounds(
@@ -1110,12 +1533,14 @@ class DataManagementService:
         earliest: date | None,
         record_count: int,
         calendar_days: list[date],
+        valid_count: int | None = None,
     ) -> int:
         """按最早记录与交易日数量计算缺口，不加载全部日期行。"""
         if earliest is None or not calendar_days:
             return 0
         expected_count = len(calendar_days) - bisect_left(calendar_days, earliest)
-        return max(0, expected_count - record_count)
+        present_count = record_count if valid_count is None else valid_count
+        return max(0, expected_count - present_count)
 
     def _health_status(
         self,
@@ -1195,6 +1620,43 @@ class DataManagementService:
             status = "warning"
         elif rows and all(row.health_status == "unsupported" for row in rows):
             status = "unsupported"
+        missing_count = sum(row.missing_count for row in rows)
+        error_count = sum(row.invalid_count for row in rows)
+        warning_count = sum(
+            int((row.issue_summary or {}).get("warning_count") or 0)
+            for row in rows
+            if isinstance(row.issue_summary, dict)
+        )
+        missing_dates_sample: list[str] = []
+        reasons: set[str] = set()
+        for row in rows:
+            summary = row.issue_summary if isinstance(row.issue_summary, dict) else {}
+            missing_dates_sample.extend(
+                value
+                for value in summary.get("missing_dates_sample", [])
+                if isinstance(value, str)
+            )
+            reasons.update(
+                value for value in summary.get("reasons", []) if isinstance(value, str)
+            )
+        missing_dates_sample = sorted(set(missing_dates_sample))[:20]
+        if missing_count:
+            reasons.add("missing_dates")
+        if error_count:
+            reasons.add("invalid_values")
+        if warning_count:
+            reasons.add("warnings")
+        issue_summary = {
+            "partition_count": len(rows),
+            "error_partitions": sum(row.health_status == "error" for row in rows),
+            "warning_partitions": sum(row.health_status == "warning" for row in rows),
+            "missing_count": missing_count,
+            "missing_dates_sample": missing_dates_sample,
+            "missing_dates_truncated": missing_count > len(missing_dates_sample),
+            "error_count": error_count,
+            "warning_count": warning_count,
+            "reasons": sorted(reasons),
+        }
         payload = {
             "partition_name": None,
             "health_status": status if rows else "unknown",
@@ -1207,15 +1669,9 @@ class DataManagementService:
                 (row.expected_date for row in rows if row.expected_date), default=None
             ),
             "record_count": sum(row.record_count for row in rows),
-            "missing_count": sum(row.missing_count for row in rows),
-            "invalid_count": sum(row.invalid_count for row in rows),
-            "issue_summary": {
-                "partition_count": len(rows),
-                "error_partitions": sum(row.health_status == "error" for row in rows),
-                "warning_partitions": sum(row.health_status == "warning" for row in rows),
-            }
-            if rows
-            else {"reason": "尚未检查"},
+            "missing_count": missing_count,
+            "invalid_count": error_count,
+            "issue_summary": issue_summary if rows else {"reason": "尚未检查"},
         }
         return self._save_snapshot(definition, "", run_id, operation, payload, existing)
 
