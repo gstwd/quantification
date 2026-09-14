@@ -18,6 +18,7 @@ from quant_etf_api.services.robustness_service import (
     build_variant_strategy_id,
     build_ablation_variants,
     build_knob_variants,
+    resolve_scan_options,
 )
 
 
@@ -242,6 +243,63 @@ class TestVariantGeneration:
         config = copy.deepcopy(self._CONFIG)
         build_ablation_variants(config)
         assert config == self._CONFIG
+
+
+class TestKnobPriorityAndPresets:
+    """D-2：截断顺序按业务重要性，支持关键旋钮清单与轻量体检预设。"""
+
+    _CONFIG = {
+        "schema_version": "1",
+        "score": {"factors": {"return_20d": 1.0}},
+        "rank": {"top_n": 3},
+        "risk": {"max_asset_weight": 0.5},
+        "timing": {"thresholds": {"offensive": 65, "defensive": 40}},
+        "rebalance": {"day_of_week": 2},
+    }
+
+    def test_timing_thresholds_are_scanned_first(self) -> None:
+        """择时阈值优先于字母序更小的其他字段被扫描。
+
+        历史行为按路径字母序截断，``timing.thresholds.*`` 永远排在最后被截掉，
+        而它恰恰是最容易被调到"刚好"的参数。
+        """
+        variants = build_knob_variants(self._CONFIG, max_knobs=2)
+        assert variants
+        assert all(item["knob"].startswith("timing.thresholds") for item in variants)
+        # 非择时字段（按字母序排在前面的 rank/risk/rebalance）不会先被扫描
+        assert not any(item["knob"].startswith("rank.") for item in variants)
+
+    def test_explicit_knobs_limit_scope(self) -> None:
+        """给出关键旋钮清单时只扫描清单内的路径。"""
+        variants = build_knob_variants(
+            self._CONFIG, max_knobs=50, knobs=["rank.top_n", "risk.max_asset_weight"]
+        )
+        assert {item["knob"] for item in variants} == {"rank.top_n", "risk.max_asset_weight"}
+
+    def test_unknown_knob_path_rejected(self) -> None:
+        """清单里出现配置中不存在的路径时直接报错，而不是静默少扫。"""
+        with pytest.raises(ValueError, match="不存在的数值字段"):
+            build_knob_variants(self._CONFIG, max_knobs=50, knobs=["timing.unknown_knob"])
+
+    def test_quick_preset_is_lightweight(self) -> None:
+        """quick 预设 = 2 窗口 / 8 旋钮的轻量体检（写进优化验收清单）。"""
+        windows, max_knobs, scan_params = resolve_scan_options("quick", None, None)
+        assert (windows, max_knobs) == (2, 8)
+        assert scan_params["preset"] == "quick"
+
+    def test_explicit_values_override_preset(self) -> None:
+        """显式参数优先于预设；两者都未给时等价于 standard。"""
+        windows, max_knobs, params = resolve_scan_options("quick", 3, 12)
+        assert (windows, max_knobs) == (3, 12)
+        assert params["preset"] == "quick"
+        default_windows, default_knobs, default_params = resolve_scan_options(None, None, None)
+        assert (default_windows, default_knobs) == (4, 30)
+        assert default_params["preset"] == "standard"
+
+    def test_unknown_preset_rejected(self) -> None:
+        """未知预设直接报错。"""
+        with pytest.raises(ValueError, match="不支持的扫描预设"):
+            resolve_scan_options("turbo", None, None)
 
 
 class TestDistributionShape:

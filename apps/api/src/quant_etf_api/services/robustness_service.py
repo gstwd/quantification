@@ -68,6 +68,85 @@ DEFAULT_MAX_KNOBS = 30
 # 子池扰动保留比例
 POOL_KEEP_RATIO = 0.8
 
+# 旋钮扰动优先级（D-2）：截断时按"业务上最可疑的拟合参数优先"排序，
+# 而不是按路径字母序——字母序会把 timing.thresholds.* 排到最后截掉，
+# 而择时阈值恰恰是最容易被调到"刚好"的参数。
+_KNOB_PRIORITY: tuple[tuple[str, int], ...] = (
+    ("timing.thresholds", 0),
+    ("timing.proxy_index_codes", 1),
+    ("timing.", 2),
+    ("filters.rules", 3),
+    ("filters.", 4),
+    ("score.factors", 5),
+    ("score.", 6),
+    ("risk.", 7),
+    ("portfolio.", 8),
+    ("rank.", 9),
+    ("rebalance.", 10),
+)
+
+# 扫描预设（D-2）：quick 用于"轻量体检"（默认写进优化验收清单），
+# standard 与既有默认值一致
+SCAN_PRESETS: dict[str, dict[str, int]] = {
+    "quick": {"windows": 2, "max_knobs": 8},
+    "standard": {"windows": 4, "max_knobs": DEFAULT_MAX_KNOBS},
+}
+
+
+def _knob_rank(path: str) -> int:
+    """返回配置路径的扰动优先级（数值越小越先扫）。
+
+    Args:
+        path: 配置路径（如 ``timing.thresholds.offensive_score``）。
+
+    Returns:
+        优先级序号；未登记在优先级表中的路径排到最后。
+    """
+    for prefix, rank in _KNOB_PRIORITY:
+        if path.startswith(prefix):
+            return rank
+    return len(_KNOB_PRIORITY)
+
+
+def resolve_scan_options(
+    preset: str | None,
+    windows: int | None,
+    max_knobs: int | None,
+) -> tuple[int, int, dict[str, Any]]:
+    """解析扫描预设与显式参数，返回最终窗口数、旋钮上限与口径记录（D-2）。
+
+    显式参数优先于预设；都未提供时等价于 ``standard``。
+
+    Args:
+        preset: 预设名（quick/standard），None 表示不指定。
+        windows: 显式窗口数，None 表示未指定。
+        max_knobs: 显式旋钮上限，None 表示未指定。
+
+    Returns:
+        (窗口数, 旋钮上限, 口径记录字典)。
+
+    Raises:
+        ValueError: 预设名不支持时抛出。
+    """
+    if preset is not None and preset not in SCAN_PRESETS:
+        raise ValueError(
+            f"不支持的扫描预设：{preset}，可选值为 {', '.join(sorted(SCAN_PRESETS))}"
+        )
+    base = SCAN_PRESETS.get(preset or "standard", SCAN_PRESETS["standard"])
+    resolved_windows = windows if windows is not None else base["windows"]
+    resolved_knobs = max_knobs if max_knobs is not None else base["max_knobs"]
+    if preset is not None:
+        preset_label = preset
+    elif windows is not None or max_knobs is not None:
+        preset_label = "custom"
+    else:
+        preset_label = "standard"
+    return resolved_windows, resolved_knobs, {
+        "preset": preset_label,
+        "windows": resolved_windows,
+        "max_knobs": resolved_knobs,
+    }
+
 
 class RobustnessService:
     """稳健性验证服务，负责变体派生、批量回测与结果汇总。"""
@@ -86,22 +165,23 @@ class RobustnessService:
 
     # ── 查询 ──────────────────────────────────────────────────────────────
 
-    def list_runs(self, limit: int = 100) -> RobustnessListResponse:
+    def list_runs(
+        self, limit: int = 100, strategy_id: str | None = None
+    ) -> RobustnessListResponse:
         """返回最近的稳健性验证批次摘要（按创建时间倒序）。
 
         Args:
             limit: 返回条数上限，默认 100。
+            strategy_id: 可选，只返回该基线策略的批次（策略详情页"稳健性"页签用）。
 
         Returns:
             RobustnessListResponse。
         """
         try:
-            rows = (
-                self._db.query(RobustnessRunModel)
-                .order_by(RobustnessRunModel.created_at.desc())
-                .limit(limit)
-                .all()
-            )
+            query = self._db.query(RobustnessRunModel)
+            if strategy_id:
+                query = query.filter(RobustnessRunModel.strategy_id == strategy_id)
+            rows = query.order_by(RobustnessRunModel.created_at.desc()).limit(limit).all()
         except Exception:
             logger.warning("list_runs DB query failed", exc_info=True)
             return RobustnessListResponse()
@@ -136,6 +216,7 @@ class RobustnessService:
             summary=row.summary,
             statistics=row.statistics,
             missing_backtest_ids=missing_ids,
+            scan_params=dict(getattr(row, "scan_params", None) or {}),
         )
 
     # ── 批次创建 ──────────────────────────────────────────────────────────
@@ -144,11 +225,13 @@ class RobustnessService:
         self,
         strategy_id: str,
         kind: str,
-        windows: int = 4,
+        windows: int | None = None,
         pool_samples: int = DEFAULT_POOL_SAMPLES,
-        max_knobs: int = DEFAULT_MAX_KNOBS,
+        max_knobs: int | None = None,
         async_mode: bool = True,
         priority: int = 0,
+        knobs: list[str] | None = None,
+        preset: str | None = None,
     ) -> dict[str, Any]:
         """创建一次稳健性验证批次：派生变体并批量提交回测。
 
@@ -158,20 +241,32 @@ class RobustnessService:
         Args:
             strategy_id: 基线策略 ID。
             kind: 验证类型，scan=单旋钮邻域扰动，ablate=因子消融，pool=子池扰动。
-            windows: 研究期内切分的验证窗口数量，默认 4。
+            windows: 研究期内切分的验证窗口数量；None 时取预设值（默认 4）。
             pool_samples: 子池扰动的随机抽样次数（kind=pool 时生效）。
-            max_knobs: 单旋钮扰动数量上限（kind=scan 时生效）。
+            max_knobs: 单旋钮扰动数量上限（kind=scan 时生效）；None 时取预设值。
             async_mode: True 时仅入队，由服务端 worker 执行。
             priority: 入队优先级（越大越先执行），仅 async_mode=True 时生效。
+            knobs: 关键旋钮路径清单（kind=scan 时生效），只扫描清单内的数值字段。
+            preset: 扫描预设（quick=2 窗口/8 旋钮的轻量体检，standard=4 窗口/30 旋钮）。
 
         Returns:
-            批次摘要字典（含 robustness_id 与变体数量）。
+            批次摘要字典（含 robustness_id、变体数量与 scan_params 口径）。
 
         Raises:
-            ValueError: 类型不支持、策略不存在、区间无行情或未派生出任何变体时抛出。
+            ValueError: 类型不支持、预设不支持、关键旋钮路径不存在、策略不存在、
+                区间无行情或未派生出任何变体时抛出。
         """
         if kind not in ("scan", "ablate", "pool"):
             raise ValueError(f"不支持的验证类型：{kind}")
+        if kind != "scan" and (knobs or preset):
+            raise ValueError("--knobs / --preset 仅对 scan 类型生效")
+        resolved_windows, resolved_knobs, scan_params = resolve_scan_options(
+            preset, windows, max_knobs
+        )
+        if knobs:
+            scan_params["knobs"] = list(dict.fromkeys(knobs))
+        if kind == "pool":
+            scan_params["pool_samples"] = pool_samples
         baseline = self._config_svc.get_config(strategy_id)
         if baseline is None:
             raise ValueError(f"基线策略 {strategy_id} 不存在")
@@ -181,18 +276,25 @@ class RobustnessService:
         )
         if not trade_dates:
             raise ValueError("研究期内无行情数据，无法切分验证窗口")
-        folds = compute_folds(trade_dates, max(1, windows))
+        folds = compute_folds(trade_dates, max(1, resolved_windows))
         window_list = [
             {"label": f"W{i}", "start": fs.isoformat(), "end": fe.isoformat()}
             for i, (fs, fe) in enumerate(folds)
         ]
+        scan_params["windows"] = len(window_list)
 
         robustness_id = uuid4().hex
         # 深拷贝：变体派生会在嵌套字典上就地改写，浅拷贝会让基线与其他变体
         # 共享同一份嵌套结构，单个越界档位即可污染整批候选
         config = deepcopy(dict(baseline.config_json or {}))
         candidates = self._build_variants(
-            robustness_id, strategy_id, config, kind, pool_samples, max_knobs
+            robustness_id,
+            strategy_id,
+            config,
+            kind,
+            pool_samples,
+            resolved_knobs,
+            knobs,
         )
         if not candidates:
             raise ValueError(
@@ -251,6 +353,7 @@ class RobustnessService:
             end_date=boundaries.research_end,
             windows=window_list,
             variants=variants,
+            scan_params=scan_params,
             trial_count=len(variants) - 1,
             created_at=utcnow(),
             updated_at=utcnow(),
@@ -272,6 +375,7 @@ class RobustnessService:
             "backtests": len(variants) * len(window_list),
             "async_mode": async_mode,
             "status": "running",
+            "scan_params": scan_params,
         }
 
     def collect(self, robustness_id: str, allow_partial: bool = False) -> dict[str, Any]:
@@ -570,6 +674,7 @@ class RobustnessService:
         kind: str,
         pool_samples: int,
         max_knobs: int,
+        knobs: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """按验证类型派生候选配置（尚未落库为草稿策略）。
 
@@ -580,12 +685,13 @@ class RobustnessService:
             kind: 验证类型。
             pool_samples: 子池抽样次数。
             max_knobs: 单旋钮扰动上限。
+            knobs: 关键旋钮路径清单（kind=scan 时生效）。
 
         Returns:
             候选列表，元素含 label/kind/knob/value/config。
         """
         if kind == "scan":
-            return build_knob_variants(config, max_knobs)
+            return build_knob_variants(config, max_knobs, knobs)
         if kind == "ablate":
             return build_ablation_variants(config)
         return self._build_pool_variants(robustness_id, strategy_id, config, pool_samples)
@@ -768,6 +874,10 @@ class RobustnessService:
                     frequency=baseline.frequency,
                     config_json=variant_config,
                     status="draft",
+                    # D-4：变体带来源批次元数据，支持整批精确清理
+                    # （strategy prune-variants --batch <id>）
+                    is_variant=True,
+                    source_batch_id=robustness_id,
                 )
             )
         except Exception:
@@ -1016,22 +1126,47 @@ class RobustnessService:
         )
 
 
-def build_knob_variants(config: dict[str, Any], max_knobs: int) -> list[dict[str, Any]]:
+def build_knob_variants(
+    config: dict[str, Any],
+    max_knobs: int,
+    knobs: list[str] | None = None,
+) -> list[dict[str, Any]]:
     """从配置的数值叶子派生单旋钮扰动候选（粗粒度、可解释）。
 
     整数型参数（周期、持仓数）按 ±25% 取整、至少 1；0-1 之间的浮点（权重、
     仓位）按 ×0.5 / ×1.5（上限 1）；其余浮点按 ±25%。粗粒度档位用来寻找
     "参数高原"而不是历史最优点。
 
+    截断顺序按**业务重要性**（``_KNOB_PRIORITY``：择时阈值 → 过滤阈值 →
+    评分权重 → 风险/仓位 → 调仓），而非路径字母序；``knobs`` 显式给出
+    "关键旋钮清单"时只扫这些路径（D-2）。
+
     Args:
         config: 基线配置 JSON。
-        max_knobs: 扰动数量上限（按路径字母序截断，保证可复现）。
+        max_knobs: 扰动数量上限（按业务重要性截断，同优先级内按路径排序，保证可复现）。
+        knobs: 可选的关键旋钮路径清单；给出时只扫描清单内的路径。
 
     Returns:
         候选列表，元素含 label/kind/knob/value/config。
+
+    Raises:
+        ValueError: ``knobs`` 中存在配置里不存在的数值叶子路径时抛出。
     """
+    leaves = sorted(iter_numeric_leaves(config), key=lambda item: (_knob_rank(item[0]), item[0]))
+    if knobs:
+        known = {path for path, _ in leaves}
+        unknown = [path for path in knobs if path not in known]
+        if unknown:
+            raise ValueError(
+                "关键旋钮清单包含配置中不存在的数值字段："
+                f"{', '.join(unknown)}；可用路径示例：{', '.join(sorted(known)[:5])}"
+            )
+        wanted = list(dict.fromkeys(knobs))
+        by_path = dict(leaves)
+        leaves = [(path, by_path[path]) for path in wanted]
+
     candidates: list[dict[str, Any]] = []
-    for path, value in sorted(iter_numeric_leaves(config)):
+    for path, value in leaves:
         for new_value in _knob_values(path, value):
             if new_value == value:
                 continue

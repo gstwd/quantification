@@ -76,6 +76,7 @@ class RobustnessDetail(RobustnessSummary):
         summary: 邻域稳定度 / 边际贡献 / 池扰动汇总。
         statistics: PBO、Deflated Sharpe、块自助法置信区间。
         missing_backtest_ids: 引用但已不存在的回测 ID（C5 悬挂引用提示）。
+        scan_params: 本次扫描口径（预设、关键旋钮清单、窗口数，D-2）。
     """
 
     baseline_config_hash: str = ""
@@ -84,6 +85,7 @@ class RobustnessDetail(RobustnessSummary):
     summary: dict[str, Any] | None = None
     statistics: dict[str, Any] | None = None
     missing_backtest_ids: list[str] = Field(default_factory=list)
+    scan_params: dict[str, Any] = Field(default_factory=dict)
 
 
 class RobustnessListResponse(BaseModel):

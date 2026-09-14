@@ -40,9 +40,15 @@ class FakeJobRepository:
     # ── 写入与查询 ───────────────────────────────────────────────────────
 
     def create(self, job: BackgroundJobModel) -> None:
-        """写入任务记录。"""
+        """写入任务记录。
+
+        created_at 用"每插入一条前进 1 微秒"的单调时间：Windows 上
+        ``datetime.now()`` 的精度约 15.6ms，连续入队会拿到完全相同的时间戳，
+        把"按创建时间排队"的用例变成不确定行为（真实库侧由
+        ``claim_pending`` 的 job_id 兜底次序键解决，这里保证用例可复现）。
+        """
         if job.created_at is None:
-            job.created_at = _now()
+            job.created_at = _now() + timedelta(microseconds=len(self.jobs))
         if getattr(job, "cancel_requested", None) is None:
             job.cancel_requested = False
         self.jobs[job.job_id] = job
@@ -204,18 +210,29 @@ class FakeJobRepository:
         return result
 
     def count_pending_ahead(
-        self, priority: int, created_at: datetime, job_types: tuple[str, ...] | None = None
+        self,
+        priority: int,
+        created_at: datetime,
+        job_types: tuple[str, ...] | None = None,
+        job_id: str | None = None,
     ) -> int:
-        """统计排在指定任务之前的待执行任务数。"""
+        """统计排在指定任务之前的待执行任务数（次序键与 claim_pending 一致）。"""
         count = 0
         for job in self.jobs.values():
             if job.status != "pending":
                 continue
             if job_types is not None and job.job_type not in job_types:
                 continue
-            if (job.priority or 0) > priority or (
-                (job.priority or 0) == priority and job.created_at < created_at
-            ):
+            job_priority = job.priority or 0
+            if job_priority > priority:
+                count += 1
+                continue
+            if job_priority < priority:
+                continue
+            if job.created_at < created_at:
+                count += 1
+                continue
+            if job.created_at == created_at and job_id is not None and job.job_id < job_id:
                 count += 1
         return count
 

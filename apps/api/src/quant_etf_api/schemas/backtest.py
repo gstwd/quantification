@@ -330,6 +330,9 @@ class ValidationUsageItem(BaseModel):
         start_date: 回测起始日期。
         end_date: 回测截止日期。
         created_at: 回测创建时间（UTC）。
+        strategy_validation_consumed_at: 该策略验证期数据首次被消费的时间（D-5），
+            与回测级记录并列，用于判断"验证期是否已被研究者消费"。
+        strategy_validation_consumed_note: 验证期消费说明（首次消费来源或人工备注）。
     """
 
     backtest_id: str
@@ -341,6 +344,8 @@ class ValidationUsageItem(BaseModel):
     start_date: date
     end_date: date
     created_at: UtcDatetime
+    strategy_validation_consumed_at: UtcDatetime | None = None
+    strategy_validation_consumed_note: str | None = None
 
 
 class ValidationUsageResponse(BaseModel):

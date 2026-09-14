@@ -61,6 +61,8 @@ python -m quant_etf_api.cli init-factors   # 将代码中的因子元数据同�
 
 ```bash
 python -m quant_etf_api.cli strategy list/show/validate/create/update/diff     # 策略配置读写与校验
+python -m quant_etf_api.cli strategy prune-variants --batch <批次> [--apply --force]  # 清理稳健性变体草稿（D4，默认预演）
+python -m quant_etf_api.cli strategy consume-validation <策略> [--note "..."]   # 标记验证期数据已被消费（D5）
 python -m quant_etf_api.cli backtest run --strategy <id> [--start --end --async --priority N]  # 回测（默认同步执行）
 python -m quant_etf_api.cli backtest status <id> --wait                         # 轮询等待回测终态
 python -m quant_etf_api.cli backtest list [--status --purpose --calendar-source --limit]  # 回测列表过滤（B4/C1）
@@ -74,6 +76,8 @@ python -m quant_etf_api.cli queue stats|jobs [--status --job-type --limit]      
 python -m quant_etf_api.cli queue worker                                        # 独立 worker 进程（前台阻塞，B1）
 python -m quant_etf_api.cli robustness collect <batch> [--allow-partial]        # 部分汇总并标记 coverage（B7）
 python -m quant_etf_api.cli robustness cancel|pause|resume <batch>              # 批次取消/暂停/恢复（B2）
+python -m quant_etf_api.cli robustness scan --strategy <id> [--preset quick|standard] [--knobs a,b] [--knobs-file f.json]  # 邻域扫描（D2）
+python -m quant_etf_api.cli research batch --strategy <id> --variants v.json [--windows 5] [--cost-bps 10]  # 变体批量评估，不落库（D1）
 python -m quant_etf_api.cli optimization start --strategy <基线> --candidate-file x.json --hypothesis "..."  # 建草稿候选+会话
 python -m quant_etf_api.cli optimization evaluate <opt_id> [--folds 4]          # 全区间+滚动样本外回测
 python -m quant_etf_api.cli optimization report <opt_id> --file report.md       # 生成报告骨架
@@ -316,6 +320,10 @@ Key rules (details in the doc):
 - **回测跨度不受限制（C4）**: 研究期内任意跨度（1 个月 ~ 研究期全段 10 年）都可单次回测，**不存在**跨度上限、也**不再要求**"> 5 年必须分段"。时间分段只是可选的观察视角（分年度绩效 + 三段一致性）。研究/验证期边界规则不变：研究类回测不得越过 2025-12-31，跨界需 `purpose=validation`。回归测试：`tests/unit/test_backtest_span.py`。
 - **回测删除的引用完整性（C5）**: 迁移 `0048` 后 `backtest_daily_result`/`backtest_index_result`/`backtest_comparison` 对 `backtest_run` 是 `ON DELETE CASCADE`，`strategy_optimization.{baseline,candidate}_backtest_id` 与 `strategy_lifecycle.{research,validation}_backtest_id` 是 `ON DELETE SET NULL`。**JSONB 引用无法加外键**（`robustness_run.variants[*].backtest_ids`、`strategy_optimization.fold_backtests[*].*`），只能靠 `GET /backtests/orphans`（`cli backtest orphans`）审计、`cli backtest prune-dangling-refs [--apply]`（默认预演）清理。`robustness collect` 必须把"回测已删除"计入 `coverage.missing_windows` 而不是 `pending`，否则批次会永远停在 running。删除接口：`DELETE /backtests/{id}?force=` / `cli backtest delete <id> [--force]`（运行中先取消；存在 JSONB 引用默认 409）。
 - **回测有效候选池时间线（C6）**: 主循环对逐日候选池规模做游程编码，随 `mark_success` 写入 `backtest_run.candidate_pool`（迁移 `0047`），读取路径透出为 `stability.candidate_pool`（含 `base_size/min_size/median_size/pool_coverage_ratio/segments/exclusions/truncated_exclusions`），池缩水时追加 `CANDIDATE_POOL_SHRINK` 信息级告警。剔除明细条数上限由 `QUANT_ETF_CANDIDATE_POOL_EXCLUSION_LIMIT`（默认 50）控制；CLI 用 `backtest pool <id>` 查看。
+- **研究批量评估不落库（D1）**: `cli research batch`（`services/research_batch_service.py`）复用 `BacktestService._run_backtest_loop(persist=False)` **同一条执行路径**，只关闭落库/提交/进度，并按窗口共享行情快照与因子预计算（`BacktestRunCaches`）。因此它的指标口径与落库回测一致（回归测试 `test_metrics_match_persisted_path` 锁定逐日收益/换手/仓位相等），但**不构成验收凭证**——输出里 `caliber.persisted=false`，验收一律走 `backtest run`。变体文件支持完整 `config` 或 `patch`（路径支持 `filters.rules[1].value` 列表下标），未知路径/未知字段直接报错而不是静默跳过。改主循环时不要破坏 `persist=False` 分支与缓存键（窗口 + 所需因子 + 参与计算的指数）。
+- **稳健性扫描口径（D2）**: `robustness scan` 的旋钮截断按**业务重要性**（`_KNOB_PRIORITY`：择时阈值 → 过滤阈值 → 评分权重 → 风险/仓位 → 调仓），不再按路径字母序；支持 `--preset quick`（2 窗口/8 旋钮的轻量体检，写进 strategy-optimizer 验收清单第 6 项）、`--preset standard`、`--knobs a,b`、`--knobs-file f.json`；实际扫描口径落在 `robustness_run.scan_params`（前端批次详情可见）。改动 `_KNOB_PRIORITY` 或预设会改变"同一批次扫了什么"，属于口径变更。
+- **变体策略清理与试验台账（D4）**: 稳健性变体草稿带 `strategy_config.is_variant` + `source_batch_id`（迁移 `0049` 按 description 回填存量），清理用 `cli strategy prune-variants --batch <批次> [--apply --force]`（默认预演；仍被回测引用时跳过，`--force` 才连带删回测）。**不要为了清理变体而删除 `robustness_run` 批次行**：它是 Deflated Sharpe 的"试验次数 N"台账。
+- **验证期消费留痕（D5）**: `strategy_config.validation_consumed_at/note` 记录"该策略的验证期（2026-01-01 起）数据已被消费"；创建 `purpose=validation|monitor` 回测时自动首次留痕（再次命中只追加说明），人工可用 `cli strategy consume-validation <策略> --note "..."`。`GET /backtests/validation-usage` 每条记录并列输出策略级留痕字段。验证期数据只能用于否决，不能作为确认依据。
 - **StrategyConfig.index_codes**: 存储在 `config_json` 内部（非独立 DB 列），通过 `**row.config_json` 展开到 engine 的 `StrategyConfig` 模型。前端 API 请求中 `index_codes` 应在 `config_json` 内传递，非顶层字段。非空时 `_filter_by_scope()` 仅保留指定指数（实时和回测模式均生效）。
 - **index_codes 回测强制应用**: `BacktestService.create_backtest()` 检查策略的 `config.index_codes`，非空时强制覆盖 `universe_filter` 为 subset 模式；`ContextBuilder._build_backtest()` 对传入的 index_codes 做交集过滤（双重保护）。
 - **StrategyConfigForm 与 engine/config.py 的 StrategyConfig 同步**: 引擎新增配置模块时，需同步更新 `StrategyConfigForm.vue`（表单）、`StrategyDetailPage.vue`（详情展示）。目前已覆盖全部 7 个模块（score/timing/filters/rank/portfolio/risk/rebalance）+ 资产范围 index_codes。

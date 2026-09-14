@@ -4,7 +4,11 @@
 
 ```bash
 # 1) 单旋钮邻域扰动：检查参数是否处于平台而非尖峰
-python -m quant_etf_api.cli robustness scan --strategy <id> --windows 4 [--max-knobs 30]
+#    --preset quick    = 轻量体检（2 窗口 / 8 旋钮），写进验收清单第 6 项
+#    --preset standard = 完整（4 窗口 / 30 旋钮，等同旧默认）
+#    --knobs a,b       = 只扫指定的关键旋钮；--knobs-file knobs.json 同上
+python -m quant_etf_api.cli robustness scan --strategy <id> [--preset quick|standard] \
+    [--windows 4] [--max-knobs 30] [--knobs timing.thresholds.offensive_score] [--knobs-file k.json]
 
 # 2) 因子消融：逐个移除评分因子与过滤条件，看边际贡献
 python -m quant_etf_api.cli robustness ablate --strategy <id> --windows 4
@@ -17,9 +21,44 @@ python -m quant_etf_api.cli robustness collect <robustness_id> --wait
 
 # 5) 统计显著性：CSCV-PBO / Deflated Sharpe / 块自助法置信区间
 python -m quant_etf_api.cli robustness stats <robustness_id> [--n-trials N] [--cost-bps 10]
+
+# 6) 清理本批次派生出来的变体草稿策略（默认预演；变体仍被回测引用时需 --force）
+python -m quant_etf_api.cli strategy prune-variants --batch <robustness_id> [--apply] [--force]
 ```
 
 所有稳健性回测都固定在研究期（2016-01-01 ~ 2025-12-31）内执行，不会消耗验证期数据。
+
+## 扫哪些旋钮（D2）
+
+`scan` 的截断顺序按**业务重要性**而不是路径字母序：择时阈值 → 过滤阈值 → 评分权重 →
+风险/仓位 → 调仓。历史行为按字母序截断时，`timing.thresholds.*`（最容易被调到"刚好"
+的参数）永远排在最后被截掉，导致"扫过邻域"结论其实没覆盖最可疑的参数。
+
+默认规模与吞吐不匹配时用 `--preset quick`：2 个窗口 × 8 个旋钮 ≈ 18 条回测，
+足以回答"参数是平台还是尖峰"；需要写进报告的完整结论再用 `standard`。
+本次实际扫描口径随批次落库（`robustness_run.scan_params`），
+`robustness show <id>` 与前端"稳健性验证"页签都能看到 preset / knobs / windows。
+
+## 探索路径与验收路径（D1）
+
+| 目的 | 命令 | 是否落库 | 能否作为验收依据 |
+| --- | --- | --- | --- |
+| 快速筛掉没价值的想法（几十个变体） | `research batch --variants v.json` | 否 | **否**（`caliber.persisted=false`） |
+| 正式口径、可审计、可复现 | `backtest run` / `robustness scan|ablate|pool` | 是 | 是 |
+
+`research batch` 与平台回测共用同一条执行路径（只关闭落库并按窗口共享行情/因子缓存），
+所以口径一致；但"没落库"意味着它不可审计，结论必须回到落库回测复核。
+
+## 变体清理与试验台账（D4/D5）
+
+- 稳健性批次会派生 `<基线>__rbXXXX_*` 草稿策略，带 `is_variant` / `source_batch_id` 元数据：
+  `strategy prune-variants --batch <批次>` 预演 → `--apply` 删除；
+  变体仍被回测引用时默认跳过（列出引用），确认后 `--force` 连带删除回测。
+- **不要删除 `robustness_run` 批次行**：`trial_count` 累加值就是 Deflated Sharpe 的 N，
+  删掉变体策略 ≠ 抹掉历史试验。
+- 只要跑过使用验证期数据的回测，或人工看过验证期结果，策略上会留下
+  `validation_consumed_at`（`cli strategy consume-validation <策略> --note "..."` 可人工补记）；
+  被标记后该策略的验证期证据只能用于**否决**，不能作为通过依据。
 
 ## 结果怎么读
 

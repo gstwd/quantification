@@ -685,6 +685,7 @@ class StrategyConfigModel(Base):
     """
 
     __tablename__ = "strategy_config"
+    __table_args__ = (Index("ix_strategy_config_source_batch", "source_batch_id"),)
 
     strategy_id: Mapped[str] = mapped_column(
         String(64), primary_key=True, comment="策略唯一标识，如 index_allocation"
@@ -706,6 +707,24 @@ class StrategyConfigModel(Base):
     )
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="active", comment="状态：active=启用, disabled=禁用"
+    )
+    is_variant: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=sa.text("false"),
+        comment="是否为稳健性验证派生的变体草稿策略（可批量清理，D-4）",
+    )
+    source_batch_id: Mapped[str | None] = mapped_column(
+        String(64),
+        comment="派生来源批次 ID（稳健性验证批次），手工策略为 NULL（D-4）",
+    )
+    validation_consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        comment="验证期（2026-01-01 起）数据首次被消费的时间，NULL 表示尚未消费（D-5）",
+    )
+    validation_consumed_note: Mapped[str | None] = mapped_column(
+        Text, comment="验证期消费说明（首次消费来源或人工备注，D-5）"
     )
     is_starred: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, comment="是否星标关注"
@@ -1256,6 +1275,10 @@ class RobustnessRunModel(Base):
     )
     statistics: Mapped[dict | None] = mapped_column(
         JSONB, comment="统计显著性：CSCV-PBO、Deflated Sharpe、块自助法置信区间"
+    )
+    scan_params: Mapped[dict | None] = mapped_column(
+        JSONB,
+        comment="本次扫描口径：预设（quick/standard）、关键旋钮清单、窗口数（D-2）",
     )
     trial_count: Mapped[int] = mapped_column(
         Integer,

@@ -267,7 +267,11 @@ class JobQueue:
         if job.created_at is None:
             return 0
         job_types = BACKTEST_LANE_JOB_TYPES if lane_for(job.job_type) == LANE_BACKTEST else None
-        return self._repo.count_pending_ahead(job.priority, job.created_at, job_types)
+        # 传 job_id 兜底：批量入队时 created_at 可能相同，只有带上同一兜底次序键，
+        # 队列位置才与 worker 的实际认领次序一致（B3）
+        return self._repo.count_pending_ahead(
+            job.priority, job.created_at, job_types, job.job_id
+        )
 
     # ── 取消 / 暂停 ──────────────────────────────────────────────────────
 

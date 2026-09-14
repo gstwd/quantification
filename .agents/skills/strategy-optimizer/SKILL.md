@@ -21,11 +21,35 @@ description: >
      `drawdown_current`（长窗口回撤 + 水下时间，配 `drawdown_score`）、`pmi_momentum_3m` 与
      `breadth_ma20_pct`（市场级择时/过滤因子，放 timing 或 filters，勿放横截面评分）。
    需要并行探索多个方向时，先列出互斥假设清单，每个方向一个候选文件（见「并行执行」）。
+   - **探索用 `research batch`，验收用 `backtest run`**：想在正式回测前快速筛掉明显无价值的想法，
+     用 `research batch`（不落库、秒级到分钟级、与平台同一条执行路径）：
+
+     ```bash
+     python -m quant_etf_api.cli research batch --strategy <基线> --variants variants.json --windows 5 --cost-bps 10
+     ```
+
+     变体文件里每个变体给完整 `config`，或只给 `patch`（改了哪几个参数就写哪几项）：
+
+     ```json
+     {"variants": [
+       {"label": "topn4", "patch": {"rank.top_n": 4}},
+       {"label": "loose_drawdown", "patch": {"filters.rules[1].value": -30}}
+     ]}
+     ```
+
+     `patch` 只能改写成已有字段的数值；**删因子 / 删过滤条件属于结构改动**，
+     要么给完整 `config`，要么直接走 `robustness ablate`（那才是消融的正式口径）。
+
+     输出含逐窗口毛/净口径、多档成本、`vs_baseline`（Δ净年化/Δ净夏普/劣化窗口占比）与口径指纹。
+     **`caliber.persisted=false` 的结果只能用来决定"值不值得走正式回测"，不能写进验收结论。**
+     想看邻域/消融/池扰动的正式口径时，仍然走第 7 步的 `robustness`。
 4. **写候选文件并校验**：完整 config_json 存入 `candidates/` 下的 JSON 文件，`strategy validate --file <path>` 通过后再用。
 5. **开会话**：`optimization start --strategy <基线> --candidate-file <path> --hypothesis "<假设>" [--start --end] --folds 4 --version <新版本>`。`--version` 必传：promote 时基线版本取该值，不传会沿用旧版本号导致版本不递增。
 6. **评估**：`optimization evaluate <opt_id> [--folds 4]`。多方向/多段并行时改用 `--async`（需要 API 服务端在跑，2+2K 个回测一次入队并行执行，见「并行执行」），之后用 `optimization show` 轮询。长跨度（> 5 年）按「滚动分段回测」处理：分会话逐段评估，或把 `--folds` 调到每折 ≈ 1-2 年。
 7. **稳健性验证**（评估通过后、收尾之前必做）：
-   - `robustness scan --strategy <基线>` 确认参数处于平台、无方向反转；
+   - `robustness scan --strategy <基线> --preset quick` 做轻量体检（2 窗口 / 8 旋钮，默认按业务重要性
+     优先扫择时阈值、过滤阈值这类最可疑的拟合参数）；需要完整结论时用 `--preset standard`，
+     或 `--knobs a,b` / `--knobs-file knobs.json` 指定关键旋钮清单；
    - 因子数 > 1 时 `robustness ablate --strategy <基线>` 看边际贡献；
    - `robustness collect <id> --wait` 后 `robustness stats <id>` 取 PBO 与 Deflated Sharpe。
    详见 [references/robustness.md](references/robustness.md)。
@@ -34,6 +58,10 @@ description: >
    - 通过 → `optimization finish <opt_id> --verdict accept --report-file <path> --promote --strict`
    - 未通过 → `--verdict reject`（不 promote），会话保留作审计。
 10. **确认落地**：`strategy show <基线>` 验证 promote 生效，必要时用 `strategy update --version` 补版本号。
+11. **收尾清理**：这一轮产生的稳健性变体草稿策略（`<基线>__rbXXXX_*`）用
+    `strategy prune-variants --batch <批次>` 预演、确认后 `--apply` 清理（变体已被回测引用时
+    需 `--force` 才连带删除回测）。**不要删除 `robustness_run` 批次行**——它是 Deflated Sharpe
+    的试验次数台账。
 
 ## 并行执行（多方向 / 多段加速）
 

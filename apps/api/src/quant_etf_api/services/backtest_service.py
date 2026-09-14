@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from time import perf_counter
 from typing import Any
@@ -74,6 +76,7 @@ from quant_etf_api.infra.db.models.core import (
     BacktestIndexResultModel,
     BacktestRunModel,
     RobustnessRunModel,
+    StrategyConfigModel,
     StrategyOptimizationModel,
 )
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
@@ -122,6 +125,39 @@ from quant_etf_api.services.strategy_config_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BacktestRunCaches:
+    """同一批变体共享的行情快照与因子缓存（D-1 研究批量评估）。
+
+    研究批量评估会在同一窗口上跑几十个变体（参数邻域 / 消融 / 池扰动）。
+    这些变体的行情、估值与宏观数据完全相同，因子值在没有新增所需因子时
+    也完全相同。默认每次 ``_run_backtest_loop`` 都会重新查库并重算，
+    批量场景下这部分开销会乘以变体数；把两者按窗口键缓存起来即可把
+    "批量探索"从数小时压到分钟级，同时因为复用同一条执行路径，
+    指标口径与平台回测严格一致。
+
+    Attributes:
+        data: 窗口键 → ``_prepare_backtest_data`` 结果元组。
+        factors: (窗口键, 因子集合键) → 逐日预计算因子值。
+    """
+
+    data: dict[str, tuple] = field(default_factory=dict)
+    factors: dict[tuple[str, str], dict] = field(default_factory=dict)
+
+
+def _window_cache_key(row: BacktestRunModel) -> str:
+    """构造窗口缓存键（区间 + 标的过滤条件）。
+
+    Args:
+        row: 回测 ORM 行（或研究批量评估构造的临时行）。
+
+    Returns:
+        形如 ``2016-01-01~2018-06-30|{"mode": "subset", ...}`` 的键。
+    """
+    universe_filter = json.dumps(row.universe_filter or {}, sort_keys=True, ensure_ascii=False)
+    return f"{row.start_date.isoformat()}~{row.end_date.isoformat()}|{universe_filter}"
 
 
 def _parse_candidate_pool(raw: Any) -> BacktestCandidatePool | None:
@@ -288,6 +324,25 @@ class BacktestService:
         except Exception:
             self._db.rollback()
             logger.warning("create_backtest DB insert failed", exc_info=True)
+
+        # 验证期消费留痕（D-5）：只要创建了使用验证期数据的回测，该策略的
+        # "验证期样本外"身份即被消费，此后这段数据只能用于否决。留痕挂在策略
+        # 元数据上（strategy_config），因为消费发生在研究阶段、可能早于上线。
+        if req.purpose in ("validation", "monitor"):
+            try:
+                StrategyConfigService(self._db).mark_validation_consumed(
+                    req.strategy_id,
+                    note=f"回测 {backtest_id}（{req.purpose}）：{req.purpose_reason or '未填写用途说明'}",
+                )
+            except Exception:
+                # 留痕失败不能阻塞回测创建，但要留下日志便于事后补救
+                self._db.rollback()
+                logger.warning(
+                    "验证期消费留痕失败: strategy_id=%s backtest_id=%s",
+                    req.strategy_id,
+                    backtest_id,
+                    exc_info=True,
+                )
 
         return BacktestSummary(
             backtest_id=backtest_id,
@@ -799,8 +854,27 @@ class BacktestService:
             return ValidationUsageResponse()
 
         items: list[ValidationUsageItem] = []
+        # 策略级验证期消费留痕（D-5）：与"跑过验证期回测"的回测级记录并列输出，
+        # 便于判断"该策略的验证期是否已经被研究者消费过"
+        consumed: dict[str, tuple[datetime | None, str | None]] = {}
+        strategy_ids = {row.strategy_id for row in rows}
+        if strategy_ids:
+            try:
+                for strategy_row in (
+                    self._db.query(StrategyConfigModel)
+                    .filter(StrategyConfigModel.strategy_id.in_(sorted(strategy_ids)))
+                    .all()
+                ):
+                    consumed[strategy_row.strategy_id] = (
+                        strategy_row.validation_consumed_at,
+                        strategy_row.validation_consumed_note,
+                    )
+            except Exception:
+                logger.warning("读取验证期消费留痕失败", exc_info=True)
+
         for row in rows:
             snapshot = row.config_snapshot or {}
+            consumed_at, consumed_note = consumed.get(row.strategy_id, (None, None))
             items.append(
                 ValidationUsageItem(
                     backtest_id=row.backtest_id,
@@ -812,6 +886,8 @@ class BacktestService:
                     start_date=row.start_date,
                     end_date=row.end_date,
                     created_at=row.created_at,
+                    strategy_validation_consumed_at=consumed_at,
+                    strategy_validation_consumed_note=consumed_note,
                 )
             )
         return ValidationUsageResponse(items=items, total=len(items))
@@ -984,7 +1060,10 @@ class BacktestService:
         backtest_id: str,
         row: BacktestRunModel,
         config: StrategyConfig,
-    ) -> None:
+        *,
+        persist: bool = True,
+        caches: BacktestRunCaches | None = None,
+    ) -> dict[str, Any]:
         """统一回测主循环，替代旧的 signal/allocation 双分支。
 
         流程：
@@ -996,6 +1075,27 @@ class BacktestService:
         5. 计算基准收益（如启用）
         6. 写入每日结果和指数结果
         7. 计算汇总绩效指标
+
+        ``persist=False`` 时保留完全相同的计算路径，只是不写 ``backtest_daily_result``
+        / ``backtest_index_result``、不提交、不落最终状态，并把逐日结果原样返回，
+        供研究批量评估（D-1）在内存里算净口径与稳健性指标。**这是同一条执行路径**，
+        因此指标口径与落库回测一致；但它不构成验收凭证——验收必须用
+        ``backtest run`` 生成可审计的落库回测。
+
+        Args:
+            backtest_id: 回测标识（仅用于日志与落库）。
+            row: 回测 ORM 行；``persist=False`` 时可以是未加入 session 的临时行。
+            config: 策略配置。
+            persist: 是否把逐日/逐指数结果与最终状态写入数据库。
+            caches: 可选的跨变体共享缓存（行情快照与因子值），仅批量场景使用。
+
+        Returns:
+            结果字典：``metrics``（毛口径汇总指标）、``daily_rows``（``persist=False``
+            时的逐日结果对象列表）、``warnings``、``candidate_pool``、
+            ``trading_dates`` 与 ``params``。
+
+        Raises:
+            JobCancelledError: 收到协作取消请求时抛出（由调用方落 cancelled）。
         """
         # 回测使用一次性行情快照；关闭 checkpoint commit 后的 ORM 对象过期，
         # 避免收尾数据质量扫描访问行情字段时逐条触发隐式 SELECT。
@@ -1004,7 +1104,7 @@ class BacktestService:
         # 每日调仓（或未配置 rebalance）与日历无关，记为 not_required。
         self._resolve_rebalance_calendar(row, config)
         universe, index_codes, trading_dates, all_bars, all_valuation, all_macro = (
-            self._prepare_backtest_data(row)
+            self._prepare_backtest_data(row, caches)
         )
 
         # 策略显式限定资产范围时，必须在因子预计算前收窄回测池。此前仅在主循环
@@ -1033,10 +1133,21 @@ class BacktestService:
                     proxy_val = self._load_all_valuation(trading_dates, [proxy_code])
                     all_valuation.update(proxy_val)
 
-        # 预计算所有因子值（含择时代理指数）
-        precomputed = self._factor_provider.precompute_backtest_factors(
-            config, trading_dates, factor_index_codes, all_bars, all_valuation, all_macro
+        # 预计算所有因子值（含择时代理指数）；批量评估时按
+        # （窗口, 所需因子, 参与计算的指数）复用，避免每个变体重算一遍
+        required_factor_ids = FactorProvider.collect_required_factor_ids(config)
+        factor_cache_key = (
+            _window_cache_key(row),
+            ",".join(sorted(required_factor_ids)),
+            ",".join(sorted(factor_index_codes)),
         )
+        precomputed = caches.factors.get(factor_cache_key) if caches is not None else None
+        if precomputed is None:
+            precomputed = self._factor_provider.precompute_backtest_factors(
+                config, trading_dates, factor_index_codes, all_bars, all_valuation, all_macro
+            )
+            if caches is not None:
+                caches.factors[factor_cache_key] = precomputed
 
         # 记录实际回望天数与因子预热期（"前 N 个交易日因子数据不足"提示），
         # 写入回测 params 元数据，随 mark_success 一并持久化
@@ -1045,7 +1156,7 @@ class BacktestService:
             precomputed,
             trading_dates,
             factor_index_codes,
-            FactorProvider.collect_required_factor_ids(config),
+            required_factor_ids,
         )
         run_params = row.params or {}
         run_params["_lookback_days"] = lookback_days
@@ -1097,6 +1208,8 @@ class BacktestService:
 
         # ORM 行列表：用于 checkpoint 提交后释放对象引用
         daily_results: list[BacktestDailyResultModel] = []
+        # 不落库模式（D-1）下保留全部逐日结果，供净口径与稳健性指标现算
+        memory_rows: list[BacktestDailyResultModel] = []
         # 账户累积器：累计净值/回撤等账务状态由领域对象跟踪，
         # 主循环只负责生成当日持仓与收益（执行与绩效关注点分离）
         accumulator = BacktestDayAccumulator()
@@ -1259,8 +1372,11 @@ class BacktestService:
                 turnover=round(turnover, 4) if turnover > 0 else None,
                 missing_bar_count=missing_bar_count,
             )
-            self._backtest_repo.add_daily_result(daily_row)
-            daily_results.append(daily_row)
+            if persist:
+                self._backtest_repo.add_daily_result(daily_row)
+                daily_results.append(daily_row)
+            else:
+                memory_rows.append(daily_row)
 
             # 写入指数结果并获取持仓统计
             day_pos_count, day_pos_positive = self._write_index_results(
@@ -1273,6 +1389,7 @@ class BacktestService:
                 result.positions if result.positions else {},
                 timing_regime=result.timing.regime if result.timing else None,
                 scoring_mode=config.score.scoring_mode,
+                persist=persist,
             )
             total_in_pos_count += day_pos_count
             total_in_pos_positive += day_pos_positive
@@ -1293,7 +1410,8 @@ class BacktestService:
             if total_dates > 0:
                 new_progress = int((i + 1) / total_dates * 100)
                 if new_progress - last_progress >= 10:
-                    self._backtest_repo.update_progress(backtest_id, new_progress)
+                    if persist:
+                        self._backtest_repo.update_progress(backtest_id, new_progress)
                     last_progress = new_progress
                     logger.info(
                         "[backtest] 进度: backtest_id=%s %s/%s (%s%%) date=%s 累计收益=%s%%",
@@ -1309,7 +1427,7 @@ class BacktestService:
             # - 释放事务大小，避免长区间回测的单一巨大事务
             # - 中途失败时已提交的分段结果保留，前端可查看部分权益曲线
             # - progress 裸 SQL 更新随本次 commit 一起对其它连接可见
-            if (i + 1) % 100 == 0:
+            if persist and (i + 1) % 100 == 0:
                 self._db.flush()
                 self._db.commit()
                 daily_results.clear()  # 释放 ORM 对象，账户累积器已保留关键数据
@@ -1320,7 +1438,8 @@ class BacktestService:
             backtest_id,
             total_dates,
         )
-        self._db.flush()
+        if persist:
+            self._db.flush()
         flush_elapsed = perf_counter() - finalize_started
         logger.info(
             "[backtest] 收尾 flush 完成: backtest_id=%s 耗时=%.3fs",
@@ -1517,18 +1636,36 @@ class BacktestService:
             metrics.get("signal_accuracy_pct", 0.0),
         )
         mark_success_started = perf_counter()
-        self._backtest_repo.mark_success(
-            backtest_id,
-            metrics,
-            warnings=[w.model_dump() for w in run_warnings],
-            candidate_pool=candidate_pool,
-        )
+        if persist:
+            self._backtest_repo.mark_success(
+                backtest_id,
+                metrics,
+                warnings=[w.model_dump() for w in run_warnings],
+                candidate_pool=candidate_pool,
+            )
+        else:
+            # 不落库模式：结果只回传给调用方（研究批量评估），
+            # 数据库里不留下任何"看起来像验收记录"的痕迹
+            logger.info(
+                "[backtest] 研究模式完成（未落库）: run_id=%s 累计收益=%s%% 夏普=%s",
+                backtest_id,
+                metrics.get("cumulative_return_pct", 0.0),
+                metrics.get("sharpe_ratio", 0.0),
+            )
         logger.info(
             "[backtest] 最终状态提交完成: backtest_id=%s 耗时=%.3fs 总收尾耗时=%.3fs",
             backtest_id,
             perf_counter() - mark_success_started,
             perf_counter() - finalize_started,
         )
+        return {
+            "metrics": metrics,
+            "daily_rows": memory_rows,
+            "warnings": [w.model_dump() for w in run_warnings],
+            "candidate_pool": candidate_pool,
+            "trading_dates": trading_dates,
+            "params": dict(row.params or {}),
+        }
 
     def _build_candidate_pool_timeline(
         self,
@@ -1621,15 +1758,28 @@ class BacktestService:
         }
 
     def _prepare_backtest_data(
-        self, row: BacktestRunModel
+        self,
+        row: BacktestRunModel,
+        caches: BacktestRunCaches | None = None,
     ) -> tuple[
         list[dict[str, Any]], list[str], list[date], dict, dict, dict[str, dict[str, float]]
     ]:
         """准备回测通用数据：标的、交易日、行情、估值、宏观指标。
 
+        Args:
+            row: 回测 ORM 行（或研究批量评估的临时行）。
+            caches: 可选的跨变体共享缓存；命中同一窗口时直接复用已加载的行情
+                快照（批量评估里几十个变体的行情、估值与宏观数据完全相同）。
+
         Returns:
             (universe, index_codes, trading_dates, all_bars, all_valuation, all_macro) 元组。
         """
+        cache_key = _window_cache_key(row)
+        if caches is not None:
+            cached = caches.data.get(cache_key)
+            if cached is not None:
+                return cached
+
         universe = self._resolve_index_universe(row.universe_filter)
         if not universe:
             raise ValueError("回测标的范围为空，请检查 universe_filter 配置")
@@ -1643,7 +1793,10 @@ class BacktestService:
         all_valuation = self._load_all_valuation(trading_dates, index_codes)
         all_macro = self._load_all_macro()
 
-        return universe, index_codes, trading_dates, all_bars, all_valuation, all_macro
+        prepared = (universe, index_codes, trading_dates, all_bars, all_valuation, all_macro)
+        if caches is not None:
+            caches.data[cache_key] = prepared
+        return prepared
 
     def _ensure_market_scope_bars(
         self,
@@ -1694,12 +1847,26 @@ class BacktestService:
         signal_positions: dict[str, float],
         timing_regime: str | None = None,
         scoring_mode: str = "absolute",
+        persist: bool = True,
     ) -> tuple[int, int]:
         """写入每日每指数的回测结果，使用与实时一致的信号等级判定逻辑。
 
         与实时 `_build_strategy_results` 共用同一 `determine_signal_level` 输入：
         score=当日综合得分、target_weight=当日目标权重（result.positions）、
         timing_regime=当日择时 regime、scoring_mode=策略评分模式。
+
+        Args:
+            backtest_id: 回测标识。
+            trade_date: 当日交易日。
+            next_date: 下一交易日（无则为 None）。
+            universe: 当日标的列表。
+            result: 引擎执行结果。
+            all_bars: 行情数据。
+            signal_positions: 当日目标权重。
+            timing_regime: 当日择时 regime。
+            scoring_mode: 策略评分模式。
+            persist: False 时只统计持仓命中数（信号准确率），不写指数结果行
+                （D-1 研究批量评估路径）。
 
         Returns:
             (in_portfolio_count, in_portfolio_positive_count) 元组。
@@ -1729,18 +1896,19 @@ class BacktestService:
                 if idx_ret is not None and idx_ret > 0:
                     in_pos_positive += 1
 
-            self._backtest_repo.add_index_result(
-                BacktestIndexResultModel(
-                    backtest_id=backtest_id,
-                    trade_date=trade_date,
-                    index_code=code,
-                    signal_score=signal_score,
-                    signal_level=level,
-                    in_portfolio=in_portfolio,
-                    index_return=idx_ret,
-                    target_weight=round(target_weight, 4),
+            if persist:
+                self._backtest_repo.add_index_result(
+                    BacktestIndexResultModel(
+                        backtest_id=backtest_id,
+                        trade_date=trade_date,
+                        index_code=code,
+                        signal_score=signal_score,
+                        signal_level=level,
+                        in_portfolio=in_portfolio,
+                        index_return=idx_ret,
+                        target_weight=round(target_weight, 4),
+                    )
                 )
-            )
 
         return in_pos_count, in_pos_positive
 

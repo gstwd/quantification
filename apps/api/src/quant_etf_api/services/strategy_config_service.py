@@ -15,6 +15,7 @@ from quant_etf_api.factors.registry import get_default_factor_registry
 from quant_etf_api.infra.db.models.core import StrategyConfigModel, StrategyLifecycleModel
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
 from quant_etf_api.infra.db.repositories.strategy_config import StrategyConfigRepository
+from quant_etf_api.infra.time import utcnow_aware
 from quant_etf_api.schemas.strategy import (
     StrategyConfigCreate,
     StrategyConfigUpdate,
@@ -61,20 +62,32 @@ class StrategyConfigService:
 
     def list_configs(self) -> list[StrategySummary]:
         """返回所有启用的策略配置摘要。"""
-        rows = self._repo.find_all_active()
-        return [
-            StrategySummary(
-                strategy_id=r.strategy_id,
-                display_name=r.display_name,
-                version=r.version,
-                frequency=r.frequency,
-                description=r.description or "",
-                status=r.status,
-                is_starred=r.is_starred,
-                index_codes=(r.config_json or {}).get("index_codes", []),
-            )
-            for r in rows
-        ]
+        return [self._to_summary(r) for r in self._repo.find_all_active()]
+
+    @staticmethod
+    def _to_summary(row: Any) -> StrategySummary:
+        """把策略 ORM 行转换为列表摘要（含变体标记与验证期留痕元数据）。
+
+        Args:
+            row: ``strategy_config`` ORM 行。
+
+        Returns:
+            StrategySummary。
+        """
+        return StrategySummary(
+            strategy_id=row.strategy_id,
+            display_name=row.display_name,
+            version=row.version,
+            frequency=row.frequency,
+            description=row.description or "",
+            status=row.status,
+            is_starred=row.is_starred,
+            index_codes=(row.config_json or {}).get("index_codes", []),
+            is_variant=getattr(row, "is_variant", False),
+            source_batch_id=getattr(row, "source_batch_id", None),
+            validation_consumed_at=getattr(row, "validation_consumed_at", None),
+            validation_consumed_note=getattr(row, "validation_consumed_note", None),
+        )
 
     def get_config(self, strategy_id: str) -> StrategyDetail | None:
         """获取策略配置详情。"""
@@ -92,6 +105,10 @@ class StrategyConfigService:
             config_json=row.config_json,
             created_at=row.created_at,
             updated_at=row.updated_at,
+            is_variant=getattr(row, "is_variant", False),
+            source_batch_id=getattr(row, "source_batch_id", None),
+            validation_consumed_at=getattr(row, "validation_consumed_at", None),
+            validation_consumed_note=getattr(row, "validation_consumed_note", None),
         )
 
     def create_config(self, req: StrategyConfigCreate) -> StrategyDetail:
@@ -127,6 +144,8 @@ class StrategyConfigService:
             frequency=req.frequency,
             config_json=config_json,
             status=req.status,
+            is_variant=req.is_variant,
+            source_batch_id=req.source_batch_id,
         )
         self._repo.upsert(model)
         self._db.commit()
@@ -202,6 +221,182 @@ class StrategyConfigService:
         if result:
             self._db.commit()
         return result
+
+    # ── 变体策略清理（D-4） ────────────────────────────────────────────────
+
+    def list_variants(self, batch_id: str) -> list[StrategySummary]:
+        """列出某个稳健性验证批次派生的变体草稿策略。
+
+        Args:
+            batch_id: 稳健性验证批次 ID。
+
+        Returns:
+            变体策略摘要列表（按策略 ID 升序）。
+        """
+        return [self._to_summary(row) for row in self._repo.find_variants(batch_id)]
+
+    def prune_variants(
+        self, batch_id: str, *, dry_run: bool = True, force: bool = False
+    ) -> dict[str, Any]:
+        """清理某个稳健性验证批次派生的变体草稿策略。
+
+        一次 ``robustness scan`` 会批量创建 ``<基线>__rbXXXX_*`` 形式的草稿策略，
+        历史上只能按 ID 前缀人工猜测（D-4）。现在变体带 ``source_batch_id``
+        元数据，可以整批精确清理：
+
+        - 默认预演（``dry_run=True``），只返回将被删除的策略；
+        - 变体仍被回测引用时不删（避免留下指向不存在策略的回测记录），
+          需显式 ``force=True`` 才连带删除该变体的回测；
+        - **不删除稳健性批次本身**：批次是"试验次数台账"的证据，
+          Deflated Sharpe 的 N 依赖它，删掉变体策略不等于抹掉历史试验。
+
+        Args:
+            batch_id: 稳健性验证批次 ID。
+            dry_run: True 时只统计不写库（默认）。
+            force: True 时连带删除变体名下的回测记录。
+
+        Returns:
+            清理结果字典：``batch_id`` / ``dry_run`` / ``force`` / ``matched`` /
+            ``deleted`` / ``skipped``。
+        """
+        rows = self._repo.find_variants(batch_id)
+        result: dict[str, Any] = {
+            "batch_id": batch_id,
+            "dry_run": dry_run,
+            "force": force,
+            "matched": len(rows),
+            "deleted": [],
+            "skipped": [],
+        }
+        if not rows:
+            result["message"] = (
+                f"批次 {batch_id} 没有带 source_batch_id 标记的变体策略"
+                "（历史批次可用 migration 0049 的 description 回填后再试）"
+            )
+            return result
+
+        backtest_ids_by_strategy = self._backtest_ids_by_strategy(
+            [row.strategy_id for row in rows]
+        )
+        for row in rows:
+            backtest_ids = backtest_ids_by_strategy.get(row.strategy_id, [])
+            if backtest_ids and not force:
+                result["skipped"].append(
+                    {
+                        "strategy_id": row.strategy_id,
+                        "reason": (
+                            f"仍有 {len(backtest_ids)} 条回测引用该变体；"
+                            "确认后可用 --force 连带删除，或先执行 backtest delete"
+                        ),
+                        "backtest_ids": backtest_ids[:5],
+                    }
+                )
+                continue
+            if dry_run:
+                result["deleted"].append(
+                    {
+                        "strategy_id": row.strategy_id,
+                        "display_name": row.display_name,
+                        "backtests": len(backtest_ids),
+                    }
+                )
+                continue
+            failed = self._delete_variant(row.strategy_id, backtest_ids, force=force)
+            if failed is not None:
+                result["skipped"].append({"strategy_id": row.strategy_id, "reason": failed})
+                continue
+            result["deleted"].append(
+                {
+                    "strategy_id": row.strategy_id,
+                    "display_name": row.display_name,
+                    "backtests": len(backtest_ids),
+                }
+            )
+        return result
+
+    def _backtest_ids_by_strategy(self, strategy_ids: list[str]) -> dict[str, list[str]]:
+        """按策略统计其名下回测 ID（局部导入避免服务层循环依赖）。
+
+        Args:
+            strategy_ids: 策略 ID 列表。
+
+        Returns:
+            策略 ID → 回测 ID 列表。
+        """
+        from quant_etf_api.infra.db.models.core import BacktestRunModel
+
+        grouped: dict[str, list[str]] = {}
+        if not strategy_ids:
+            return grouped
+        try:
+            rows = (
+                self._db.query(BacktestRunModel.backtest_id, BacktestRunModel.strategy_id)
+                .filter(BacktestRunModel.strategy_id.in_(strategy_ids))
+                .all()
+            )
+        except Exception:
+            logger.warning("统计变体策略的回测引用失败", exc_info=True)
+            return grouped
+        for backtest_id, strategy_id in rows:
+            grouped.setdefault(strategy_id, []).append(backtest_id)
+        return grouped
+
+    def _delete_variant(
+        self, strategy_id: str, backtest_ids: list[str], *, force: bool
+    ) -> str | None:
+        """删除单个变体策略（可选连带删除其回测）。
+
+        Args:
+            strategy_id: 变体策略 ID。
+            backtest_ids: 该变体名下的回测 ID。
+            force: 是否连带删除回测。
+
+        Returns:
+            失败原因；成功返回 None。
+        """
+        for backtest_id in backtest_ids:
+            if not force:
+                return f"回测 {backtest_id} 仍引用该变体"
+            try:
+                # 局部导入：backtest 服务反向依赖 strategy 配置服务
+                from quant_etf_api.services.backtest_service import BacktestService
+
+                BacktestService(self._db).delete_backtest(backtest_id, force=True)
+            except Exception as exc:
+                self._db.rollback()
+                return f"删除回测 {backtest_id} 失败：{exc}"
+        try:
+            deleted = self._repo.delete_by_id(strategy_id)
+            self._db.commit()
+        except Exception as exc:
+            self._db.rollback()
+            return f"删除策略失败：{exc}"
+        return None if deleted else f"策略 {strategy_id} 不存在"
+
+    # ── 验证期消费留痕（D-5） ──────────────────────────────────────────────
+
+    def mark_validation_consumed(self, strategy_id: str, note: str | None = None) -> bool:
+        """记录"该策略的验证期数据已被消费"（D-5）。
+
+        验证期数据只能用于否决、不能用于确认。回测级留痕（``backtests`` 接口）
+        只能证明"跑过验证期回测"，无法说明"验证期是否已被研究者消费"；
+        本方法把该状态记到策略元数据上，供研究流程判断后续验证期证据的效力。
+
+        Args:
+            strategy_id: 策略标识。
+            note: 消费说明（首次消费来源或人工备注）。
+
+        Returns:
+            是否写入成功（策略不存在返回 False）。
+        """
+        consumed = self._repo.mark_validation_consumed(
+            strategy_id, note, consumed_at=utcnow_aware()
+        )
+        if not consumed:
+            return False
+        self._db.commit()
+        logger.info("验证期消费留痕: strategy_id=%s note=%s", strategy_id, note)
+        return True
 
     def validate_config(self, config_json: dict[str, Any]) -> StrategyValidationResult:
         """校验策略配置 JSON 是否合法（含因子 ID 与变换函数校验）。

@@ -9,6 +9,14 @@ export interface StrategySummary {
   is_starred: boolean
   /** 策略绑定的指数代码列表，空数组表示全指数通用 */
   index_codes: string[]
+  /** 是否为稳健性验证派生的变体草稿策略（D-4） */
+  is_variant?: boolean
+  /** 派生来源批次 ID（稳健性验证批次），手工策略为 null（D-4） */
+  source_batch_id?: string | null
+  /** 验证期（2026-01-01 起）数据首次被消费的时间（D-5） */
+  validation_consumed_at?: string | null
+  /** 验证期消费说明（D-5） */
+  validation_consumed_note?: string | null
 }
 
 export interface StrategyDetail extends StrategySummary {
@@ -1085,10 +1093,142 @@ export interface ValidationUsageItem {
   start_date: string
   end_date: string
   created_at: string
+  /** 该策略验证期数据首次被消费的时间（D-5，策略级留痕） */
+  strategy_validation_consumed_at?: string | null
+  /** 验证期消费说明（D-5） */
+  strategy_validation_consumed_note?: string | null
 }
 
 /** 验证期数据使用留痕列表响应 */
 export interface ValidationUsageResponse {
   items: ValidationUsageItem[]
+  total: number
+}
+
+/** 稳健性验证批次变体 */
+export interface RobustnessVariant {
+  label: string
+  kind: string
+  knob: string | null
+  value: unknown
+  strategy_id: string | null
+  backtest_ids: Record<string, string>
+  deleted_windows: string[]
+}
+
+/** 稳健性验证批次摘要 */
+export interface RobustnessSummary {
+  robustness_id: string
+  strategy_id: string
+  strategy_version: string
+  kind: string
+  status: string
+  start_date: string
+  end_date: string
+  trial_count: number
+  created_at: string | null
+  finished_at: string | null
+  error_message: string | null
+}
+
+/** 稳健性汇总中的单个变体明细（Δ 相对基线） */
+export interface RobustnessVariantDetail {
+  label: string
+  kind: string | null
+  knob: string | null
+  value: unknown
+  sharpe_mean: number | null
+  annualized_return_mean: number | null
+  windows: number
+  delta_sharpe: number | null
+  delta_annualized_return: number | null
+}
+
+/** 参数邻域稳定度（scan） */
+export interface RobustnessNeighborhood {
+  n_variants: number
+  delta_min: number | null
+  delta_max: number | null
+  worse_ratio: number | null
+  reversal: boolean
+  is_plateau: boolean
+}
+
+/** 资产池扰动分布（pool） */
+export interface RobustnessPool {
+  n_variants: number
+  delta_median: number | null
+  delta_min: number | null
+  delta_max: number | null
+}
+
+/** 部分汇总覆盖率（B7） */
+export interface RobustnessCoverage {
+  expected_windows: number
+  completed_windows: number
+  pending_windows: number
+  missing_windows: string[]
+  failed_windows: string[]
+  is_partial: boolean
+}
+
+/** 稳健性汇总结构 */
+export interface RobustnessSummaryBody {
+  baseline_sharpe_mean: number | null
+  baseline_annualized_return_mean: number | null
+  variants: RobustnessVariantDetail[]
+  neighborhood?: RobustnessNeighborhood
+  marginal?: Array<{
+    label: string
+    delta_sharpe: number | null
+    delta_annualized_return: number | null
+  }>
+  pool?: RobustnessPool
+  coverage?: RobustnessCoverage
+}
+
+/** 统计显著性（CSCV-PBO / Deflated Sharpe / 块自助法） */
+export interface RobustnessStatistics {
+  n_trials: number
+  n_windows: number
+  cost_bps: number
+  pbo: {
+    value: number
+    n_candidates: number
+    n_splits: number
+    n_blocks: number
+  } | null
+  deflated_sharpe: {
+    sharpe_annualized: number
+    expected_max_sharpe_annualized: number
+    deflated_sharpe: number
+    n_observations: number
+    n_trials: number
+  } | null
+  bootstrap: {
+    sharpe_annualized: number
+    lower: number
+    upper: number
+    confidence: number
+    block: number
+    n_bootstrap: number
+  } | null
+}
+
+/** 稳健性验证批次详情 */
+export interface RobustnessDetail extends RobustnessSummary {
+  baseline_config_hash: string
+  windows: Array<{ label: string; start: string; end: string }>
+  variants: RobustnessVariant[]
+  summary: RobustnessSummaryBody | null
+  statistics: RobustnessStatistics | null
+  missing_backtest_ids: string[]
+  /** 本次扫描口径：预设、关键旋钮清单、窗口数（D-2） */
+  scan_params?: Record<string, unknown>
+}
+
+/** 稳健性验证批次列表响应 */
+export interface RobustnessListResponse {
+  items: RobustnessSummary[]
   total: number
 }

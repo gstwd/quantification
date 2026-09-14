@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from quant_etf_api.infra.db.models.core import StrategyConfigModel
 from quant_etf_api.infra.db.repositories.base import BaseRepository
 
@@ -46,6 +48,49 @@ class StrategyConfigRepository(BaseRepository):
             .order_by(StrategyConfigModel.strategy_id.asc())
             .all()
         )
+
+    def find_variants(self, batch_id: str) -> list[StrategyConfigModel]:
+        """按派生批次查询稳健性变体草稿策略（D-4）。
+
+        Args:
+            batch_id: 稳健性验证批次 ID（``strategy_config.source_batch_id``）。
+
+        Returns:
+            该批次派生的变体策略列表（按策略 ID 升序）。
+        """
+        return (
+            self._db.query(StrategyConfigModel)
+            .filter(
+                StrategyConfigModel.source_batch_id == batch_id,
+                StrategyConfigModel.is_variant == True,  # noqa: E712
+            )
+            .order_by(StrategyConfigModel.strategy_id.asc())
+            .all()
+        )
+
+    def mark_validation_consumed(
+        self, strategy_id: str, note: str | None, consumed_at: datetime
+    ) -> bool:
+        """记录"该策略的验证期数据已被消费"（D-5，仅首次写入）。
+
+        Args:
+            strategy_id: 策略标识。
+            note: 消费说明（首次消费来源或人工备注）。
+            consumed_at: 首次消费时间（UTC aware）。
+
+        Returns:
+            是否写入成功（策略不存在返回 False）。
+        """
+        model = self._db.get(StrategyConfigModel, strategy_id)
+        if model is None:
+            return False
+        if model.validation_consumed_at is None:
+            model.validation_consumed_at = consumed_at
+            model.validation_consumed_note = note
+        elif note:
+            # 已经标记过：保留首次时间，仅追加最新说明，避免覆盖历史
+            model.validation_consumed_note = f"{model.validation_consumed_note}；{note}"
+        return True
 
     def set_starred(self, strategy_id: str, is_starred: bool) -> bool:
         """设置策略的星标状态。

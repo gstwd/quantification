@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, false, func, or_
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.db.base import SessionLocal
@@ -148,6 +148,10 @@ class JobRepository:
                 query.order_by(
                     BackgroundJobModel.priority.desc(),
                     BackgroundJobModel.created_at.asc(),
+                    # 次序键兜底：created_at 在同一时间片内可能完全相同
+                    # （批量入队 + Windows 时钟精度约 15.6ms），缺少兜底键时
+                    # 认领顺序不确定，queue_position 也会与实际认领次序不符
+                    BackgroundJobModel.job_id.asc(),
                 )
                 .limit(limit)
                 .with_for_update(skip_locked=True)
@@ -487,15 +491,18 @@ class JobRepository:
         priority: int,
         created_at: datetime,
         job_types: Sequence[str] | None = None,
+        job_id: str | None = None,
     ) -> int:
         """统计排在指定任务之前、待执行的任务数（队列位置）。
 
-        排序规则与 claim_pending 一致：优先级降序 + 创建时间升序。
+        排序规则与 claim_pending 一致：优先级降序 + 创建时间升序 + 任务 ID 升序。
 
         Args:
             priority: 目标任务优先级。
             created_at: 目标任务创建时间。
             job_types: 任务类型白名单（lane 内位置），None 表示全队列。
+            job_id: 目标任务 ID；给出时按与 claim_pending 相同的兜底次序键
+                精确统计（创建时间在同一时间片内相同时仍能给出一致的排队位置）。
 
         Returns:
             排在前面的待执行任务数量。
@@ -510,6 +517,13 @@ class JobRepository:
                         BackgroundJobModel.priority == priority,
                         BackgroundJobModel.created_at < created_at,
                     ),
+                    and_(
+                        BackgroundJobModel.priority == priority,
+                        BackgroundJobModel.created_at == created_at,
+                        BackgroundJobModel.job_id < job_id,
+                    )
+                    if job_id is not None
+                    else false(),
                 ),
             )
             if job_types is not None:

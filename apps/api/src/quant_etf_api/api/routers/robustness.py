@@ -24,10 +24,13 @@ router = APIRouter(tags=["robustness"])
 @router.get("/robustness", response_model=RobustnessListResponse)
 def list_robustness_runs(
     limit: int = Query(default=100, ge=1, le=500, description="返回条数上限"),
+    strategy_id: str | None = Query(
+        default=None, description="只返回该基线策略的批次（策略详情页稳健性页签）"
+    ),
     db: Session = Depends(get_db),
 ) -> RobustnessListResponse:
     """返回最近的稳健性验证批次摘要（按创建时间倒序）。"""
-    return RobustnessService(db).list_runs(limit=limit)
+    return RobustnessService(db).list_runs(limit=limit, strategy_id=strategy_id)
 
 
 @router.get("/robustness/{robustness_id}", response_model=RobustnessDetail)

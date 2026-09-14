@@ -168,3 +168,47 @@ class StrategyService:
                 errors=["未提供数据库 Session，无法完成因子校验"],
             )
         return self._config_svc().validate_config(config_json)
+
+    def list_variants(self, batch_id: str) -> list[StrategySummary]:
+        """列出某稳健性验证批次派生的变体草稿策略（D-4）。
+
+        Args:
+            batch_id: 稳健性验证批次 ID。
+
+        Returns:
+            变体策略摘要列表。
+        """
+        if self._db is None:
+            return []
+        return self._config_svc().list_variants(batch_id)
+
+    def prune_variants(
+        self, batch_id: str, *, dry_run: bool = True, force: bool = False
+    ) -> dict[str, Any]:
+        """清理某稳健性验证批次派生的变体草稿策略（D-4）。
+
+        Args:
+            batch_id: 稳健性验证批次 ID。
+            dry_run: True 时只预演不写库。
+            force: True 时连带删除变体名下的回测记录。
+
+        Returns:
+            清理结果字典。
+        """
+        if self._db is None:
+            return {"batch_id": batch_id, "dry_run": dry_run, "matched": 0, "deleted": []}
+        return self._config_svc().prune_variants(batch_id, dry_run=dry_run, force=force)
+
+    def mark_validation_consumed(self, strategy_id: str, note: str | None = None) -> bool:
+        """记录"该策略的验证期数据已被消费"（D-5）。
+
+        Args:
+            strategy_id: 策略标识。
+            note: 消费说明。
+
+        Returns:
+            是否写入成功。
+        """
+        if self._db is None:
+            return False
+        return self._config_svc().mark_validation_consumed(strategy_id, note)

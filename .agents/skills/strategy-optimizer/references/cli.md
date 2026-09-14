@@ -18,14 +18,21 @@
 | `strategy create --id <sid> --name <name> --file <path> [--draft] [--version]` | 创建策略 |
 | `strategy update <id> [--file] [--status active\|draft\|disabled] [--version] [--name] [--description]` | 更新策略 |
 | `strategy diff <a> <b>` | 两策略配置的 unified diff |
+| `strategy prune-variants --batch <批次> [--apply] [--force]` | 清理稳健性变体草稿策略；默认预演；变体仍被回测引用时跳过，`--force` 才连带删回测 |
+| `strategy consume-validation <id> [--note "..."]` | 标记"该策略的验证期数据已被消费"（此后验证期证据只能用于否决） |
 
 ## backtest
 
 | 命令 | 说明 |
 | --- | --- |
-| `backtest run --strategy <id> [--start] [--end] [--universe all\|subset] [--index-codes a,b] [--benchmark 000300] [--no-benchmark] [--purpose research\|validation\|monitor] [--purpose-reason] [--cost-bps] [--async]` | 创建并执行回测；默认同步；`purpose=research` 时 `--end` 缺省为研究期末端（2025-12-31），其他用途缺省为今天；`--start` 缺省为 end 往前 2 年且不早于 2016-01-01；单次跨度建议 ≤ 2 年，长跨度按 1-2 年滚动分段执行 |
+| `backtest run --strategy <id> [--start] [--end] [--universe all\|subset] [--index-codes a,b] [--benchmark 000300] [--no-benchmark] [--purpose research\|validation\|monitor] [--purpose-reason] [--cost-bps] [--async] [--priority N]` | 创建并执行回测；默认同步；`purpose=research` 时 `--end` 缺省为研究期末端（2025-12-31），其他用途缺省为今天；`--start` 缺省为 end 往前 2 年且不早于 2016-01-01；**研究期内任意跨度（1 个月~10 年）都可单次执行，不存在跨度上限，也不再要求分段** |
 | `backtest status <id> [--wait] [--timeout 600]` | 状态与指标；`--wait` 轮询至终态（failed 退出码 1，超时 2） |
-| `backtest show <id>` | 详情（含 config_snapshot / config_hash / data_cutoff_date / warnings） |
+| `backtest show <id> [--cost-bps N] [--cost-ladder 0,10,20,30,50]` | 详情（含 config_snapshot / config_hash / data_cutoff_date / warnings / 口径指纹 / 多档成本） |
+| `backtest list [--status] [--purpose] [--calendar-source] [--order-by] [--asc] [--limit]` | 回测列表过滤（状态/用途/日历来源/排序） |
+| `backtest cancel <id>` | 取消回测（未开始直接取消，运行中在安全检查点退出） |
+| `backtest pool <id>` | 有效候选池逐日时间线与剔除区间 |
+| `backtest orphans [--limit N]` / `backtest prune-dangling-refs [--apply]` | 悬挂回测引用审计 / 清理（默认预演） |
+| `backtest delete <id> [--force]` | 受控删除回测（运行中先取消；存在 JSONB 引用默认拒绝） |
 | `backtest results <id> [--daily] [--index]` | 每日组合绩效 / 每指数信号与收益 |
 
 ## optimization
@@ -46,12 +53,31 @@
 
 | 命令 | 说明 |
 | --- | --- |
-| `robustness scan --strategy <id> [--windows 4] [--max-knobs 30] [--sync]` | 单旋钮邻域扰动：从配置数值叶子派生 ±1 档变体 |
+| `robustness scan --strategy <id> [--preset quick\|standard] [--windows 4] [--max-knobs 30] [--knobs a,b] [--knobs-file k.json] [--sync]` | 单旋钮邻域扰动：按业务重要性优先扫择时/过滤阈值；`quick`=2 窗口/8 旋钮轻量体检 |
 | `robustness ablate --strategy <id> [--windows 4] [--sync]` | 因子消融：逐个移除评分因子与过滤条件 |
 | `robustness pool --strategy <id> [--windows 4] [--samples 8] [--sync]` | 资产池扰动：随机 80% 子池 / 剔除常持 / 剔除后上市 |
-| `robustness collect <id> [--wait] [--timeout 3600]` | 等待并汇总批次（邻域稳定度 / 边际贡献 / 池扰动分布） |
+| `robustness collect <id> [--wait] [--timeout 3600] [--allow-partial]` | 等待并汇总批次（邻域稳定度 / 边际贡献 / 池扰动分布）；`--allow-partial` 按已完成窗口汇总并写 coverage |
+| `robustness cancel\|pause\|resume <id>` | 整批取消 / 暂停 / 恢复（运行中的任务在安全检查点退出） |
 | `robustness stats <id> [--n-trials] [--cost-bps] [--block 20] [--bootstrap 2000]` | CSCV-PBO / Deflated Sharpe / 块自助法置信区间 |
-| `robustness show <id>` / `robustness list [--limit]` | 批次详情 / 列表 |
+| `robustness show <id>` / `robustness list [--limit]` | 批次详情（含 `scan_params` 扫描口径）/ 列表 |
+
+## research（批量变体探索，不落库）
+
+| 命令 | 说明 |
+| --- | --- |
+| `research batch --strategy <id> --variants v.json [--windows 5] [--cost-bps 10] [--cost-ladder 0,10,20,30,50] [--no-baseline]` | 同一批变体 × 窗口的离线评估：复用平台执行路径但**不落库**，按窗口共享行情与因子缓存；输出逐窗口毛/净口径、多档成本与 `vs_baseline`（Δ净年化/Δ净夏普/劣化窗口占比） |
+
+变体文件格式：`{"variants": [{"label": "x", "patch": {"rank.top_n": 4}}, {"label": "y", "config": {...}}]}`。
+`patch` 的路径支持列表下标（`filters.rules[1].value`）；路径不存在或字段拼错都会直接报错。
+输出中的 `caliber.persisted=false` 表示结果不可审计：**只能用来决定"值不值得走正式回测"**。
+
+## queue（任务队列可观测性）
+
+| 命令 | 说明 |
+| --- | --- |
+| `queue stats [--window-hours 1]` | 积压 / 吞吐 / 运行中任务 / 并发预算 |
+| `queue jobs [--status] [--job-type] [--limit]` | 任务明细（含心跳时间与已耗时） |
+| `queue worker` | 以独立进程运行队列 worker（前台阻塞；配合 `QUANT_ETF_JOB_QUEUE_EMBEDDED=false`） |
 
 ## lifecycle（上线后监控）
 
@@ -69,7 +95,8 @@
 - 区间下限（用户约定）：所有回测/评估的 `--start` 一律取 `2016-01-01`，不使用 2016 年之前的数据。
 - 研究期 / 验证期边界（硬约束）：研究期为 2016-01-01 ~ 2025-12-31，验证期为 2026-01-01 起。
   `purpose=research` 的回测与优化会话越过研究期末端会被直接拒绝；验证/监控用途允许使用验证期数据，但会进入留痕列表（`GET /backtests/validation-usage`）。
-- 分段原则：分段用于控制单任务风险、资源峰值、失败局部重跑和跨市场阶段比较。总跨度 > 5 年时必须按 1-2 年逐段 `backtest run`（或按段分别建 optimization 会话）；较短区间在指数/候选较多时也优先按 1-2 年分段或分批执行。
+- 分段原则（C4 起）：研究期内任意跨度都可单次回测，**不存在跨度上限、也不再要求"总跨度 > 5 年必须分段"**。分段只是可选的分析视角（分年度绩效 + 三段一致性），需要逐段比较时再按自然年/等分段跑。
+- 探索与验收分工（D1）：几十个变体的快速筛选用 `research batch`（不落库、分钟级、同一条执行路径），**验收与报告数字必须来自落库回测**（`backtest run` / `robustness`）。
 - 异步并行：`backtest run --async` 与 `optimization evaluate --async` 只把任务写入 `background_job`，由服务端 uvicorn 多 worker 进程经 `FOR UPDATE SKIP LOCKED` 并行认领执行，互不重复；实际并行度 = min(worker 数, CPU 核心数)。多方向/多段并行时用 `--async`，入队后 CLI 进程可退出，任务继续在服务端执行。
 - `fold_summary`：每个指标输出基线/候选的均值、中位数、候选胜出折数。
 - 验收清单默认阈值（共 7 项）：验证窗平均夏普 Δ≥0；平均最大回撤劣化 ≤ 2pct；夏普胜出折数 ≥ 50%；验证窗平均累计收益 Δ≥0；净成本口径夏普 Δ≥0；参数邻域无方向反转（需先跑 `robustness scan`）；分段一致性（剔除最好折后候选夏普不低于基线）。`--strict` 时 accept 必须全部满足。

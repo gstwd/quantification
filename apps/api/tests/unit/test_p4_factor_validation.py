@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest import mock
 
@@ -40,6 +40,41 @@ from quant_etf_api.services.strategy_service import StrategyService
 def _registry_ids() -> set[str]:
     """返回进程级注册表中全部因子 ID。"""
     return {spec.factor_id for spec in get_default_factor_registry().specs()}
+
+
+class _WeekdayCalendar:
+    """按工作日判断交易日的替身日历（用例不需要真实节假日日历）。
+
+    测试不应依赖网络：星标摘要会构建调仓调度器，而严格口径（C1）下
+    日历必须来自真实数据源或本地表，这里注入只按工作日判断的替身。
+    """
+
+    def is_trading_day(self, day: date) -> bool:
+        """工作日视为交易日。"""
+        return day.weekday() < 5
+
+    def latest_trading_day(self, day: date) -> date:
+        """回退到最近的工作日。"""
+        while day.weekday() >= 5:
+            day = day - timedelta(days=1)
+        return day
+
+    def next_trading_day(self, day: date) -> date:
+        """前进到下一个工作日。"""
+        day = day + timedelta(days=1)
+        while day.weekday() >= 5:
+            day = day + timedelta(days=1)
+        return day
+
+    def trading_days_between(self, start: date, end: date) -> list[date]:
+        """区间内的工作日列表。"""
+        days: list[date] = []
+        current = start
+        while current <= end:
+            if current.weekday() < 5:
+                days.append(current)
+            current = current + timedelta(days=1)
+        return days
 
 
 class _FakeRow:
@@ -321,6 +356,12 @@ class TestRuntimeGuards:
                 StrategyDecisionService,
                 "run_allocation",
                 side_effect=_fake_run_allocation,
+            ),
+            # 星标摘要会构建调仓调度器，需要真实交易日历（C1 严格口径）；
+            # 用例不该依赖网络，这里注入只按工作日判断的替身日历
+            mock.patch(
+                "quant_etf_api.services.strategy_decision_service.resolve_trading_calendar",
+                return_value=(_WeekdayCalendar(), "test"),
             ),
         ):
             summary = svc.get_starred_summary(trade_date=date(2025, 1, 15))

@@ -23,6 +23,10 @@ class StrategySummary(BaseModel):
         status: 状态。
         is_starred: 是否星标关注。
         index_codes: 策略绑定的指数代码列表，空列表表示全指数通用。
+        is_variant: 是否为稳健性验证派生的变体草稿策略（D-4）。
+        source_batch_id: 派生来源批次 ID（稳健性验证批次），手工策略为 None（D-4）。
+        validation_consumed_at: 验证期（2026-01-01 起）数据首次被消费的时间（D-5）。
+        validation_consumed_note: 验证期消费说明（D-5）。
     """
 
     strategy_id: str
@@ -33,6 +37,10 @@ class StrategySummary(BaseModel):
     status: str = "active"
     is_starred: bool = False
     index_codes: list[str] = Field(default_factory=list)
+    is_variant: bool = False
+    source_batch_id: str | None = None
+    validation_consumed_at: UtcDatetime | None = None
+    validation_consumed_note: str | None = None
 
 
 class StrategyDetail(StrategySummary):
@@ -60,6 +68,8 @@ class StrategyConfigCreate(BaseModel):
         frequency: 运行频率。
         config_json: 完整策略配置 JSON。
         status: 初始状态，active=启用，draft=优化候选草稿（不出现在启用列表）。
+        is_variant: 是否为稳健性验证派生的变体草稿策略（D-4）。
+        source_batch_id: 派生来源批次 ID（D-4）。
     """
 
     strategy_id: str
@@ -69,6 +79,8 @@ class StrategyConfigCreate(BaseModel):
     frequency: str = "daily"
     config_json: dict[str, Any]
     status: str = "active"
+    is_variant: bool = False
+    source_batch_id: str | None = None
 
 
 class StrategyConfigUpdate(BaseModel):

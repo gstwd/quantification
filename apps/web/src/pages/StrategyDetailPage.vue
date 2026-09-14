@@ -48,8 +48,25 @@
 
       <p class="description">{{ store.current.description || '暂无描述' }}</p>
 
+      <!-- 页签：策略配置 / 稳健性验证（D-3） -->
+      <div class="debug-tabs page-tabs">
+        <button
+          :class="['debug-tab', { active: activeTab === 'config' }]"
+          @click="activeTab = 'config'"
+        >
+          策略配置
+        </button>
+        <button
+          :class="['debug-tab', { active: activeTab === 'robustness' }]"
+          @click="activeTab = 'robustness'"
+        >
+          稳健性验证
+          <span v-if="robustnessRuns.length" class="tab-count">{{ robustnessRuns.length }}</span>
+        </button>
+      </div>
+
       <!-- 策略配置模块 -->
-      <div class="config-grid">
+      <div v-if="activeTab === 'config'" class="config-grid">
         <!-- 资产范围 -->
         <div v-if="indexCodesList.length > 0" class="config-card">
           <div class="config-header">资产范围</div>
@@ -246,6 +263,198 @@
           </div>
         </div>
 
+      </div>
+
+      <!-- 稳健性验证面板（D-3）：批次列表 + 邻域 Δ / 消融边际贡献 / PBO / DSR -->
+      <div v-else class="robustness-panel">
+        <div class="section-header-row">
+          <h2 class="section-title">稳健性验证</h2>
+          <div class="header-actions">
+            <button class="btn-secondary" :disabled="robustnessLoading" @click="loadRobustness">
+              {{ robustnessLoading ? '加载中...' : '刷新' }}
+            </button>
+          </div>
+        </div>
+        <p class="robustness-hint">
+          候选集级别的过拟合风险检验（单次回测无法计算）。批次由 CLI 创建：
+          <code>robustness scan --strategy {{ strategyId }} --preset quick</code>；
+          汇总后 <code>robustness collect &lt;id&gt;</code> 与
+          <code>robustness stats &lt;id&gt;</code> 给出邻域与显著性结论。
+        </p>
+        <div v-if="robustnessError" class="run-error">{{ robustnessError }}</div>
+        <div v-if="!robustnessLoading && !robustnessRuns.length" class="config-empty">
+          暂无稳健性验证批次
+        </div>
+
+        <table v-if="robustnessRuns.length" class="robust-table">
+          <thead>
+            <tr>
+              <th>批次</th>
+              <th>类型</th>
+              <th>状态</th>
+              <th>试验数</th>
+              <th>窗口</th>
+              <th>创建时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="run in robustnessRuns"
+              :key="run.robustness_id"
+              :class="{ 'row-selected': selectedRun?.robustness_id === run.robustness_id }"
+            >
+              <td class="mono">{{ run.robustness_id.slice(0, 8) }}</td>
+              <td>{{ kindLabel(run.kind) }}</td>
+              <td>
+                <span :class="['chip', statusChipClass(run.status)]">
+                  {{ statusText(run.status) }}
+                </span>
+              </td>
+              <td>{{ run.trial_count }}</td>
+              <td class="mono">{{ run.start_date }} ~ {{ run.end_date }}</td>
+              <td>{{ formatCnTime(run.created_at) }}</td>
+              <td class="row-actions">
+                <button class="btn-link" @click="selectRun(run.robustness_id)">查看</button>
+                <button
+                  v-if="run.status === 'running'"
+                  class="btn-link danger"
+                  @click="handleCancelRun(run.robustness_id)"
+                >
+                  取消
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div v-if="selectedRun" class="robust-detail">
+          <h3 class="robust-detail-title">
+            批次 {{ selectedRun.robustness_id.slice(0, 8) }}（{{ kindLabel(selectedRun.kind) }}）
+          </h3>
+
+          <div v-if="selectedRun.scan_params?.preset" class="stat-chip chip-total">
+            扫描口径：{{ selectedRun.scan_params.preset }}
+            <template v-if="Array.isArray(selectedRun.scan_params.knobs)">
+              · 关键旋钮 {{ (selectedRun.scan_params.knobs as unknown[]).length }} 个
+            </template>
+          </div>
+
+          <div v-if="coverageOf(selectedRun)" class="robust-block">
+            <div class="robust-block-title">覆盖率</div>
+            <div class="robust-kv">
+              <span>完整 {{ coverageOf(selectedRun)?.completed_windows }} /
+                {{ coverageOf(selectedRun)?.expected_windows }} 窗口</span>
+              <span v-if="coverageOf(selectedRun)?.is_partial" class="chip chip-disabled">
+                部分汇总（结论仅供参考）
+              </span>
+            </div>
+          </div>
+
+          <!-- 参数邻域（scan） -->
+          <div v-if="selectedRun.summary?.neighborhood" class="robust-block">
+            <div class="robust-block-title">参数邻域稳定度</div>
+            <div class="robust-kv">
+              <span>扰动变体 {{ selectedRun.summary.neighborhood.n_variants }} 个</span>
+              <span>Δ夏普范围 {{ fmt(selectedRun.summary.neighborhood.delta_min) }} ~
+                {{ fmt(selectedRun.summary.neighborhood.delta_max) }}</span>
+              <span>劣于基线占比 {{ fmtRatio(selectedRun.summary.neighborhood.worse_ratio) }}</span>
+              <span :class="['chip', selectedRun.summary.neighborhood.is_plateau ? 'chip-active' : 'chip-disabled']">
+                {{ selectedRun.summary.neighborhood.is_plateau ? '处于平台' : '非平台（参数脆弱）' }}
+              </span>
+              <span v-if="selectedRun.summary.neighborhood.reversal" class="chip chip-disabled">
+                存在方向反转
+              </span>
+            </div>
+          </div>
+
+          <!-- 因子消融（ablate） -->
+          <div v-if="selectedRun.summary?.marginal?.length" class="robust-block">
+            <div class="robust-block-title">因子／过滤条件边际贡献（Δ夏普，升序）</div>
+            <table class="robust-table inner">
+              <thead>
+                <tr><th>移除项</th><th>Δ夏普</th><th>Δ年化(%)</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in selectedRun.summary.marginal" :key="item.label">
+                  <td class="mono">{{ item.label }}</td>
+                  <td>{{ fmt(item.delta_sharpe) }}</td>
+                  <td>{{ fmt(item.delta_annualized_return) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="robustness-hint">Δ 接近 0 的项对结果没有贡献，可考虑删除以降低复杂度。</p>
+          </div>
+
+          <!-- 资产池扰动（pool） -->
+          <div v-if="selectedRun.summary?.pool" class="robust-block">
+            <div class="robust-block-title">资产池扰动分布</div>
+            <div class="robust-kv">
+              <span>子池变体 {{ selectedRun.summary.pool.n_variants }} 个</span>
+              <span>中位 Δ夏普 {{ fmt(selectedRun.summary.pool.delta_median) }}</span>
+              <span>范围 {{ fmt(selectedRun.summary.pool.delta_min) }} ~
+                {{ fmt(selectedRun.summary.pool.delta_max) }}</span>
+            </div>
+          </div>
+
+          <!-- 统计显著性 -->
+          <div v-if="selectedRun.statistics" class="robust-block">
+            <div class="robust-block-title">
+              统计显著性（试验次数 N = {{ selectedRun.statistics.n_trials }}）
+            </div>
+            <div class="robust-kv">
+              <span v-if="selectedRun.statistics.pbo">
+                CSCV-PBO：<b class="mono">{{ selectedRun.statistics.pbo.value }}</b>
+                （≈0.5 相当于纯噪声，越高越可疑）
+              </span>
+              <span v-else class="text-muted">PBO：窗口数或候选数不足，未计算</span>
+            </div>
+            <div class="robust-kv">
+              <span v-if="selectedRun.statistics.deflated_sharpe">
+                Deflated Sharpe：<b class="mono">{{ selectedRun.statistics.deflated_sharpe.deflated_sharpe }}</b>
+                （年化夏普 {{ selectedRun.statistics.deflated_sharpe.sharpe_annualized }}，
+                期望最大夏普 {{ selectedRun.statistics.deflated_sharpe.expected_max_sharpe_annualized }}）
+              </span>
+              <span v-else class="text-muted">Deflated Sharpe：未计算</span>
+            </div>
+            <div class="robust-kv">
+              <span v-if="selectedRun.statistics.bootstrap">
+                自助法 {{ selectedRun.statistics.bootstrap.confidence * 100 }}% 置信区间：
+                [{{ selectedRun.statistics.bootstrap.lower }},
+                {{ selectedRun.statistics.bootstrap.upper }}]
+              </span>
+              <span v-else class="text-muted">自助法区间：未计算</span>
+            </div>
+          </div>
+
+          <!-- 变体逐个结果 -->
+          <div v-if="selectedRun.summary?.variants?.length" class="robust-block">
+            <div class="robust-block-title">变体逐项结果（相对基线）</div>
+            <table class="robust-table inner">
+              <thead>
+                <tr>
+                  <th>变体</th>
+                  <th>扰动项</th>
+                  <th>均值夏普</th>
+                  <th>Δ夏普</th>
+                  <th>Δ年化(%)</th>
+                  <th>窗口数</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in selectedRun.summary.variants" :key="item.label">
+                  <td>{{ item.label }}</td>
+                  <td class="mono">{{ item.knob || '-' }}</td>
+                  <td>{{ fmt(item.sharpe_mean) }}</td>
+                  <td>{{ fmt(item.delta_sharpe) }}</td>
+                  <td>{{ fmt(item.delta_annualized_return) }}</td>
+                  <td>{{ item.windows }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-else class="config-empty">该批次尚未汇总（collect 后可查看结果）</div>
+        </div>
       </div>
 
       <!-- 执行错误提示 -->
@@ -621,12 +830,23 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { fetchIndexDailyBars } from '../api/market_data'
+import {
+  cancelRobustnessRun,
+  fetchRobustnessDetail,
+  fetchRobustnessRuns,
+} from '../api/robustness'
 import { runAllocation } from '../api/strategies'
 import StrategyConfigForm from '../components/StrategyConfigForm.vue'
 import { useStrategyStore } from '../stores/strategies'
 import { toast } from '../stores/toast'
-import type { AllocationResponse, DailyBar } from '../types/api'
-import { shiftDateCn, todayCn } from '../utils/date'
+import type {
+  AllocationResponse,
+  DailyBar,
+  RobustnessCoverage,
+  RobustnessDetail,
+  RobustnessSummary,
+} from '../types/api'
+import { formatCnTime, shiftDateCn, todayCn } from '../utils/date'
 
 const props = defineProps<{ strategyId: string }>()
 const store = useStrategyStore()
@@ -703,6 +923,118 @@ watch(showEdit, (val) => {
     editConfigText.value = JSON.stringify(store.current.config_json, null, 2)
     editJsonError.value = ''
     editAdvancedMode.value = false
+  }
+})
+
+// ── 稳健性验证面板（D-3） ────────────────────────────────────────────────
+
+/** 当前页签 */
+const activeTab = ref<'config' | 'robustness'>('config')
+/** 该策略的稳健性批次列表 */
+const robustnessRuns = ref<RobustnessSummary[]>([])
+/** 当前查看的批次详情 */
+const selectedRun = ref<RobustnessDetail | null>(null)
+const robustnessLoading = ref(false)
+const robustnessError = ref('')
+
+/** 批次类型中文标签 */
+const KIND_LABELS: Record<string, string> = {
+  scan: '参数邻域',
+  ablate: '因子消融',
+  pool: '资产池扰动',
+}
+
+/** 批次状态中文标签 */
+const STATUS_TEXTS: Record<string, string> = {
+  running: '执行中',
+  success: '已完成',
+  partial: '部分汇总',
+  failed: '失败',
+  cancelled: '已取消',
+  paused: '已暂停',
+}
+
+/** 批次类型标签 */
+function kindLabel(kind: string): string {
+  return KIND_LABELS[kind] || kind
+}
+
+/** 批次状态标签 */
+function statusText(status: string): string {
+  return STATUS_TEXTS[status] || status
+}
+
+/** 批次状态对应的徽标样式 */
+function statusChipClass(status: string): string {
+  if (status === 'success') return 'chip-active'
+  if (status === 'running' || status === 'partial') return 'chip-version'
+  if (status === 'paused') return 'chip-freq'
+  return 'chip-disabled'
+}
+
+/** 数字格式化（空值显示 '-'） */
+function fmt(value: number | null | undefined): string {
+  return value == null ? '-' : String(value)
+}
+
+/** 比例格式化（0-1 → 百分比） */
+function fmtRatio(value: number | null | undefined): string {
+  return value == null ? '-' : `${(value * 100).toFixed(1)}%`
+}
+
+/** 汇总覆盖率（部分汇总时提示结论仅供参考） */
+function coverageOf(detail: RobustnessDetail): RobustnessCoverage | undefined {
+  return detail.summary?.coverage
+}
+
+/** 加载该策略的稳健性批次列表（默认选中最近一个已完成的批次） */
+async function loadRobustness(): Promise<void> {
+  robustnessLoading.value = true
+  robustnessError.value = ''
+  try {
+    const response = await fetchRobustnessRuns({ strategyId: props.strategyId, limit: 20 })
+    robustnessRuns.value = response.items
+    const target =
+      selectedRun.value && response.items.some((r) => r.robustness_id === selectedRun.value?.robustness_id)
+        ? selectedRun.value.robustness_id
+        : response.items[0]?.robustness_id
+    if (target) {
+      await selectRun(target)
+    } else {
+      selectedRun.value = null
+    }
+  } catch (e) {
+    robustnessError.value = e instanceof Error ? e.message : '稳健性批次加载失败'
+  } finally {
+    robustnessLoading.value = false
+  }
+}
+
+/** 查看单个批次详情 */
+async function selectRun(robustnessId: string): Promise<void> {
+  try {
+    selectedRun.value = await fetchRobustnessDetail(robustnessId)
+  } catch (e) {
+    selectedRun.value = null
+    robustnessError.value = e instanceof Error ? e.message : '批次详情加载失败'
+  }
+}
+
+/** 取消整批稳健性回测并刷新 */
+async function handleCancelRun(robustnessId: string): Promise<void> {
+  try {
+    await cancelRobustnessRun(robustnessId)
+    toast.info('已请求取消该批次，运行中的任务会在安全检查点退出')
+    await loadRobustness()
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : '取消失败')
+  }
+}
+
+/** 切到稳健性页签时按需加载 */
+watch(activeTab, (tab) => {
+  if (tab === 'robustness' && !robustnessRuns.value.length && !robustnessLoading.value) {
+    void loadRobustness()
   }
 })
 
@@ -993,6 +1325,55 @@ onUnmounted(() => disposeCharts())
 .chip-disabled { background: rgba(239,68,68,0.12); color: #f87171; }
 
 .description { color: var(--text-muted); font-size: 14px; line-height: 1.7; max-width: 700px; }
+
+/* 稳健性验证面板（D-3） */
+.page-tabs { margin-top: -8px; }
+.robustness-panel { display: flex; flex-direction: column; gap: 12px; }
+.robustness-hint { color: var(--text-muted); font-size: 12px; line-height: 1.7; max-width: 900px; }
+.robustness-hint code {
+  background: var(--surface-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.robust-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.robust-table th {
+  text-align: left;
+  color: var(--text-muted);
+  font-weight: 500;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.robust-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.robust-table.inner { margin-top: 6px; }
+.robust-table tr.row-selected { background: rgba(59,130,246,0.08); }
+.row-actions { display: flex; gap: 8px; }
+.btn-link {
+  background: none;
+  border: none;
+  color: #60a5fa;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+}
+.btn-link.danger { color: #f87171; }
+.robust-detail {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.robust-detail-title { font-size: 14px; font-weight: 600; }
+.robust-block { display: flex; flex-direction: column; gap: 4px; }
+.robust-block-title { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+.robust-kv { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; align-items: center; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 /* 配置网格 */
 .config-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }

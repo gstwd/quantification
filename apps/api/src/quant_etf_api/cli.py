@@ -23,7 +23,8 @@ from quant_etf_api.schemas.strategy import StrategyConfigCreate, StrategyConfigU
 from quant_etf_api.services.backtest_service import BacktestService
 from quant_etf_api.services.factor_admin_service import FactorAdminService
 from quant_etf_api.services.optimization_service import OptimizationService
-from quant_etf_api.services.robustness_service import RobustnessService
+from quant_etf_api.services.research_batch_service import ResearchBatchService
+from quant_etf_api.services.robustness_service import SCAN_PRESETS, RobustnessService
 from quant_etf_api.services.strategy_lifecycle_service import StrategyLifecycleService
 from quant_etf_api.services.strategy_service import StrategyService
 
@@ -179,6 +180,51 @@ def _read_json_file(path: str) -> dict[str, Any]:
         return json.load(f)
 
 
+def _read_json_any(path: str) -> Any:
+    """读取 UTF-8 JSON 文件（不限制顶层结构，可能是列表）。
+
+    Args:
+        path: 文件路径。
+
+    Returns:
+        解析后的 JSON 对象。
+    """
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _resolve_knobs(args: argparse.Namespace) -> list[str] | None:
+    """汇总 ``--knobs`` 与 ``--knobs-file`` 给出的关键旋钮清单（D-2）。
+
+    关键旋钮清单让"最可疑的拟合参数"优先被扫描，而不是被
+    ``--max-knobs`` 按业务重要性截断后遗漏。
+
+    Args:
+        args: argparse 解析结果（可能不含 knobs 相关字段）。
+
+    Returns:
+        去重后的旋钮路径列表；两者都未提供时返回 None。
+
+    Raises:
+        ValueError: 清单文件结构非法时抛出。
+    """
+    knobs: list[str] = []
+    raw = getattr(args, "knobs", None)
+    if raw:
+        knobs.extend(item.strip() for item in raw.split(",") if item.strip())
+    knobs_file = getattr(args, "knobs_file", None)
+    if knobs_file:
+        payload = _read_json_any(knobs_file)
+        if isinstance(payload, dict):
+            payload = payload.get("knobs")
+        if not isinstance(payload, list) or not payload:
+            raise ValueError("关键旋钮清单文件必须是路径列表，或含 knobs 列表的对象")
+        knobs.extend(str(item).strip() for item in payload if str(item).strip())
+    if not knobs:
+        return None
+    return list(dict.fromkeys(knobs))
+
+
 def _add_json_flag(parser: argparse.ArgumentParser) -> None:
     """给子命令添加 --no-json 开关（默认 JSON 输出）。"""
     parser.add_argument("--no-json", action="store_true", help="以人类可读文本输出（默认 JSON）")
@@ -242,6 +288,27 @@ def _build_strategy_group(subparsers: argparse._SubParsersAction) -> None:
     p = sub.add_parser("diff", help="对比两个策略的配置差异")
     p.add_argument("strategy_a")
     p.add_argument("strategy_b")
+    _add_json_flag(p)
+
+    p = sub.add_parser(
+        "prune-variants",
+        help="清理稳健性验证派生的变体草稿策略（D-4，默认预演）",
+    )
+    p.add_argument("--batch", dest="batch_id", required=True, help="稳健性验证批次 ID")
+    p.add_argument("--apply", action="store_true", help="真正删除（默认只预演）")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="变体仍被回测引用时，连带删除这些回测记录",
+    )
+    _add_json_flag(p)
+
+    p = sub.add_parser(
+        "consume-validation",
+        help="标记该策略的验证期数据已被消费（D-5，人工备注用）",
+    )
+    p.add_argument("strategy_id")
+    p.add_argument("--note", help="消费说明（如「人工查看 2026 段表现」）")
     _add_json_flag(p)
 
 
@@ -408,9 +475,32 @@ def _build_robustness_group(subparsers: argparse._SubParsersAction) -> None:
     ):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--strategy", dest="strategy_id", required=True, help="基线策略 ID")
-        p.add_argument("--windows", type=int, default=4, help="研究期内切分的验证窗口数")
+        p.add_argument(
+            "--windows",
+            type=int,
+            default=None,
+            help="研究期内切分的验证窗口数（缺省取预设：quick=2 / standard=4）",
+        )
         if name == "scan":
-            p.add_argument("--max-knobs", type=int, default=30, help="单旋钮扰动数量上限")
+            p.add_argument(
+                "--max-knobs",
+                type=int,
+                default=None,
+                help="单旋钮扰动数量上限（缺省取预设：quick=8 / standard=30）",
+            )
+            p.add_argument(
+                "--preset",
+                choices=sorted(SCAN_PRESETS),
+                help="扫描预设：quick=轻量体检（2 窗口/8 旋钮），standard=完整（4/30）",
+            )
+            p.add_argument(
+                "--knobs",
+                help="关键旋钮清单（逗号分隔的配置路径，如 timing.thresholds.offensive_score）",
+            )
+            p.add_argument(
+                "--knobs-file",
+                help="关键旋钮清单文件（JSON 列表，或含 knobs 列表的对象）",
+            )
         if name == "pool":
             p.add_argument("--samples", type=int, default=8, help="随机子池抽样次数")
         p.add_argument("--sync", dest="sync_mode", action="store_true", help="同步执行（默认入队）")
@@ -459,6 +549,37 @@ def _build_robustness_group(subparsers: argparse._SubParsersAction) -> None:
 
     p = sub.add_parser("list", help="列出最近的批次")
     p.add_argument("--limit", type=int, default=50)
+    _add_json_flag(p)
+
+
+def _build_research_group(subparsers: argparse._SubParsersAction) -> None:
+    """注册 research 命令组（研究批量评估，D-1）。"""
+    group = subparsers.add_parser(
+        "research", help="研究批量评估（变体 × 窗口的秒级离线评估，不落库）"
+    )
+    sub = group.add_subparsers(dest="subcommand", required=True)
+
+    p = sub.add_parser(
+        "batch",
+        help="批量评估变体（复用平台执行路径但不落库；验收仍须走 backtest run）",
+    )
+    p.add_argument("--strategy", dest="strategy_id", required=True, help="基线策略 ID")
+    p.add_argument(
+        "--variants",
+        required=True,
+        help="变体文件（JSON 列表，或含 variants 列表的对象；每项给 config 或 patch）",
+    )
+    p.add_argument("--windows", type=int, default=5, help="研究期切分窗口数（默认 5 段）")
+    p.add_argument("--cost-bps", type=float, help="净口径成本（基点），缺省取系统默认值")
+    p.add_argument(
+        "--cost-ladder",
+        help="多档成本档位，逗号分隔（默认取系统配置，如 0,10,20,30,50）",
+    )
+    p.add_argument(
+        "--no-baseline",
+        action="store_true",
+        help="不额外评估基线配置（默认总是把基线一起评估作为对照）",
+    )
     _add_json_flag(p)
 
 
@@ -947,6 +1068,24 @@ def _run_strategy(args: argparse.Namespace) -> None:
                 print(diff)
             else:
                 _emit({"diff": diff}, True)
+        elif args.subcommand == "prune-variants":
+            result = svc.prune_variants(
+                args.batch_id,
+                dry_run=not args.apply,
+                force=args.force,
+            )
+            _emit(result, not args.no_json)
+        elif args.subcommand == "consume-validation":
+            if not svc.mark_validation_consumed(args.strategy_id, args.note):
+                _fail(f"策略 {args.strategy_id} 不存在")
+            _emit(
+                {
+                    "strategy_id": args.strategy_id,
+                    "validation_consumed": True,
+                    "note": args.note,
+                },
+                not args.no_json,
+            )
     except ValueError as exc:
         _fail(str(exc))
     finally:
@@ -1148,6 +1287,32 @@ def _run_lifecycle(args: argparse.Namespace) -> None:
         db.close()
 
 
+def _run_research(args: argparse.Namespace) -> None:
+    """执行 research 命令组（研究批量评估，D-1）。"""
+    db = SessionLocal()
+    try:
+        if args.subcommand != "batch":
+            raise ValueError(f"未知的 research 子命令: {args.subcommand}")
+        payload = _read_json_any(args.variants)
+        svc = ResearchBatchService(db)
+        variants = ResearchBatchService.parse_variants(
+            svc.baseline_config(args.strategy_id), payload
+        )
+        result = svc.run(
+            args.strategy_id,
+            variants,
+            windows=args.windows,
+            cost_bps=args.cost_bps,
+            cost_ladder=_parse_cost_ladder(args.cost_ladder),
+            include_baseline=not args.no_baseline,
+        )
+        _emit(result.to_dict(), not args.no_json)
+    except ValueError as exc:
+        _fail(str(exc))
+    finally:
+        db.close()
+
+
 def _run_robustness(args: argparse.Namespace) -> None:
     """执行 robustness 命令组。"""
     db = SessionLocal()
@@ -1157,11 +1322,13 @@ def _run_robustness(args: argparse.Namespace) -> None:
             result = svc.create(
                 strategy_id=args.strategy_id,
                 kind=args.subcommand,
-                windows=args.windows,
+                windows=getattr(args, "windows", None),
                 pool_samples=getattr(args, "samples", 8),
-                max_knobs=getattr(args, "max_knobs", 30),
+                max_knobs=getattr(args, "max_knobs", None),
                 async_mode=not getattr(args, "sync_mode", False),
                 priority=getattr(args, "priority", 0),
+                knobs=_resolve_knobs(args),
+                preset=getattr(args, "preset", None),
             )
             _emit(result, not args.no_json)
         elif args.subcommand == "collect":
@@ -1330,6 +1497,7 @@ def main() -> None:
     _build_backtest_group(subparsers)
     _build_lifecycle_group(subparsers)
     _build_robustness_group(subparsers)
+    _build_research_group(subparsers)
     _build_optimization_group(subparsers)
     _build_queue_group(subparsers)
     _build_industry_group(subparsers)
@@ -1367,6 +1535,8 @@ def _dispatch(args: argparse.Namespace) -> None:
         _run_lifecycle(args)
     elif args.command == "robustness":
         _run_robustness(args)
+    elif args.command == "research":
+        _run_research(args)
     elif args.command == "optimization":
         _run_optimization(args)
     elif args.command == "queue":
