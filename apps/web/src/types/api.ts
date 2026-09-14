@@ -147,6 +147,7 @@ export interface DataSetHealthSummary {
   source_label: string
   source_name: string | null
   supported_operations: string[]
+  quality_rules: string[]
   health_status: 'healthy' | 'warning' | 'error' | 'unknown' | 'unsupported'
   earliest_date: string | null
   latest_date: string | null

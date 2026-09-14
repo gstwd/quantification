@@ -1,28 +1,51 @@
 <template>
   <div class="data-management-page">
-    <!-- 页面头 -->
-    <header class="page-head">
-      <div class="head-copy">
-        <h1 class="page-title">数据管理</h1>
-        <p class="page-subtitle">非新闻外部数据的健康状态、质量检查与维护入口</p>
+    <section class="command-center">
+      <header class="page-head">
+        <div class="head-copy">
+          <span class="eyebrow">DATA OPERATIONS</span>
+          <h1 class="page-title">数据管理</h1>
+          <p class="page-subtitle">集中查看外部数据健康度，并在需要时执行检查、补数与修复。</p>
+        </div>
+        <div class="head-actions">
+          <button class="btn btn-ghost" :disabled="busy" @click="runGlobal('check')">
+            <span aria-hidden="true">⌕</span> 检查全部质量
+          </button>
+          <button class="btn btn-primary" :disabled="busy" @click="runGlobal('sync_latest')">
+            <span aria-hidden="true">↻</span> 同步全部数据
+          </button>
+        </div>
+      </header>
+
+      <div v-if="overview" class="health-strip">
+        <div class="health-summary">
+          <span class="health-orb" :class="overallHealthTone" aria-hidden="true">{{ overallHealthIcon }}</span>
+          <div>
+            <span class="summary-label">整体健康度</span>
+            <strong>{{ overallHealthLabel }}</strong>
+            <p>{{ overallHealthDescription }}</p>
+          </div>
+        </div>
+        <div class="health-stats" aria-label="数据集健康统计">
+          <button class="health-stat healthy" :class="{ active: statusFilter === 'healthy' }" @click="setStatusFilter('healthy')">
+            <strong>{{ overview.healthy_count }}</strong><span>健康</span>
+          </button>
+          <button class="health-stat warning" :class="{ active: statusFilter === 'warning' }" @click="setStatusFilter('warning')">
+            <strong>{{ overview.warning_count }}</strong><span>需关注</span>
+          </button>
+          <button class="health-stat error" :class="{ active: statusFilter === 'error' }" @click="setStatusFilter('error')">
+            <strong>{{ overview.error_count }}</strong><span>异常</span>
+          </button>
+          <button class="health-stat unknown" :class="{ active: statusFilter === 'unknown' }" @click="setStatusFilter('unknown')">
+            <strong>{{ overview.unknown_count }}</strong><span>待检查</span>
+          </button>
+        </div>
+        <div class="schedule-status">
+          <span class="schedule-icon" aria-hidden="true">◷</span>
+          <div><span>自动同步</span><strong>{{ overview.schedule_time }}</strong></div>
+        </div>
       </div>
-      <div class="head-actions">
-        <button
-          class="btn btn-ghost"
-          :disabled="submitting || polling"
-          @click="runGlobal('check')"
-        >
-          检查全部质量
-        </button>
-        <button
-          class="btn btn-primary"
-          :disabled="submitting || polling"
-          @click="runGlobal('sync_latest')"
-        >
-          同步全部数据
-        </button>
-      </div>
-    </header>
+    </section>
 
     <div v-if="error" class="notice error">{{ error }}</div>
     <div v-if="polling" class="notice polling">
@@ -31,43 +54,25 @@
     </div>
     <div v-if="resultNotice" class="notice success">{{ resultNotice }}</div>
 
-    <!-- 健康概览卡片 -->
-    <section v-if="overview" class="overview-grid">
-      <article class="stat-card healthy">
-        <span class="stat-icon">✓</span>
-        <div><strong>{{ overview.healthy_count }}</strong><span>健康</span></div>
-      </article>
-      <article class="stat-card warning">
-        <span class="stat-icon">!</span>
-        <div><strong>{{ overview.warning_count }}</strong><span>需关注</span></div>
-      </article>
-      <article class="stat-card error">
-        <span class="stat-icon">×</span>
-        <div><strong>{{ overview.error_count }}</strong><span>异常</span></div>
-      </article>
-      <article class="stat-card unknown">
-        <span class="stat-icon">?</span>
-        <div><strong>{{ overview.unknown_count }}</strong><span>待检查</span></div>
-      </article>
-      <article class="stat-card schedule">
-        <span class="stat-icon">↻</span>
-        <div class="schedule-copy">
-          <strong>自动同步</strong>
-          <span>{{ overview.schedule_time }}</span>
-        </div>
-      </article>
-    </section>
-
-    <!-- 数据集卡片 -->
     <section v-if="overview" class="dataset-section">
       <div class="section-head">
-        <h2 class="section-title">受管数据集</h2>
-        <span class="section-hint">点击卡片查看分区并执行单对象维护</span>
+        <div>
+          <span class="section-kicker">DATASETS</span>
+          <h2 class="section-title">受管数据集 <em>{{ filteredDatasets.length }} / {{ overview.datasets.length }}</em></h2>
+        </div>
+        <div class="dataset-toolbar">
+          <div class="filter-group" aria-label="按状态筛选数据集">
+            <button :class="{ active: statusFilter === 'all' }" @click="setStatusFilter('all')">全部</button>
+            <button :class="{ active: statusFilter === 'error' }" @click="setStatusFilter('error')">异常优先</button>
+            <button :class="{ active: statusFilter === 'warning' }" @click="setStatusFilter('warning')">需关注</button>
+          </div>
+          <span class="section-hint">选择数据集查看分区明细</span>
+        </div>
       </div>
       <div v-if="loading" class="loading-state">加载数据健康状态…</div>
       <div v-else class="dataset-grid">
         <article
-          v-for="item in overview.datasets"
+          v-for="item in filteredDatasets"
           :key="item.dataset_key"
           class="dataset-card"
           :class="{
@@ -79,25 +84,16 @@
           <header class="card-top">
             <div class="card-title">
               <span class="status-dot" aria-hidden="true"></span>
-              <strong>{{ item.display_name }}</strong>
-              <span class="freq-chip">{{ item.frequency }}</span>
+              <div><strong>{{ item.display_name }}</strong><span class="card-source">{{ item.source_name ?? item.source_label }}</span></div>
             </div>
-            <span class="status-badge" :class="`status-${item.health_status}`">
-              {{ statusText(item.health_status) }}
-            </span>
+            <div class="card-labels"><span class="freq-chip">{{ item.frequency }}</span><span class="status-badge" :class="`status-${item.health_status}`">{{ statusText(item.health_status) }}</span></div>
           </header>
-
-          <div class="card-source">
-            {{ item.source_name ?? item.source_label }}
-            <span v-if="item.partition_label" class="muted">
-              · 按{{ item.partition_label }}分
-            </span>
-          </div>
 
           <div class="card-metrics">
             <div class="metric">
-              <span>实际 / 目标</span>
-              <strong>{{ item.latest_date ?? '—' }}<em>/ {{ item.expected_date ?? '按发布周期' }}</em></strong>
+              <span>数据最新至</span>
+              <strong>{{ item.latest_date ?? '—' }}</strong>
+              <em>目标 {{ item.expected_date ?? '按发布周期' }}</em>
             </div>
             <div class="metric">
               <span>记录数</span>
@@ -109,15 +105,14 @@
             </div>
           </div>
 
-          <p class="card-issue" :class="{ none: !formatIssue(item) }">
-            {{ formatIssue(item) || '暂无已知问题' }}
+          <p class="card-issue" :class="{ none: item.health_status === 'healthy' }">
+            <span aria-hidden="true">{{ item.health_status === 'healthy' ? '✓' : '!' }}</span>{{ formatIssue(item) }}
           </p>
 
           <footer class="card-footer" @click.stop>
             <span class="last-run muted">
               <template v-if="item.last_run_id">
-                {{ runStatusText(item.last_run_status) }}
-                <em>{{ formatClock(item.last_checked_at) }}</em>
+                最近检查 · {{ runStatusText(item.last_run_status) }}<em>{{ formatClock(item.last_checked_at) }}</em>
               </template>
               <template v-else>尚未执行统一检查</template>
             </span>
@@ -129,6 +124,9 @@
             </div>
           </footer>
         </article>
+        <div v-if="filteredDatasets.length === 0" class="empty-filter-state">
+          <span aria-hidden="true">✓</span><strong>没有符合当前筛选的数据集</strong><button class="btn-mini" @click="setStatusFilter('all')">查看全部</button>
+        </div>
       </div>
     </section>
 
@@ -137,7 +135,7 @@
       <div class="section-head">
         <div>
           <h2 class="section-title">{{ detail.dataset.display_name }}</h2>
-          <p class="section-rules muted">{{ detail.quality_rules.join('；') }}</p>
+          <p class="section-rules muted"><span>检查定义：</span>{{ formatQualityRules(detail.quality_rules) }}</p>
         </div>
         <span v-if="detail.total > 0" class="section-badge">{{ detail.total }} 个分区</span>
       </div>
@@ -254,10 +252,49 @@ const loading = ref(false)
 const submitting = ref(false)
 const error = ref<string | null>(null)
 const resultNotice = ref<string | null>(null)
+const statusFilter = ref<'all' | 'healthy' | 'warning' | 'error' | 'unknown'>('all')
 const route = useRoute()
 
 /** 是否有维护任务正在执行。 */
 const busy = computed(() => submitting.value || polling.value)
+
+/** 筛选后的数据集保持异常、告警优先，便于先处理需要关注的内容。 */
+const filteredDatasets = computed(() => {
+  if (!overview.value) return []
+  const priority: Record<string, number> = { error: 0, warning: 1, unknown: 2, healthy: 3, unsupported: 4 }
+  return overview.value.datasets
+    .filter((item) => statusFilter.value === 'all' || item.health_status === statusFilter.value)
+    .slice()
+    .sort((left, right) => priority[left.health_status] - priority[right.health_status])
+})
+
+const overallHealthLabel = computed(() => {
+  if (!overview.value) return '等待检查'
+  if (overview.value.error_count > 0) return '需要处理异常'
+  if (overview.value.warning_count > 0) return '运行中，需关注'
+  if (overview.value.unknown_count > 0) return '等待首次检查'
+  return '所有数据集健康'
+})
+const overallHealthTone = computed(() => {
+  if (!overview.value) return 'unknown'
+  if (overview.value.error_count > 0) return 'error'
+  if (overview.value.warning_count > 0) return 'warning'
+  if (overview.value.unknown_count > 0) return 'unknown'
+  return 'healthy'
+})
+const overallHealthIcon = computed(() => ({ healthy: '✓', warning: '!', error: '×', unknown: '·' })[overallHealthTone.value])
+const overallHealthDescription = computed(() => {
+  if (!overview.value) return ''
+  const count = overview.value.datasets.length
+  if (overview.value.error_count > 0) return `${overview.value.error_count} 个数据集异常，建议优先检查。`
+  if (overview.value.warning_count > 0) return `${overview.value.warning_count} 个数据集需关注，共管理 ${count} 个数据集。`
+  if (overview.value.unknown_count > 0) return `${overview.value.unknown_count} 个数据集尚未生成质量快照。`
+  return `${count} 个数据集均已通过最近一次质量检查。`
+})
+
+function setStatusFilter(status: typeof statusFilter.value): void {
+  statusFilter.value = statusFilter.value === status && status !== 'all' ? 'all' : status
+}
 
 /** 读取数据管理总览。 */
 async function loadOverview(): Promise<void> {
@@ -335,6 +372,18 @@ function supports(item: { supported_operations: string[] }, operation: DataManag
   return item.supported_operations.includes(operation)
 }
 
+/** 将质量规则安全格式化，兼容旧接口字符串和异常的逐字符数组。 */
+function formatQualityRules(rules: string[] | string | null | undefined): string {
+  if (!rules) return '暂无检查定义'
+  if (typeof rules === 'string') return rules
+  if (rules.length === 0) return '暂无检查定义'
+  // 兼容历史响应把单条规则拆成字符数组的情况，避免渲染成“代；码；…”。
+  if (rules.length > 1 && rules.every((rule) => [...rule].length <= 1)) {
+    return rules.join('')
+  }
+  return rules.join('；')
+}
+
 /** 将 UTC 时间串展示为本地可读时间。 */
 function formatClock(value: string | null | undefined): string {
   if (!value) return '—'
@@ -344,7 +393,7 @@ function formatClock(value: string | null | undefined): string {
 /** 将结构化健康问题转换为简短、可读的表格说明。 */
 function formatIssue(item: DataSetDetailResponse['dataset']): string {
   const summary = item.issue_summary
-  if (!summary) return ''
+  if (!summary) return '尚未完成质量检查'
   const lastError = summary.last_error
   if (typeof lastError === 'string') return lastError
   const reasonLabels: Record<string, string> = {
@@ -354,20 +403,27 @@ function formatIssue(item: DataSetDetailResponse['dataset']): string {
     invalid_values: '存在异常值',
     warnings: '存在数据告警',
   }
-  const reasons = summary.reasons
-  if (Array.isArray(reasons)) {
-    const readable = reasons
-      .filter((item): item is string => typeof item === 'string')
+  const warnings = typeof summary.warning_count === 'number' ? summary.warning_count : 0
+  const errors = typeof summary.error_count === 'number' ? summary.error_count : item.invalid_count
+  const missing = typeof summary.missing_count === 'number' ? summary.missing_count : item.missing_count
+  const details = [
+    `缺口 ${missing}`,
+    `错误 ${errors}`,
+    warnings > 0 ? `告警 ${warnings}` : '',
+  ].filter(Boolean)
+  const reasons = Array.isArray(summary.reasons)
+    ? summary.reasons
+      .filter((value): value is string => typeof value === 'string')
       .map((reason) => reasonLabels[reason] ?? reason)
-    if (readable.length > 0) return readable.join('；')
+    : []
+  const sample = Array.isArray(summary.missing_dates_sample)
+    ? summary.missing_dates_sample.filter((value): value is string => typeof value === 'string')
+    : []
+  if (sample.length > 0) {
+    reasons.push(`缺口样例：${sample.join('、')}${summary.missing_dates_truncated ? '…' : ''}`)
   }
-  const warnings = summary.warning_count
-  const errors = summary.error_count ?? item.invalid_count
-  return [
-    `缺口 ${item.missing_count}`,
-    `错误 ${typeof errors === 'number' ? errors : item.invalid_count}`,
-    typeof warnings === 'number' && warnings > 0 ? `告警 ${warnings}` : '',
-  ].filter(Boolean).join(' · ')
+  if (missing === 0 && errors === 0 && warnings === 0) return `已检查：${details.join(' · ')}`
+  return [...details, ...reasons].filter(Boolean).join(' · ')
 }
 
 /** 提交全局数据维护操作。 */
@@ -445,22 +501,51 @@ onMounted(async () => {
 .data-management-page {
   display: flex;
   flex-direction: column;
-  gap: 22px;
-  padding-bottom: 28px;
+  gap: 18px;
+  max-width: 1480px;
+  padding: 4px 0 32px;
 }
-
-/* 头部 */
+.command-center {
+  overflow: hidden;
+  background: linear-gradient(115deg, #17233a 0%, var(--surface) 52%, #192640 100%);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
 .page-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: 24px;
+  padding: 28px 30px 24px;
 }
-.page-title { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: .2px; }
+.eyebrow, .section-kicker { color: #7db0ff; font-size: 10px; font-weight: 750; letter-spacing: .13em; }
+.page-title { margin: 5px 0 3px; font-size: 30px; font-weight: 720; letter-spacing: .01em; }
 .page-subtitle, .muted { color: var(--text-muted); font-size: 13px; }
+.page-subtitle { max-width: 580px; }
 .head-actions { display: flex; gap: 10px; flex-shrink: 0; }
+.head-actions .btn { display: inline-flex; align-items: center; gap: 6px; }
 
-/* 通知 */
+.health-strip { display: grid; grid-template-columns: 1.25fr 1.65fr auto; border-top: 1px solid rgba(148, 163, 184, .16); }
+.health-summary, .schedule-status { display: flex; align-items: center; gap: 12px; padding: 18px 30px; }
+.health-summary { border-right: 1px solid rgba(148, 163, 184, .16); }
+.health-orb { display: inline-flex; align-items: center; justify-content: center; width: 42px; height: 42px; border-radius: 13px; font-size: 20px; font-weight: 800; }
+.health-orb.healthy { color: #5ee798; background: rgba(34, 197, 94, .15); }
+.health-orb.warning { color: #fbbf24; background: rgba(245, 158, 11, .14); }
+.health-orb.error { color: #f87171; background: rgba(239, 68, 68, .15); }
+.health-orb.unknown { color: #94a3b8; background: rgba(148, 163, 184, .13); }
+.summary-label, .schedule-status span { display: block; color: var(--text-muted); font-size: 11px; }
+.health-summary strong { display: block; margin-top: 1px; font-size: 15px; }
+.health-summary p { margin-top: 2px; color: var(--text-muted); font-size: 11px; }
+.health-stats { display: grid; grid-template-columns: repeat(4, 1fr); align-items: stretch; }
+.health-stat { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 12px 14px; border: 0; border-right: 1px solid rgba(148, 163, 184, .13); color: var(--text); background: transparent; text-align: left; transition: background .15s ease; }
+.health-stat:hover, .health-stat.active { background: rgba(255, 255, 255, .055); }
+.health-stat strong { font-size: 20px; line-height: 1; }.health-stat span { font-size: 11px; color: var(--text-muted); }
+.health-stat.healthy strong { color: #4ade80; }.health-stat.warning strong { color: #fbbf24; }.health-stat.error strong { color: #fb7185; }.health-stat.unknown strong { color: #cbd5e1; }
+.schedule-status { min-width: 160px; padding-left: 20px; }
+.schedule-status strong { display: block; max-width: 150px; font-size: 12px; line-height: 1.35; }
+.schedule-icon { display: inline-flex !important; align-items: center; justify-content: center; width: 28px; height: 28px; border: 1px solid rgba(125, 176, 255, .35); border-radius: 9px; color: #7db0ff !important; font-size: 16px !important; }
+
 .notice {
   display: flex;
   align-items: center;
@@ -482,54 +567,23 @@ onMounted(async () => {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* 概览统计 */
-.overview-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 12px;
-}
-.stat-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 16px 16px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 2px 12px rgba(15, 23, 42, .04);
-}
-.stat-card div { display: flex; flex-direction: column; gap: 2px; }
-.stat-card strong { font-size: 23px; line-height: 1.1; }
-.stat-card span { font-size: 12px; color: var(--text-muted); }
-.stat-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
-  font-weight: 700;
-  font-size: 15px;
-}
-.stat-card.healthy .stat-icon { background: rgba(22, 163, 74, .12); color: #16a34a; }
-.stat-card.warning .stat-icon { background: rgba(217, 119, 6, .12); color: #d97706; }
-.stat-card.error .stat-icon { background: rgba(220, 38, 38, .12); color: #dc2626; }
-.stat-card.unknown .stat-icon { background: var(--surface-2); color: var(--text-muted); }
-.stat-card.schedule { grid-column: span 1; }
-.stat-card.schedule .stat-icon { background: rgba(59, 130, 246, .1); color: var(--accent); }
-.schedule-copy span { max-width: 100%; line-height: 1.35; }
-
-/* 数据集卡片 */
 .section-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
-.section-title { margin: 0; font-size: 17px; font-weight: 650; }
+.section-head > div { min-width: 0; flex: 1; }
+.section-title { margin: 2px 0 0; font-size: 19px; font-weight: 680; }
+.section-title em { color: var(--text-muted); font-size: 12px; font-style: normal; font-weight: 500; }
 .section-hint { font-size: 12px; color: var(--text-muted); }
-.section-rules { margin: 4px 0 0; }
+.dataset-toolbar { display: flex; align-items: center; gap: 13px; }
+.filter-group { display: flex; padding: 3px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; }
+.filter-group button { padding: 4px 8px; border: 0; border-radius: 5px; color: var(--text-muted); background: transparent; font-size: 11px; transition: color .15s ease, background .15s ease; }
+.filter-group button:hover { color: var(--text); }.filter-group button.active { color: var(--text); background: rgba(255, 255, 255, .12); }
+.section-rules { margin: 4px 0 0; line-height: 1.5; word-break: normal; overflow-wrap: break-word; }
+.section-rules span { color: var(--text); }
 .section-badge {
   padding: 4px 10px;
   background: var(--surface-2);
@@ -541,18 +595,18 @@ onMounted(async () => {
 }
 .dataset-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 12px;
 }
 .dataset-card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 16px;
+  gap: 13px;
+  padding: 17px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 2px 12px rgba(15, 23, 42, .04);
+  border-radius: 12px;
+  box-shadow: 0 5px 18px rgba(0, 0, 0, .09);
   cursor: pointer;
   transition: border-color .16s ease, transform .16s ease, box-shadow .16s ease;
 }
@@ -572,7 +626,8 @@ onMounted(async () => {
   gap: 10px;
 }
 .card-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.card-title strong { font-size: 15px; }
+.card-title strong { display: block; font-size: 15px; line-height: 1.35; }
+.card-labels { display: flex; align-items: center; gap: 5px; }
 .freq-chip {
   padding: 2px 7px;
   border-radius: 999px;
@@ -592,26 +647,29 @@ onMounted(async () => {
 .tone-warning .status-dot { background: #d97706; }
 .tone-error .status-dot { background: #dc2626; }
 .tone-unknown .status-dot, .tone-unsupported .status-dot { background: var(--text-muted); }
-.card-source { font-size: 12px; color: var(--text-muted); }
+.card-source { display: block; margin-top: 1px; color: var(--text-muted); font-size: 11px; }
 .card-metrics {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 1fr;
-  gap: 10px;
+  grid-template-columns: 1.25fr .85fr .85fr;
+  gap: 8px;
 }
 .metric {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 8px 10px;
+  gap: 3px;
+  padding: 9px 10px;
   background: var(--surface-2);
   border-radius: var(--radius-sm);
 }
 .metric span { font-size: 11px; color: var(--text-muted); }
-.metric strong { font-size: 12px; line-height: 1.35; word-break: break-all; }
-.metric em { font-style: normal; opacity: .75; }
+.metric strong { font-size: 12px; line-height: 1.35; word-break: break-all; }.metric em { color: var(--text-muted); font-size: 10px; font-style: normal; }
 .card-issue {
   margin: 0;
-  padding: 7px 10px;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-height: 39px;
+  padding: 8px 10px;
   border-radius: var(--radius-sm);
   background: rgba(217, 119, 6, .08);
   color: #b45309;
@@ -628,13 +686,12 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 8px;
   margin-top: auto;
-  padding-top: 10px;
+  padding-top: 12px;
   border-top: 1px dashed var(--border);
 }
-.last-run { display: flex; flex-direction: column; font-size: 11px; line-height: 1.4; }
+.last-run { display: flex; flex-direction: column; font-size: 10px; line-height: 1.4; }
 .last-run em { font-style: normal; opacity: .75; }
 
-/* 状态徽章与按钮 */
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -662,10 +719,10 @@ onMounted(async () => {
 .btn-mini:disabled { opacity: .5; cursor: not-allowed; }
 .btn-mini.danger { color: var(--danger); border-color: rgba(239, 68, 68, .4); }
 .btn-mini.danger:hover:not(:disabled) { background: rgba(239, 68, 68, .08); }
+.empty-filter-state { grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; gap: 9px; min-height: 140px; border: 1px dashed var(--border); border-radius: 12px; color: var(--text-muted); }.empty-filter-state > span { color: var(--success); font-size: 18px; }.empty-filter-state strong { color: var(--text); font-size: 13px; }
 
-/* 详情面板 */
 .card-panel {
-  padding: 18px;
+  padding: 20px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -713,14 +770,13 @@ onMounted(async () => {
 }
 
 @media (max-width: 1080px) {
-  .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .stat-card.schedule { grid-column: span 2; }
+  .health-strip { grid-template-columns: 1fr 1.4fr; }.schedule-status { grid-column: 1 / -1; border-top: 1px solid rgba(148, 163, 184, .16); }.dataset-toolbar { gap: 8px; }
 }
 @media (max-width: 760px) {
-  .page-head { flex-direction: column; }
+  .page-head { flex-direction: column; padding: 22px 20px 18px; }
   .head-actions { width: 100%; }
   .head-actions .btn { flex: 1; }
-  .overview-grid { grid-template-columns: 1fr 1fr; }
+  .health-strip { grid-template-columns: 1fr; }.health-summary { padding: 16px 20px; border-right: 0; }.health-stats { border-top: 1px solid rgba(148, 163, 184, .16); }.health-stat { padding: 12px 10px; }.schedule-status { padding: 14px 20px; }.section-head, .dataset-toolbar { align-items: flex-start; flex-direction: column; }.section-hint { display: none; }
   .dataset-grid { grid-template-columns: 1fr; }
   .card-footer { flex-direction: column; align-items: stretch; }
   .mini-actions { justify-content: flex-start; }

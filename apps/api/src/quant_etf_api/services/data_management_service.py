@@ -1731,6 +1731,7 @@ class DataManagementService:
             partition_label=definition.partition_label,
             source_label=definition.source_label,
             supported_operations=list(definition.operations),
+            quality_rules=list(definition.quality_rules),
             health_status=values.pop("health_status", "unknown"),
             **values,
         )
@@ -1757,6 +1758,7 @@ class DataManagementService:
             "source_label": definition.source_label,
             "source_name": row.source_name,
             "supported_operations": list(definition.operations),
+            "quality_rules": list(definition.quality_rules),
             "health_status": row.health_status,
             "earliest_date": row.earliest_date,
             "latest_date": row.latest_date,

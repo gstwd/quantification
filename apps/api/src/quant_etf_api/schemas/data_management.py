@@ -20,6 +20,7 @@ class DataSetHealthSummary(BaseModel):
     source_label: str
     source_name: str | None = None
     supported_operations: list[str]
+    quality_rules: list[str] = Field(default_factory=list)
     health_status: str
     earliest_date: date | None = None
     latest_date: date | None = None
