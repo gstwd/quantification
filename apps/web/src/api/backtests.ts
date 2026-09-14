@@ -1,5 +1,6 @@
 import { apiClient } from './client'
 import type {
+  BacktestCancelResponse,
   BacktestCreateRequest,
   BacktestDetail,
   BacktestDailyResult,
@@ -10,6 +11,7 @@ import type {
   ComparisonDailyResponse,
   ComparisonSummary,
   PaginatedResponse,
+  QueueStatsResponse,
 } from '../types/api'
 
 /** 创建回测任务，后端立即返回 pending 状态并在后台执行 */
@@ -18,20 +20,47 @@ export async function createBacktest(req: BacktestCreateRequest): Promise<Backte
   return data
 }
 
-/** 分页获取回测列表 */
+/** 回测列表筛选条件 */
+export interface BacktestListFilters {
+  strategyId?: string
+  status?: string
+  purpose?: string
+  createdFrom?: string
+  createdTo?: string
+}
+
+/** 分页获取回测列表（支持状态/用途/时间范围筛选） */
 export async function fetchBacktests(
   offset = 0,
   limit = 50,
-  filters?: { strategyId?: string; createdFrom?: string; createdTo?: string },
+  filters?: BacktestListFilters,
 ): Promise<PaginatedResponse<BacktestSummary>> {
   const { data } = await apiClient.get<PaginatedResponse<BacktestSummary>>('/backtests', {
     params: {
       offset,
       limit,
       strategy_id: filters?.strategyId || undefined,
+      status: filters?.status || undefined,
+      purpose: filters?.purpose || undefined,
       created_from: filters?.createdFrom || undefined,
       created_to: filters?.createdTo || undefined,
     },
+  })
+  return data
+}
+
+/** 请求取消回测（未开始直接取消，运行中在安全检查点退出） */
+export async function cancelBacktest(backtestId: string): Promise<BacktestCancelResponse> {
+  const { data } = await apiClient.post<BacktestCancelResponse>(
+    `/backtests/${backtestId}/cancel`,
+  )
+  return data
+}
+
+/** 获取后台任务队列统计（积压 / 吞吐 / 运行中任务 / 并发预算） */
+export async function fetchQueueStats(windowHours = 1): Promise<QueueStatsResponse> {
+  const { data } = await apiClient.get<QueueStatsResponse>('/queue/stats', {
+    params: { window_hours: windowHours },
   })
   return data
 }

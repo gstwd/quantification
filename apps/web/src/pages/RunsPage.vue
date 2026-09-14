@@ -10,6 +10,52 @@
     <!-- 轮询提示 -->
     <div v-if="polling" class="polling-banner">有任务执行中，自动刷新状态...</div>
 
+    <!-- 队列概览：替代手工查库判断"卡住了还是在跑" -->
+    <div v-if="queueStats" class="queue-panel">
+      <div class="queue-metrics">
+        <div class="queue-metric">
+          <span class="queue-label">待执行</span>
+          <span class="queue-value">{{ queueStats.pending }}</span>
+        </div>
+        <div class="queue-metric">
+          <span class="queue-label">执行中</span>
+          <span class="queue-value">{{ queueStats.running }}</span>
+        </div>
+        <div class="queue-metric">
+          <span class="queue-label">已暂停</span>
+          <span class="queue-value">{{ queueStats.paused }}</span>
+        </div>
+        <div class="queue-metric">
+          <span class="queue-label">近 {{ queueStats.throughput_window_hours }}h 完成</span>
+          <span class="queue-value">
+            {{ queueStats.throughput.success ?? 0 }} 成功 / {{ queueStats.throughput.failed ?? 0 }} 失败
+          </span>
+        </div>
+        <div class="queue-metric">
+          <span class="queue-label">并发预算</span>
+          <span class="queue-value">
+            通用 {{ queueStats.capacity.general_workers }} / 回测 {{ queueStats.capacity.backtest_workers }}
+          </span>
+        </div>
+      </div>
+      <div v-if="queueStats.running_jobs.length > 0" class="running-jobs">
+        <span
+          v-for="job in queueStats.running_jobs"
+          :key="job.job_id"
+          class="job-chip"
+          :title="`${job.job_id}（lane=${job.lane}）`"
+        >
+          {{ job.job_type }} · {{ formatSeconds(job.elapsed_seconds) }}
+          <span v-if="job.cancel_requested" class="job-cancel-flag">取消中</span>
+        </span>
+      </div>
+      <div v-if="queueStats.backlog_by_type.length > 0" class="backlog-list">
+        <span v-for="item in queueStats.backlog_by_type" :key="item.job_type" class="backlog-chip">
+          {{ item.job_type }}: 待 {{ item.pending }} / 跑 {{ item.running }}
+        </span>
+      </div>
+    </div>
+
     <div class="table-wrap">
       <div v-if="loading" class="loading">加载中...</div>
       <table v-else class="data-table">
@@ -117,8 +163,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
+import { fetchQueueStats } from '../api/backtests'
 import { fetchRunDetail, fetchRunItems, fetchRuns, retryRun } from '../api/runs'
-import type { ResearchRunDetail, ResearchRunItem, ResearchRunSummary } from '../types/api'
+import type {
+  QueueStatsResponse,
+  ResearchRunDetail,
+  ResearchRunItem,
+  ResearchRunSummary,
+} from '../types/api'
 import { usePolling } from '../composables/usePolling'
 import { notifySkippedRun } from '../composables/useRunSkipToast'
 
@@ -129,6 +181,7 @@ const pageSize = 50
 const loading = ref(false)
 const refreshing = ref(false)
 const retryingId = ref<string | null>(null)
+const queueStats = ref<QueueStatsResponse | null>(null)
 
 // 展开详情相关
 const expandedId = ref<string | null>(null)
@@ -148,6 +201,7 @@ const { polling, start: startPolling } = usePolling({
     refreshing.value = true
     try {
       await load(currentOffset.value)
+      await loadQueueStats()
       // 更新展开项的详情
       if (expandedId.value && detailCache.value[expandedId.value]) {
         try {
@@ -265,8 +319,25 @@ async function load(offset = 0) {
   }
 }
 
+/** 加载后台任务队列统计，失败时保持上一次结果（静默降级） */
+async function loadQueueStats() {
+  try {
+    queueStats.value = await fetchQueueStats(1)
+  } catch {
+    // 队列统计属于增强可观测性，失败不打扰用户
+  }
+}
+
+/** 把秒数格式化为紧凑的中文时长 */
+function formatSeconds(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m${Math.round(seconds % 60)}s`
+  return `${Math.floor(seconds / 3600)}h${Math.floor((seconds % 3600) / 60)}m`
+}
+
 onMounted(async () => {
   await load()
+  await loadQueueStats()
   if (hasActiveRuns.value) {
     startPolling()
   }
@@ -295,6 +366,30 @@ onMounted(async () => {
 .btn-sm { padding: 4px 10px; font-size: 12px; }
 .btn-accent { background: rgba(59,130,246,0.15); color: #60a5fa; border-color: rgba(59,130,246,0.3); }
 .btn-accent:hover { background: rgba(59,130,246,0.25); }
+
+.queue-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.queue-metrics { display: flex; flex-wrap: wrap; gap: 20px; }
+.queue-metric { display: flex; flex-direction: column; gap: 2px; }
+.queue-label { font-size: 11px; color: var(--text-muted); }
+.queue-value { font-size: 14px; font-weight: 600; }
+.running-jobs, .backlog-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.job-chip, .backlog-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+.job-chip { background: rgba(59,130,246,0.15); color: #60a5fa; }
+.job-cancel-flag { margin-left: 4px; color: var(--warning, #f59e0b); }
 
 .polling-banner {
   padding: 10px 16px;

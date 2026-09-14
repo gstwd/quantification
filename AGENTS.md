@@ -61,8 +61,14 @@ python -m quant_etf_api.cli init-factors   # 将代码中的因子元数据同�
 
 ```bash
 python -m quant_etf_api.cli strategy list/show/validate/create/update/diff     # 策略配置读写与校验
-python -m quant_etf_api.cli backtest run --strategy <id> [--start --end --async]  # 回测（默认同步执行）
+python -m quant_etf_api.cli backtest run --strategy <id> [--start --end --async --priority N]  # 回测（默认同步执行）
 python -m quant_etf_api.cli backtest status <id> --wait                         # 轮询等待回测终态
+python -m quant_etf_api.cli backtest list [--status --purpose --limit]          # 回测列表过滤（B4）
+python -m quant_etf_api.cli backtest cancel <id>                                # 取消回测（运行中在安全检查点退出）
+python -m quant_etf_api.cli queue stats|jobs [--status --job-type --limit]      # 队列积压/吞吐/运行中任务（B3）
+python -m quant_etf_api.cli queue worker                                        # 独立 worker 进程（前台阻塞，B1）
+python -m quant_etf_api.cli robustness collect <batch> [--allow-partial]        # 部分汇总并标记 coverage（B7）
+python -m quant_etf_api.cli robustness cancel|pause|resume <batch>              # 批次取消/暂停/恢复（B2）
 python -m quant_etf_api.cli optimization start --strategy <基线> --candidate-file x.json --hypothesis "..."  # 建草稿候选+会话
 python -m quant_etf_api.cli optimization evaluate <opt_id> [--folds 4]          # 全区间+滚动样本外回测
 python -m quant_etf_api.cli optimization report <opt_id> --file report.md       # 生成报告骨架
@@ -114,7 +120,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
                    factors/ (single-factor computation)
 ```
 
-- **`api/routers/`** — 10 route groups: `health`, `system`, `indexes`, `market_data`, `strategies`, `factors`, `runs`, `backtests`, `ai_factors`, `keyword_tags`
+- **`api/routers/`** — 11 route groups: `health`, `system`, `indexes`, `market_data`, `strategies`, `factors`, `runs`, `backtests`, `robustness`, `queue`, `ai_factors`, `keyword_tags`
 - **`api/middleware.py`** — `RequestIdMiddleware`：为每个请求注入唯一 request_id，写入响应头和日志 ContextVar
 - **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. `DataFreshnessService` 独立负责数据新鲜度汇总，`IngestService` 只保留摄取编排门面。其他服务包括 `index_service.py`、`factor_admin_service.py`（因子定义同步，与 FactorService 计算编排分离）、`strategy_decision_service.py`（统一策略执行入口：加载配置→校验→构建上下文→补算触发→引擎执行→可选持久化）。基准收益、数据质量和绩效指标规则位于 `domain/`，`services/benchmark.py`、`services/data_quality.py`、`services/metrics.py` 仅保留历史导入兼容转发。
 - **`engine/`** — **策略引擎核心**：组件化、配置驱动的策略执行管线（11 个文件）：
@@ -134,7 +140,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
   - `retry_decorator.py` — `@with_retry()` 装饰器，指数退避重试，参数可通过环境变量 `AKSHARE_RETRY_MAX_ATTEMPTS` / `AKSHARE_RETRY_BASE_DELAY` 配置
 - **`infra/trading_calendar.py`** — `TradingCalendar` 类，通过 `akshare.tool_trade_date_hist_sina()` 获取 A 股交易日历，内存缓存 TTL=1 天，API 不可用时降级为周末判断
-- **`infra/job_queue/`** — **统一后台任务队列**：`background_job` 表（迁移 0023）+ `JobRepository`（`FOR UPDATE SKIP LOCKED` 认领）+ `JobQueue`（固定 worker 线程池，`settings.job_queue_workers` 默认 4）+ `handlers.py`（`JOB_HANDLERS` 分发表）。所有后台任务（摄取/因子/回测/对比/AI/日历预热/GET 补数）统一 `enqueue(job_type, payload, job_key=...)`，支持 `job_key` 幂等去重与 `max_attempts` 重试。进程重启后 `recover_stuck_jobs()` 将 running 任务标记失败。
+- **`infra/job_queue/`** — **统一后台任务队列**：`background_job` 表（迁移 0023，迁移 0046 增加 `batch_id`/`heartbeat_at`/`cancel_requested` 并把时间戳改为 timestamptz）+ `JobRepository`（`FOR UPDATE SKIP LOCKED` 认领）+ `JobQueue`（**按 lane 划分**的 worker 线程池：回测 lane `job_queue_backtest_workers` 默认 1，通用 lane `job_queue_workers` 默认 2）+ `context.py`（协作取消上下文）+ `handlers.py`（`JOB_HANDLERS` / `JOB_ABANDON_HANDLERS` 分发表）。所有后台任务（摄取/因子/回测/对比/AI/日历预热/GET 补数）统一 `enqueue(job_type, payload, job_key=..., priority=..., batch_id=...)`，支持 `job_key` 幂等去重、`priority` 抢跑、`max_attempts` 重试与批次级取消/暂停。独立 worker 进程入口为 `python -m quant_etf_api.worker`（API 侧配 `QUANT_ETF_JOB_QUEUE_EMBEDDED=false`）。`recover_stuck_jobs()` 仍用于进程重启恢复；运行期由心跳 + 僵尸扫描回收异常任务。
 - **`infra/scheduler/`** — `DailyIngestScheduler` / `AIAnalysisScheduler`: daemon `Thread` + `Event` 定时器，仅负责在预定时间将任务入队（`job_key="daily_ingest"` / `ai_analysis:{date}`），实际执行在任务队列 worker 中，调度线程不做任何同步外部调用。数据摄取调度器不做交易日判断：周末/节假日也会入队，由摄取任务按"最近交易日缺口"决定是否补拉。
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
   - `common/` — `bar_metrics.py` (BAR computation), `numeric.py`（NaN/Inf 和价格字段容错）、`enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）、`trading_calendar.py`（`TradingCalendarLike` 协议 + 周末兜底实现）
@@ -239,7 +245,7 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 
 ## Gotchas
 
-- **时间与日期统一规则**: 时间戳统一按 UTC 生成、存储和 API 传输；后端使用 `utcnow()`，API 使用 `UtcDatetime`；交易日/回测日期等业务日期统一按北京时间 `Asia/Shanghai` 计算，使用 `today_cn()`。调度器配置时间也解释为北京时间。前端时间戳展示显式指定北京时间，日期字符串使用 `src/utils/date.ts`，禁止直接使用 `date.today()`、`datetime.now()` 或 `toISOString().slice(0, 10)` 处理业务日期。
+- **时间与日期统一规则**: 时间戳统一按 UTC 生成、存储和 API 传输；后端使用 `utcnow()`，API 使用 `UtcDatetime`；交易日/回测日期等业务日期统一按北京时间 `Asia/Shanghai` 计算，使用 `today_cn()`。调度器配置时间也解释为北京时间。前端时间戳展示显式指定北京时间，日期字符串使用 `src/utils/date.ts`，禁止直接使用 `date.today()`、`datetime.now()` 或 `toISOString().slice(0, 10)` 处理业务日期。**时间戳列分两类（B5 起）**：队列与回测相关列（`background_job.*`、`backtest_run.created_at/started_at/finished_at`、`backtest_comparison.*`）已是 `timestamptz`，写入必须用 `infra.time.utcnow_aware()`、查询过滤也要传 aware datetime；其余历史列仍是 naive timestamp，继续用 `utcnow()`。新增时间戳列一律用 `DateTime(timezone=True)` + `utcnow_aware()`。
 
 - **Alembic**: `alembic/versions/` was empty on init — autogenerate requires a live DB connection. Hand-write the first migration if the DB is blank.
 - **SQLAlchemy**: Stack is fully **sync** (`create_engine`, `sessionmaker`). Do not introduce async.
@@ -274,6 +280,11 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 - **FilterRuleValue 前端接口**: 定义在 `StrategyConfigForm.vue`（非共享 types 文件）。修改 FilterRule schema 时需同步更新：接口定义、表单模板、`initFilter()`、`buildConfig()`、校验逻辑，以及 `StrategyDetailPage.vue` 的只读展示。
 - **后台任务状态流转**: `research_run` 状态链：pending → running → success/skipped/failed。`skipped` 表示"未执行"：daily_ingest/index_refresh/macro_refresh 等摄取入口共享同一把摄取互斥锁，并发冲突时标记 skipped（metrics.reason=concurrent_skip）；daily_ingest/index_refresh 已不再因非交易日跳过（改为按最近交易日缺口补拉，周末/节假日触发时补齐缺失数据），macro_refresh 与单指数增量补数仍保留非交易日跳过（reason=holiday）。任务通过 `get_job_queue().enqueue(...)` 入队 `background_job`，由 worker 认领执行；处理器内 `RunService.mark_running()` / `mark_success` / `mark_failed` 维护 run 状态。进程重启后 `recover_stuck_runs_on_startup()` 与 `get_job_queue().recover_stuck_jobs()` 分别恢复卡死的 run 与 job。
 - **回测 checkpoint 提交（P7）**: `_run_backtest_loop` 每 100 天 flush+commit 一次（进度随 checkpoint 可见）；中途失败仅回滚当前未提交分段，已提交部分结果保留，失败信息通过 `BacktestRepository.find_latest_daily_date()` 附带"已保存部分结果至 {date}"。若未来实现回测重试，必须先清理该 backtest_id 的 daily/index 结果再重跑。
+- **队列 lane 与并发预算（B1/B6）**: `JobQueue` 按 lane 认领任务——`backtest`/`comparison` 属回测 lane（`job_queue_backtest_workers`，默认 1，串行），其余全部属通用 lane（`job_queue_workers`，默认 2，认领时用 `exclude_job_types` 排除回测类型）。**不要把回测任务挪进通用 lane**：回测是 CPU+数据库混合任务，实测单进程内 4 线程并发比串行慢约 20 倍。需要更高吞吐时优先按 `QUANT_ETF_JOB_QUEUE_EMBEDDED=false` + `python -m quant_etf_api.worker` 拆进程，而不是加线程。
+- **队列任务心跳与僵尸回收（B7）**: worker 执行期由 `_HeartbeatWorker` 每 `job_heartbeat_interval_seconds`（默认 15 秒）更新 `background_job.heartbeat_at`；`JobQueue` 的僵尸扫描线程把心跳超时（默认 1800 秒）或运行超过 `job_max_runtime_seconds`（默认 7200 秒）的任务回收为 pending（还有重试次数）或 failed，并调用 `JOB_ABANDON_HANDLERS[job_type]` 清理业务侧记录。**新增长任务类型时**：若它会在 `backtest_run` 之类的主表留下 running 记录，必须注册对应的 abandon 回调，否则回收后主表会永远停在 running。
+- **回测协作取消（B2）**: 队列取消运行中的任务只是把 `background_job.cancel_requested` 置真；回测主循环每个交易日调用 `infra.job_queue.context.ensure_not_cancelled()`（取消标记有 5 秒 TTL 缓存）并在 checkpoint 抛出 `JobCancelledError`。`BacktestService.run_backtest` 必须**先**捕获 `JobCancelledError`（落 `cancelled` 状态并 re-raise），否则会被通用 `except Exception` 吞掉、把取消误记成失败。任何新增的长循环也应插入同类安全检查点。
+- **回测任务去重键（B3）**: 回测入队统一用 `backtest_job_key(backtest_id)`（即 `backtest:{id}`）作为 `job_key`——既做幂等去重，也让 `BacktestSummary.queued_seconds/elapsed_seconds/queue_position` 能反查队列任务。新增回测入队点时不要自造键名。
+- **稳健性批次收口（B2/B7）**: 批次内回测任务以 `robustness_id` 作为 `background_job.batch_id`（优化会话用 `optimization_id`），`robustness cancel/pause/resume` 与 `collect --allow-partial` 都依赖该批次号；`allow_partial` 汇总会把 `coverage`（expected/completed/pending/failed/is_partial）写进 summary 并把批次状态落为 `partial`，人工复核时**必须先看 coverage**再下结论。
 - **数据刷新按类型拆分**: `IngestService` 提供 `refresh_index_data()`、`refresh_macro_data()` 两个公共方法，各有独立 run 生命周期。对应 API 端点：`POST /runs/index-refresh`、`/runs/macro-refresh`。各数据页面（指数/宏观）有自己的"刷新数据"按钮，RunsPage 纯做监控。
 - **Run detail API**: `GET /runs/{run_id}` 返回 `ResearchRunDetail`（含 metrics、duration_seconds），`GET /runs/{run_id}/items` 返回 `ResearchRunItemSchema` 逐条明细，`POST /runs/{run_id}/retry` 重试失败任务（创建新 run 并入队对应后台任务）。
 

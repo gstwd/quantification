@@ -247,6 +247,38 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--purpose-reason", help="用途说明，写入留痕记录")
     p.add_argument("--cost-bps", type=float, help="净口径指标的单边成本（基点），默认 10")
     p.add_argument("--async", dest="async_mode", action="store_true", help="入队后台执行")
+    p.add_argument(
+        "--priority",
+        type=int,
+        default=0,
+        help="队列优先级（越大越先执行），仅 --async 入队时生效",
+    )
+    _add_json_flag(p)
+
+    p = sub.add_parser("list", help="列出回测（支持状态/用途/时间范围过滤）")
+    p.add_argument("--strategy", dest="strategy_id", help="按策略 ID 过滤")
+    p.add_argument(
+        "--status",
+        choices=["pending", "running", "success", "failed", "cancelled"],
+        help="按状态过滤",
+    )
+    p.add_argument(
+        "--purpose", choices=["research", "validation", "monitor"], help="按用途过滤"
+    )
+    p.add_argument("--created-from", type=date.fromisoformat, help="创建日期起点（含）")
+    p.add_argument("--created-to", type=date.fromisoformat, help="创建日期终点（含）")
+    p.add_argument(
+        "--order-by",
+        choices=["created_at", "started_at", "finished_at"],
+        default="created_at",
+        help="排序字段",
+    )
+    p.add_argument("--asc", action="store_true", help="升序（默认倒序）")
+    p.add_argument("--limit", type=int, default=50, help="返回条数上限（最大 200）")
+    _add_json_flag(p)
+
+    p = sub.add_parser("cancel", help="请求取消回测（未开始直接取消，运行中协作退出）")
+    p.add_argument("backtest_id")
     _add_json_flag(p)
 
     p = sub.add_parser("status", help="查看回测状态")
@@ -319,12 +351,35 @@ def _build_robustness_group(subparsers: argparse._SubParsersAction) -> None:
         if name == "pool":
             p.add_argument("--samples", type=int, default=8, help="随机子池抽样次数")
         p.add_argument("--sync", dest="sync_mode", action="store_true", help="同步执行（默认入队）")
+        p.add_argument(
+            "--priority",
+            type=int,
+            default=0,
+            help="队列优先级（越大越先执行），仅入队模式生效",
+        )
         _add_json_flag(p)
 
     p = sub.add_parser("collect", help="等待并汇总批次结果")
     p.add_argument("robustness_id")
     p.add_argument("--wait", action="store_true", help="轮询等待至终态")
     p.add_argument("--timeout", type=float, default=3600.0, help="等待超时秒数")
+    p.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="允许按已完成窗口部分汇总（跳过未完成/失败窗口并标记 coverage）",
+    )
+    _add_json_flag(p)
+
+    p = sub.add_parser("cancel", help="取消整批稳健性回测（运行中的在安全检查点退出）")
+    p.add_argument("robustness_id")
+    _add_json_flag(p)
+
+    p = sub.add_parser("pause", help="暂停批次中尚未开始的任务")
+    p.add_argument("robustness_id")
+    _add_json_flag(p)
+
+    p = sub.add_parser("resume", help="恢复批次中被暂停的任务")
+    p.add_argument("robustness_id")
     _add_json_flag(p)
 
     p = sub.add_parser("stats", help="计算 CSCV-PBO / Deflated Sharpe / 自助法置信区间")
@@ -342,6 +397,33 @@ def _build_robustness_group(subparsers: argparse._SubParsersAction) -> None:
     p = sub.add_parser("list", help="列出最近的批次")
     p.add_argument("--limit", type=int, default=50)
     _add_json_flag(p)
+
+
+def _build_queue_group(subparsers: argparse._SubParsersAction) -> None:
+    """注册 queue 命令组（后台任务队列可观测性，B3）。"""
+    group = subparsers.add_parser("queue", help="后台任务队列状态与任务明细")
+    sub = group.add_subparsers(dest="subcommand", required=True)
+
+    p = sub.add_parser("stats", help="查看积压/吞吐/运行中任务与并发预算")
+    p.add_argument("--window-hours", type=float, default=1.0, help="吞吐统计窗口（小时）")
+    _add_json_flag(p)
+
+    p = sub.add_parser("jobs", help="查看最近的后台任务明细")
+    p.add_argument(
+        "--status",
+        choices=["pending", "running", "success", "failed", "cancelled", "paused"],
+        help="按状态过滤",
+    )
+    p.add_argument("--job-type", dest="job_type", help="按任务类型过滤")
+    p.add_argument("--limit", type=int, default=50, help="返回条数上限")
+    _add_json_flag(p)
+
+    p = sub.add_parser("worker", help="以独立进程运行队列 worker（前台阻塞）")
+    p.add_argument(
+        "--recover-stuck",
+        action="store_true",
+        help="启动前把卡在 running 的任务恢复为失败（进程重启场景）",
+    )
 
 
 def _build_optimization_group(subparsers: argparse._SubParsersAction) -> None:
@@ -845,9 +927,17 @@ def _run_backtest(args: argparse.Namespace) -> None:
             )
             summary = svc.create_backtest(req)
             if args.async_mode:
-                from quant_etf_api.infra.job_queue.queue import get_job_queue
+                from quant_etf_api.infra.job_queue.queue import (
+                    backtest_job_key,
+                    get_job_queue,
+                )
 
-                get_job_queue().enqueue("backtest", {"backtest_id": summary.backtest_id})
+                get_job_queue().enqueue(
+                    "backtest",
+                    {"backtest_id": summary.backtest_id},
+                    job_key=backtest_job_key(summary.backtest_id),
+                    priority=getattr(args, "priority", 0),
+                )
                 _emit(summary.model_dump(), not args.no_json)
                 return
             svc.run_backtest(summary.backtest_id)
@@ -857,6 +947,27 @@ def _run_backtest(args: argparse.Namespace) -> None:
             _emit(detail.model_dump(), not args.no_json)
             if detail.status != "success":
                 sys.exit(1)
+        elif args.subcommand == "list":
+            items, total = svc.list_backtests(
+                offset=0,
+                limit=min(max(1, args.limit), 200),
+                strategy_id=args.strategy_id,
+                created_from=args.created_from,
+                created_to=args.created_to,
+                status=args.status,
+                purpose=args.purpose,
+                order_by=args.order_by,
+                descending=not args.asc,
+            )
+            _emit(
+                {
+                    "total": total,
+                    "items": [item.model_dump() for item in items],
+                },
+                not args.no_json,
+            )
+        elif args.subcommand == "cancel":
+            _emit(svc.cancel_backtest(args.backtest_id), not args.no_json)
         elif args.subcommand == "status":
             detail = svc.get_backtest(args.backtest_id)
             if detail is None:
@@ -949,12 +1060,15 @@ def _run_robustness(args: argparse.Namespace) -> None:
                 pool_samples=getattr(args, "samples", 8),
                 max_knobs=getattr(args, "max_knobs", 30),
                 async_mode=not getattr(args, "sync_mode", False),
+                priority=getattr(args, "priority", 0),
             )
             _emit(result, not args.no_json)
         elif args.subcommand == "collect":
             deadline = time.monotonic() + args.timeout
             while True:
-                result = svc.collect(args.robustness_id)
+                result = svc.collect(
+                    args.robustness_id, allow_partial=args.allow_partial
+                )
                 if not args.wait or result.get("status") != "running":
                     break
                 if time.monotonic() >= deadline:
@@ -964,6 +1078,12 @@ def _run_robustness(args: argparse.Namespace) -> None:
             _emit(result, not args.no_json)
             if result.get("status") == "failed":
                 sys.exit(1)
+        elif args.subcommand == "cancel":
+            _emit(svc.cancel(args.robustness_id), not args.no_json)
+        elif args.subcommand == "pause":
+            _emit(svc.pause(args.robustness_id), not args.no_json)
+        elif args.subcommand == "resume":
+            _emit(svc.resume(args.robustness_id), not args.no_json)
         elif args.subcommand == "stats":
             result = svc.compute_statistics(
                 args.robustness_id,
@@ -1051,6 +1171,56 @@ def _run_optimization(args: argparse.Namespace) -> None:
         db.close()
 
 
+def _run_queue(args: argparse.Namespace) -> None:
+    """执行 queue 命令组（后台任务队列可观测性与独立 worker，B3）。"""
+    if args.subcommand == "worker":
+        from quant_etf_api.worker import main as worker_main
+
+        worker_main()
+        return
+    from quant_etf_api.infra.job_queue.queue import get_job_queue, lane_for
+    from quant_etf_api.infra.time import utcnow_aware
+
+    queue = get_job_queue()
+    if args.subcommand == "stats":
+        _emit(queue.stats(window_hours=args.window_hours), not args.no_json)
+        return
+    rows = queue.list_jobs(
+        statuses=[args.status] if args.status else None,
+        job_types=[args.job_type] if args.job_type else None,
+        limit=min(max(1, args.limit), 500),
+    )
+    now = utcnow_aware()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        item: dict[str, Any] = {
+            "job_id": row.job_id,
+            "job_type": row.job_type,
+            "lane": lane_for(row.job_type),
+            "batch_id": row.batch_id,
+            "status": row.status,
+            "priority": row.priority,
+            "attempts": row.attempts,
+            "max_attempts": row.max_attempts,
+            "error_message": row.error_message,
+            "cancel_requested": row.cancel_requested,
+            "created_at": row.created_at,
+            "started_at": row.started_at,
+            "heartbeat_at": row.heartbeat_at,
+            "finished_at": row.finished_at,
+        }
+        if row.status == "pending" and row.created_at is not None:
+            item["queued_seconds"] = round(
+                max(0.0, (now - row.created_at).total_seconds()), 1
+            )
+        if row.status == "running" and row.started_at is not None:
+            item["elapsed_seconds"] = round(
+                max(0.0, (now - row.started_at).total_seconds()), 1
+            )
+        items.append(item)
+    _emit({"total": len(items), "items": items}, not args.no_json)
+
+
 def main() -> None:
     """CLI 入口。"""
     parser = argparse.ArgumentParser(description="量化研究平台 CLI 工具")
@@ -1066,6 +1236,7 @@ def main() -> None:
     _build_lifecycle_group(subparsers)
     _build_robustness_group(subparsers)
     _build_optimization_group(subparsers)
+    _build_queue_group(subparsers)
     _build_industry_group(subparsers)
     _build_index_group(subparsers)
     _build_stock_group(subparsers)
@@ -1082,6 +1253,8 @@ def main() -> None:
         _run_robustness(args)
     elif args.command == "optimization":
         _run_optimization(args)
+    elif args.command == "queue":
+        _run_queue(args)
     elif args.command == "industry":
         _run_industry(args)
     elif args.command == "index":

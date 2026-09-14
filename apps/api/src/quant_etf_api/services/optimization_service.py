@@ -523,9 +523,18 @@ class OptimizationService:
             optimization_id=optimization_id,
         )
         if async_mode:
-            from quant_etf_api.infra.job_queue.queue import get_job_queue
+            from quant_etf_api.infra.job_queue.queue import (
+                backtest_job_key,
+                get_job_queue,
+            )
 
-            get_job_queue().enqueue("backtest", {"backtest_id": summary.backtest_id})
+            get_job_queue().enqueue(
+                "backtest",
+                {"backtest_id": summary.backtest_id},
+                job_key=backtest_job_key(summary.backtest_id),
+                # 优化会话作为批次号，支持整批取消/暂停（B2）
+                batch_id=optimization_id,
+            )
             return summary.backtest_id
         svc.run_backtest(summary.backtest_id)
         row = self._backtest_repo.find_by_id(summary.backtest_id)

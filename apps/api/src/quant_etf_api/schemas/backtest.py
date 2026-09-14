@@ -208,7 +208,17 @@ class AnnualMetrics(BaseModel):
 
 
 class BacktestSummary(BaseModel):
-    """回测列表摘要，不含明细数据。"""
+    """回测列表摘要，不含明细数据。
+
+    Attributes:
+        job_status: 对应后台任务状态（pending/running/success/failed/cancelled/paused），
+            None 表示该回测未经过队列（如 CLI 同步执行）。
+        queued_seconds: 仍在排队时的等待时长（秒）。
+        elapsed_seconds: 执行中已耗时（秒）。
+        queue_position: 回测 lane 内的排队位置（0 表示下一个执行）。
+        job_priority: 队列优先级。
+        batch_id: 批次标识（如稳健性批次 ID）。
+    """
 
     backtest_id: str
     strategy_id: str
@@ -222,6 +232,32 @@ class BacktestSummary(BaseModel):
     error_message: str | None = None
     progress: int = 0
     purpose: str = "research"
+    job_status: str | None = None
+    queued_seconds: float | None = None
+    elapsed_seconds: float | None = None
+    queue_position: int | None = None
+    job_priority: int | None = None
+    batch_id: str | None = None
+
+
+class BacktestCancelResponse(BaseModel):
+    """回测取消请求的处理结果（B2）。
+
+    Attributes:
+        backtest_id: 回测标识。
+        status: 取消请求发出时的回测状态。
+        job_id: 队列任务 ID，None 表示该回测未经过队列。
+        job_status: 处理后的队列任务状态（cancelled 或 running）。
+        cancel_requested: True 表示任务正在运行，已打协作取消标记。
+        message: 面向用户的结果说明。
+    """
+
+    backtest_id: str
+    status: str
+    job_id: str | None = None
+    job_status: str | None = None
+    cancel_requested: bool = False
+    message: str
 
 
 class BacktestDetail(BacktestSummary):

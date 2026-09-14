@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
-from quant_etf_api.infra.job_queue.queue import get_job_queue
+from quant_etf_api.infra.job_queue.queue import backtest_job_key, get_job_queue
 from quant_etf_api.schemas.backtest import (
+    BacktestCancelResponse,
     BacktestComparisonCreateRequest,
     BacktestComparisonDetail,
     BacktestComparisonSummary,
@@ -40,7 +42,10 @@ def create_backtest(req: BacktestCreateRequest, db: Session = Depends(get_db)) -
         # 策略配置校验失败（未配置 portfolio / 引用未知因子等）或
         # 回测区间越过研究期边界 → 422
         raise HTTPException(status_code=422, detail=str(e))
-    get_job_queue().enqueue("backtest", {"backtest_id": summary.backtest_id})
+    get_job_queue().enqueue(
+        "backtest", {"backtest_id": summary.backtest_id},
+        job_key=backtest_job_key(summary.backtest_id),
+    )
     return summary
 
 
@@ -64,11 +69,22 @@ def list_backtests(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     strategy_id: str | None = Query(default=None, description="策略 ID，精确匹配"),
+    status: str | None = Query(
+        default=None,
+        description="回测状态过滤：pending/running/success/failed/cancelled",
+    ),
+    purpose: Literal["research", "validation", "monitor"] | None = Query(
+        default=None, description="回测用途过滤"
+    ),
     created_from: date | None = Query(default=None, description="创建日期起点（含）"),
     created_to: date | None = Query(default=None, description="创建日期终点（含）"),
+    order_by: Literal["created_at", "started_at", "finished_at"] = Query(
+        default="created_at", description="排序字段"
+    ),
+    descending: bool = Query(default=True, description="是否倒序"),
     db: Session = Depends(get_db),
 ) -> PaginatedResponse[BacktestSummary]:
-    """分页返回回测列表，按创建时间倒序并支持筛选。"""
+    """分页返回回测列表，支持状态/用途/策略/时间范围筛选与排序（B4）。"""
     if created_from and created_to and created_from > created_to:
         raise HTTPException(status_code=422, detail="创建日期起点不能晚于终点")
     items, total = BacktestService(db).list_backtests(
@@ -77,6 +93,10 @@ def list_backtests(
         strategy_id=strategy_id,
         created_from=created_from,
         created_to=created_to,
+        status=status,
+        purpose=purpose,
+        order_by=order_by,
+        descending=descending,
     )
     return PaginatedResponse(items=items, total=total, offset=offset, limit=limit)
 
@@ -153,6 +173,24 @@ def get_backtest(backtest_id: str, db: Session = Depends(get_db)) -> BacktestDet
     if detail is None:
         raise HTTPException(status_code=404, detail="回测记录不存在")
     return detail
+
+
+@router.post(
+    "/backtests/{backtest_id}/cancel",
+    response_model=BacktestCancelResponse,
+    status_code=202,
+)
+def cancel_backtest(backtest_id: str, db: Session = Depends(get_db)) -> BacktestCancelResponse:
+    """请求取消回测（B2）。
+
+    未开始的回测直接落为 cancelled；运行中的回测只打协作取消标记，
+    由回测主循环在安全检查点退出（已提交的日结果保留）。
+    """
+    try:
+        result = BacktestService(db).cancel_backtest(backtest_id)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return BacktestCancelResponse(**result)
 
 
 @router.get("/backtests/{backtest_id}/daily", response_model=list[BacktestDailyResult])

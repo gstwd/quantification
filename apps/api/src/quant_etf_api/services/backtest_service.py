@@ -50,7 +50,10 @@ from quant_etf_api.infra.db.models.core import (
     BacktestRunModel,
 )
 from quant_etf_api.infra.time import CHINA_TZ
-from quant_etf_api.infra.db.base import utcnow
+from quant_etf_api.infra.job_queue.context import JobCancelledError, ensure_not_cancelled
+from quant_etf_api.infra.job_queue.queue import BACKTEST_LANE_JOB_TYPES, backtest_job_key
+from quant_etf_api.infra.job_queue.repository import JobRepository
+from quant_etf_api.infra.time import utcnow_aware
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
 from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
@@ -148,7 +151,8 @@ class BacktestService:
             ValueError: 策略不存在、配置校验失败，或回测区间不符合用途边界时抛出。
         """
         backtest_id = str(uuid4())
-        now = utcnow()
+        # created_at 和 started_at/finished_at 一样是 timestamptz，写入必须带时区（B5）
+        now = utcnow_aware()
 
         # 研究期/验证期硬约束：研究类回测越过研究期末端直接拒绝
         validate_backtest_period(
@@ -254,8 +258,12 @@ class BacktestService:
         strategy_id: str | None = None,
         created_from: date | None = None,
         created_to: date | None = None,
+        status: str | None = None,
+        purpose: str | None = None,
+        order_by: str = "created_at",
+        descending: bool = True,
     ) -> tuple[list[BacktestSummary], int]:
-        """分页返回回测列表，按创建时间倒序并支持筛选。
+        """分页返回回测列表，支持状态/用途/时间范围筛选（B4）。
 
         Args:
             offset: 偏移量。
@@ -263,6 +271,10 @@ class BacktestService:
             strategy_id: 策略 ID，精确匹配。
             created_from: 创建日期起点（含，中国日期）。
             created_to: 创建日期终点（含，中国日期）。
+            status: 回测状态，精确匹配（pending/running/success/failed/cancelled）。
+            purpose: 回测用途（research/validation/monitor）。
+            order_by: 排序字段：created_at / started_at / finished_at。
+            descending: 是否倒序，默认 True。
 
         Returns:
             筛选后的回测摘要和总数。
@@ -276,8 +288,15 @@ class BacktestService:
                 strategy_id=strategy_id,
                 created_from=start_at,
                 created_to=end_at,
+                status=status,
+                purpose=purpose,
+                order_by=order_by,
+                descending=descending,
             )
-            items = [self._row_to_summary(r) for r in rows]
+            queue_info = self._queue_info([r.backtest_id for r in rows])
+            items = [
+                self._row_to_summary(r, queue_info.get(r.backtest_id)) for r in rows
+            ]
             return items, total
         except Exception:
             logger.warning("list_backtests DB query failed", exc_info=True)
@@ -285,10 +304,60 @@ class BacktestService:
 
     @staticmethod
     def _china_day_start(value: date) -> datetime:
-        """将中国业务日期的零点转换为数据库使用的 UTC naive 时间。"""
-        return datetime.combine(value, time.min, tzinfo=CHINA_TZ).astimezone(timezone.utc).replace(
-            tzinfo=None
-        )
+        """将中国业务日期的零点转换为带时区的 UTC 时间（B5：timestamptz 列）。"""
+        return datetime.combine(value, time.min, tzinfo=CHINA_TZ).astimezone(timezone.utc)
+
+    def _queue_info(self, backtest_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """批量查询回测任务的排队位置与等待/执行耗时（B3）。
+
+        队列信息属于增强可观测性：任何查询失败都不应影响回测列表本身。
+
+        Args:
+            backtest_ids: 回测标识列表。
+
+        Returns:
+            backtest_id → {"job_status", "queued_seconds", "elapsed_seconds",
+            "queue_position", "job_priority", "batch_id"}。
+        """
+        if not backtest_ids:
+            return {}
+        try:
+            repo = JobRepository()
+            snapshots = repo.find_snapshots_by_keys(
+                [backtest_job_key(bid) for bid in backtest_ids]
+            )
+        except Exception:
+            logger.debug("查询回测队列信息失败", exc_info=True)
+            return {}
+        now = utcnow_aware()
+        result: dict[str, dict[str, Any]] = {}
+        for backtest_id in backtest_ids:
+            snapshot = snapshots.get(backtest_job_key(backtest_id))
+            if snapshot is None:
+                continue
+            info: dict[str, Any] = {
+                "job_status": snapshot.status,
+                "job_priority": snapshot.priority,
+                "batch_id": snapshot.batch_id,
+            }
+            if snapshot.status == "pending" and snapshot.created_at is not None:
+                info["queued_seconds"] = round(
+                    max(0.0, (now - snapshot.created_at).total_seconds()), 1
+                )
+                try:
+                    info["queue_position"] = repo.count_pending_ahead(
+                        snapshot.priority,
+                        snapshot.created_at,
+                        BACKTEST_LANE_JOB_TYPES,
+                    )
+                except Exception:
+                    logger.debug("计算队列位置失败: %s", backtest_id, exc_info=True)
+            if snapshot.status == "running" and snapshot.started_at is not None:
+                info["elapsed_seconds"] = round(
+                    max(0.0, (now - snapshot.started_at).total_seconds()), 1
+                )
+            result[backtest_id] = info
+        return result
 
     def get_backtest(self, backtest_id: str) -> BacktestDetail | None:
         """返回回测详情。"""
@@ -296,7 +365,7 @@ class BacktestService:
             row = self._backtest_repo.find_by_id(backtest_id)
             if row is None:
                 return None
-            detail = self._row_to_detail(row)
+            detail = self._row_to_detail(row, self._queue_info([backtest_id]).get(backtest_id))
             # 分年度绩效表：读取时按自然年切分已持久化的日收益序列计算，
             # 存量回测无需重跑即可获得该表（滚动/分年度口径仅依赖单条序列）
             if detail.status == "success":
@@ -331,6 +400,56 @@ class BacktestService:
         except Exception:
             logger.warning("get_backtest DB query failed", exc_info=True)
             return None
+
+    def cancel_backtest(self, backtest_id: str) -> dict[str, Any]:
+        """请求取消一条回测（B2）。
+
+        未开始（pending）的回测直接落为 cancelled；运行中的回测只打协作取消
+        标记，由回测主循环在安全检查点退出。同步执行（不走队列）的回测没有
+        队列任务，只能标记"不可取消"。
+
+        Args:
+            backtest_id: 回测标识。
+
+        Returns:
+            取消结果字典：backtest_id / status / job_status / cancel_requested。
+
+        Raises:
+            ValueError: 回测不存在或已处于终态时抛出。
+        """
+        row = self._backtest_repo.find_by_id(backtest_id)
+        if row is None:
+            raise ValueError(f"回测 {backtest_id} 不存在")
+        if row.status in ("success", "failed", "cancelled"):
+            raise ValueError(f"回测 {backtest_id} 已处于终态（{row.status}），无法取消")
+
+        from quant_etf_api.infra.job_queue.queue import get_job_queue
+
+        queue = get_job_queue()
+        job_key = backtest_job_key(backtest_id)
+        snapshot = queue.find_snapshots_by_keys([job_key]).get(job_key)
+        if snapshot is None:
+            # 同步 CLI 回测不经过队列：只能提示，无法协作取消
+            return {
+                "backtest_id": backtest_id,
+                "status": row.status,
+                "job_status": None,
+                "cancel_requested": False,
+                "message": "未找到队列任务（同步执行的回测无法取消）",
+            }
+        job_status = queue.cancel_job(snapshot.job_id, f"用户取消回测 {backtest_id}")
+        return {
+            "backtest_id": backtest_id,
+            "status": row.status,
+            "job_id": snapshot.job_id,
+            "job_status": job_status,
+            "cancel_requested": job_status == "running",
+            "message": (
+                "已请求取消，回测将在最近的安全检查点退出"
+                if job_status == "running"
+                else "回测任务已取消"
+            ),
+        }
 
     def _compute_stability(
         self, row: BacktestRunModel, daily_rows: list
@@ -529,6 +648,27 @@ class BacktestService:
             self._record_data_cutoff(row)
             self._run_backtest_loop(backtest_id, row, config)
 
+        except JobCancelledError:
+            # 协作取消：回滚当前未提交分段后把回测落成 cancelled，
+            # 并向上抛出以便队列把 background_job 也标记为已取消（B2）
+            self._db.rollback()
+            logger.info("回测已按请求取消: backtest_id=%s", backtest_id)
+            try:
+                self._backtest_repo.mark_cancelled(
+                    backtest_id,
+                    "回测已按请求取消",
+                    warnings=[
+                        BacktestWarning(
+                            level="warning",
+                            code="CANCELLED",
+                            message="回测在执行过程中被取消，已保存的日结果保留",
+                        ).model_dump()
+                    ],
+                )
+            except Exception:
+                self._db.rollback()
+            raise
+
         except Exception as exc:
             self._db.rollback()
             logger.exception("run_backtest failed for %s", backtest_id)
@@ -724,6 +864,8 @@ class BacktestService:
         cached_metadata = {code: {"name_cn": code, "category": "broad_index"} for code in codes}
 
         for i, trade_date in enumerate(trading_dates):
+            # 协作取消检查点（B2）：取消标记有短 TTL 缓存，不会每个交易日都查库
+            ensure_not_cancelled()
             day_factors = precomputed.get(trade_date, {})
             next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
 
@@ -1658,14 +1800,22 @@ class BacktestService:
 
     # ── Schema 转换辅助 ────────────────────────────────────────────────────
 
-    def _row_to_summary(self, row: BacktestRunModel) -> BacktestSummary:
-        """将 ORM 行转换为 BacktestSummary。"""
+    def _row_to_summary(
+        self, row: BacktestRunModel, queue_info: dict[str, Any] | None = None
+    ) -> BacktestSummary:
+        """将 ORM 行转换为 BacktestSummary。
+
+        Args:
+            row: 回测 ORM 行。
+            queue_info: 可选的队列观测信息（排队位置/等待与执行耗时，B3）。
+        """
         metrics = None
         if row.metrics:
             try:
                 metrics = BacktestMetrics(**row.metrics)
             except Exception:
                 pass
+        info = queue_info or {}
         return BacktestSummary(
             backtest_id=row.backtest_id,
             strategy_id=row.strategy_id,
@@ -1679,11 +1829,19 @@ class BacktestService:
             error_message=row.error_message,
             progress=getattr(row, "progress", 0) or 0,
             purpose=getattr(row, "purpose", None) or PURPOSE_RESEARCH,
+            job_status=info.get("job_status"),
+            queued_seconds=info.get("queued_seconds"),
+            elapsed_seconds=info.get("elapsed_seconds"),
+            queue_position=info.get("queue_position"),
+            job_priority=info.get("job_priority"),
+            batch_id=info.get("batch_id"),
         )
 
-    def _row_to_detail(self, row: BacktestRunModel) -> BacktestDetail:
+    def _row_to_detail(
+        self, row: BacktestRunModel, queue_info: dict[str, Any] | None = None
+    ) -> BacktestDetail:
         """将 ORM 行转换为 BacktestDetail（含结构化警告）。"""
-        summary = self._row_to_summary(row)
+        summary = self._row_to_summary(row, queue_info)
         try:
             warnings = [BacktestWarning(**w) for w in (row.warnings or [])]
         except Exception:
@@ -1719,7 +1877,7 @@ class BacktestService:
             ValueError: 策略不存在或两策略相同。
         """
         comparison_id = str(uuid4())
-        now = utcnow()
+        now = utcnow_aware()
 
         # 校验两个策略不同
         if req.strategy_a_id == req.strategy_b_id:
@@ -1863,7 +2021,7 @@ class BacktestService:
             return None
 
         comp.status = "running"
-        comp.started_at = utcnow()
+        comp.started_at = utcnow_aware()
         self._db.commit()
         return comp.backtest_a_id, comp.backtest_b_id
 

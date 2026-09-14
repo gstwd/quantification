@@ -42,7 +42,7 @@ class RobustnessSummary(BaseModel):
         strategy_id: 基线策略 ID。
         strategy_version: 基线策略版本。
         kind: 验证类型（scan/ablate/pool）。
-        status: 批次状态（running/success/failed）。
+        status: 批次状态（running/success/failed/partial/cancelled）。
         start_date: 验证区间起始日期。
         end_date: 验证区间截止日期。
         trial_count: 批次内独立变体数量（试验次数台账口径）。
@@ -92,3 +92,25 @@ class RobustnessListResponse(BaseModel):
 
     items: list[RobustnessSummary] = Field(default_factory=list)
     total: int = 0
+
+
+class RobustnessControlResponse(BaseModel):
+    """批次控制（取消 / 暂停 / 恢复）结果（B2）。
+
+    Attributes:
+        robustness_id: 批次 ID。
+        status: 操作后的批次状态（取消操作返回）。
+        cancelled_jobs: 直接取消的队列任务数。
+        cancel_requested_jobs: 打协作取消标记的运行中任务数。
+        cancelled_backtests: 同步执行、由服务端直接落为 cancelled 的回测数。
+        paused_jobs: 被暂停的队列任务数。
+        resumed_jobs: 被恢复的队列任务数。
+    """
+
+    robustness_id: str
+    status: str | None = None
+    cancelled_jobs: int = 0
+    cancel_requested_jobs: int = 0
+    cancelled_backtests: int = 0
+    paused_jobs: int = 0
+    resumed_jobs: int = 0

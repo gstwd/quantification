@@ -7,7 +7,6 @@ from typing import Any
 
 from sqlalchemy import func, text
 
-from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import (
     BacktestComparisonModel,
     BacktestDailyResultModel,
@@ -15,6 +14,7 @@ from quant_etf_api.infra.db.models.core import (
     BacktestRunModel,
 )
 from quant_etf_api.infra.db.repositories.base import BaseRepository
+from quant_etf_api.infra.time import utcnow_aware
 
 
 class BacktestRepository(BaseRepository):
@@ -27,15 +27,23 @@ class BacktestRepository(BaseRepository):
         strategy_id: str | None = None,
         created_from: datetime | None = None,
         created_to: datetime | None = None,
+        status: str | None = None,
+        purpose: str | None = None,
+        order_by: str = "created_at",
+        descending: bool = True,
     ) -> tuple[list[BacktestRunModel], int]:
-        """分页查询回测记录，按创建时间倒序。
+        """分页查询回测记录，支持状态/用途/时间范围筛选（B4）。
 
         Args:
             offset: 偏移量。
             limit: 每页最大条数。
             strategy_id: 策略 ID，精确匹配。
-            created_from: 创建时间起点（UTC，含）。
-            created_to: 创建时间终点（UTC，不含）。
+            created_from: 创建时间起点（UTC aware，含）。
+            created_to: 创建时间终点（UTC aware，不含）。
+            status: 回测状态，精确匹配（pending/running/success/failed/cancelled）。
+            purpose: 回测用途（research/validation/monitor）。
+            order_by: 排序字段，可选 created_at / started_at / finished_at。
+            descending: 是否倒序。
 
         Returns:
             (items, total) 元组。
@@ -43,12 +51,21 @@ class BacktestRepository(BaseRepository):
         base_q = self._db.query(BacktestRunModel)
         if strategy_id:
             base_q = base_q.filter(BacktestRunModel.strategy_id == strategy_id)
+        if status:
+            base_q = base_q.filter(BacktestRunModel.status == status)
+        if purpose:
+            base_q = base_q.filter(BacktestRunModel.purpose == purpose)
         if created_from is not None:
             base_q = base_q.filter(BacktestRunModel.created_at >= created_from)
         if created_to is not None:
             base_q = base_q.filter(BacktestRunModel.created_at < created_to)
         total = base_q.count()
-        rows = base_q.order_by(BacktestRunModel.created_at.desc()).offset(offset).limit(limit).all()
+        column = {
+            "started_at": BacktestRunModel.started_at,
+            "finished_at": BacktestRunModel.finished_at,
+        }.get(order_by, BacktestRunModel.created_at)
+        order = column.desc() if descending else column.asc()
+        rows = base_q.order_by(order).offset(offset).limit(limit).all()
         return rows, total
 
     def find_recent(self, limit: int = 50) -> list[BacktestRunModel]:
@@ -153,7 +170,7 @@ class BacktestRepository(BaseRepository):
         if run is None:
             return
         run.status = "success"
-        run.finished_at = utcnow()
+        run.finished_at = utcnow_aware()
         run.progress = 100
         if metrics:
             run.metrics = metrics
@@ -173,7 +190,7 @@ class BacktestRepository(BaseRepository):
         if run is None:
             return
         run.status = "running"
-        run.started_at = utcnow()
+        run.started_at = utcnow_aware()
         self._db.commit()
 
     def add_daily_result(self, row: BacktestDailyResultModel) -> None:
@@ -212,7 +229,32 @@ class BacktestRepository(BaseRepository):
         if run is None:
             return
         run.status = "failed"
-        run.finished_at = utcnow()
+        run.finished_at = utcnow_aware()
+        run.error_message = error_message[:1000]
+        if warnings is not None:
+            run.warnings = warnings
+        self._db.commit()
+
+    def mark_cancelled(
+        self,
+        backtest_id: str,
+        error_message: str = "回测已按请求取消",
+        warnings: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """将回测标记为已取消（B2 协作取消的落库出口）。
+
+        Args:
+            backtest_id: 回测标识。
+            error_message: 取消原因。
+            warnings: 可选的结构化提示（如 CANCELLED）。
+        """
+        if self._db.is_active is False:
+            self._db.rollback()
+        run = self.find_by_id(backtest_id)
+        if run is None:
+            return
+        run.status = "cancelled"
+        run.finished_at = utcnow_aware()
         run.error_message = error_message[:1000]
         if warnings is not None:
             run.warnings = warnings
@@ -270,7 +312,7 @@ class BacktestRepository(BaseRepository):
         if comp is None:
             return
         comp.status = "success"
-        comp.finished_at = utcnow()
+        comp.finished_at = utcnow_aware()
         comp.progress = 100
         if metrics:
             comp.comparison_metrics = metrics
@@ -284,7 +326,7 @@ class BacktestRepository(BaseRepository):
         if comp is None:
             return
         comp.status = "failed"
-        comp.finished_at = utcnow()
+        comp.finished_at = utcnow_aware()
         comp.error_message = error_message[:1000]
         self._db.commit()
 
@@ -296,6 +338,6 @@ class BacktestRepository(BaseRepository):
         if comp is None:
             return
         comp.status = "partial"
-        comp.finished_at = utcnow()
+        comp.finished_at = utcnow_aware()
         comp.error_message = error_message[:1000]
         self._db.commit()

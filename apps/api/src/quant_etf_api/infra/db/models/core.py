@@ -22,6 +22,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from quant_etf_api.infra.db.base import Base, utcnow
+from quant_etf_api.infra.time import utcnow_aware
 
 
 class BenchmarkIndexModel(Base):
@@ -425,11 +426,13 @@ class BacktestRunModel(Base):
         "如预热期、因子缺失、数据缺口、部分结果等",
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, comment="回测创建时间（UTC）"
+        DateTime(timezone=True), default=utcnow_aware, comment="回测创建时间（UTC，timestamptz）"
     )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime, comment="回测开始执行时间（UTC）")
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), comment="回测开始执行时间（UTC，timestamptz）"
+    )
     finished_at: Mapped[datetime | None] = mapped_column(
-        DateTime, comment="回测完成时间（UTC），NULL 表示未完成"
+        DateTime(timezone=True), comment="回测完成时间（UTC，timestamptz），NULL 表示未完成"
     )
     progress: Mapped[int] = mapped_column(
         Integer,
@@ -607,12 +610,16 @@ class BacktestComparisonModel(Base):
         Text, nullable=True, comment="失败/部分失败时的错误信息"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=utcnow,
-        comment="记录创建时间（UTC）",
+        DateTime(timezone=True),
+        default=utcnow_aware,
+        comment="记录创建时间（UTC，timestamptz）",
     )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime, comment="开始执行时间（UTC）")
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime, comment="完成时间（UTC）")
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), comment="开始执行时间（UTC，timestamptz）"
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), comment="完成时间（UTC，timestamptz）"
+    )
     progress: Mapped[int] = mapped_column(
         Integer,
         default=0,
@@ -1096,8 +1103,10 @@ class BackgroundJobModel(Base):
     """后台任务队列表。
 
     所有后台任务（数据摄取、因子计算、回测、对比回测、AI 分析、补数等）
-    统一通过本表入队，由固定 worker 线程池认领执行。
+    统一通过本表入队，由按 lane 划分的 worker 线程池认领执行。
     job_key 在 pending/running 状态下唯一，用于幂等去重。
+    heartbeat_at 由 worker 周期更新，供运行期僵尸任务扫描判断活性（B7）；
+    batch_id 承载批次标识（如稳健性 robustness_id），支持整批取消/暂停（B2）。
     """
 
     __tablename__ = "background_job"
@@ -1108,6 +1117,8 @@ class BackgroundJobModel(Base):
             unique=True,
             postgresql_where=sa.text("status IN ('pending', 'running')"),
         ),
+        Index("ix_background_job_batch_id", "batch_id"),
+        Index("ix_background_job_status_created", "status", "created_at"),
     )
 
     job_id: Mapped[str] = mapped_column(
@@ -1119,12 +1130,24 @@ class BackgroundJobModel(Base):
     job_key: Mapped[str | None] = mapped_column(
         String(256), comment="去重键，pending/running 状态下唯一"
     )
+    batch_id: Mapped[str | None] = mapped_column(
+        String(64), comment="批次标识（如稳健性批次 robustness_id），用于整批取消/暂停"
+    )
     payload: Mapped[dict | None] = mapped_column(JSON, comment="任务参数，JSON 格式")
     status: Mapped[str] = mapped_column(
         String(32),
         default="pending",
         server_default=sa.text("'pending'"),
-        comment="任务状态：pending=待执行，running=执行中，success=成功，failed=失败",
+        comment=(
+            "任务状态：pending=待执行，running=执行中，success=成功，failed=失败，"
+            "cancelled=已取消，paused=批次暂停"
+        ),
+    )
+    cancel_requested: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=sa.text("FALSE"),
+        comment="是否已请求取消：运行中的任务由处理器在安全检查点协作退出",
     )
     priority: Mapped[int] = mapped_column(
         Integer,
@@ -1146,13 +1169,20 @@ class BackgroundJobModel(Base):
     )
     error_message: Mapped[str | None] = mapped_column(Text, comment="失败时的错误信息")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, server_default=sa.func.now(), comment="创建时间（UTC）"
+        DateTime(timezone=True),
+        default=utcnow_aware,
+        server_default=sa.func.now(),
+        comment="创建时间（UTC，timestamptz）",
     )
     started_at: Mapped[datetime | None] = mapped_column(
-        DateTime, comment="开始执行时间（UTC）"
+        DateTime(timezone=True), comment="开始执行时间（UTC，timestamptz）"
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        comment="最近一次心跳时间（UTC，timestamptz），worker 执行期周期更新",
     )
     finished_at: Mapped[datetime | None] = mapped_column(
-        DateTime, comment="完成时间（UTC）"
+        DateTime(timezone=True), comment="完成时间（UTC，timestamptz）"
     )
 
 

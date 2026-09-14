@@ -361,6 +361,72 @@ export interface BacktestSummary {
   progress: number
   /** 回测用途：research / validation / monitor */
   purpose: string
+  /** 对应后台任务状态；null 表示该回测未经过队列（如 CLI 同步执行） */
+  job_status?: string | null
+  /** 仍在排队时的等待时长（秒） */
+  queued_seconds?: number | null
+  /** 执行中已耗时（秒） */
+  elapsed_seconds?: number | null
+  /** 回测 lane 内的排队位置（0 = 下一个执行） */
+  queue_position?: number | null
+  /** 队列优先级 */
+  job_priority?: number | null
+  /** 批次标识（如稳健性批次 ID） */
+  batch_id?: string | null
+}
+
+/** 回测取消请求的处理结果 */
+export interface BacktestCancelResponse {
+  backtest_id: string
+  status: string
+  job_id?: string | null
+  job_status?: string | null
+  /** true 表示任务运行中，已打协作取消标记 */
+  cancel_requested: boolean
+  message: string
+}
+
+/** 队列中单个运行中任务的摘要 */
+export interface QueueRunningJob {
+  job_id: string
+  job_type: string
+  lane: string
+  batch_id?: string | null
+  attempts: number
+  elapsed_seconds: number
+  cancel_requested: boolean
+}
+
+/** 按任务类型统计的队列积压 */
+export interface QueueBacklogItem {
+  job_type: string
+  pending: number
+  running: number
+  paused: number
+  oldest_pending_at?: string | null
+}
+
+/** 队列并发预算与异常回收阈值 */
+export interface QueueCapacity {
+  general_workers: number
+  backtest_workers: number
+  heartbeat_interval_seconds: number
+  stuck_timeout_seconds: number
+  max_runtime_seconds: number
+  zombie_scan_enabled: boolean
+}
+
+/** 后台任务队列统计（积压 / 吞吐 / 运行中任务 / 并发预算） */
+export interface QueueStatsResponse {
+  status_counts: Record<string, number>
+  pending: number
+  running: number
+  paused: number
+  throughput_window_hours: number
+  throughput: Record<string, number>
+  backlog_by_type: QueueBacklogItem[]
+  running_jobs: QueueRunningJob[]
+  capacity: QueueCapacity
 }
 
 export interface BacktestDetail extends BacktestSummary {

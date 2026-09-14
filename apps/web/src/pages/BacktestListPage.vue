@@ -41,6 +41,26 @@
           />
         </div>
         <div class="filter-item">
+          <label class="form-label" for="status-filter">状态</label>
+          <select id="status-filter" v-model="statusFilter" class="form-input">
+            <option value="">全部</option>
+            <option value="pending">待执行</option>
+            <option value="running">执行中</option>
+            <option value="success">成功</option>
+            <option value="failed">失败</option>
+            <option value="cancelled">已取消</option>
+          </select>
+        </div>
+        <div class="filter-item">
+          <label class="form-label" for="purpose-filter">用途</label>
+          <select id="purpose-filter" v-model="purposeFilter" class="form-input">
+            <option value="">全部</option>
+            <option value="research">研究期</option>
+            <option value="validation">验证期</option>
+            <option value="monitor">上线监控</option>
+          </select>
+        </div>
+        <div class="filter-item">
           <label class="form-label" for="created-from">创建日期起</label>
           <input id="created-from" v-model="createdFrom" class="form-input" type="date" />
         </div>
@@ -61,11 +81,13 @@
               <th>策略</th>
               <th>日期范围</th>
               <th>状态</th>
+              <th>队列</th>
               <th>累计收益</th>
               <th>年化收益</th>
               <th>最大回撤</th>
               <th>夏普</th>
               <th>创建时间</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -86,6 +108,7 @@
                   <span class="progress-pct">{{ item.progress }}%</span>
                 </span>
               </td>
+              <td class="text-muted queue-cell">{{ queueLabel(item) }}</td>
               <td :class="returnClass(item.metrics?.cumulative_return_pct)">
                 {{ item.metrics ? formatPct(item.metrics.cumulative_return_pct) : '—' }}
               </td>
@@ -95,6 +118,18 @@
               <td class="danger">{{ item.metrics ? formatPct(item.metrics.max_drawdown_pct) : '—' }}</td>
               <td>{{ item.metrics ? item.metrics.sharpe_ratio.toFixed(2) : '—' }}</td>
               <td class="text-muted">{{ formatTime(item.created_at) }}</td>
+              <td>
+                <button
+                  v-if="item.status === 'pending' || item.status === 'running'"
+                  class="btn btn-secondary btn-sm"
+                  type="button"
+                  :disabled="cancellingId === item.backtest_id"
+                  @click.stop="cancelRun(item.backtest_id)"
+                >
+                  取消
+                </button>
+                <span v-else class="text-muted">—</span>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -175,7 +210,9 @@
 import { onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
+import { cancelBacktest } from '../api/backtests'
 import { useBacktestStore } from '../stores/backtests'
+import { toast } from '../stores/toast'
 
 const store = useBacktestStore()
 const loading = ref(false)
@@ -186,19 +223,71 @@ const singlePageSize = 50
 const compOffset = ref(0)
 const compPageSize = 50
 const strategyFilter = ref('')
+const statusFilter = ref('')
+const purposeFilter = ref('')
 const createdFrom = ref('')
 const createdTo = ref('')
+const cancellingId = ref('')
 
+/** 汇总当前筛选条件为请求参数。 */
 function currentFilters() {
   return {
     strategyId: strategyFilter.value || undefined,
+    status: statusFilter.value || undefined,
+    purpose: purposeFilter.value || undefined,
     createdFrom: createdFrom.value || undefined,
     createdTo: createdTo.value || undefined,
   }
 }
 
+/** 队列列文案：排队位置/等待时长/执行耗时/无队列任务。 */
+function queueLabel(item: {
+  job_status?: string | null
+  queued_seconds?: number | null
+  elapsed_seconds?: number | null
+  queue_position?: number | null
+}): string {
+  if (item.job_status === 'pending') {
+    const position = item.queue_position != null ? `#${item.queue_position + 1}` : ''
+    const waited = item.queued_seconds != null ? `已等 ${formatDuration(item.queued_seconds)}` : ''
+    return ['排队中', position, waited].filter(Boolean).join(' · ')
+  }
+  if (item.job_status === 'paused') return '已暂停'
+  if (item.job_status === 'running' && item.elapsed_seconds != null) {
+    return `执行 ${formatDuration(item.elapsed_seconds)}`
+  }
+  if (item.job_status === 'cancelled') return '任务已取消'
+  return '—'
+}
+
+/** 把秒数格式化为紧凑的中文时长。 */
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)} 秒`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分 ${Math.round(seconds % 60)} 秒`
+  return `${Math.floor(seconds / 3600)} 时 ${Math.floor((seconds % 3600) / 60)} 分`
+}
+
+/** 请求取消回测并刷新列表（运行中的任务在安全检查点退出）。 */
+async function cancelRun(backtestId: string): Promise<void> {
+  cancellingId.value = backtestId
+  try {
+    const result = await cancelBacktest(backtestId)
+    toast.info(result.message)
+    await store.loadAll(singleOffset.value, singlePageSize, currentFilters())
+  } finally {
+    cancellingId.value = ''
+  }
+}
+
+/** 状态中文标签。 */
 function statusLabel(status: string): string {
-  const map: Record<string, string> = { pending: '待执行', running: '执行中', success: '成功', failed: '失败' }
+  const map: Record<string, string> = {
+    pending: '待执行',
+    running: '执行中',
+    success: '成功',
+    failed: '失败',
+    cancelled: '已取消',
+  }
   return map[status] ?? status
 }
 
@@ -239,6 +328,8 @@ async function applyFilters() {
 /** 清空回测列表筛选条件。 */
 async function clearFilters() {
   strategyFilter.value = ''
+  statusFilter.value = ''
+  purposeFilter.value = ''
   createdFrom.value = ''
   createdTo.value = ''
   await applyFilters()
@@ -252,6 +343,7 @@ async function goCompPage(newOffset: number) {
 
 const comparisonsLoaded = ref(false)
 
+/** 切换 Tab；首次进入对比 Tab 时加载对比列表。 */
 async function switchTab(tab: 'single' | 'comparison') {
   activeTab.value = tab
   if (tab === 'comparison' && !comparisonsLoaded.value) {
@@ -390,7 +482,11 @@ onMounted(async () => {
 .status-running { background: rgba(59,130,246,0.15); color: #60a5fa; }
 .status-success { background: rgba(34,197,94,0.15); color: var(--success); }
 .status-failed { background: rgba(239,68,68,0.15); color: var(--danger); }
+.status-cancelled { background: rgba(148,163,184,0.15); color: var(--text-muted); }
 .status-partial { background: rgba(245,158,11,0.15); color: #f59e0b; }
+
+.queue-cell { font-size: 12px; white-space: nowrap; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
 
 /* 进度条 */
 .progress-inline { display: inline-flex; align-items: center; gap: 5px; margin-left: 6px; vertical-align: middle; }

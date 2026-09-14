@@ -220,6 +220,77 @@ def handle_backtest(payload: dict) -> None:
                 db.close()
 
 
+def abandon_backtest(payload: dict, reason: str) -> None:
+    """把被回收的异常回测任务对应回测标记为失败（B7）。
+
+    僵尸扫描只负责回收队列任务；若不同步回测记录，`backtest_run` 会
+    永远停留在 running，批次汇总也就无法收口。
+
+    Args:
+        payload: 任务载荷（含 backtest_id / comparison_id）。
+        reason: 回收原因。
+    """
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
+
+    backtest_id = payload.get("backtest_id") or ""
+    comparison_id = payload.get("comparison_id")
+    if not backtest_id:
+        return
+    db = SessionLocal()
+    try:
+        repo = BacktestRepository(db)
+        row = repo.find_by_id(backtest_id)
+        if row is not None and row.status in ("pending", "running"):
+            repo.mark_failed(
+                backtest_id,
+                f"任务被回收：{reason}",
+                warnings=[
+                    {
+                        "level": "error",
+                        "code": "JOB_ABANDONED",
+                        "message": f"后台任务被回收：{reason}",
+                    }
+                ],
+            )
+        if comparison_id:
+            try:
+                from quant_etf_api.services.backtest_service import BacktestService
+
+                BacktestService(db).finalize_comparison_if_ready(comparison_id)
+            except Exception:
+                logger.warning("对比回测收口失败: %s", comparison_id, exc_info=True)
+    except Exception:
+        logger.warning("异常回测任务清理失败: backtest_id=%s", backtest_id, exc_info=True)
+    finally:
+        db.close()
+
+
+def abandon_comparison(payload: dict, reason: str) -> None:
+    """把被回收的对比回测任务对应记录标记为失败（B7）。
+
+    Args:
+        payload: 任务载荷（含 comparison_id）。
+        reason: 回收原因。
+    """
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
+
+    comparison_id = payload.get("comparison_id") or ""
+    if not comparison_id:
+        return
+    db = SessionLocal()
+    try:
+        repo = BacktestRepository(db)
+        row = repo.find_comparison_by_id(comparison_id)
+        if row is not None and row.status in ("pending", "running"):
+            repo.mark_comparison_failed(comparison_id, f"任务被回收：{reason}")
+    except Exception:
+        logger.warning("异常对比任务清理失败: comparison_id=%s", comparison_id, exc_info=True)
+    finally:
+        db.close()
+
+
 def handle_comparison(payload: dict) -> None:
     """启动对比回测：标记运行中并入队两个子回测任务，立即返回。"""
     from quant_etf_api.infra.db.base import SessionLocal
@@ -237,15 +308,18 @@ def handle_comparison(payload: dict) -> None:
         return
     backtest_a_id, backtest_b_id = children
     queue = get_job_queue()
+    # 子回测沿用对比 ID 作为批次号，便于整批取消（B2）
     queue.enqueue(
         "backtest",
         {"backtest_id": backtest_a_id, "comparison_id": comparison_id},
         job_key=f"comparison:{comparison_id}:a",
+        batch_id=comparison_id,
     )
     queue.enqueue(
         "backtest",
         {"backtest_id": backtest_b_id, "comparison_id": comparison_id},
         job_key=f"comparison:{comparison_id}:b",
+        batch_id=comparison_id,
     )
 
 
@@ -627,4 +701,12 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "stock_quality_check": handle_stock_quality_check,
     "stock_data_fill": handle_stock_data_fill,
     "stock_data_rebuild": handle_stock_data_rebuild,
+}
+
+
+# 异常任务回收回调（B7）：僵尸扫描把任务判失败时，同步把业务侧记录收口，
+# 否则 backtest_run / backtest_comparison 会永远停在 running。
+JOB_ABANDON_HANDLERS: dict[str, Callable[[dict, str], None]] = {
+    "backtest": abandon_backtest,
+    "comparison": abandon_comparison,
 }

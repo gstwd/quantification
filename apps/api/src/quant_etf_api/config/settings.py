@@ -32,10 +32,55 @@ class Settings(BaseSettings):
         description="AI 舆情分析触发时间（HH:MM），默认夜里 23:30，覆盖当天全部新闻",
     )
 
-    # 后台任务队列
-    job_queue_workers: int = Field(default=4, ge=1, description="后台任务队列 worker 线程数")
+    # 后台任务队列（B1/B6：按任务类别分 lane，各自绑定独立的并发预算）
+    # 回测是 CPU + 数据库混合型任务，实测单进程内并发 4 条比串行慢约 20 倍，
+    # 因此回测 lane 默认并发 1（串行），且与摄取/其它任务互不抢占 worker。
+    job_queue_workers: int = Field(
+        default=2,
+        ge=1,
+        description="后台任务队列通用 lane 的 worker 线程数（因子/摄取/其它任务）",
+    )
+    job_queue_backtest_workers: int = Field(
+        default=1,
+        ge=1,
+        description="回测 lane 的 worker 线程数（回测并发预算，默认串行）",
+    )
+    job_queue_embedded: bool = Field(
+        default=True,
+        description=(
+            "是否在 API 进程内启动 worker 线程；部署独立 worker 进程"
+            "（python -m quant_etf_api.worker）时应设为 false，避免两处同时消费"
+        ),
+    )
     job_poll_interval_seconds: float = Field(
         default=1.0, gt=0, description="任务队列空转时的轮询间隔（秒）"
+    )
+    job_heartbeat_interval_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        description="worker 执行任务时更新 background_job.heartbeat_at 的间隔（秒）",
+    )
+    job_stuck_timeout_seconds: float = Field(
+        default=1800.0,
+        gt=0,
+        description="运行期僵尸任务判定阈值（秒）：心跳超过该时长未更新即视为卡死",
+    )
+    job_zombie_scan_enabled: bool = Field(
+        default=True,
+        description="是否启用运行期僵尸任务扫描线程（按心跳超时回收 running 任务）",
+    )
+    job_zombie_scan_interval_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="僵尸任务扫描线程的扫描间隔（秒）",
+    )
+    job_max_runtime_seconds: float = Field(
+        default=7200.0,
+        ge=0,
+        description=(
+            "单个任务最长运行时间（秒），超过即被僵尸扫描回收；0 表示不限制。"
+            "默认 2 小时，用于兜住『卡在数据库锁上但心跳正常』的异常长任务"
+        ),
     )
 
     # 日志配置

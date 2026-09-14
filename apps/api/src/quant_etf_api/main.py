@@ -18,6 +18,7 @@ from quant_etf_api.api.routers import (
     industry,
     keyword_tags,
     market_data,
+    queue as queue_router,
     robustness,
     runs,
     strategies,
@@ -52,7 +53,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         # 恢复失败（如 background_job 表尚未迁移）不应阻止服务启动
         logger.warning("后台任务队列恢复失败，服务继续启动", exc_info=True)
-    job_queue.start()
+    if settings.job_queue_embedded:
+        job_queue.start()
+    else:
+        # 独立 worker 进程部署模式：API 只入队不消费，避免两处 worker 抢任务
+        logger.info("已禁用 API 进程内 worker（job_queue_embedded=false），请运行独立 worker 进程")
     if settings.schedule_enabled:
         get_scheduler().start()
     if settings.ai_analysis_enabled:
@@ -117,6 +122,7 @@ app.include_router(strategies.router, prefix=settings.api_prefix)
 
 app.include_router(factors.router, prefix=settings.api_prefix)
 app.include_router(runs.router, prefix=settings.api_prefix)
+app.include_router(queue_router.router, prefix=settings.api_prefix)
 app.include_router(backtests.router, prefix=settings.api_prefix)
 app.include_router(robustness.router, prefix=settings.api_prefix)
 app.include_router(ai_factors.router, prefix=settings.api_prefix)

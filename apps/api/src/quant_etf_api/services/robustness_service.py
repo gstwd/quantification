@@ -139,6 +139,7 @@ class RobustnessService:
         pool_samples: int = DEFAULT_POOL_SAMPLES,
         max_knobs: int = DEFAULT_MAX_KNOBS,
         async_mode: bool = True,
+        priority: int = 0,
     ) -> dict[str, Any]:
         """创建一次稳健性验证批次：派生变体并批量提交回测。
 
@@ -152,6 +153,7 @@ class RobustnessService:
             pool_samples: 子池扰动的随机抽样次数（kind=pool 时生效）。
             max_knobs: 单旋钮扰动数量上限（kind=scan 时生效）。
             async_mode: True 时仅入队，由服务端 worker 执行。
+            priority: 入队优先级（越大越先执行），仅 async_mode=True 时生效。
 
         Returns:
             批次摘要字典（含 robustness_id 与变体数量）。
@@ -227,6 +229,7 @@ class RobustnessService:
                     robustness_id,
                     variant["label"],
                     async_mode,
+                    priority,
                 )
                 if backtest_id is not None:
                     variant["backtest_ids"][window["label"]] = backtest_id
@@ -265,11 +268,13 @@ class RobustnessService:
             "status": "running",
         }
 
-    def collect(self, robustness_id: str) -> dict[str, Any]:
+    def collect(self, robustness_id: str, allow_partial: bool = False) -> dict[str, Any]:
         """汇总批次结果：等待全部回测结束并计算邻域稳定度 / 边际贡献。
 
         Args:
             robustness_id: 批次 ID。
+            allow_partial: True 时跳过"未完成/失败窗口"，只按已完成窗口汇总，
+                并把覆盖率写入 summary（B7：避免个别卡死回测让整批无法收口）。
 
         Returns:
             汇总字典（含 status 与 summary）。
@@ -283,34 +288,153 @@ class RobustnessService:
         variants = list(row.variants or [])
         pending = 0
         failed: list[str] = []
+        completed = 0
+        expected = 0
         for variant in variants:
             for window_label, backtest_id in (variant.get("backtest_ids") or {}).items():
+                expected += 1
                 detail = self._backtest_repo.find_by_id(backtest_id)
                 if detail is None or detail.status in ("pending", "running"):
                     pending += 1
-                elif detail.status == "failed":
+                elif detail.status in ("failed", "cancelled"):
                     failed.append(f"{variant['label']}/{window_label}")
-        if failed:
+                else:
+                    completed += 1
+        if failed and not allow_partial:
             row.status = "failed"
             row.error_message = f"部分回测失败：{', '.join(failed[:5])}"
             row.finished_at = utcnow()
             row.updated_at = utcnow()
             self._db.commit()
             return {"robustness_id": robustness_id, "status": "failed", "failed": failed}
-        if pending:
+        if pending and not allow_partial:
             return {
                 "robustness_id": robustness_id,
                 "status": "running",
                 "pending_backtests": pending,
             }
+        if allow_partial and (pending or failed):
+            logger.warning(
+                "稳健性批次部分汇总: %s 已完成=%d/%d 缺失窗口=%d 失败窗口=%d",
+                robustness_id,
+                completed,
+                expected,
+                pending,
+                len(failed),
+            )
 
         summary = self._summarize(row, variants)
+        if allow_partial and (pending or failed):
+            # 覆盖率随汇总落库：部分汇总必须显式暴露样本缺口，
+            # 否则人工复核会把"少算几个窗口"的结果当成完整口径
+            summary["coverage"] = {
+                "expected_windows": expected,
+                "completed_windows": completed,
+                "pending_windows": pending,
+                "failed_windows": failed,
+                "is_partial": True,
+            }
+            row.status = "partial"
+        else:
+            summary["coverage"] = {
+                "expected_windows": expected,
+                "completed_windows": completed,
+                "pending_windows": 0,
+                "failed_windows": [],
+                "is_partial": False,
+            }
+            row.status = "success"
         row.summary = summary
-        row.status = "success"
         row.finished_at = utcnow()
         row.updated_at = utcnow()
         self._db.commit()
-        return {"robustness_id": robustness_id, "status": "success", "summary": summary}
+        return {"robustness_id": robustness_id, "status": row.status, "summary": summary}
+
+    # ── 批次取消 / 暂停（B2） ─────────────────────────────────────────────
+
+    def cancel(self, robustness_id: str) -> dict[str, Any]:
+        """取消整批稳健性回测：未开始的直接取消，运行中的协作退出。
+
+        Args:
+            robustness_id: 批次 ID。
+
+        Returns:
+            取消结果字典（含队列与回测两侧的处理数量）。
+
+        Raises:
+            ValueError: 批次不存在时抛出。
+        """
+        row = self._find(robustness_id)
+        if row is None:
+            raise ValueError(f"稳健性验证批次 {robustness_id} 不存在")
+        from quant_etf_api.infra.job_queue.queue import get_job_queue
+
+        result = get_job_queue().cancel_batch(
+            robustness_id, f"用户取消稳健性批次 {robustness_id}"
+        )
+        # 只把"任务已被取消、永远不会再跑"的 pending 回测直接落为 cancelled；
+        # 运行中的回测交给协作取消路径（主循环退出后自行落 cancelled），
+        # 避免在回测仍可能写成 success 时被提前改写状态。
+        stale = 0
+        for variant in list(row.variants or []):
+            for backtest_id in (variant.get("backtest_ids") or {}).values():
+                detail = self._backtest_repo.find_by_id(backtest_id)
+                if detail is not None and detail.status == "pending":
+                    self._backtest_repo.mark_cancelled(
+                        backtest_id, f"批次 {robustness_id} 已取消"
+                    )
+                    stale += 1
+        if row.status == "running":
+            row.status = "cancelled"
+            row.finished_at = utcnow()
+            row.updated_at = utcnow()
+            row.error_message = "批次已按请求取消"
+            self._db.commit()
+        return {
+            "robustness_id": robustness_id,
+            "status": row.status,
+            "cancelled_jobs": result["cancelled"],
+            "cancel_requested_jobs": result["requested"],
+            "cancelled_backtests": stale,
+        }
+
+    def pause(self, robustness_id: str) -> dict[str, Any]:
+        """暂停批次中尚未开始的任务（运行中的任务自然结束）。
+
+        Args:
+            robustness_id: 批次 ID。
+
+        Returns:
+            暂停结果字典。
+
+        Raises:
+            ValueError: 批次不存在时抛出。
+        """
+        if self._find(robustness_id) is None:
+            raise ValueError(f"稳健性验证批次 {robustness_id} 不存在")
+        from quant_etf_api.infra.job_queue.queue import get_job_queue
+
+        paused = get_job_queue().pause_batch(robustness_id, f"批次 {robustness_id} 已暂停")
+        return {"robustness_id": robustness_id, "paused_jobs": paused}
+
+    def resume(self, robustness_id: str) -> dict[str, Any]:
+        """恢复批次中被暂停的任务。
+
+        Args:
+            robustness_id: 批次 ID。
+
+        Returns:
+            恢复结果字典。
+
+        Raises:
+            ValueError: 批次不存在时抛出。
+        """
+        if self._find(robustness_id) is None:
+            raise ValueError(f"稳健性验证批次 {robustness_id} 不存在")
+        from quant_etf_api.infra.job_queue.queue import get_job_queue
+
+        resumed = get_job_queue().resume_batch(robustness_id)
+        return {"robustness_id": robustness_id, "resumed_jobs": resumed}
 
     def compute_statistics(
         self,
@@ -657,6 +781,7 @@ class RobustnessService:
         robustness_id: str,
         label: str,
         async_mode: bool,
+        priority: int = 0,
     ) -> str | None:
         """创建并（可选异步）执行单个变体回测。
 
@@ -664,9 +789,10 @@ class RobustnessService:
             strategy_id: 变体策略 ID。
             start: 起始日期。
             end: 截止日期。
-            robustness_id: 批次 ID（写入用途说明用于留痕）。
+            robustness_id: 批次 ID（写入用途说明用于留痕，并作为队列批次号）。
             label: 变体标签。
             async_mode: True 时仅入队。
+            priority: 入队优先级。
 
         Returns:
             回测 ID；创建失败时返回 None。
@@ -687,9 +813,16 @@ class RobustnessService:
             )
             return None
         if async_mode:
-            from quant_etf_api.infra.job_queue.queue import get_job_queue
+            from quant_etf_api.infra.job_queue.queue import backtest_job_key, get_job_queue
 
-            get_job_queue().enqueue("backtest", {"backtest_id": summary.backtest_id})
+            get_job_queue().enqueue(
+                "backtest",
+                {"backtest_id": summary.backtest_id},
+                job_key=backtest_job_key(summary.backtest_id),
+                priority=priority,
+                # 批次号随任务落库，支持整批取消/暂停（B2）
+                batch_id=robustness_id,
+            )
         else:
             self._backtest_svc.run_backtest(summary.backtest_id)
         return summary.backtest_id

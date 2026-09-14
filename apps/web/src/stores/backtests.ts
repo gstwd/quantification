@@ -11,6 +11,7 @@ import {
   fetchComparisons,
   fetchComparisonDaily,
 } from '../api/backtests'
+import type { BacktestListFilters } from '../api/backtests'
 import type {
   BacktestCreateRequest,
   BacktestDetail,
@@ -39,11 +40,7 @@ export const useBacktestStore = defineStore('backtests', {
     comparisonDaily: null as ComparisonDailyResponse | null,
   }),
   actions: {
-    async loadAll(
-      offset = 0,
-      limit = 50,
-      filters?: { strategyId?: string; createdFrom?: string; createdTo?: string },
-    ) {
+    async loadAll(offset = 0, limit = 50, filters?: BacktestListFilters) {
       this.loading = true
       try {
         const res = await fetchBacktests(offset, limit, filters)
