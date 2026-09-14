@@ -103,6 +103,10 @@ class StrategyConfigService:
             status=row.status,
             is_starred=row.is_starred,
             config_json=row.config_json,
+            # 详情顶层 index_codes 必须与 config_json 一致（F-11）：
+            # 之前详情不填这个字段，调用方读到的永远是 []，
+            # 而列表接口返回的是真实资产池，两边口径不一致
+            index_codes=(row.config_json or {}).get("index_codes", []),
             created_at=row.created_at,
             updated_at=row.updated_at,
             is_variant=getattr(row, "is_variant", False),

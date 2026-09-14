@@ -94,3 +94,21 @@ def resume_robustness_run(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return RobustnessControlResponse(**result)
+
+
+@router.post(
+    "/robustness/{robustness_id}/abandon",
+    response_model=RobustnessControlResponse,
+    status_code=202,
+)
+def abandon_robustness_run(
+    robustness_id: str,
+    reason: str | None = Query(default=None, description="作废原因，写入批次 error_message"),
+    db: Session = Depends(get_db),
+) -> RobustnessControlResponse:
+    """作废批次：把长期 running 的批次显式收口（F-4），证据与试验台账保留。"""
+    try:
+        result = RobustnessService(db).abandon(robustness_id, reason=reason)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return RobustnessControlResponse(**result)

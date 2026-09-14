@@ -16,7 +16,7 @@ import random
 import re
 from copy import deepcopy
 from hashlib import md5
-from datetime import date, timedelta
+from datetime import date, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -58,6 +58,9 @@ from quant_etf_api.services.strategy_config_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 批次停滞判定阈值（小时）：running 且超过该时长没有更新，提示人工收口（F-4）
+STALE_AFTER_HOURS = 6
 
 # 不参与单旋钮扰动的配置键：版本号改动不产生行为差异
 _KNOB_SKIP_KEYS = {"schema_version"}
@@ -232,6 +235,7 @@ class RobustnessService:
         priority: int = 0,
         knobs: list[str] | None = None,
         preset: str | None = None,
+        parallel: int = 1,
     ) -> dict[str, Any]:
         """创建一次稳健性验证批次：派生变体并批量提交回测。
 
@@ -248,18 +252,24 @@ class RobustnessService:
             priority: 入队优先级（越大越先执行），仅 async_mode=True 时生效。
             knobs: 关键旋钮路径清单（kind=scan 时生效），只扫描清单内的数值字段。
             preset: 扫描预设（quick=2 窗口/8 旋钮的轻量体检，standard=4 窗口/30 旋钮）。
+            parallel: 本地并发执行的回测进程数（仅 async_mode=False 时生效，默认 1）。
+                回测是 CPU + 数据库混合任务，线程并发会被 GIL 限制，因此这里用
+                独立进程；进程数与远端数据库连接预算要一起考虑。
 
         Returns:
             批次摘要字典（含 robustness_id、变体数量与 scan_params 口径）。
 
         Raises:
             ValueError: 类型不支持、预设不支持、关键旋钮路径不存在、策略不存在、
-                区间无行情或未派生出任何变体时抛出。
+                区间无行情、未派生出任何变体、变体标签重名，
+                或在 async_mode 下指定 parallel 时抛出。
         """
         if kind not in ("scan", "ablate", "pool"):
             raise ValueError(f"不支持的验证类型：{kind}")
         if kind != "scan" and (knobs or preset):
             raise ValueError("--knobs / --preset 仅对 scan 类型生效")
+        if async_mode and parallel != 1:
+            raise ValueError("--parallel 只在同步模式（--sync）下生效，队列并发由 worker 数决定")
         resolved_windows, resolved_knobs, scan_params = resolve_scan_options(
             preset, windows, max_knobs
         )
@@ -300,6 +310,12 @@ class RobustnessService:
             raise ValueError(
                 f"未派生任何 {kind} 变体（配置可能缺少可扰动字段或资产池）；请检查策略配置"
             )
+        labels = [candidate["label"] for candidate in candidates]
+        duplicated = sorted({label for label in labels if labels.count(label) > 1})
+        if duplicated:
+            raise ValueError(
+                "变体标签重复（会派生同一个变体策略 ID）：" + "、".join(duplicated)
+            )
 
         variants: list[dict[str, Any]] = [
             {
@@ -328,20 +344,6 @@ class RobustnessService:
         if len(variants) < 2:
             raise ValueError("未派生任何有效变体（候选配置均未通过校验）")
 
-        for variant in variants:
-            for window in window_list:
-                backtest_id = self._submit_backtest(
-                    variant["strategy_id"],
-                    date.fromisoformat(window["start"]),
-                    date.fromisoformat(window["end"]),
-                    robustness_id,
-                    variant["label"],
-                    async_mode,
-                    priority,
-                )
-                if backtest_id is not None:
-                    variant["backtest_ids"][window["label"]] = backtest_id
-
         model = RobustnessRunModel(
             robustness_id=robustness_id,
             strategy_id=strategy_id,
@@ -367,13 +369,46 @@ class RobustnessService:
             len(variants) - 1,
             len(window_list),
         )
+
+        # 阶段一：只创建回测行并落库（F-5）。
+        # 同步模式下旧实现把整批回测放在同一个事务里，批次行要到全部跑完
+        # 才 commit，前端/CLI 在长达一小时的执行期里既看不到批次也无法取消。
+        pending: list[str] = []
+        for variant in variants:
+            for window in window_list:
+                backtest_id = self._create_variant_backtest(
+                    variant["strategy_id"],
+                    date.fromisoformat(window["start"]),
+                    date.fromisoformat(window["end"]),
+                    robustness_id,
+                    variant["label"],
+                )
+                if backtest_id is None:
+                    continue
+                variant["backtest_ids"][window["label"]] = backtest_id
+                pending.append(backtest_id)
+            # 逐变体回写映射：即便随后中断，已完成部分也保留可审计的对应关系
+            model.variants = list(variants)
+            self._db.commit()
+
+        # 阶段二：执行（队列 / 本地并行 / 本地串行）
+        if async_mode:
+            for backtest_id in pending:
+                self._enqueue_variant_backtest(backtest_id, robustness_id, priority)
+        elif parallel > 1:
+            self._run_backtests_parallel(pending, parallel)
+        else:
+            for backtest_id in pending:
+                self._backtest_svc.run_backtest(backtest_id)
+
         return {
             "robustness_id": robustness_id,
             "kind": kind,
             "variants": len(variants) - 1,
             "windows": len(window_list),
-            "backtests": len(variants) * len(window_list),
+            "backtests": len(pending),
             "async_mode": async_mode,
+            "parallel": parallel if not async_mode else 0,
             "status": "running",
             "scan_params": scan_params,
         }
@@ -399,6 +434,7 @@ class RobustnessService:
         pending = 0
         missing = 0
         failed: list[str] = []
+        missing_windows: list[str] = []
         completed = 0
         expected = 0
         for variant in variants:
@@ -409,16 +445,18 @@ class RobustnessService:
                     # 回测已被删除（C5）：既不是 pending 也不能算 completed，
                     # 否则批次会永远停在 running（"等待一个不存在的结果"）
                     missing += 1
-                    failed.append(f"{variant['label']}/{window_label}:回测已删除")
+                    missing_windows.append(f"{variant['label']}/{window_label}:回测已删除")
                 elif detail.status in ("pending", "running"):
                     pending += 1
                 elif detail.status in ("failed", "cancelled"):
                     failed.append(f"{variant['label']}/{window_label}")
                 else:
                     completed += 1
-        if failed and not allow_partial:
+        # 缺失窗口（回测行已不存在）与失败窗口分开报：前者是"证据被删除"，
+        # 后者是"跑过了但没跑成"，混在一起会让人以为是执行问题（F-4）
+        if (failed or missing_windows) and not allow_partial:
             row.status = "failed"
-            row.error_message = f"部分回测失败或缺失：{', '.join(failed[:5])}"
+            row.error_message = f"部分回测失败或缺失：{', '.join((failed + missing_windows)[:5])}"
             row.finished_at = utcnow()
             row.updated_at = utcnow()
             self._db.commit()
@@ -426,6 +464,7 @@ class RobustnessService:
                 "robustness_id": robustness_id,
                 "status": "failed",
                 "failed": failed,
+                "missing_windows": missing_windows,
                 "missing_backtests": missing,
             }
         if pending and not allow_partial:
@@ -434,38 +473,43 @@ class RobustnessService:
                 "status": "running",
                 "pending_backtests": pending,
             }
-        if allow_partial and (pending or failed):
+        if allow_partial and (pending or failed or missing_windows):
             logger.warning(
                 "稳健性批次部分汇总: %s 已完成=%d/%d 缺失窗口=%d 失败窗口=%d",
                 robustness_id,
                 completed,
                 expected,
-                pending,
+                len(missing_windows),
                 len(failed),
             )
 
         summary = self._summarize(row, variants)
-        if allow_partial and (pending or failed):
+        coverage = summary.setdefault("coverage", {})
+        if allow_partial and (pending or failed or missing_windows):
             # 覆盖率随汇总落库：部分汇总必须显式暴露样本缺口，
             # 否则人工复核会把"少算几个窗口"的结果当成完整口径
-            summary["coverage"] = {
-                "expected_windows": expected,
-                "completed_windows": completed,
-                "pending_windows": pending,
-                "missing_windows": [item for item in failed if "回测已删除" in item],
-                "failed_windows": failed,
-                "is_partial": True,
-            }
+            coverage.update(
+                {
+                    "expected_windows": expected,
+                    "completed_windows": completed,
+                    "pending_windows": pending,
+                    "missing_windows": missing_windows,
+                    "failed_windows": failed,
+                    "is_partial": True,
+                }
+            )
             row.status = "partial"
         else:
-            summary["coverage"] = {
-                "expected_windows": expected,
-                "completed_windows": completed,
-                "pending_windows": 0,
-                "missing_windows": [],
-                "failed_windows": [],
-                "is_partial": False,
-            }
+            coverage.update(
+                {
+                    "expected_windows": expected,
+                    "completed_windows": completed,
+                    "pending_windows": 0,
+                    "missing_windows": [],
+                    "failed_windows": [],
+                    "is_partial": False,
+                }
+            )
             row.status = "success"
         row.summary = summary
         row.finished_at = utcnow()
@@ -555,6 +599,45 @@ class RobustnessService:
         resumed = get_job_queue().resume_batch(robustness_id)
         return {"robustness_id": robustness_id, "resumed_jobs": resumed}
 
+    def abandon(self, robustness_id: str, reason: str | None = None) -> dict[str, Any]:
+        """作废批次：把长期挂着 running 的批次显式收口（F-4）。
+
+        适用场景：回测记录被删除、服务重启后遗留、批次已无继续执行的意义。
+        作废只改批次状态与原因，**不删除任何证据**（变体策略与回测行保留，
+        变体清理仍走 ``strategy prune-variants``）；批次行的 ``trial_count``
+        继续留在试验次数台账里。
+
+        Args:
+            robustness_id: 批次 ID。
+            reason: 作废原因（写入 error_message）。
+
+        Returns:
+            作废结果字典。
+
+        Raises:
+            ValueError: 批次不存在时抛出。
+        """
+        row = self._find(robustness_id)
+        if row is None:
+            raise ValueError(f"稳健性验证批次 {robustness_id} 不存在")
+        from quant_etf_api.infra.job_queue.queue import get_job_queue
+
+        cancelled = get_job_queue().cancel_batch(
+            robustness_id, f"批次 {robustness_id} 已作废：{reason or '未说明原因'}"
+        )
+        row.status = "abandoned"
+        row.error_message = reason or "批次已人工作废（不再维护，证据保留）"
+        row.finished_at = utcnow()
+        row.updated_at = utcnow()
+        self._db.commit()
+        return {
+            "robustness_id": robustness_id,
+            "status": row.status,
+            "reason": row.error_message,
+            "cancelled_jobs": cancelled.get("cancelled", 0),
+            "cancel_requested_jobs": cancelled.get("requested", 0),
+        }
+
     def compute_statistics(
         self,
         robustness_id: str,
@@ -584,7 +667,7 @@ class RobustnessService:
         row = self._find(robustness_id)
         if row is None:
             raise ValueError(f"稳健性验证批次 {robustness_id} 不存在")
-        if row.status != "success":
+        if row.status not in ("success", "partial"):
             raise ValueError(
                 f"批次 {robustness_id} 当前状态为 {row.status}，请先执行 collect 汇总全部回测结果"
             )
@@ -604,13 +687,34 @@ class RobustnessService:
             if values:
                 matrix[variant["label"]] = values
 
-        # CSCV 需要对称切分：分块数必须为不小于 2 的偶数，否则跳过 PBO
+        # CSCV 需要对称切分：分块数必须为不小于 2 的偶数，否则跳过 PBO。
+        # 分块太少（< MIN_PBO_BLOCKS）时 compute_pbo 会返回 pbo=None + reason，
+        # 而不是把"恒为 0"伪装成"没有过拟合"（F-14）
         n_blocks = len(window_labels)
-        pbo_result = (
-            compute_pbo(matrix)
-            if len(matrix) >= 3 and n_blocks >= 2 and n_blocks % 2 == 0
-            else None
-        )
+        pbo_reason: str | None = None
+        if n_blocks < 2:
+            pbo_reason = "验证窗口少于 2 个，无法做 CSCV 切分"
+        elif n_blocks % 2 != 0:
+            pbo_reason = f"验证窗口数 {n_blocks} 为奇数，CSCV 需要对称切分"
+        elif len(matrix) < 3:
+            pbo_reason = f"有效候选只有 {len(matrix)} 个（需 ≥ 3）"
+        if pbo_reason is None:
+            pbo_result = compute_pbo(matrix)
+            pbo_payload = {
+                "value": None if pbo_result.pbo is None else round(pbo_result.pbo, 4),
+                "n_candidates": pbo_result.n_candidates,
+                "n_splits": pbo_result.n_splits,
+                "n_blocks": pbo_result.n_blocks,
+                "reason": pbo_result.reason,
+            }
+        else:
+            pbo_payload = {
+                "value": None,
+                "n_candidates": len(matrix),
+                "n_splits": 0,
+                "n_blocks": n_blocks,
+                "reason": pbo_reason,
+            }
         baseline_returns = self._baseline_daily_returns(row, cost_bps)
         trials = n_trials if n_trials is not None else self._trial_ledger(row.strategy_id)
         dsr = (
@@ -625,16 +729,8 @@ class RobustnessService:
             "n_trials": trials,
             "n_windows": n_blocks,
             "cost_bps": (cost_bps if cost_bps is not None else get_settings().default_cost_bps),
-            "pbo": (
-                {
-                    "value": round(pbo_result.pbo, 4),
-                    "n_candidates": pbo_result.n_candidates,
-                    "n_splits": pbo_result.n_splits,
-                    "n_blocks": pbo_result.n_blocks,
-                }
-                if pbo_result is not None
-                else None
-            ),
+            "is_partial": row.status == "partial",
+            "pbo": pbo_payload,
             "deflated_sharpe": (
                 {
                     "sharpe_annualized": round(dsr.sharpe_annualized, 4),
@@ -860,7 +956,20 @@ class RobustnessService:
         variant_id = build_variant_strategy_id(
             baseline.strategy_id, robustness_id, candidate["label"]
         )
-        if self._config_svc.get_config(variant_id) is not None:
+        existing = self._config_svc.get_config(variant_id)
+        if existing is not None:
+            # 变体 ID 由"基线 + 批次 + 标签"派生：命中同 ID 只可能是
+            # 同一批次内标签重名（历史缺陷 F-2 就在这里静默复用，
+            # 让第二个消融跑成第一份配置）。配置一致才允许复用，
+            # 不一致必须报错——沉默地跑错配置比整批失败更危险。
+            if compute_config_hash(existing.config_json or {}) != compute_config_hash(
+                variant_config
+            ):
+                raise ValueError(
+                    f"稳健性变体 ID 冲突且配置不一致：{variant_id}"
+                    f"（标签 {candidate['label']} 与既有变体不是同一份配置，"
+                    "请检查变体标签是否重名）"
+                )
             return variant_id
         try:
             self._config_svc.create_config(
@@ -887,17 +996,18 @@ class RobustnessService:
             return None
         return variant_id
 
-    def _submit_backtest(
+    def _create_variant_backtest(
         self,
         strategy_id: str,
         start: date,
         end: date,
         robustness_id: str,
         label: str,
-        async_mode: bool,
-        priority: int = 0,
     ) -> str | None:
-        """创建并（可选异步）执行单个变体回测。
+        """只为单个变体窗口创建回测行（不执行）。
+
+        创建与执行分开是为了让批次在执行期就可见（F-5）：
+        先把全部回测行落库，再进入执行阶段。
 
         Args:
             strategy_id: 变体策略 ID。
@@ -905,8 +1015,6 @@ class RobustnessService:
             end: 截止日期。
             robustness_id: 批次 ID（写入用途说明用于留痕，并作为队列批次号）。
             label: 变体标签。
-            async_mode: True 时仅入队。
-            priority: 入队优先级。
 
         Returns:
             回测 ID；创建失败时返回 None。
@@ -924,25 +1032,66 @@ class RobustnessService:
         except Exception:
             logger.warning("创建稳健性回测失败：%s %s~%s", strategy_id, start, end, exc_info=True)
             return None
-        if async_mode:
-            from quant_etf_api.infra.job_queue.queue import backtest_job_key, get_job_queue
-
-            get_job_queue().enqueue(
-                "backtest",
-                {"backtest_id": summary.backtest_id},
-                job_key=backtest_job_key(summary.backtest_id),
-                priority=priority,
-                # 批次号随任务落库，支持整批取消/暂停（B2）
-                batch_id=robustness_id,
-            )
-        else:
-            self._backtest_svc.run_backtest(summary.backtest_id)
         return summary.backtest_id
+
+    def _enqueue_variant_backtest(
+        self, backtest_id: str, robustness_id: str, priority: int = 0
+    ) -> None:
+        """把已创建的回测任务入队（异步模式）。
+
+        Args:
+            backtest_id: 回测 ID。
+            robustness_id: 批次 ID（作为队列批次号，支持整批取消/暂停）。
+            priority: 入队优先级。
+        """
+        from quant_etf_api.infra.job_queue.queue import backtest_job_key, get_job_queue
+
+        get_job_queue().enqueue(
+            "backtest",
+            {"backtest_id": backtest_id},
+            job_key=backtest_job_key(backtest_id),
+            priority=priority,
+            batch_id=robustness_id,
+        )
+
+    def _run_backtests_parallel(self, backtest_ids: list[str], workers: int) -> None:
+        """在独立进程里并行执行多条回测（F-13）。
+
+        回测是 CPU + 数据库混合任务，单进程内多线程会受 GIL 限制
+        （B-1 已实测线程并发反而更慢），因此这里用进程池。子进程各自
+        建 Session，不与父进程共享连接；Windows 下 ``spawn`` 会重新
+        导入模块，不会继承父进程的连接池。
+
+        Args:
+            backtest_ids: 待执行的回测 ID 列表。
+            workers: 并发进程数上限。
+        """
+        if not backtest_ids:
+            return
+        from concurrent.futures import ProcessPoolExecutor
+
+        worker_count = max(1, min(workers, len(backtest_ids)))
+        logger.info(
+            "稳健性批次本地并行执行: 回测=%d 并发进程=%d", len(backtest_ids), worker_count
+        )
+        failures: list[str] = []
+        with ProcessPoolExecutor(max_workers=worker_count) as pool:
+            for backtest_id, error in pool.map(_run_backtest_in_subprocess, backtest_ids):
+                if error:
+                    failures.append(f"{backtest_id}: {error}")
+        if failures:
+            # 失败的回测行自身会落 failed 状态，collect 汇总时按失败窗口暴露；
+            # 这里只把信息带回日志，不吞掉失败
+            logger.warning("本地并行执行有 %d 条回测失败：%s", len(failures), failures[:3])
 
     # ── 汇总与统计辅助 ────────────────────────────────────────────────────
 
     def _summarize(self, row: RobustnessRunModel, variants: list[dict[str, Any]]) -> dict[str, Any]:
         """按验证类型汇总变体结果（邻域稳定度 / 边际贡献 / 池扰动分布）。
+
+        **只在共同窗口集上比较**（F-1）：只有"所有变体都成功"的窗口才进入
+        均值，否则基线（可能少算几个窗口）与变体的均值不在同一时间样本上，
+        直接相减会得到反向结论（实测池扰动结论被整体反转）。
 
         Args:
             row: 批次 ORM 行。
@@ -952,20 +1101,35 @@ class RobustnessService:
             汇总字典。
         """
         windows = list(row.windows or [])
+        window_labels = [w["label"] for w in windows]
+        # 逐变体的可用窗口集合：用于求"所有变体都有数据"的共同窗口
+        available: dict[str, dict[str, dict[str, Any]]] = {}
+        for variant in variants:
+            metrics_by_window: dict[str, dict[str, Any]] = {}
+            for label in window_labels:
+                metrics = self._metrics_of((variant.get("backtest_ids") or {}).get(label))
+                if metrics is not None and metrics.get("sharpe_ratio") is not None:
+                    metrics_by_window[label] = metrics
+            available[variant["label"]] = metrics_by_window
+        common_windows = [
+            label
+            for label in window_labels
+            if all(label in available.get(v["label"], {}) for v in variants)
+        ]
+
         detail_rows: list[dict[str, Any]] = []
         baseline_sharpe: float | None = None
         baseline_return: float | None = None
         for variant in variants:
-            sharpes: list[float] = []
-            returns: list[float] = []
-            for window in windows:
-                metrics = self._metrics_of((variant.get("backtest_ids") or {}).get(window["label"]))
-                if metrics is None:
-                    continue
-                if metrics.get("sharpe_ratio") is not None:
-                    sharpes.append(float(metrics["sharpe_ratio"]))
-                if metrics.get("annualized_return_pct") is not None:
-                    returns.append(float(metrics["annualized_return_pct"]))
+            metrics_by_window = available.get(variant["label"], {})
+            sharpes = [
+                float(metrics_by_window[label]["sharpe_ratio"]) for label in common_windows
+            ]
+            returns = [
+                float(metrics_by_window[label]["annualized_return_pct"])
+                for label in common_windows
+                if metrics_by_window[label].get("annualized_return_pct") is not None
+            ]
             mean_sharpe = _mean(sharpes)
             mean_return = _mean(returns)
             if variant["label"] == "baseline":
@@ -979,7 +1143,10 @@ class RobustnessService:
                     "value": variant.get("value"),
                     "sharpe_mean": _round(mean_sharpe),
                     "annualized_return_mean": _round(mean_return),
+                    # windows 表示"参与比较的窗口数"（共同窗口），
+                    # windows_available 表示该变体自己跑成功的窗口数
                     "windows": len(sharpes),
+                    "windows_available": len(metrics_by_window),
                 }
             )
 
@@ -999,12 +1166,28 @@ class RobustnessService:
             "baseline_sharpe_mean": _round(baseline_sharpe),
             "baseline_annualized_return_mean": _round(baseline_return),
             "variants": detail_rows,
+            "coverage": {
+                "expected_windows": len(window_labels) * len(variants),
+                "completed_windows": sum(len(item) for item in available.values()),
+                "pending_windows": 0,
+                "missing_windows": [],
+                "failed_windows": [],
+                "is_partial": False,
+                "common_windows": common_windows,
+                "comparable": bool(common_windows),
+            },
         }
         perturbed = [item for item in detail_rows if item["label"] != "baseline"]
-        if row.kind == "scan" and baseline_sharpe is not None:
+        if row.kind == "scan":
+            # 基线自身没有可用窗口时不比较（否则会拿 0.0 当基线算出一堆假 delta）
+            variant_values = (
+                [item["sharpe_mean"] for item in perturbed if item["sharpe_mean"] is not None]
+                if baseline_sharpe is not None
+                else []
+            )
             neighborhood = summarize_neighborhood(
-                baseline_sharpe,
-                [item["sharpe_mean"] for item in perturbed if item["sharpe_mean"] is not None],
+                baseline_sharpe if baseline_sharpe is not None else 0.0,
+                variant_values,
             )
             summary["neighborhood"] = {
                 "n_variants": neighborhood.n_variants,
@@ -1123,7 +1306,58 @@ class RobustnessService:
             created_at=row.created_at,
             finished_at=row.finished_at,
             error_message=row.error_message,
+            is_stale=_is_stale(row),
         )
+
+
+def _is_stale(row: RobustnessRunModel) -> bool:
+    """判断批次是否疑似停滞（F-4）。
+
+    ``running`` 且超过 :data:`STALE_AFTER_HOURS` 没有更新，说明没有人/进程
+    在推进它（历史上出现过两种成因：回测被删除、进程重启遗留）。
+    时间戳可能同时存在 aware（timestamptz）与 naive（历史 timestamp）两种
+    形态，这里统一按 UTC 处理，避免时区混用导致的判断错误（B5）。
+
+    Args:
+        row: 批次 ORM 行。
+
+    Returns:
+        True 表示疑似停滞。
+    """
+    if row.status != "running" or row.updated_at is None:
+        return False
+    updated = row.updated_at
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    now = utcnow()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return (now - updated) > timedelta(hours=STALE_AFTER_HOURS)
+
+
+def _run_backtest_in_subprocess(backtest_id: str) -> tuple[str, str | None]:
+    """在独立进程里执行一条回测（F-13 本地并行用）。
+
+    必须是模块级函数才能被 ``ProcessPoolExecutor`` 序列化；子进程自己
+    创建 Session（Windows 下 ``spawn`` 会重新导入模块），因此不会与
+    父进程共享数据库连接池。
+
+    Args:
+        backtest_id: 回测 ID。
+
+    Returns:
+        ``(backtest_id, 错误信息)``；成功时错误信息为 None。
+    """
+    from quant_etf_api.infra.db.base import SessionLocal
+
+    db = SessionLocal()
+    try:
+        BacktestService(db).run_backtest(backtest_id)
+        return backtest_id, None
+    except Exception as exc:  # noqa: BLE001 - 子进程异常必须带回父进程，避免静默丢失
+        return backtest_id, f"{type(exc).__name__}: {exc}"
+    finally:
+        db.close()
 
 
 def build_knob_variants(
@@ -1231,7 +1465,10 @@ def build_ablation_variants(config: dict[str, Any]) -> list[dict[str, Any]]:
             factor_label = rule.get("factor", f"rule{index}")
             candidates.append(
                 {
-                    "label": f"ablate_filter_{_slug(str(factor_label))}",
+                    # 标签必须带规则下标：同一因子可以出现在多条规则里
+                    # （v8 的 close_price 就有 ma_10d / ma_17d 两条），
+                    # 只按因子名生成标签会让两个不同消融拿到同一个变体 ID
+                    "label": f"ablate_filter_rules{index}_{_slug(str(factor_label))}",
                     "kind": "ablation",
                     "knob": f"filters.rules[{index}].{factor_label}",
                     "value": None,

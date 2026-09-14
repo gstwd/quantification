@@ -53,19 +53,20 @@
 
 | 命令 | 说明 |
 | --- | --- |
-| `robustness scan --strategy <id> [--preset quick\|standard] [--windows 4] [--max-knobs 30] [--knobs a,b] [--knobs-file k.json] [--sync]` | 单旋钮邻域扰动：按业务重要性优先扫择时/过滤阈值；`quick`=2 窗口/8 旋钮轻量体检 |
-| `robustness ablate --strategy <id> [--windows 4] [--sync]` | 因子消融：逐个移除评分因子与过滤条件 |
-| `robustness pool --strategy <id> [--windows 4] [--samples 8] [--sync]` | 资产池扰动：随机 80% 子池 / 剔除常持 / 剔除后上市 |
+| `robustness scan --strategy <id> [--preset quick\|standard] [--windows 4] [--max-knobs 30] [--knobs a,b] [--knobs-file k.json] [--sync --parallel N]` | 单旋钮邻域扰动：按业务重要性优先扫择时/过滤阈值；`quick`=2 窗口/8 旋钮轻量体检；`--parallel` 走本地进程池并行（仅同步模式） |
+| `robustness ablate --strategy <id> [--windows 4] [--sync --parallel N]` | 因子消融：逐个移除评分因子与过滤条件（标签形如 `ablate_filter_rules1_close_price`，含规则下标） |
+| `robustness pool --strategy <id> [--windows 4] [--samples 8] [--sync --parallel N]` | 资产池扰动：随机 80% 子池 / 剔除常持 / 剔除后上市 |
 | `robustness collect <id> [--wait] [--timeout 3600] [--allow-partial]` | 等待并汇总批次（邻域稳定度 / 边际贡献 / 池扰动分布）；`--allow-partial` 按已完成窗口汇总并写 coverage |
 | `robustness cancel\|pause\|resume <id>` | 整批取消 / 暂停 / 恢复（运行中的任务在安全检查点退出） |
-| `robustness stats <id> [--n-trials] [--cost-bps] [--block 20] [--bootstrap 2000]` | CSCV-PBO / Deflated Sharpe / 块自助法置信区间 |
-| `robustness show <id>` / `robustness list [--limit]` | 批次详情（含 `scan_params` 扫描口径）/ 列表 |
+| `robustness abandon <id> [--reason "..."]` | 作废批次（把长期 running 的批次显式收口，证据与试验台账保留） |
+| `robustness stats <id> [--n-trials] [--cost-bps] [--block 20] [--bootstrap 2000]` | CSCV-PBO / Deflated Sharpe / 块自助法置信区间；窗口数 <4 时 `pbo.value=null` + `reason` |
+| `robustness show <id>` / `robustness list [--limit]` | 批次详情（含 `scan_params` 扫描口径）/ 列表（含 `is_stale` 停滞提示） |
 
 ## research（批量变体探索，不落库）
 
 | 命令 | 说明 |
 | --- | --- |
-| `research batch --strategy <id> --variants v.json [--windows 5] [--cost-bps 10] [--cost-ladder 0,10,20,30,50] [--no-baseline]` | 同一批变体 × 窗口的离线评估：复用平台执行路径但**不落库**，按窗口共享行情与因子缓存；输出逐窗口毛/净口径、多档成本与 `vs_baseline`（Δ净年化/Δ净夏普/劣化窗口占比） |
+| `research batch --strategy <id> --variants v.json [--windows 5] [--cost-bps 10] [--cost-ladder 0,10,20,30,50] [--no-baseline] [--summary]` | 同一批变体 × 窗口的离线评估：复用平台执行路径但**不落库**，按窗口共享行情与因子缓存；`--summary` 输出「变体 × 指标」排名表（否则是完整 JSON，几十个变体会超输出上限） |
 
 变体文件格式：`{"variants": [{"label": "x", "patch": {"rank.top_n": 4}}, {"label": "y", "config": {...}}]}`。
 `patch` 的路径支持列表下标（`filters.rules[1].value`）；路径不存在或字段拼错都会直接报错。
@@ -100,6 +101,8 @@
 - 异步并行：`backtest run --async` 与 `optimization evaluate --async` 只把任务写入 `background_job`，由服务端 uvicorn 多 worker 进程经 `FOR UPDATE SKIP LOCKED` 并行认领执行，互不重复；实际并行度 = min(worker 数, CPU 核心数)。多方向/多段并行时用 `--async`，入队后 CLI 进程可退出，任务继续在服务端执行。
 - `fold_summary`：每个指标输出基线/候选的均值、中位数、候选胜出折数。
 - 验收清单默认阈值（共 7 项）：验证窗平均夏普 Δ≥0；平均最大回撤劣化 ≤ 2pct；夏普胜出折数 ≥ 50%；验证窗平均累计收益 Δ≥0；净成本口径夏普 Δ≥0；参数邻域无方向反转（需先跑 `robustness scan`）；分段一致性（剔除最好折后候选夏普不低于基线）。`--strict` 时 accept 必须全部满足。
+- 验收清单现在随 `optimization show` 一起返回（`acceptance_checklist`），不必先 `finish` 就能看到哪一项没过；`metrics_full` / `metrics_folds` 也带净口径（`net_sharpe_ratio` / `net_annualized_return_pct` / `annualized_turnover`）。
+- `optimization start` 的 `--start` 缺省为**研究期起点**（不是"最近两年"）；`finish --promote` 会把版本历史追加进策略描述。
 
 ## 回测快照与会话
 

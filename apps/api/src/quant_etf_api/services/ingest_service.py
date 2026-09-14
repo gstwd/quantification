@@ -26,7 +26,8 @@ from quant_etf_api.infra.clients.tushare_market import (
     TushareIndexValuationClient,
     TushareMacroClient,
 )
-from quant_etf_api.infra.trading_calendar import TradingCalendar
+from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
+from quant_etf_api.infra.trading_calendar import TradingCalendar, resolve_trading_calendar
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.time import today_cn
 from quant_etf_api.infra.db.models.core import (
@@ -405,9 +406,52 @@ class IngestService:
         if latest is not None:
             bars = [b for b in bars if b.trade_date > latest]
 
+        # 非交易日行情过滤（F-7）：上游偶尔把上一交易日的收盘价打在假期日期上
+        # （实测 2018-06-18 端午节有 7 个指数日线），入库前按交易日历剔除
+        bars, dropped = self._drop_non_trading_bars(bars)
+        if dropped:
+            logger.warning(
+                "剔除非交易日行情: index_code=%s 条数=%d 日期=%s",
+                index_code,
+                len(dropped),
+                [str(b.trade_date) for b in dropped[:5]],
+            )
+        if not bars:
+            return 0
+
         count = self._insert_index_bars(index_code, bars, source=source)
         self._db.commit()
         return count
+
+    def _drop_non_trading_bars(self, bars: list[Any]) -> tuple[list[Any], list[Any]]:
+        """剔除不属于交易日的行情（F-7）。
+
+        `index_daily_bar` 没有对交易日历的约束，上游把假期日期打上行情时
+        会被照单全收，随后回测把它当交易日，多出一个假调仓日与假收益。
+        日历不可用时保持原有行为（不阻断摄取）并留下告警。
+
+        Args:
+            bars: 待入库的行情列表（元素含 ``trade_date``）。
+
+        Returns:
+            (可入库行情列表, 被剔除行情列表)。
+        """
+        if not bars:
+            return bars, []
+        try:
+            calendar, _ = resolve_trading_calendar(
+                self._db,
+                required_range=(
+                    min(b.trade_date for b in bars),
+                    max(b.trade_date for b in bars),
+                ),
+            )
+        except TradingCalendarUnavailableError:
+            logger.warning("交易日历不可用，跳过行情的非交易日校验", exc_info=True)
+            return bars, []
+        kept = [b for b in bars if calendar.is_trading_day(b.trade_date)]
+        dropped = [b for b in bars if not calendar.is_trading_day(b.trade_date)]
+        return kept, dropped
 
     def get_benchmark_indexes(self) -> list[BenchmarkIndex]:
         """返回所有活跃的基准指数（从种子表读取，已停用的不返回）。"""

@@ -23,6 +23,9 @@ from dataclasses import dataclass
 DEFAULT_TRADING_DAYS_PER_YEAR = 252
 # 欧拉-马歇罗尼常数，Deflated Sharpe 期望最大值公式使用
 EULER_GAMMA = 0.5772156649015329
+# CSCV 需要的最少分块数：低于该值时对称切分方式太少（2 块只有 1 种切分），
+# PBO 恒为 0，读起来像"没有过拟合"却是纯粹的假阳性保护
+MIN_PBO_BLOCKS = 4
 
 
 @dataclass
@@ -30,16 +33,18 @@ class PboResult:
     """CSCV-PBO 估计结果。
 
     Attributes:
-        pbo: 回测过拟合概率（0-1，约 0.5 相当于纯噪声）。
+        pbo: 回测过拟合概率（0-1，约 0.5 相当于纯噪声）；分块不足时为 None。
         n_candidates: 参与计算的候选数量。
         n_splits: 对称切分数量（C(S, S/2)）。
         n_blocks: 分块数量。
+        reason: 未给出 pbo 时的原因说明（分块不足等）。
     """
 
-    pbo: float
+    pbo: float | None
     n_candidates: int
     n_splits: int
     n_blocks: int
+    reason: str | None = None
 
 
 @dataclass
@@ -90,19 +95,21 @@ class NeighborhoodSummary:
 
     Attributes:
         n_variants: 参与统计的扰动变体数量。
-        delta_min: 变体相对基线的指标变化最小值。
-        delta_max: 变体相对基线的指标变化最大值。
-        worse_ratio: 劣于基线的变体占比（0-1）。
-        reversal: 是否存在方向反转（最好变体明显优于基线且最差变体明显劣于基线）。
-        is_plateau: 是否落在参数高原（全部变体的变化都在容差内）。
+        delta_min: 变体相对基线的指标变化最小值；无变体时为 None。
+        delta_max: 变体相对基线的指标变化最大值；无变体时为 None。
+        worse_ratio: 劣于基线的变体占比（0-1）；无变体时为 None。
+        reversal: 是否存在方向反转（最好变体明显优于基线且最差变体明显劣于基线）；
+            无变体时为 None。
+        is_plateau: 是否落在参数高原（全部变体的变化都在容差内）；
+            **无变体时为 None**——"没算出东西"不能读成"通过"。
     """
 
     n_variants: int
-    delta_min: float
-    delta_max: float
-    worse_ratio: float
-    reversal: bool
-    is_plateau: bool
+    delta_min: float | None
+    delta_max: float | None
+    worse_ratio: float | None
+    reversal: bool | None
+    is_plateau: bool | None
 
 
 def annualized_sharpe(
@@ -167,7 +174,9 @@ def compute_pbo(
         n_blocks: 分块数量，默认取候选矩阵的分块数；必须为偶数且 ≥ 2。
 
     Returns:
-        PboResult；有效候选少于 3 个时返回 pbo=0、n_candidates 为实际数量。
+        PboResult。有效候选少于 3 个、或分块数低于 :data:`MIN_PBO_BLOCKS` 时
+        返回 ``pbo=None`` 并给出 ``reason``（分块太少时 CSCV 的切分方式不足，
+        PBO 恒为 0，直接输出 0 会被误读成"没有过拟合"）。
 
     Raises:
         ValueError: n_blocks 为奇数或小于 2 时抛出。
@@ -181,8 +190,25 @@ def compute_pbo(
         for label, values in performance_matrix.items()
         if values and len(values) == block_count
     )
+    if block_count < MIN_PBO_BLOCKS:
+        return PboResult(
+            pbo=None,
+            n_candidates=len(labels),
+            n_splits=0,
+            n_blocks=block_count,
+            reason=(
+                f"分块数 {block_count} < {MIN_PBO_BLOCKS}，CSCV 切分方式不足，"
+                "PBO 无信息量（请用更多验证窗口重跑）"
+            ),
+        )
     if len(labels) < 3:
-        return PboResult(pbo=0.0, n_candidates=len(labels), n_splits=0, n_blocks=block_count)
+        return PboResult(
+            pbo=None,
+            n_candidates=len(labels),
+            n_splits=0,
+            n_blocks=block_count,
+            reason=f"有效候选只有 {len(labels)} 个（需 ≥ 3）",
+        )
 
     n = len(labels)
     logits: list[float] = []
@@ -342,7 +368,9 @@ def summarize_neighborhood(
     """
     valid = [v for v in variant_values if v is not None and math.isfinite(v)]
     if not valid:
-        return NeighborhoodSummary(0, 0.0, 0.0, 0.0, False, True)
+        # 一个变体都没算出结果时不能返回 is_plateau=True：
+        # 验收清单第 6 项（参数邻域无方向反转）会把"没算"读成"通过"
+        return NeighborhoodSummary(0, None, None, None, None, None)
     deltas = [v - base_value for v in valid]
     worse = sum(1 for d in deltas if d < 0)
     return NeighborhoodSummary(

@@ -505,6 +505,12 @@ def _build_robustness_group(subparsers: argparse._SubParsersAction) -> None:
             p.add_argument("--samples", type=int, default=8, help="随机子池抽样次数")
         p.add_argument("--sync", dest="sync_mode", action="store_true", help="同步执行（默认入队）")
         p.add_argument(
+            "--parallel",
+            type=int,
+            default=1,
+            help="同步模式下的本地并发进程数（默认 1；回测是 CPU+DB 混合任务，用进程而非线程）",
+        )
+        p.add_argument(
             "--priority",
             type=int,
             default=0,
@@ -533,6 +539,14 @@ def _build_robustness_group(subparsers: argparse._SubParsersAction) -> None:
 
     p = sub.add_parser("resume", help="恢复批次中被暂停的任务")
     p.add_argument("robustness_id")
+    _add_json_flag(p)
+
+    p = sub.add_parser(
+        "abandon",
+        help="作废批次（把长期 running 的批次显式收口，保留全部证据与试验台账）",
+    )
+    p.add_argument("robustness_id")
+    p.add_argument("--reason", help="作废原因，写入批次 error_message")
     _add_json_flag(p)
 
     p = sub.add_parser("stats", help="计算 CSCV-PBO / Deflated Sharpe / 自助法置信区间")
@@ -579,6 +593,11 @@ def _build_research_group(subparsers: argparse._SubParsersAction) -> None:
         "--no-baseline",
         action="store_true",
         help="不额外评估基线配置（默认总是把基线一起评估作为对照）",
+    )
+    p.add_argument(
+        "--summary",
+        action="store_true",
+        help="只输出「变体 × 指标」排名表（避免几十个变体的完整 JSON 刷屏）",
     )
     _add_json_flag(p)
 
@@ -1306,7 +1325,11 @@ def _run_research(args: argparse.Namespace) -> None:
             cost_ladder=_parse_cost_ladder(args.cost_ladder),
             include_baseline=not args.no_baseline,
         )
-        _emit(result.to_dict(), not args.no_json)
+        if args.summary:
+            # 摘要视图是"给人/agent 看的表"，不走 JSON 序列化
+            print(result.to_summary_table())
+        else:
+            _emit(result.to_dict(), not args.no_json)
     except ValueError as exc:
         _fail(str(exc))
     finally:
@@ -1329,6 +1352,7 @@ def _run_robustness(args: argparse.Namespace) -> None:
                 priority=getattr(args, "priority", 0),
                 knobs=_resolve_knobs(args),
                 preset=getattr(args, "preset", None),
+                parallel=getattr(args, "parallel", 1),
             )
             _emit(result, not args.no_json)
         elif args.subcommand == "collect":
@@ -1350,6 +1374,8 @@ def _run_robustness(args: argparse.Namespace) -> None:
             _emit(svc.pause(args.robustness_id), not args.no_json)
         elif args.subcommand == "resume":
             _emit(svc.resume(args.robustness_id), not args.no_json)
+        elif args.subcommand == "abandon":
+            _emit(svc.abandon(args.robustness_id, reason=args.reason), not args.no_json)
         elif args.subcommand == "stats":
             result = svc.compute_statistics(
                 args.robustness_id,
@@ -1380,9 +1406,13 @@ def _run_optimization(args: argparse.Namespace) -> None:
         svc = OptimizationService(db)
         if args.subcommand == "start":
             # 优化属于研究行为：默认截止在研究期末端，不得触碰验证期数据
-            research_end = date.fromisoformat(get_settings().research_period_end)
+            settings = get_settings()
+            research_end = date.fromisoformat(settings.research_period_end)
             end = args.end or research_end
-            start = args.start or (end - timedelta(days=730))
+            # 起点缺省必须是研究期起点（F-18）：旧实现缺省 end - 730 天，
+            # 忘了写 --start 时会把"十年研究期评估"静默变成"最近两年"，
+            # 而验收清单照常输出"通过"。
+            start = args.start or date.fromisoformat(settings.research_period_start)
             candidate = _read_json_file(args.candidate_file)
             result = svc.start(
                 strategy_id=args.strategy_id,

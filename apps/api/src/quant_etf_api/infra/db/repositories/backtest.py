@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+import sqlalchemy as sa
 from sqlalchemy import func, text
 
 from quant_etf_api.infra.db.models.core import (
@@ -146,6 +147,45 @@ class BacktestRepository(BaseRepository):
             .order_by(BacktestDailyResultModel.trade_date.asc())
             .all()
         )
+
+    def find_return_turnover_pairs(
+        self, backtest_ids: list[str]
+    ) -> dict[str, list[tuple[float | None, float | None, float | None]]]:
+        """批量读取多条回测的 (组合日收益, 单边换手率, 基准日收益) 序列（F-12）。
+
+        列表页需要净口径指标，但净口径必须由逐日序列现算（C3 的设计：
+        不落库、不重跑）。这里只取三列且不构造 ORM 对象，避免为几十条
+        十年回测实例化十万级对象；带基准是为了让列表的净超额与
+        ``backtest show`` 口径一致。
+
+        Args:
+            backtest_ids: 回测标识列表。
+
+        Returns:
+            backtest_id → [(portfolio_return, turnover, benchmark_return)]，按交易日升序；
+            没有逐日结果时为空字典。
+        """
+        if not backtest_ids:
+            return {}
+        stmt = (
+            sa.select(
+                BacktestDailyResultModel.backtest_id,
+                BacktestDailyResultModel.portfolio_return,
+                BacktestDailyResultModel.turnover,
+                BacktestDailyResultModel.benchmark_return,
+            )
+            .where(BacktestDailyResultModel.backtest_id.in_(backtest_ids))
+            .order_by(
+                BacktestDailyResultModel.backtest_id.asc(),
+                BacktestDailyResultModel.trade_date.asc(),
+            )
+        )
+        result: dict[str, list[tuple[float | None, float | None, float | None]]] = {}
+        for backtest_id, portfolio_return, turnover, benchmark_return in self._db.execute(stmt).all():
+            result.setdefault(backtest_id, []).append(
+                (portfolio_return, turnover, benchmark_return)
+            )
+        return result
 
     def find_index_results(
         self, backtest_id: str, index_code: str | None = None

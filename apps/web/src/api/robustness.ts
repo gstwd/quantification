@@ -75,3 +75,22 @@ export async function resumeRobustnessRun(
   )
   return data
 }
+
+/**
+ * 作废批次（把长期 running 的批次显式收口，保留证据与试验台账，F-4）。
+ *
+ * @param robustnessId - 批次 ID
+ * @param reason - 作废原因
+ * @returns 作废结果
+ */
+export async function abandonRobustnessRun(
+  robustnessId: string,
+  reason?: string,
+): Promise<Record<string, unknown>> {
+  const { data } = await apiClient.post<Record<string, unknown>>(
+    `/robustness/${robustnessId}/abandon`,
+    undefined,
+    { params: { reason } },
+  )
+  return data
+}

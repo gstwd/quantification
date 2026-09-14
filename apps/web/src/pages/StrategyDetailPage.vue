@@ -310,6 +310,9 @@
                 <span :class="['chip', statusChipClass(run.status)]">
                   {{ statusText(run.status) }}
                 </span>
+                <span v-if="run.is_stale" class="chip chip-disabled" title="长时间没有进展，可用 robustness abandon 收口">
+                  疑似停滞
+                </span>
               </td>
               <td>{{ run.trial_count }}</td>
               <td class="mono">{{ run.start_date }} ~ {{ run.end_date }}</td>
@@ -322,6 +325,13 @@
                   @click="handleCancelRun(run.robustness_id)"
                 >
                   取消
+                </button>
+                <button
+                  v-if="run.status === 'running' || run.status === 'partial'"
+                  class="btn-link danger"
+                  @click="handleAbandonRun(run.robustness_id)"
+                >
+                  作废
                 </button>
               </td>
             </tr>
@@ -359,7 +369,16 @@
               <span>Δ夏普范围 {{ fmt(selectedRun.summary.neighborhood.delta_min) }} ~
                 {{ fmt(selectedRun.summary.neighborhood.delta_max) }}</span>
               <span>劣于基线占比 {{ fmtRatio(selectedRun.summary.neighborhood.worse_ratio) }}</span>
-              <span :class="['chip', selectedRun.summary.neighborhood.is_plateau ? 'chip-active' : 'chip-disabled']">
+              <span
+                v-if="selectedRun.summary.neighborhood.is_plateau === null"
+                class="chip chip-disabled"
+              >
+                有效变体不足，无法判定
+              </span>
+              <span
+                v-else
+                :class="['chip', selectedRun.summary.neighborhood.is_plateau ? 'chip-active' : 'chip-disabled']"
+              >
                 {{ selectedRun.summary.neighborhood.is_plateau ? '处于平台' : '非平台（参数脆弱）' }}
               </span>
               <span v-if="selectedRun.summary.neighborhood.reversal" class="chip chip-disabled">
@@ -403,11 +422,13 @@
               统计显著性（试验次数 N = {{ selectedRun.statistics.n_trials }}）
             </div>
             <div class="robust-kv">
-              <span v-if="selectedRun.statistics.pbo">
+              <span v-if="selectedRun.statistics.pbo && selectedRun.statistics.pbo.value !== null">
                 CSCV-PBO：<b class="mono">{{ selectedRun.statistics.pbo.value }}</b>
                 （≈0.5 相当于纯噪声，越高越可疑）
               </span>
-              <span v-else class="text-muted">PBO：窗口数或候选数不足，未计算</span>
+              <span v-else class="text-muted">
+                PBO：{{ selectedRun.statistics.pbo?.reason || '窗口数或候选数不足，未计算' }}
+              </span>
             </div>
             <div class="robust-kv">
               <span v-if="selectedRun.statistics.deflated_sharpe">
@@ -831,6 +852,7 @@ import { useRouter } from 'vue-router'
 
 import { fetchIndexDailyBars } from '../api/market_data'
 import {
+  abandonRobustnessRun,
   cancelRobustnessRun,
   fetchRobustnessDetail,
   fetchRobustnessRuns,
@@ -952,6 +974,7 @@ const STATUS_TEXTS: Record<string, string> = {
   failed: '失败',
   cancelled: '已取消',
   paused: '已暂停',
+  abandoned: '已作废',
 }
 
 /** 批次类型标签 */
@@ -1028,6 +1051,18 @@ async function handleCancelRun(robustnessId: string): Promise<void> {
     await loadRobustness()
   } catch (e) {
     toast.error(e instanceof Error ? e.message : '取消失败')
+  }
+}
+
+/** 作废批次：把长期 running 的批次显式收口（证据与试验台账保留） */
+async function handleAbandonRun(robustnessId: string): Promise<void> {
+  try {
+    await abandonRobustnessRun(robustnessId, '人工在策略详情页作废')
+    toast.info('批次已作废（证据与试验台账保留）')
+    if (selectedRun.value?.robustness_id === robustnessId) selectedRun.value = null
+    await loadRobustness()
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : '作废失败')
   }
 }
 

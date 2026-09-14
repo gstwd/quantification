@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from time import perf_counter
@@ -31,6 +32,7 @@ from quant_etf_api.domain.common.numeric import (
     sanitize_metric_value as _sanitize_metric_value,
 )
 from quant_etf_api.domain.common.signal_level import determine_signal_level
+from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
 from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
 from quant_etf_api.domain.portfolio.benchmark import compute_buy_hold_benchmark
 from quant_etf_api.domain.portfolio.returns import (
@@ -61,6 +63,7 @@ from quant_etf_api.domain.research.periods import (
     validate_backtest_period,
 )
 from quant_etf_api.domain.research.stability import (
+    DEFAULT_TRADING_DAYS_PER_YEAR,
     compute_cost_ladder,
     compute_stability_metrics,
 )
@@ -158,6 +161,61 @@ def _window_cache_key(row: BacktestRunModel) -> str:
     """
     universe_filter = json.dumps(row.universe_filter or {}, sort_keys=True, ensure_ascii=False)
     return f"{row.start_date.isoformat()}~{row.end_date.isoformat()}|{universe_filter}"
+
+
+def _execution_price_warning(
+    exclusion_dates: dict[str, list[date]],
+    exclusion_reasons: dict[str, set[str]],
+) -> BacktestWarning | None:
+    """构造"缺开盘价被剔除"的警告（F-8）。
+
+    执行模型是 T+1 开盘价，缺开盘价的指数当期无法建仓，会被静默排除在
+    候选池之外。旧实现只有一条 info 级的池缩水提示，很容易被读成
+    "资产池正常波动"，实际上配置 21 只指数时 2016-2024 只有 10~14 只可交易。
+
+    Args:
+        exclusion_dates: 指数 → 被剔除的交易日列表。
+        exclusion_reasons: 指数 → 剔除原因集合。
+
+    Returns:
+        结构化警告；没有被"缺开盘价"剔除的指数时返回 None。
+    """
+    missing_open_days = {
+        code: len(dates)
+        for code, dates in exclusion_dates.items()
+        if "MISSING_OPEN" in exclusion_reasons.get(code, set())
+    }
+    if not missing_open_days:
+        return None
+    ranked = sorted(missing_open_days.items(), key=lambda item: (-item[1], item[0]))
+    detail = "、".join(f"{code} {days} 天" for code, days in ranked[:5])
+    return BacktestWarning(
+        level="warning",
+        code="EXECUTION_PRICE_MISSING",
+        message=(
+            f"{len(missing_open_days)} 个指数因缺开盘价被排除在候选池之外"
+            f"（合计 {sum(missing_open_days.values())} 个交易日）：{detail}"
+            f"{' 等' if len(ranked) > 5 else ''}；"
+            "执行模型为 T+1 开盘价，缺开盘价当期无法建仓，实际可交易资产域小于配置资产池"
+        ),
+    )
+
+
+def _first_bar_by_code(all_bars: dict[tuple[str, date], Any]) -> dict[str, date]:
+    """汇总每个指数在回测区间内的首根 K 线日期（F-6 预热期口径用）。
+
+    Args:
+        all_bars: 行情数据，键为 (index_code, trade_date)。
+
+    Returns:
+        指数代码 → 首根 K 线日期。
+    """
+    first: dict[str, date] = {}
+    for (code, trade_date) in all_bars:
+        current = first.get(code)
+        if current is None or trade_date < current:
+            first[code] = trade_date
+    return first
 
 
 def _parse_candidate_pool(raw: Any) -> BacktestCandidatePool | None:
@@ -366,6 +424,8 @@ class BacktestService:
         order_by: str = "created_at",
         descending: bool = True,
         calendar_source: str | None = None,
+        include_net: bool = True,
+        cost_bps: float | None = None,
     ) -> tuple[list[BacktestSummary], int]:
         """分页返回回测列表，支持状态/用途/时间范围/日历来源筛选（B4/C1）。
 
@@ -381,6 +441,10 @@ class BacktestService:
             descending: 是否倒序，默认 True。
             calendar_source: 调仓日历来源过滤（upstream/database/not_required），
                 用于审计"同一配置是否跑在两种调仓日历上"（C1）。
+            include_net: 是否现算净成本口径指标（F-12，默认 True）。
+                历史实现只给 `backtest show` 现算净口径，列表里
+                `net_sharpe_ratio` 恒为 null，无法在列表层比较"成本吃掉多少超额"。
+            cost_bps: 净口径成本（基点），None 时取系统默认值。
 
         Returns:
             筛选后的回测摘要和总数。
@@ -401,11 +465,73 @@ class BacktestService:
                 calendar_source=calendar_source,
             )
             queue_info = self._queue_info([r.backtest_id for r in rows])
-            items = [self._row_to_summary(r, queue_info.get(r.backtest_id)) for r in rows]
+            net_info = self._net_metrics_by_backtest(rows, cost_bps) if include_net else {}
+            items = [
+                self._row_to_summary(
+                    r, queue_info.get(r.backtest_id), net_metrics=net_info.get(r.backtest_id)
+                )
+                for r in rows
+            ]
             return items, total
         except Exception:
             logger.warning("list_backtests DB query failed", exc_info=True)
             return [], 0
+
+    def _net_metrics_by_backtest(
+        self, rows: list[BacktestRunModel], cost_bps: float | None
+    ) -> dict[str, dict[str, Any]]:
+        """批量现算每条回测的净成本口径指标（F-12）。
+
+        与 `backtest show` 使用同一套口径（`domain.research.stability`
+        的成本折算），只是把结果并进列表摘要，避免"列表看毛、详情看净"。
+
+        Args:
+            rows: 当前页的回测 ORM 行。
+            cost_bps: 成本（基点），None 时取系统默认值。
+
+        Returns:
+            backtest_id → {net_sharpe_ratio, net_annualized_return_pct,
+            annualized_turnover, cost_drag_pct_per_year, cost_bps}；无逐日
+            结果或未成功的回测不出现在结果里。
+        """
+        successful = [row for row in rows if row.status == "success" and row.metrics]
+        if not successful:
+            return {}
+        bps = float(cost_bps if cost_bps is not None else get_settings().default_cost_bps)
+        try:
+            series_map = self._backtest_repo.find_return_turnover_pairs(
+                [row.backtest_id for row in successful]
+            )
+        except Exception:
+            logger.warning("批量现算净口径指标失败", exc_info=True)
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for row in successful:
+            pairs = series_map.get(row.backtest_id) or []
+            returns = [
+                float(item[0]) for item in pairs if item[0] is not None
+            ]
+            if not returns:
+                continue
+            turnovers = [item[1] for item in pairs]
+            benchmarks = [item[2] if len(item) > 2 else None for item in pairs]
+            ladder = compute_cost_ladder(returns, turnovers, [bps], benchmark_returns=benchmarks)
+            if not ladder:
+                continue
+            entry = ladder[0]
+            normalized_turnovers = [float(t or 0.0) for t in turnovers]
+            years = len(returns) / DEFAULT_TRADING_DAYS_PER_YEAR
+            result[row.backtest_id] = {
+                "cost_bps": bps,
+                "net_annualized_return_pct": entry.net_annualized_return_pct,
+                "net_sharpe_ratio": entry.net_sharpe_ratio,
+                "net_excess_return_pct": entry.net_excess_return_pct,
+                "annualized_turnover": (
+                    round(sum(normalized_turnovers) / years, 4) if years > 0 else None
+                ),
+                "cost_drag_pct_per_year": entry.cost_drag_pct_per_year,
+            }
+        return result
 
     @staticmethod
     def _china_day_start(value: date) -> datetime:
@@ -1106,6 +1232,15 @@ class BacktestService:
         universe, index_codes, trading_dates, all_bars, all_valuation, all_macro = (
             self._prepare_backtest_data(row, caches)
         )
+        # 非交易日行情过滤（F-7）：上游偶尔把行情打在假期日期上，直接当交易日
+        # 会多出假调仓日与假收益；日历不可用时保持原行为并留痕
+        trading_dates, non_trading_dates = self._filter_non_trading_dates(
+            row.start_date, row.end_date, trading_dates
+        )
+        if non_trading_dates:
+            params = dict(row.params or {})
+            params["_non_trading_bar_dates"] = [d.isoformat() for d in non_trading_dates]
+            row.params = params
 
         # 策略显式限定资产范围时，必须在因子预计算前收窄回测池。此前仅在主循环
         # 构建上下文时过滤，会让扩散等成分面板因子为无关指数加载数据并产生缺失告警。
@@ -1157,6 +1292,7 @@ class BacktestService:
             trading_dates,
             factor_index_codes,
             required_factor_ids,
+            _first_bar_by_code(all_bars),
         )
         run_params = row.params or {}
         run_params["_lookback_days"] = lookback_days
@@ -1479,6 +1615,22 @@ class BacktestService:
                     ),
                 )
             )
+        # 非交易日行情（F-7）：行情表里存在日历判定为非交易日的日期时
+        # 显式告知，避免"回测多出一个假调仓日"被当成正常波动
+        non_trading_dates = (row.params or {}).get("_non_trading_bar_dates") or []
+        if non_trading_dates:
+            run_warnings.append(
+                BacktestWarning(
+                    level="warning",
+                    code="NON_TRADING_BAR",
+                    message=(
+                        f"行情数据包含 {len(non_trading_dates)} 个非交易日"
+                        f"（{', '.join(non_trading_dates[:5])}"
+                        f"{' 等' if len(non_trading_dates) > 5 else ''}），"
+                        "已从回测交易日中剔除（上游把行情打在假期日期上）"
+                    ),
+                )
+            )
         if warmup_trading_days > 0:
             run_warnings.append(
                 BacktestWarning(
@@ -1486,7 +1638,7 @@ class BacktestService:
                     code="WARMUP",
                     message=(
                         f"回测前 {warmup_trading_days} 个交易日长周期因子数据不足"
-                        "（预热期），前段信号与绩效参考价值有限"
+                        "（按各指数自身首根 K 线起算的预热期），前段信号与绩效参考价值有限"
                     ),
                 )
             )
@@ -1543,6 +1695,12 @@ class BacktestService:
         if exclusion_dates:
             exclusion_warning_started = perf_counter()
             excluded_days_total = sum(len(dates) for dates in exclusion_dates.values())
+            # 缺失开盘价导致的剔除单列（F-8）：执行模型是 t_plus_1_open，
+            # 缺开盘价的指数会被静默排除在候选池之外，实际资产域可能远小于
+            # 配置的资产池；这里显式给出"哪些资产、被排除了多少天"
+            execution_warning = _execution_price_warning(exclusion_dates, exclusion_reasons)
+            if execution_warning is not None:
+                run_warnings.append(execution_warning)
             if data_quality_mode == "strict":
                 for code, dates in list(exclusion_dates.items())[:5]:
                     run_warnings.append(
@@ -2205,6 +2363,45 @@ class BacktestService:
         """从 index_daily_bar 中提取区间内的交易日列表（读取走仓库）。"""
         return self._index_bar_repo.find_trading_dates(start, end, index_codes)
 
+    def _filter_non_trading_dates(
+        self, start: date, end: date, trading_dates: list[date]
+    ) -> tuple[list[date], list[date]]:
+        """剔除"行情里有数据、日历判定为非交易日"的日期（F-7）。
+
+        上游数据源偶尔把上一交易日的收盘价打在假期日期上（实测 2018-06-18
+        端午节有 7 个指数日线），旧实现直接把它当交易日，于是回测多出一个
+        假调仓日、一段假收益，还会连带一批 DATA_GAP / BENCHMARK_MISSING 警告。
+
+        日历解析失败时**保持原有行为**（不静默改变历史结果口径），
+        并通过 ``_non_trading_bar_policy=skipped_no_calendar`` 留痕。
+
+        Args:
+            start: 回测起始日期。
+            end: 回测截止日期。
+            trading_dates: 由行情推导出的交易日列表。
+
+        Returns:
+            (过滤后的交易日列表, 被剔除的日期列表)。
+        """
+        if not trading_dates:
+            return trading_dates, []
+        try:
+            calendar, _ = resolve_trading_calendar(self._db, required_range=(start, end))
+        except TradingCalendarUnavailableError:
+            logger.warning(
+                "[backtest] 交易日历不可用，跳过非交易日行情过滤（保持原口径）: %s~%s",
+                start,
+                end,
+            )
+            return trading_dates, []
+        filtered = [d for d in trading_dates if calendar.is_trading_day(d)]
+        dropped = [d for d in trading_dates if d not in set(filtered)]
+        if dropped:
+            logger.warning(
+                "[backtest] 行情包含非交易日数据，已从回测交易日中剔除: %s", dropped
+            )
+        return filtered, dropped
+
     def _get_lookback_days(self) -> int:
         """按因子注册表推导回测回望自然日数，与实时模式口径一致。
 
@@ -2264,6 +2461,10 @@ class BacktestService:
     ) -> list[BacktestWarning]:
         """按因子聚合回测区间内的缺失情况，生成 MISSING_FACTOR 警告。
 
+        计数口径（F-6）：``缺失天数`` 仍是"任一指数缺值即算一天"，但**必须
+        同时给出按指数排序的明细**——历史实现只列字母序前 5 个指数，导致
+        "只有一只后上市指数缺数据"被读成"整个资产池数据损坏"。
+
         Args:
             precomputed: 预计算因子值，date → (index_code, factor_id) → 数值。
             trading_dates: 回测交易日列表。
@@ -2276,7 +2477,7 @@ class BacktestService:
         warnings: list[BacktestWarning] = []
         for factor_id in factor_ids:
             missing_days = 0
-            affected_codes: set[str] = set()
+            missing_days_by_code: dict[str, int] = {}
             first_missing: date | None = None
             last_missing: date | None = None
             for trade_date in trading_dates:
@@ -2286,19 +2487,26 @@ class BacktestService:
                 ]
                 if missing_codes:
                     missing_days += 1
-                    affected_codes.update(missing_codes)
+                    for code in missing_codes:
+                        missing_days_by_code[code] = missing_days_by_code.get(code, 0) + 1
                     if first_missing is None:
                         first_missing = trade_date
                     last_missing = trade_date
             if missing_days > 0:
+                ranked = sorted(
+                    missing_days_by_code.items(), key=lambda item: (-item[1], item[0])
+                )
+                detail = "、".join(f"{code} {days} 天" for code, days in ranked[:5])
+                if len(ranked) > 5:
+                    detail += f" 等 {len(ranked)} 个指数"
                 warnings.append(
                     BacktestWarning(
                         level="warning",
                         code="MISSING_FACTOR",
                         message=(
                             f"因子 {factor_id} 在 {missing_days} 个交易日存在缺失"
-                            f"（{first_missing}~{last_missing}，"
-                            f"涉及指数 {sorted(affected_codes)[:5]}{' 等' if len(affected_codes) > 5 else ''}）"
+                            f"（{first_missing}~{last_missing}）；"
+                            f"按缺失天数排序：{detail}"
                         ),
                     )
                 )
@@ -2376,19 +2584,27 @@ class BacktestService:
         trading_dates: list[date],
         index_codes: list[str],
         factor_ids: list[str],
+        first_bar_by_code: dict[str, date] | None = None,
     ) -> int:
         """估算回测前段因子数据不足的预热交易日数。
 
-        对策略实际需要的每个因子，找到首个"全部指数均有有效值"的交易日，
-        取各因子首次全覆盖日期的最大值作为预热期。从未达到全指数覆盖的
-        因子（如某指数无估值数据导致的永久缺失）不参与统计，避免把结构性
-        数据缺口误判为回望不足（后者由 B10 数据质量检查单独处理）。
+        口径（F-6）：对每个 (因子, 指数) 组合，从**该指数自己的首根 K 线**
+        开始数"该因子还没有有效值"的天数，取最大值作为预热期——这才是
+        真正影响策略的可交易起点。
+
+        历史实现要求"全部指数都有有效值"才算预热结束，单只后上市指数
+        （如 000688 行情自 2020 年才有）会把整个回测的前 1038 个交易日
+        （约 4.3 年）判成预热期，读起来像"前四年结果无效"，实际只是
+        一只指数缺数据。指数上市前的空缺属于数据缺口（DATA_GAP），
+        不在这里计数。
 
         Args:
             precomputed: 预计算因子值，date → (index_code, factor_id) → 数值。
             trading_dates: 回测交易日列表。
             index_codes: 参与因子计算的指数代码列表（含择时代理指数）。
             factor_ids: 策略实际引用的因子 ID 列表。
+            first_bar_by_code: 指数 → 回测区间内首根 K 线日期；提供后每个指数
+                只从自己的首根 K 线起算（None 时等价于从区间首日起算）。
 
         Returns:
             前 N 个交易日中因子数据不足的天数；无预热期时返回 0。
@@ -2397,14 +2613,23 @@ class BacktestService:
             return 0
         warmup = 0
         for factor_id in factor_ids:
-            first_full: int | None = None
-            for i, trade_date in enumerate(trading_dates):
-                day_values = precomputed.get(trade_date, {})
-                if all(day_values.get((code, factor_id)) is not None for code in index_codes):
-                    first_full = i
-                    break
-            if first_full is not None:
-                warmup = max(warmup, first_full)
+            for code in index_codes:
+                start_index = 0
+                if first_bar_by_code is not None:
+                    first_bar = first_bar_by_code.get(code)
+                    if first_bar is None:
+                        # 该指数在窗口内完全没有行情，整体缺失由 DATA_GAP 报告
+                        continue
+                    start_index = bisect_left(trading_dates, first_bar)
+                for i in range(start_index, len(trading_dates)):
+                    if precomputed.get(trading_dates[i], {}).get((code, factor_id)) is not None:
+                        # 只计"该指数自己序列开头"的缺口，指数上市前的空缺不算
+                        warmup = max(warmup, i - start_index)
+                        break
+                else:
+                    # 该指数在窗口内始终没有该因子值：结构性缺失，
+                    # 由 MISSING_FACTOR / 数据质量检查负责，不算预热
+                    continue
         return warmup
 
     def _get_index_return(
@@ -2420,20 +2645,27 @@ class BacktestService:
     # ── Schema 转换辅助 ────────────────────────────────────────────────────
 
     def _row_to_summary(
-        self, row: BacktestRunModel, queue_info: dict[str, Any] | None = None
+        self,
+        row: BacktestRunModel,
+        queue_info: dict[str, Any] | None = None,
+        net_metrics: dict[str, Any] | None = None,
     ) -> BacktestSummary:
         """将 ORM 行转换为 BacktestSummary。
 
         Args:
             row: 回测 ORM 行。
             queue_info: 可选的队列观测信息（排队位置/等待与执行耗时，B3）。
+            net_metrics: 可选的净口径指标覆盖（F-12，列表路径现算）
         """
         metrics = None
         if row.metrics:
             try:
-                metrics = BacktestMetrics(**row.metrics)
+                metrics = BacktestMetrics(**{**row.metrics, **(net_metrics or {})})
             except Exception:
-                pass
+                try:
+                    metrics = BacktestMetrics(**row.metrics)
+                except Exception:
+                    pass
         info = queue_info or {}
         return BacktestSummary(
             backtest_id=row.backtest_id,

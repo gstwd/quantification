@@ -1129,6 +1129,8 @@ export interface RobustnessSummary {
   created_at: string | null
   finished_at: string | null
   error_message: string | null
+  /** 疑似停滞（running 且长时间无更新，可用 robustness abandon 收口，F-4） */
+  is_stale?: boolean
 }
 
 /** 稳健性汇总中的单个变体明细（Δ 相对基线） */
@@ -1139,7 +1141,10 @@ export interface RobustnessVariantDetail {
   value: unknown
   sharpe_mean: number | null
   annualized_return_mean: number | null
+  /** 参与比较的窗口数（共同窗口口径，F-1） */
   windows: number
+  /** 该变体自己跑成功的窗口数（可能大于 windows） */
+  windows_available?: number
   delta_sharpe: number | null
   delta_annualized_return: number | null
 }
@@ -1150,8 +1155,9 @@ export interface RobustnessNeighborhood {
   delta_min: number | null
   delta_max: number | null
   worse_ratio: number | null
-  reversal: boolean
-  is_plateau: boolean
+  /** 无有效变体时为 null（"没算出东西"不等于"通过"，F-3） */
+  reversal: boolean | null
+  is_plateau: boolean | null
 }
 
 /** 资产池扰动分布（pool） */
@@ -1170,6 +1176,10 @@ export interface RobustnessCoverage {
   missing_windows: string[]
   failed_windows: string[]
   is_partial: boolean
+  /** 所有变体都有数据的窗口（汇总实际使用的窗口，F-1） */
+  common_windows?: string[]
+  /** 窗口覆盖是否一致：false 时 delta 不可比较 */
+  comparable?: boolean
 }
 
 /** 稳健性汇总结构 */
@@ -1193,10 +1203,12 @@ export interface RobustnessStatistics {
   n_windows: number
   cost_bps: number
   pbo: {
-    value: number
+    /** 分块不足时为 null，此时看 reason（F-14） */
+    value: number | null
     n_candidates: number
     n_splits: number
     n_blocks: number
+    reason: string | null
   } | null
   deflated_sharpe: {
     sharpe_annualized: number

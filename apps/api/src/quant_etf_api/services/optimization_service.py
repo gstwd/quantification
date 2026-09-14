@@ -331,11 +331,23 @@ class OptimizationService:
             candidate = self._config_svc.get_config(session.candidate_strategy_id)
             if candidate is None:
                 raise ValueError("候选策略不存在，无法 promote")
+            baseline = self._config_svc.get_config(session.strategy_id)
+            if baseline is None:
+                raise ValueError(f"基线策略 {session.strategy_id} 不存在，无法 promote")
             self._config_svc.update_config(
                 session.strategy_id,
                 StrategyConfigUpdate(
                     config_json=candidate.config_json,
                     version=session.candidate_version,
+                    # 版本历史写在 description 里（F-17）：旧实现 promote 只写
+                    # config_json + version，描述会停留在旧配置，
+                    # 人和 agent 读到的第一手说明与实际配置不一致
+                    description=_append_version_history(
+                        getattr(baseline, "description", "") or "",
+                        session.candidate_version,
+                        session.hypothesis,
+                        session.fold_summary,
+                    ),
                 ),
             )
             logger.info(
@@ -363,6 +375,11 @@ class OptimizationService:
             session = self._repo.find_by_id(optimization_id)
         payload = self._to_dict(session)
         payload["missing_backtest_ids"] = self._missing_backtest_ids(session)
+        # 验收清单随详情返回（F-15）：7 项清单此前只在 finish（会改状态、不可逆）
+        # 内部计算，agent 想在收尾前知道"哪一项没过、差多少"只能先结束会话
+        payload["acceptance_checklist"] = (
+            self._acceptance_checklist(session) if session.fold_summary is not None else []
+        )
         return payload
 
     def _missing_backtest_ids(self, session: StrategyOptimizationModel) -> list[str]:
@@ -636,13 +653,67 @@ class OptimizationService:
         return True
 
     def _collect_metrics(self, backtest_id: str | None) -> dict[str, Any] | None:
-        """读取回测汇总指标，未成功或缺失时返回 None。"""
+        """读取回测汇总指标（含净成本口径），未成功或缺失时返回 None。
+
+        净口径字段（F-16）：``net_sharpe_ratio`` / ``net_annualized_return_pct`` /
+        ``annualized_turnover`` 由逐日结果现算后并入——旧实现只落毛口径，
+        会话输出里这些字段恒为 null，报告要写净口径数字只能另跑脚本。
+
+        Args:
+            backtest_id: 回测 ID。
+
+        Returns:
+            指标字典；回测缺失或未成功时返回 None。
+        """
         if not backtest_id:
             return None
         row = self._backtest_repo.find_by_id(backtest_id)
         if row is None or row.status != "success":
             return None
-        return row.metrics or None
+        metrics = dict(row.metrics or {})
+        if not metrics:
+            return None
+        try:
+            metrics.update(self._net_metrics(backtest_id))
+        except Exception:
+            # 净口径是增强信息：现算失败不应让会话指标整体不可用
+            logger.warning("现算净口径指标失败: backtest_id=%s", backtest_id, exc_info=True)
+        return metrics
+
+    def _net_metrics(self, backtest_id: str) -> dict[str, Any]:
+        """现算单条回测的净成本口径指标（F-16）。
+
+        Args:
+            backtest_id: 回测 ID。
+
+        Returns:
+            {net_annualized_return_pct, net_sharpe_ratio, net_excess_return_pct,
+            annualized_turnover, cost_drag_pct_per_year, cost_bps}；
+            无逐日结果时返回空字典。
+        """
+        row = self._backtest_repo.find_by_id(backtest_id)
+        if row is None:
+            return {}
+        daily = self._backtest_repo.find_daily_results(backtest_id)
+        if not daily:
+            return {}
+        cost_bps = float((row.params or {}).get("_cost_bps") or get_settings().default_cost_bps)
+        metrics = compute_stability_metrics(
+            [item.portfolio_return for item in daily],
+            [item.trade_date for item in daily],
+            benchmark_returns=[getattr(item, "benchmark_return", None) for item in daily],
+            turnovers=[getattr(item, "turnover", None) for item in daily],
+            cost_bps=cost_bps,
+        )
+        return {
+            "cost_bps": cost_bps,
+            "net_cumulative_return_pct": metrics.net_cumulative_return_pct,
+            "net_annualized_return_pct": metrics.net_annualized_return_pct,
+            "net_sharpe_ratio": metrics.net_sharpe_ratio,
+            "net_excess_return_pct": metrics.net_excess_return_pct,
+            "annualized_turnover": metrics.annualized_turnover,
+            "cost_drag_pct_per_year": metrics.cost_drag_pct_per_year,
+        }
 
     def _acceptance_checklist(self, session: StrategyOptimizationModel) -> list[dict[str, Any]]:
         """按默认阈值计算验收清单（严格模式强制全部通过）。"""
@@ -872,6 +943,45 @@ def _fmt_metric(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:.4f}"
     return str(value)
+
+
+def _append_version_history(
+    description: str,
+    version: str | None,
+    hypothesis: str,
+    fold_summary: dict[str, Any] | None,
+) -> str:
+    """把本次 promote 的版本号、假设与关键指标追加进策略描述（F-17）。
+
+    策略的版本历史一直写在 ``description`` 里（人和 agent 的第一手说明），
+    但 promote 只回写 config_json 与 version，导致"描述写 ma_10d 与 ma_17d、
+    实际配置已删 ma_17d"这类漂移。这里把摘要补上，保持描述与配置同步。
+
+    Args:
+        description: 基线原有描述。
+        version: 候选版本号。
+        hypothesis: 本轮假设。
+        fold_summary: 逐折聚合结果（可能为 None）。
+
+    Returns:
+        追加了版本记录的描述文本。
+    """
+    sharpe = ((fold_summary or {}).get("metrics") or {}).get("sharpe_ratio") or {}
+    wins = sharpe.get("candidate_wins")
+    total = sharpe.get("total_folds")
+    base_mean = sharpe.get("baseline_mean")
+    cand_mean = sharpe.get("candidate_mean")
+    detail = ""
+    if None not in (wins, total, base_mean, cand_mean):
+        detail = f"（逐折夏普均值 {base_mean:.3f}→{cand_mean:.3f}，胜出 {wins}/{total}）"
+    hypothesis_text = " ".join((hypothesis or "").split())
+    if len(hypothesis_text) > 200:
+        hypothesis_text = hypothesis_text[:200] + "…"
+    entry = f"v{version or '?'}（优化 promote）：{hypothesis_text}{detail}"
+    base = (description or "").rstrip()
+    if not base:
+        return entry
+    return f"{base}；{entry}"
 
 
 def _ge(candidate: Any, baseline: Any) -> bool:

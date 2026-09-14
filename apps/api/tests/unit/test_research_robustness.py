@@ -68,10 +68,23 @@ class TestPbo:
         assert result.pbo > 0.5
 
     def test_insufficient_candidates_returns_zero(self) -> None:
-        """有效候选少于 3 个时返回 0 而不是抛异常。"""
-        result = compute_pbo({"A": [1.0, 2.0], "B": [2.0, 1.0]})
-        assert result.pbo == 0.0
+        """有效候选少于 3 个时返回 pbo=None 并说明原因（F-14）。"""
+        result = compute_pbo(
+            {"A": [1.0, 2.0, 3.0, 4.0], "B": [2.0, 1.0, 2.5, 3.5]}
+        )
+        assert result.pbo is None
         assert result.n_candidates == 2
+        assert result.reason is not None and "候选" in result.reason
+
+    def test_too_few_blocks_returns_none(self) -> None:
+        """分块数少于 MIN_PBO_BLOCKS 时不能输出 0（会被读成"没有过拟合"，F-14）。"""
+        result = compute_pbo(
+            {"A": [3.0, 1.0], "B": [1.0, 3.0], "C": [2.0, 2.0]}
+        )
+        assert result.pbo is None
+        assert result.n_splits == 0
+        assert result.n_blocks == 2
+        assert result.reason is not None and "分块" in result.reason
 
     def test_odd_blocks_raise(self) -> None:
         """分块数为奇数时抛 ValueError（无法做对称切分）。"""
@@ -141,9 +154,12 @@ class TestNeighborhood:
         assert summary.delta_max == pytest.approx(0.4)
 
     def test_empty_variants(self) -> None:
-        """无有效变体时不报错。"""
+        """无有效变体时不报错，且不能把"没算出东西"判成参数高原（F-3）。"""
         summary = summarize_neighborhood(0.5, [])
         assert summary.n_variants == 0
+        assert summary.is_plateau is None
+        assert summary.worse_ratio is None
+        assert summary.reversal is None
 
 
 class TestVariantGeneration:
@@ -193,6 +209,37 @@ class TestVariantGeneration:
             "filters": {"rules": [{"factor": "return_20d"}]},
         }
         assert build_ablation_variants(config) == []
+
+    def test_ablation_labels_unique_for_same_factor_rules(self) -> None:
+        """同一因子的多条过滤规则必须派生不同标签（F-2）。
+
+        历史缺陷：标签只含因子名，v8 的两条 ``close_price`` 规则
+        （ma_10d / ma_17d）派生同一个变体 ID，第二个消融静默复用了第一份配置，
+        汇总里出现"knob 不同但指标完全相同"的两行。
+        """
+        config = {
+            "score": {"factors": {"return_20d": 1.0, "volatility_20d": 0.5}},
+            "filters": {
+                "logic": "AND",
+                "rules": [
+                    {"factor": "close_price", "op": "gt", "compare_to": "ma_17d"},
+                    {"factor": "close_price", "op": "gt", "compare_to": "ma_10d"},
+                ],
+            },
+        }
+        variants = build_ablation_variants(config)
+        labels = [item["label"] for item in variants if item["kind"] == "ablation"]
+        assert len(labels) == len(set(labels))
+        assert "ablate_filter_rules0_close_price" in labels
+        assert "ablate_filter_rules1_close_price" in labels
+        # 两个变体的配置确实不同：一个保留 ma_10d，一个保留 ma_17d
+        by_label = {item["label"]: item["config"] for item in variants}
+        assert by_label["ablate_filter_rules0_close_price"]["filters"]["rules"] == [
+            {"factor": "close_price", "op": "gt", "compare_to": "ma_10d"}
+        ]
+        assert by_label["ablate_filter_rules1_close_price"]["filters"]["rules"] == [
+            {"factor": "close_price", "op": "gt", "compare_to": "ma_17d"}
+        ]
 
     def test_knob_variants_do_not_mutate_input_config(self) -> None:
         """派生单旋钮变体不得就地改写输入配置。

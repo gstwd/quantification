@@ -7,8 +7,10 @@
 #    --preset quick    = 轻量体检（2 窗口 / 8 旋钮），写进验收清单第 6 项
 #    --preset standard = 完整（4 窗口 / 30 旋钮，等同旧默认）
 #    --knobs a,b       = 只扫指定的关键旋钮；--knobs-file knobs.json 同上
+#    --sync --parallel N = 本地多进程并行（回测是 CPU+DB 混合任务，线程会被 GIL 限制）
 python -m quant_etf_api.cli robustness scan --strategy <id> [--preset quick|standard] \
-    [--windows 4] [--max-knobs 30] [--knobs timing.thresholds.offensive_score] [--knobs-file k.json]
+    [--windows 4] [--max-knobs 30] [--knobs timing.thresholds.offensive_score] [--knobs-file k.json] \
+    [--sync --parallel 4]
 
 # 2) 因子消融：逐个移除评分因子与过滤条件，看边际贡献
 python -m quant_etf_api.cli robustness ablate --strategy <id> --windows 4
@@ -24,9 +26,15 @@ python -m quant_etf_api.cli robustness stats <robustness_id> [--n-trials N] [--c
 
 # 6) 清理本批次派生出来的变体草稿策略（默认预演；变体仍被回测引用时需 --force）
 python -m quant_etf_api.cli strategy prune-variants --batch <robustness_id> [--apply] [--force]
+
+# 7) 把长期挂着 running 的批次显式收口（回测被删除、进程重启遗留等；证据与试验台账保留）
+python -m quant_etf_api.cli robustness abandon <robustness_id> --reason "回测已被删除，不再维护"
 ```
 
 所有稳健性回测都固定在研究期（2016-01-01 ~ 2025-12-31）内执行，不会消耗验证期数据。
+
+批次创建时行先落库（早于执行），所以执行期就能在 `robustness list` 里看到并取消；
+`robustness list/show` 的 `is_stale=true` 表示"还是 running 但长时间没有进展"。
 
 ## 扫哪些旋钮（D2）
 
@@ -64,13 +72,16 @@ python -m quant_etf_api.cli strategy prune-variants --batch <robustness_id> [--a
 
 | 字段 | 位置 | 判读 |
 | --- | --- | --- |
-| `summary.neighborhood.is_plateau` | scan | true = 所有扰动都在容差内（平台）；false 且 `reversal` = 参数脆弱 |
+| `summary.coverage.common_windows` | 所有类型 | 汇总实际使用的窗口（所有变体都有数据的交集）；`comparable=false` 时**不要读 delta** |
+| `summary.neighborhood.is_plateau` | scan | true = 所有扰动都在容差内（平台）；false 且 `reversal` = 参数脆弱；**null = 没有有效变体，不等于通过** |
 | `summary.neighborhood.worse_ratio` | scan | 劣于基线的变体占比；接近 1 说明当前参数只是局部幸运 |
 | `summary.marginal` | ablate | 按 Δ夏普排序的因子边际贡献；接近 0 的因子应考虑删除 |
 | `summary.pool.delta_median` | pool | 子池扰动的中位 Δ夏普；接近 0 说明结果不依赖特定成分 |
-| `statistics.pbo.value` | stats | CSCV-PBO，约 0.5 相当于纯噪声；越高越可疑 |
+| `variants[].windows` / `windows_available` | 所有类型 | 参与比较的窗口数 / 该变体自己跑成功的窗口数；两者不等说明该变体有缺窗 |
+| `statistics.pbo.value` | stats | CSCV-PBO，约 0.5 相当于纯噪声；越高越可疑；**null = 窗口数不足（<4）**，看 `pbo.reason` |
 | `statistics.deflated_sharpe.deflated_sharpe` | stats | 计入试验次数后的显著性概率；< 0.5 基本可以认为不显著 |
 | `statistics.bootstrap.lower/upper` | stats | 年化夏普置信区间；跨 0 表示无法区分于噪声 |
+| `coverage.missing_windows` / `failed_windows` | 所有类型 | "回测已被删除"与"执行失败"分开报；前者说明证据缺失，不是执行问题 |
 
 ## 试验次数 N 的取法
 

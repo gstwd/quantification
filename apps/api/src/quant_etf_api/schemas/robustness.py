@@ -51,6 +51,8 @@ class RobustnessSummary(BaseModel):
         created_at: 创建时间（UTC）。
         finished_at: 完成时间（UTC）。
         error_message: 失败信息。
+        is_stale: 是否疑似停滞（状态仍为 running 但已超过
+            ``STALE_AFTER_HOURS`` 没有更新，F-4：提示可用 ``robustness abandon`` 收口）。
     """
 
     robustness_id: str
@@ -64,6 +66,7 @@ class RobustnessSummary(BaseModel):
     created_at: UtcDatetime | None = None
     finished_at: UtcDatetime | None = None
     error_message: str | None = None
+    is_stale: bool = False
 
 
 class RobustnessDetail(RobustnessSummary):
@@ -111,6 +114,7 @@ class RobustnessControlResponse(BaseModel):
         cancelled_backtests: 同步执行、由服务端直接落为 cancelled 的回测数。
         paused_jobs: 被暂停的队列任务数。
         resumed_jobs: 被恢复的队列任务数。
+        reason: 作废原因（abandon 操作返回）。
     """
 
     robustness_id: str
@@ -120,3 +124,4 @@ class RobustnessControlResponse(BaseModel):
     cancelled_backtests: int = 0
     paused_jobs: int = 0
     resumed_jobs: int = 0
+    reason: str | None = None

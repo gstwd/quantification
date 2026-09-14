@@ -75,7 +75,9 @@ python -m quant_etf_api.cli backtest prune-dangling-refs [--apply]              
 python -m quant_etf_api.cli queue stats|jobs [--status --job-type --limit]      # 队列积压/吞吐/运行中任务（B3）
 python -m quant_etf_api.cli queue worker                                        # 独立 worker 进程（前台阻塞，B1）
 python -m quant_etf_api.cli robustness collect <batch> [--allow-partial]        # 部分汇总并标记 coverage（B7）
-python -m quant_etf_api.cli robustness cancel|pause|resume <batch>              # 批次取消/暂停/恢复（B2）
+python -m quant_etf_api.cli robustness cancel|pause|resume|abandon <batch>      # 批次取消/暂停/恢复/作废（B2/F-4）
+python -m quant_etf_api.cli robustness scan --strategy <id> --sync --parallel 4 # 本地多进程并行跑批次（F-13）
+python -m quant_etf_api.cli research batch --strategy <id> --variants v.json --summary  # 变体排名表（F-9）
 python -m quant_etf_api.cli robustness scan --strategy <id> [--preset quick|standard] [--knobs a,b] [--knobs-file f.json]  # 邻域扫描（D2）
 python -m quant_etf_api.cli research batch --strategy <id> --variants v.json [--windows 5] [--cost-bps 10]  # 变体批量评估，不落库（D1）
 python -m quant_etf_api.cli optimization start --strategy <基线> --candidate-file x.json --hypothesis "..."  # 建草稿候选+会话
@@ -297,6 +299,14 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 - **回测协作取消（B2）**: 队列取消运行中的任务只是把 `background_job.cancel_requested` 置真；回测主循环每个交易日调用 `infra.job_queue.context.ensure_not_cancelled()`（取消标记有 5 秒 TTL 缓存）并在 checkpoint 抛出 `JobCancelledError`。`BacktestService.run_backtest` 必须**先**捕获 `JobCancelledError`（落 `cancelled` 状态并 re-raise），否则会被通用 `except Exception` 吞掉、把取消误记成失败。任何新增的长循环也应插入同类安全检查点。
 - **回测任务去重键（B3）**: 回测入队统一用 `backtest_job_key(backtest_id)`（即 `backtest:{id}`）作为 `job_key`——既做幂等去重，也让 `BacktestSummary.queued_seconds/elapsed_seconds/queue_position` 能反查队列任务。新增回测入队点时不要自造键名。
 - **稳健性批次收口（B2/B7）**: 批次内回测任务以 `robustness_id` 作为 `background_job.batch_id`（优化会话用 `optimization_id`），`robustness cancel/pause/resume` 与 `collect --allow-partial` 都依赖该批次号；`allow_partial` 汇总会把 `coverage`（expected/completed/pending/failed/is_partial）写进 summary 并把批次状态落为 `partial`，人工复核时**必须先看 coverage**再下结论。
+- **稳健性汇总按共同窗口比较（F-1 已修）**: `_summarize` 只用"所有变体都有数据"的窗口求均值，并在 `summary.coverage` 给出 `common_windows` / `comparable`；`variants[].windows` 是参与比较的窗口数、`windows_available` 是该变体自己跑成功的窗口数。`comparable=false` 时**不要读 delta**。历史批次（2026-09-14 之前汇总的）仍可能是旧口径，重新 `collect` 一次即可按新口径覆盖。
+- **消融变体标签带规则下标（F-2 已修）**: 标签形如 `ablate_filter_rules1_close_price`；`_create_variant_strategy` 命中既有变体时**先比对配置哈希**，不一致直接报错（不再静默复用）。`e72997a1` 这类历史批次里"两条 knob 不同但指标完全相同"的行是旧代码产物，不可用。
+- **非交易日行情（F-7 已修）**: 摄取侧 `IngestService._drop_non_trading_bars` 按 `trading_calendar` 拦掉假期日期；回测侧 `_filter_non_trading_dates` 再兜一层并输出 `NON_TRADING_BAR` 警告。日历不可用时两侧都保持原行为（不静默改变历史口径）。库内仍留有 2018-06-18 的 7 条历史污染数据，回测已忽略。
+- **预热期与缺失因子口径（F-6 已修）**: `_warmup_trading_days` 按**各指数自身首根 K 线**起算（单只后上市指数不再把整段回测标成预热）；`MISSING_FACTOR` 警告按指数排序给出"代码 N 天"明细。`EXECUTION_PRICE_MISSING`（F-8）单列"因缺开盘价被排除在候选池之外"的资产与天数——T+1 开盘执行下，配置 21 只指数在 2016-2024 实际只有 10~14 只可交易。
+- **稳健性批次控制与并行（F-4/F-5/F-13）**: 批次行在创建时先落库（执行期即可见、可取消）；`robustness abandon <batch> [--reason]` 把长期 running 的批次显式收口（保留证据与试验台账）；`robustness list/show` 的 `is_stale` 提示疑似停滞；同步模式可用 `--parallel N` 走进程池本地并行（回测是 CPU+DB 混合任务，线程会被 GIL 限制），入队模式禁止该参数（并发由 worker 数决定）。`collect` 现在把"回测已删除"归入 `missing_windows`、执行失败归入 `failed_windows`。
+- **PBO 分块下限（F-14）**: CSCV 分块数 <4 时 `statistics.pbo.value=null` 并给出 `reason`（2 个窗口只有 1 种对称切分，PBO 恒为 0，直接输出会被读成"没有过拟合"）。
+- **research batch 摘要视图（F-9/F-10）**: `research batch --summary` 输出「变体 × 指标」排名表（毛/净年化、净夏普、换手、回撤、Δ、逐窗口 Δ）；完整 JSON 在几十个变体时会超输出上限。`caliber.aggregate_mode=window_stitched` 表明 aggregate 是窗口拼接结果，**不可与 `backtest show` 的整段数字直接比较**。
+- **列表与会话的净口径（F-12/F-16）**: `GET /backtests`（CLI `backtest list`）默认现算净口径（`net_sharpe_ratio`/`net_annualized_return_pct`/`annualized_turnover`）；`optimization show` 同时返回 `acceptance_checklist`（7 项）与带净口径的 `metrics_full`/`metrics_folds`；`optimization start` 的 `--start` 缺省为**研究期起点**（F-18），`finish --promote` 会把版本历史追加进策略描述（F-17）。
 - **数据刷新按类型拆分**: `IngestService` 提供 `refresh_index_data()`、`refresh_macro_data()` 两个公共方法，各有独立 run 生命周期。对应 API 端点：`POST /runs/index-refresh`、`/runs/macro-refresh`。各数据页面（指数/宏观）有自己的"刷新数据"按钮，RunsPage 纯做监控。
 - **Run detail API**: `GET /runs/{run_id}` 返回 `ResearchRunDetail`（含 metrics、duration_seconds），`GET /runs/{run_id}/items` 返回 `ResearchRunItemSchema` 逐条明细，`POST /runs/{run_id}/retry` 重试失败任务（创建新 run 并入队对应后台任务）。
 

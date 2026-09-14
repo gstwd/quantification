@@ -43,6 +43,24 @@ logger = logging.getLogger(__name__)
 _VARIANT_KEYS = ("label", "config", "patch", "kind")
 
 
+def _fmt_number(value: Any, digits: int = 3) -> str:
+    """格式化摘要表里的数值，缺失显示 '-'。
+
+    Args:
+        value: 待格式化的数值（可能为 None）。
+        digits: 小数位数。
+
+    Returns:
+        格式化字符串。
+    """
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 @dataclass(frozen=True)
 class ResearchVariant:
     """研究批量评估中的一个变体。
@@ -82,6 +100,52 @@ class ResearchBatchResult:
             "cost_bps": self.cost_bps,
             "variants": self.variants,
         }
+
+    def to_summary_table(self) -> str:
+        """输出"变体 × 指标"排名表（F-9）。
+
+        几十个变体的完整 JSON 动辄几万 token，且没有排序视图，人和 agent
+        都难以直接回答"到底哪个变体更好"；这里只保留决策需要的列。
+
+        Returns:
+            对齐后的纯文本表格（含窗口口径、成本口径与逐窗口 Δ）。
+        """
+        lines = [
+            "windows: "
+            + " | ".join(
+                f"{w.get('label')} {w.get('start')}~{w.get('end')}" for w in self.windows
+            ),
+            f"cost_bps={self.cost_bps}（aggregate 为窗口拼接口径，"
+            "不可与整段回测直接比较）",
+        ]
+        header = (
+            f"{'variant':<26}{'grossAnn':>9}{'grossShp':>9}{'netAnn':>8}{'netShp':>8}"
+            f"{'turn':>7}{'maxDD':>8}{'dNetAnn':>9}{'dNetShp':>9}{'worse':>7}  perWindow(dNetShp)"
+        )
+        lines.append(header)
+        lines.append("-" * len(header))
+        for variant in self.variants:
+            aggregate = variant.get("aggregate") or {}
+            metrics = aggregate.get("metrics") or {}
+            net = aggregate.get("net_metrics") or {}
+            delta = variant.get("vs_baseline") or {}
+            per_window = " ".join(
+                f"{item.get('label')}:{_fmt_number(item.get('delta_net_sharpe'))}"
+                for item in (delta.get("per_window") or [])
+            )
+            lines.append(
+                f"{str(variant.get('label')):<26}"
+                f"{_fmt_number(metrics.get('annualized_return_pct'), 2):>9}"
+                f"{_fmt_number(metrics.get('sharpe_ratio')):>9}"
+                f"{_fmt_number(net.get('net_annualized_return_pct'), 2):>8}"
+                f"{_fmt_number(net.get('net_sharpe_ratio')):>8}"
+                f"{_fmt_number(net.get('annualized_turnover'), 2):>7}"
+                f"{_fmt_number(metrics.get('max_drawdown_pct'), 2):>8}"
+                f"{_fmt_number(delta.get('delta_net_annualized_return_pct'), 2):>9}"
+                f"{_fmt_number(delta.get('delta_net_sharpe_ratio')):>9}"
+                f"{_fmt_number(delta.get('worse_window_ratio'), 2):>7}  {per_window}"
+            )
+        return "\n".join(lines)
 
 
 class ResearchBatchService:
@@ -531,6 +595,10 @@ def _caliber_digest(
         "start_date": windows_list[0]["start"] if windows_list else None,
         "end_date": windows_list[-1]["end"] if windows_list else None,
         "persisted": False,
+        # 拼接口径标记（F-10）：aggregate 是把各窗口的逐日结果首尾相接后重算的，
+        # 与"整段一次性回测"不等价（窗口起点会重置仓位、每窗各自预热），
+        # 报告里禁止拿它与 backtest show 的整段数字直接比较
+        "aggregate_mode": "window_stitched",
     }
 
 
