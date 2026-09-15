@@ -1271,6 +1271,16 @@ class DataManagementService:
             if self._is_daily(definition.key)
             else []
         )
+        stock_exact_missing = (
+            self._stock_exact_missing_summaries(
+                definition.key,
+                partitions,
+                calendar_days,
+                upstream_missing_by_partition or {},
+            )
+            if definition.key in _STOCK_DAILY_DATASETS and exact_missing
+            else None
+        )
         result: dict[str, dict[str, Any]] = {}
         for key in keys:
             row = raw_rows.get(key)
@@ -1297,7 +1307,12 @@ class DataManagementService:
             )
             missing_sample: list[str] = []
             upstream_missing_ranges: list[dict[str, Any]] = []
-            if self._is_daily(definition.key) and key and missing and exact_missing:
+            if stock_exact_missing is not None and key:
+                exact = stock_exact_missing.get(key, {})
+                missing = int(exact.get("missing_count") or 0)
+                missing_sample = list(exact.get("missing_sample") or [])
+                upstream_missing_ranges = list(exact.get("upstream_missing_ranges") or [])
+            elif self._is_daily(definition.key) and key and missing and exact_missing:
                 raw_missing_dates = self._exact_missing_date_values(
                     definition.key, key, range_start, range_end
                 )
@@ -1577,6 +1592,122 @@ class DataManagementService:
             if force or trade_date not in exempt_dates_by_stock.get(stock_code, set()):
                 targets.setdefault(trade_date, set()).add(stock_code)
         return targets
+
+    def _stock_exact_missing_summaries(
+        self,
+        dataset_key: str,
+        stock_codes: list[str],
+        calendar_days: list[date],
+        upstream_missing_by_partition: dict[str, list[dict[str, Any]]],
+    ) -> dict[str, dict[str, Any]]:
+        """流式汇总全市场个股真实缺口，供完整质量检查复用。
+
+        资金流向的原始缺口可达数百万行。不能为每只股票单独反连接，也不
+        应把所有结果一次载入 Python；本方法使用一个集合反连接并按块读取，
+        仅保留每证券计数、前 20 个样例和仍有效的已确认上游空档。
+        """
+        if not stock_codes:
+            return {}
+        model, partition_column, date_column, _ = self._model_columns(dataset_key)
+        assert partition_column is not None and date_column is not None
+        error_condition, _ = self._quality_conditions(dataset_key)
+        bounds = (
+            self._db.query(
+                partition_column.label("stock_code"),
+                func.min(date_column).label("earliest_date"),
+                func.max(date_column).label("latest_date"),
+            )
+            .filter(partition_column.in_(stock_codes))
+            .group_by(partition_column)
+            .subquery()
+        )
+        join_condition = and_(
+            partition_column == bounds.c.stock_code,
+            date_column == TradingCalendarModel.trade_date,
+            not_(error_condition),
+        )
+        known_ranges_by_stock: dict[str, list[tuple[date, date]]] = {}
+        for stock_code, ranges in upstream_missing_by_partition.items():
+            parsed: list[tuple[date, date]] = []
+            for item in ranges:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    parsed.append(
+                        (
+                            date.fromisoformat(str(item["start_date"])),
+                            date.fromisoformat(str(item["end_date"])),
+                        )
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+            known_ranges_by_stock[stock_code] = parsed
+        missing_count: dict[str, int] = {}
+        missing_sample: dict[str, list[str]] = {}
+        # (起始日、终止日、交易日数、末日的交易日日历序号)。按 SQL 排序流式
+        # 压缩，避免资金流向的数百万个已豁免日期常驻内存。
+        retained_groups: dict[str, list[list[Any]]] = {}
+        calendar_positions = {day: index for index, day in enumerate(calendar_days)}
+        rows = (
+            self._db.query(bounds.c.stock_code, TradingCalendarModel.trade_date)
+            .select_from(bounds)
+            .join(
+                TradingCalendarModel,
+                and_(
+                    TradingCalendarModel.is_trading_day.is_(True),
+                    TradingCalendarModel.trade_date >= bounds.c.earliest_date,
+                    TradingCalendarModel.trade_date <= bounds.c.latest_date,
+                ),
+            )
+            .outerjoin(model, join_condition)
+            .filter(getattr(model, "id").is_(None))
+            .order_by(bounds.c.stock_code, TradingCalendarModel.trade_date)
+            .yield_per(10_000)
+        )
+        for stock_code, trade_date in rows:
+            if any(start <= trade_date <= end for start, end in known_ranges_by_stock.get(stock_code, [])):
+                groups = retained_groups.setdefault(stock_code, [])
+                position = calendar_positions[trade_date]
+                if groups and position == groups[-1][3] + 1:
+                    groups[-1][1] = trade_date
+                    groups[-1][2] += 1
+                    groups[-1][3] = position
+                else:
+                    groups.append([trade_date, trade_date, 1, position])
+                continue
+            missing_count[stock_code] = missing_count.get(stock_code, 0) + 1
+            samples = missing_sample.setdefault(stock_code, [])
+            if len(samples) < 20:
+                samples.append(trade_date.isoformat())
+
+        result: dict[str, dict[str, Any]] = {}
+        for stock_code in stock_codes:
+            existing = upstream_missing_by_partition.get(stock_code, [])
+            confirmed_at = next(
+                (
+                    value
+                    for item in existing
+                    if isinstance(item, dict)
+                    for value in [item.get("confirmed_at")]
+                    if isinstance(value, str)
+                ),
+                utcnow().replace(microsecond=0).isoformat() + "Z",
+            )
+            result[stock_code] = {
+                "missing_count": missing_count.get(stock_code, 0),
+                "missing_sample": missing_sample.get(stock_code, []),
+                "upstream_missing_ranges": [
+                    {
+                        "start_date": start.isoformat(),
+                        "end_date": end.isoformat(),
+                        "trading_day_count": count,
+                        "source": "tushare",
+                        "confirmed_at": confirmed_at,
+                    }
+                    for start, end, count, _ in retained_groups.get(stock_code, [])
+                ],
+            }
+        return result
 
     def _record_upstream_missing_dates_batch(
         self,
