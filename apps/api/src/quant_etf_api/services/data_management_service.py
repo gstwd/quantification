@@ -63,6 +63,7 @@ _STOCK_DAILY_DATASETS = {
     "stock_daily_basic",
     "stock_moneyflow",
 }
+_STOCK_REPAIR_COMMIT_BATCH_SIZE = 20
 _VALUATION_SUPPORTED_CODES = {
     "000016",
     "000300",
@@ -1508,60 +1509,108 @@ class DataManagementService:
             for group in groups
         ]
 
-    def _stock_gap_dates_for_repair(
-        self, dataset_key: str, stock_code: str, *, force: bool
-    ) -> list[date]:
-        """Find real unfilled dates in a stock's confirmed local coverage span."""
+    def _stock_gap_targets_for_repair(
+        self,
+        dataset_key: str,
+        stock_codes: list[str],
+        calendar_days: list[date],
+        *,
+        force: bool,
+    ) -> dict[date, set[str]]:
+        """一次 SQL 找出所有证券确认覆盖区间内的真实缺口。
+
+        不能对每只证券分别执行 ``min/max + 日历反连接``：全市场修复会
+        退化为上万次 SQL。这里先聚合每证券的本地覆盖边界，再与交易日历
+        反连接，结果一次返回为 ``交易日 -> 证券集合``。
+        """
+        if not stock_codes:
+            return {}
         model, partition_column, date_column, _ = self._model_columns(dataset_key)
         assert partition_column is not None and date_column is not None
-        earliest, latest = (
-            self._db.query(func.min(date_column), func.max(date_column))
-            .filter(partition_column == stock_code)
-            .one()
-        )
-        range_start, range_end = self._coverage_bounds(dataset_key, earliest, latest, latest)
-        missing = self._exact_missing_date_values(dataset_key, stock_code, range_start, range_end)
-        if force or not missing:
-            return missing
-        snapshot = (
-            self._db.query(DataHealthSnapshotModel)
-            .filter_by(dataset_key=dataset_key, partition_key=stock_code)
-            .one_or_none()
-        )
-        return [
-            day
-            for day in missing
-            if day
-            not in self._upstream_exempt_dates(
-                missing, list(getattr(snapshot, "upstream_missing_ranges", None) or [])
+        error_condition, _ = self._quality_conditions(dataset_key)
+        bounds = (
+            self._db.query(
+                partition_column.label("stock_code"),
+                func.min(date_column).label("earliest_date"),
+                func.max(date_column).label("latest_date"),
             )
-        ]
+            .filter(partition_column.in_(stock_codes))
+            .group_by(partition_column)
+            .subquery()
+        )
+        join_condition = and_(
+            partition_column == bounds.c.stock_code,
+            date_column == TradingCalendarModel.trade_date,
+            not_(error_condition),
+        )
+        rows = (
+            self._db.query(bounds.c.stock_code, TradingCalendarModel.trade_date)
+            .select_from(bounds)
+            .join(
+                TradingCalendarModel,
+                and_(
+                    TradingCalendarModel.is_trading_day.is_(True),
+                    TradingCalendarModel.trade_date >= bounds.c.earliest_date,
+                    TradingCalendarModel.trade_date <= bounds.c.latest_date,
+                ),
+            )
+            .outerjoin(model, join_condition)
+            .filter(getattr(model, "id").is_(None))
+            .order_by(TradingCalendarModel.trade_date, bounds.c.stock_code)
+            .all()
+        )
+        exemptions: dict[str, list[dict[str, Any]]] = {
+            row.partition_key: list(row.upstream_missing_ranges or [])
+            for row in self._db.query(DataHealthSnapshotModel)
+            .filter(
+                DataHealthSnapshotModel.dataset_key == dataset_key,
+                DataHealthSnapshotModel.partition_key.in_(stock_codes),
+            )
+            .all()
+        }
+        exempt_dates_by_stock = {
+            stock_code: self._range_dates(ranges, calendar_days)
+            for stock_code, ranges in exemptions.items()
+        }
+        targets: dict[date, set[str]] = {}
+        for stock_code, trade_date in rows:
+            if force or trade_date not in exempt_dates_by_stock.get(stock_code, set()):
+                targets.setdefault(trade_date, set()).add(stock_code)
+        return targets
 
-    def _record_upstream_missing_dates(
-        self, dataset_key: str, stock_code: str, dates: set[date]
+    def _record_upstream_missing_dates_batch(
+        self,
+        dataset_key: str,
+        dates_by_stock: dict[str, set[date]],
+        calendar_days: list[date],
     ) -> None:
-        """Merge successful Tushare negative results into the partition snapshot."""
-        if not dates:
+        """一次加载、一次 flush 写入本轮确认的所有上游缺失区间。"""
+        if not dates_by_stock:
             return
-        snapshot = (
-            self._db.query(DataHealthSnapshotModel)
-            .filter_by(dataset_key=dataset_key, partition_key=stock_code)
-            .one_or_none()
-        )
-        if snapshot is None:
-            snapshot = DataHealthSnapshotModel(dataset_key=dataset_key, partition_key=stock_code)
-            self._db.add(snapshot)
-        calendar_days = self._calendar_days_until(
-            self._latest_trading_day(local_only=True), local_calendar=True
-        )
-        existing = list(getattr(snapshot, "upstream_missing_ranges", None) or [])
-        merged = self._range_dates(existing, calendar_days) | dates
-        snapshot.upstream_missing_ranges = self._compress_upstream_missing_ranges(
-            merged,
-            calendar_days,
-            existing,
-            confirmed_at=utcnow().replace(microsecond=0).isoformat() + "Z",
-        )
+        snapshots = {
+            row.partition_key: row
+            for row in self._db.query(DataHealthSnapshotModel)
+            .filter(
+                DataHealthSnapshotModel.dataset_key == dataset_key,
+                DataHealthSnapshotModel.partition_key.in_(list(dates_by_stock)),
+            )
+            .all()
+        }
+        confirmed_at = utcnow().replace(microsecond=0).isoformat() + "Z"
+        for stock_code, dates in dates_by_stock.items():
+            snapshot = snapshots.get(stock_code)
+            if snapshot is None:
+                snapshot = DataHealthSnapshotModel(
+                    dataset_key=dataset_key, partition_key=stock_code
+                )
+                self._db.add(snapshot)
+            existing = list(snapshot.upstream_missing_ranges or [])
+            snapshot.upstream_missing_ranges = self._compress_upstream_missing_ranges(
+                self._range_dates(existing, calendar_days) | dates,
+                calendar_days,
+                existing,
+                confirmed_at=confirmed_at,
+            )
         self._db.flush()
 
     def _repair_stock_daily_gaps(
@@ -1578,21 +1627,25 @@ class DataManagementService:
         is evidence of an upstream gap. Transport/API failures deliberately remain
         normal unresolved gaps.
         """
-        targets_by_day: dict[date, set[str]] = {}
-        for stock_code in ([partition_key] if partition_key else self._partitions(dataset_key)):
-            for trade_date in self._stock_gap_dates_for_repair(
-                dataset_key, stock_code, force=force
-            ):
-                targets_by_day.setdefault(trade_date, set()).add(stock_code)
+        stock_codes = [partition_key] if partition_key else self._partitions(dataset_key)
+        calendar_days = self._calendar_days_until(
+            self._latest_trading_day(local_only=True), local_calendar=True
+        )
+        targets_by_day = self._stock_gap_targets_for_repair(
+            dataset_key, stock_codes, calendar_days, force=force
+        )
 
         records = 0
         errors: list[str] = []
         confirmed = 0
         model, partition_column, date_column, _ = self._model_columns(dataset_key)
         assert partition_column is not None and date_column is not None
-        for trade_date, target_codes in sorted(targets_by_day.items()):
+        confirmed_dates_by_stock: dict[str, set[date]] = {}
+        for index, (trade_date, target_codes) in enumerate(sorted(targets_by_day.items()), start=1):
             try:
-                result = service.sync_trade_date(trade_date, datasets=[dataset_key])
+                result = service.sync_trade_date(
+                    trade_date, datasets=[dataset_key], commit=False
+                )
             except Exception as exc:  # upstream request did not establish a negative result
                 errors.append(f"{trade_date.isoformat()}: {type(exc).__name__}: {exc}")
                 continue
@@ -1609,8 +1662,15 @@ class DataManagementService:
             }
             absent_codes = target_codes - returned_codes
             for stock_code in absent_codes:
-                self._record_upstream_missing_dates(dataset_key, stock_code, {trade_date})
+                confirmed_dates_by_stock.setdefault(stock_code, set()).add(trade_date)
             confirmed += len(absent_codes)
+            if index % _STOCK_REPAIR_COMMIT_BATCH_SIZE == 0:
+                # 数据写入按小批提交，避免每个交易日一次事务提交的网络往返。
+                self._db.commit()
+        if confirmed_dates_by_stock:
+            self._record_upstream_missing_dates_batch(
+                dataset_key, confirmed_dates_by_stock, calendar_days
+            )
         return {
             "records": records,
             "errors": errors,

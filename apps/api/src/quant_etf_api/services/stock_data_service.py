@@ -706,12 +706,15 @@ class StockDataService:
         self,
         trade_date: date,
         datasets: list[str] | None = None,
+        *,
+        commit: bool = True,
     ) -> dict[str, Any]:
         """按交易日抓取全市场 Tushare 个股数据并分表写入。
 
         Args:
             trade_date: 交易日。
             datasets: 需要同步的数据集；None 表示全部个股数据集。
+            commit: 是否在本次交易日写入后提交事务；批量修复可延后提交。
 
         Returns:
             {trade_date, datasets, records, errors}；单个数据集失败不中断其他数据集。
@@ -795,7 +798,8 @@ class StockDataService:
             except Exception as exc:  # noqa: PERF203
                 errors.append(f"stock_moneyflow: {type(exc).__name__}: {exc}")
                 logger.warning("个股资金流向同步失败 %s: %s", trade_date, exc)
-        self._db.commit()
+        if commit:
+            self._db.commit()
         return {
             "trade_date": trade_date,
             "datasets": selected,

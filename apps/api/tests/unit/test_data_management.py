@@ -190,8 +190,12 @@ def test_stock_gap_repair_confirms_only_successful_tushare_negative_results() ->
     db.query.return_value.filter.return_value.all.return_value = [("000001",)]
     service = DataManagementService(db)
     service._partitions = lambda _: ["000001", "000002"]
-    service._stock_gap_dates_for_repair = lambda *_args, **_kwargs: [date(2026, 1, 5)]
-    service._record_upstream_missing_dates = MagicMock()
+    service._latest_trading_day = lambda **_kwargs: date(2026, 1, 5)
+    service._calendar_days_until = lambda *_args, **_kwargs: [date(2026, 1, 5)]
+    service._stock_gap_targets_for_repair = MagicMock(
+        return_value={date(2026, 1, 5): {"000001", "000002"}}
+    )
+    service._record_upstream_missing_dates_batch = MagicMock()
     tushare = MagicMock(
         sync_trade_date=MagicMock(
             return_value={"records": {"stock_daily_close": 12}, "errors": []}
@@ -203,18 +207,20 @@ def test_stock_gap_repair_confirms_only_successful_tushare_negative_results() ->
     assert result["records"] == 12
     assert result["gaps_found"] == 2
     assert result["upstream_missing_confirmed"] == 1
-    service._record_upstream_missing_dates.assert_called_once_with(
-        "stock_daily_close", "000002", {date(2026, 1, 5)}
+    service._record_upstream_missing_dates_batch.assert_called_once_with(
+        "stock_daily_close",
+        {"000002": {date(2026, 1, 5)}},
+        [date(2026, 1, 5)],
     )
 
-    service._record_upstream_missing_dates.reset_mock()
+    service._record_upstream_missing_dates_batch.reset_mock()
     tushare.sync_trade_date.return_value = {
         "records": {"stock_daily_close": 0},
         "errors": ["stock_daily_close: rate limited"],
     }
     failed = service._repair_stock_daily_gaps("stock_daily_close", None, tushare, force=False)
     assert failed["upstream_missing_confirmed"] == 0
-    service._record_upstream_missing_dates.assert_not_called()
+    service._record_upstream_missing_dates_batch.assert_not_called()
 
 
 def test_non_partitioned_dataset_check_keeps_single_summary_row() -> None:
