@@ -12,6 +12,10 @@ python -m quant_etf_api.worker
 
 回测 lane 的并发由 ``QUANT_ETF_JOB_QUEUE_BACKTEST_WORKERS`` 控制（默认 1，
 即串行），通用 lane 由 ``QUANT_ETF_JOB_QUEUE_WORKERS`` 控制。
+
+启动时的卡死任务恢复只回收心跳超过 ``QUANT_ETF_JOB_STUCK_TIMEOUT_SECONDS``
+未更新的任务（判据与运行期僵尸扫描一致），因此运行期启动本进程不会
+误伤其它进程正在执行、心跳正常的任务。
 """
 
 from __future__ import annotations
@@ -49,7 +53,10 @@ def main() -> None:
     try:
         recovered = queue.recover_stuck_jobs()
         if recovered:
-            logger.warning("启动时恢复 %d 条卡死的 running 任务", recovered)
+            logger.warning(
+                "启动时恢复 %d 条心跳超时的卡死 running 任务（心跳正常的任务不受影响）",
+                recovered,
+            )
     except Exception:
         # 数据库未迁移等情况下不阻塞 worker 启动流程
         logger.warning("卡死任务恢复失败，继续启动 worker", exc_info=True)

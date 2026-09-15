@@ -48,7 +48,8 @@ factor_registry: FactorRegistry = get_default_factor_registry()
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 启动时恢复卡死的运行记录
     runs.recover_stuck_runs_on_startup()
-    # 启动后台任务队列：先恢复卡死任务，再启动 worker
+    # 启动后台任务队列：先恢复卡死任务（仅心跳超时者），再启动 worker。
+    # 独立 worker 进程部署下 API 重启不会误伤 worker 正在执行的任务
     job_queue = get_job_queue()
     try:
         job_queue.recover_stuck_jobs()

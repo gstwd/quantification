@@ -290,14 +290,19 @@ class FakeJobRepository:
                 result[job.status] += 1
         return result
 
-    def recover_stuck_jobs(self) -> int:
-        """将 running 状态任务标记为失败。"""
+    def recover_stuck_jobs(self, timeout_seconds: float) -> int:
+        """将心跳超时的 running 任务标记为失败（判据同 find_stale_running）。"""
+        cutoff = _now() - timedelta(seconds=timeout_seconds)
         count = 0
         for job in self.jobs.values():
-            if job.status == "running":
-                job.status = "failed"
-                job.error_message = "进程重启，任务中断"
-                count += 1
+            if job.status != "running":
+                continue
+            heartbeat = job.heartbeat_at or job.started_at
+            if heartbeat is None or heartbeat >= cutoff:
+                continue
+            job.status = "failed"
+            job.error_message = "执行进程已中断，任务中断"
+            count += 1
         return count
 
     @staticmethod
@@ -470,19 +475,52 @@ class TestJobQueue:
         assert "未知任务类型" in (repo.jobs[job_id].error_message or "")
 
     def test_recover_stuck_jobs(self) -> None:
-        """进程重启后 running 任务应恢复为 failed。"""
+        """进程重启后心跳超时的 running 任务应恢复为 failed。"""
         repo = FakeJobRepository()
-        queue = _make_queue(repo)
+        queue = _make_queue(repo, stuck_timeout=60.0)
         job_id = queue.enqueue("daily_ingest", {})
 
         repo.claim_pending(1)
+        repo.jobs[job_id].heartbeat_at = _now() - timedelta(seconds=600)
         assert repo.jobs[job_id].status == "running"
 
         count = queue.recover_stuck_jobs()
 
         assert count == 1
         assert repo.jobs[job_id].status == "failed"
-        assert "进程重启" in (repo.jobs[job_id].error_message or "")
+        assert "中断" in (repo.jobs[job_id].error_message or "")
+
+    def test_recover_keeps_running_job_with_fresh_heartbeat(self) -> None:
+        """心跳新鲜的 running 任务不得被启动恢复误伤。
+
+        运行期启动第二个 worker（或重启 API）时，另一个进程正在执行的
+        任务心跳是新鲜的；若判为失败，其 job_key 去重会失效，同一回测
+        会被并发执行两份。
+        """
+        repo = FakeJobRepository()
+        queue = _make_queue(repo, stuck_timeout=60.0)
+        job_id = queue.enqueue("backtest", {"backtest_id": "b1"}, job_key="backtest:b1")
+
+        repo.claim_pending(1, job_types=BACKTEST_LANE_JOB_TYPES)
+        assert repo.jobs[job_id].status == "running"
+
+        count = queue.recover_stuck_jobs()
+
+        assert count == 0
+        assert repo.jobs[job_id].status == "running"
+        # 去重仍然生效：同一 job_key 不会因为误判失败而被重复入队
+        assert queue.enqueue("backtest", {"backtest_id": "b1"}, job_key="backtest:b1") == job_id
+
+    def test_recover_uses_configured_stuck_timeout(self) -> None:
+        """恢复阈值应取队列配置的 stuck_timeout，而非固定值。"""
+        repo = FakeJobRepository()
+        queue = _make_queue(repo, stuck_timeout=30.0)
+        job_id = queue.enqueue("daily_ingest", {})
+        repo.claim_pending(1)
+        repo.jobs[job_id].heartbeat_at = _now() - timedelta(seconds=120)
+
+        assert queue.recover_stuck_jobs() == 1
+        assert repo.jobs[job_id].status == "failed"
 
 
 class TestLaneIsolation:

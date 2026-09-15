@@ -641,21 +641,41 @@ class JobRepository:
         finally:
             db.close()
 
-    def recover_stuck_jobs(self) -> int:
-        """将进程重启后卡在 running 状态的任务标记为失败。
+    def recover_stuck_jobs(self, timeout_seconds: float) -> int:
+        """将心跳超时、已确认失去执行进程的 running 任务标记为失败。
+
+        **不能**把所有 running 任务都当作残留：运行期启动第二个 worker
+        进程（或 API 进程重启而独立 worker 仍在跑）时，无条件清空会把
+        别人正在执行的任务写成失败，导致 ``job_key`` 去重失效、同一任务
+        被并发执行两份。因此这里复用运行期僵尸扫描的判据——仅当心跳
+        （历史行回退到 ``started_at``）超过 ``timeout_seconds`` 未更新，
+        才认定执行进程已死，与 ``JobQueue.scan_zombies`` 口径一致。
+
+        Args:
+            timeout_seconds: 心跳超时阈值（秒），口径同
+                ``job_stuck_timeout_seconds``。
 
         Returns:
-            恢复的任务数量。
+            被判为失败的任务数量。
         """
         db = self._session_factory()
         try:
+            cutoff = utcnow_aware() - timedelta(seconds=max(1.0, timeout_seconds))
             stuck = (
-                db.query(BackgroundJobModel).filter(BackgroundJobModel.status == "running").all()
+                db.query(BackgroundJobModel)
+                .filter(
+                    BackgroundJobModel.status == "running",
+                    func.coalesce(BackgroundJobModel.heartbeat_at, BackgroundJobModel.started_at)
+                    < cutoff,
+                )
+                .all()
             )
             for job in stuck:
                 job.status = "failed"
                 job.finished_at = utcnow_aware()
-                job.error_message = "进程重启，任务中断"
+                job.error_message = (
+                    f"执行进程已中断（心跳超过 {timeout_seconds:.0f} 秒未更新），任务中断"
+                )
             if stuck:
                 db.commit()
             return len(stuck)

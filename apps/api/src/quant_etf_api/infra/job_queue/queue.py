@@ -421,12 +421,17 @@ class JobQueue:
         logger.info("任务队列 worker 已停止")
 
     def recover_stuck_jobs(self) -> int:
-        """恢复进程重启后卡在 running 状态的任务。
+        """恢复冷启动前遗留的卡死任务（仅限心跳超时者）。
+
+        判据与 :meth:`scan_zombies` 一致：只有心跳超过 ``stuck_timeout``
+        未更新的 running 任务才被回收。因此在系统运行期启动本 worker
+        进程（或重启 API 进程）不会影响其它进程正在正常心跳的任务，
+        避免误判失败后 ``job_key`` 去重失效、同一任务被并发执行两份。
 
         Returns:
             恢复的任务数量。
         """
-        return self._repo.recover_stuck_jobs()
+        return self._repo.recover_stuck_jobs(self._stuck_timeout)
 
     def scan_zombies(self) -> int:
         """回收心跳超时（或超长运行）的 running 任务。
