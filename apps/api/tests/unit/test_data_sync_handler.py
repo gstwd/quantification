@@ -76,3 +76,21 @@ def test_no_new_records_does_not_requeue_any_factor(monkeypatch) -> None:
     job_types = [call.args[0] for call in fake_queue.enqueue.call_args_list]
     assert "factor_computation" not in job_types
     assert "industry_factor_compute" not in job_types
+
+
+def test_industry_daily_ingest_chain_removed() -> None:
+    """行业日频摄取链已删除：行业数据只由全局同步按数据集增量补拉。"""
+    from quant_etf_api.infra.job_queue.handlers import JOB_HANDLERS
+    from quant_etf_api.services.industry_data_service import IndustryDataService
+
+    assert "industry_daily_ingest" not in JOB_HANDLERS
+    assert not hasattr(handlers, "handle_industry_daily_ingest")
+    assert not hasattr(IndustryDataService, "run_daily_ingest")
+    # 行业单对象手动入口仍保留
+    assert {
+        "industry_universe_refresh",
+        "industry_bars_refresh",
+        "industry_quality_check",
+        "industry_data_fill",
+        "industry_data_rebuild",
+    } <= set(JOB_HANDLERS)

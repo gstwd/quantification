@@ -32,7 +32,6 @@ from quant_etf_api.factors.registry import FactorRegistry, get_default_factor_re
 from quant_etf_api.infra.job_queue.queue import get_job_queue
 from quant_etf_api.infra.scheduler import (
     get_ai_scheduler,
-    get_industry_scheduler,
     get_scheduler,
 )
 
@@ -65,8 +64,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         get_scheduler().start()
     if settings.ai_analysis_enabled:
         get_ai_scheduler().start()
-    if settings.schedule_enabled and settings.industry_refresh_enabled:
-        get_industry_scheduler().start()
     # 日历预热为尽力而为：入队失败（如数据库未迁移）不阻塞启动
     try:
         # 预热交易日历缓存，防止首个请求触发慢速加载/并发崩溃
@@ -98,8 +95,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     get_scheduler().stop()
     if settings.ai_analysis_enabled:
         get_ai_scheduler().stop()
-    if settings.schedule_enabled and settings.industry_refresh_enabled:
-        get_industry_scheduler().stop()
     # 停止后台任务队列
     job_queue.stop()
 

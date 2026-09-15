@@ -112,7 +112,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
   - `akshare_index.py` (index daily + PE/PB valuation), `akshare_macro.py` (CPI/PMI/LPR)
   - `retry_decorator.py` — `@with_retry()` 装饰器，指数退避重试，参数可通过环境变量 `AKSHARE_RETRY_MAX_ATTEMPTS` / `AKSHARE_RETRY_BASE_DELAY` 配置
 - **`infra/trading_calendar.py`** — `TradingCalendar` 类，通过 `akshare.tool_trade_date_hist_sina()` 获取 A 股交易日历，内存缓存 TTL=1 天，API 不可用时降级为周末判断
-- **`infra/scheduler/`** — `DailyIngestScheduler` / `AIAnalysisScheduler`: daemon `Thread` + `Event` 定时器，仅将任务入队（`job_key="daily_ingest"` / `ai_analysis:{date}`），不执行外部调用；数据摄取调度器不做交易日判断（周末/节假日也入队，由摄取侧按最近交易日缺口补拉），任务由 `background_job` worker 执行。
+- **`infra/scheduler/`** — `DailyIngestScheduler` / `AIAnalysisScheduler`: daemon `Thread` + `Event` 定时器，仅将任务入队（`job_key="data_sync_all"` / `ai_analysis:{date}`），不执行外部调用；**所有数据源的定时摄取统一走全局同步调度器**（指数/宏观/行业/个股均为受管数据集，无行业等子调度器）；数据摄取调度器不做交易日判断（周末/节假日也入队，由摄取侧按最近交易日缺口补拉），任务由 `background_job` worker 执行。
 - **`api/executor.py`** — 共享后台任务线程池。所有 bg 路由（runs、backtests）通过 `get_bg_executor()` 获取统一 executor，`main.py` lifespan 统一 shutdown。所有 bg 函数统一 `mark_running` → `mark_success/failed` 状态流转，外层 try/except 兜底。
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
   - `common/` — `bar_metrics.py` (BAR computation), `numeric.py`（NaN/Inf 和价格字段容错）、`enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）
@@ -266,7 +266,7 @@ Key rules (details in the doc):
 - **`get_default_factor_registry()` vs `build_default_factor_registry()`**: 进程级单例通过 `get_default_factor_registry()` 获取（首次构建后缓存），避免 `BacktestService` 每请求重建。只有 `cli.py` 和 `registry.py` 内部使用 `build_default_factor_registry()`。
 - **`BatchFactorComputer` Protocol**: 定义在 `factors/base.py`，回测因子预计算时优先调用 `compute_batch()`（一次遍历 bar 数据覆盖所有日期）。已在 momentum.py（return_5d/20d/60d/120d）实现。新增回测频繁使用的因子时建议实现此协议。
 - **`validate_config` 是 `@staticmethod`**: `StrategyConfigService.validate_config()` 不依赖 DB 会话，直接静态调用无需实例化服务。
-- **AI 分析双调度器**: 数据摄取+因子计算在 `schedule_time`（默认 17:30）执行，AI 舆情分析在 `ai_schedule_time`（默认 23:30）独立执行。两个调度器通过 `main.py` lifespan 分别启动，互不影响。`ai_analysis_enabled=False` 时 AI 调度器不启动。
+- **AI 分析双调度器**: 数据摄取+因子计算在 `schedule_time`（默认 17:30）执行，AI 舆情分析在 `ai_schedule_time`（默认 23:30）独立执行。两个调度器通过 `main.py` lifespan 分别启动，互不影响。`ai_analysis_enabled=False` 时 AI 调度器不启动。**所有数据源的定时摄取统一走全局数据同步调度器**（`data_sync_all`，覆盖指数/宏观/行业/个股等全部受管数据集）：原独立的行业摄取调度器（`get_industry_scheduler` / `IndustryIngestScheduler`）已取消，行业日频摄取链（`handle_industry_daily_ingest` 任务处理器与 `IndustryDataService.run_daily_ingest()`）已一并删除，行业数据按 `industry_universe`/`industry_daily_bar`/`industry_membership` 数据集由全局同步增量补拉；行业单对象的手动入口（`industry_universe_refresh`/`industry_bars_refresh`/`industry_quality_check`/`industry_data_fill`/`industry_data_rebuild`）保留。
 - **AI 因子在策略引擎中的行为**: AI 因子仅在已有 `daily_sentiment_aggregate` 数据的交易日有效。缺失数据时返回 `FactorValue(numeric=None)`，评分引擎默认 `missing_factor_strategy="ignore"` 会静默跳过。不要在 filter 规则中使用 AI 因子（None 会导致 filter 失败=资产被排除）。AI 因子专用 transform 函数：`sentiment_score`（[-1,1]→[0,100]）、`attention_score`（裁剪到 [0,100]）。
 - **关键词标签可配置化**: `keyword_tag_config` 表存储关键词→资产标签映射，替代硬编码的 `classifier._KEYWORD_TAG_MAP`。`TagClassifier._classify_via_keyword()` 优先使用 DB 映射，回退到静态默认值。CRUD 端点: `GET/POST/PUT/DELETE /keyword-tags`。
 - **市场综合研判**: `market_synthesis` 表存储每日 AI 生成的市场概况（200-300 字中文研判）。在 `AIFactorService.run_full_pipeline()` 步骤 7 自动生成，LLM 不可用时静默跳过。API: `GET /ai-factors/synthesis/{date}`。

@@ -469,56 +469,6 @@ class IndustryDataService:
         return int(result["records"].get("stock_daily_close") or 0)
 
     # ------------------------------------------------------------------
-    # 日频入口
-    # ------------------------------------------------------------------
-
-    def run_daily_ingest(self, target_date: date | None = None) -> dict[str, Any]:
-        """执行行业轮动子系统日频数据摄取。
-
-        Args:
-            target_date: 期望补数的交易日；None 时以行业日线最新日期为准。
-
-        Returns:
-            结构化运行指标：{target_date, bars, membership, stock_snapshot, quality}。
-            行业日线逐行业失败会进入 bars.errors；成分/个股快照阶段失败记录为
-            对应字段的 error 但不中断整体执行（可由 CLI/页面单独重跑补齐）。
-        """
-        result: dict[str, Any] = {"target_date": None}
-        result["bars"] = self.refresh_industry_bars_incremental()
-        latest = self._bar_repo.latest_trade_date()
-        if latest is None:
-            return result
-        result["target_date"] = latest
-        try:
-            result["membership"] = self.refresh_membership()
-        except Exception as exc:
-            result["membership"] = {"error": f"{type(exc).__name__}: {exc}"}
-            logger.warning(
-                "行业成分刷新失败，跳过（可稍后执行 backfill-membership）", exc_info=True
-            )
-        try:
-            from quant_etf_api.services.stock_data_service import (  # noqa: PLC0415
-                StockDataService,
-            )
-
-            result["stock_snapshot"] = StockDataService(self._db).sync_missing_recent(
-                lookback_days=15
-            )
-        except Exception as exc:
-            result["stock_snapshot"] = {"error": f"{type(exc).__name__}: {exc}"}
-            logger.warning(
-                "个股 Tushare 缺口补齐失败，跳过（可稍后执行 stock sync-day/backfill-tushare）",
-                exc_info=True,
-            )
-        # 日频摄取末尾重算 31 个行业质量快照，保证总览与列表页无需手动初检
-        try:
-            result["quality"] = self.bulk_quality()
-        except Exception as exc:
-            result["quality"] = {"error": f"{type(exc).__name__}: {exc}"}
-            logger.warning("行业日频摄取后质量快照重算失败", exc_info=True)
-        return result
-
-    # ------------------------------------------------------------------
     # 交易日历与质量快照
     # ------------------------------------------------------------------
 

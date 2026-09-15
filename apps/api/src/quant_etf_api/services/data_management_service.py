@@ -228,10 +228,7 @@ class DataManagementService:
         settings = get_settings()
         items = [self._summary(definition) for definition in DATASETS]
         return DataManagementOverview(
-            schedule_time=(
-                f"{settings.schedule_time} 自动全局同步"
-                f" · {settings.industry_refresh_time} 增量补拉（北京时间）"
-            ),
+            schedule_time=f"{settings.schedule_time} 自动全局同步（北京时间）",
             datasets=items,
             healthy_count=sum(item.health_status == "healthy" for item in items),
             warning_count=sum(item.health_status == "warning" for item in items),

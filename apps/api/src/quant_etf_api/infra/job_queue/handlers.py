@@ -457,50 +457,6 @@ def handle_warm_calendar(payload: dict) -> None:
     calendar.require_trading_days()
 
 
-def handle_industry_daily_ingest(payload: dict) -> None:
-    """执行申万行业日频摄取并更新数据质量状态。"""
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.infra.job_queue.queue import get_job_queue
-    from quant_etf_api.services.industry_data_service import IndustryDataService
-    from quant_etf_api.services.run_service import RunService
-
-    run_id = payload.get("run_id") or ""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        result = IndustryDataService(db).run_daily_ingest()
-        RunService(db).mark_success(run_id, metrics=_json_safe(result))
-        # 行业凌晨补拉会补齐前一日缺口；结束后入队全局质量检查，
-        # 让统一健康快照在早上即反映补拉后的真实状态（幂等去重）。
-        try:
-            check_db = SessionLocal()
-            try:
-                check_run = RunService(check_db).create_run(
-                    "data_manage_operation", None, today_cn(), params={"operation": "check"}
-                )
-                _, check_created = get_job_queue().enqueue_with_status(
-                    "data_manage_operation",
-                    {"run_id": check_run.run_id, "operation": "check"},
-                    job_key="data_manage:check:all:all",
-                )
-                if not check_created:
-                    RunService(check_db).mark_skipped(
-                        check_run.run_id,
-                        {"reason": "已有健康检查任务正在执行"},
-                    )
-            finally:
-                check_db.close()
-        except Exception:
-            logger.warning("行业日频摄取后健康检查入队失败", exc_info=True)
-    except Exception as e:
-        logger.exception("行业日频摄取任务异常: run_id=%s", run_id)
-        db.rollback()
-        RunService(db).mark_failed(run_id, f"行业日频摄取异常: {type(e).__name__}: {e}")
-        raise
-    finally:
-        db.close()
-
-
 def _run_stock_task(
     *,
     job_type: str,
@@ -699,7 +655,6 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "data_sync_all": handle_data_sync_all,
     "factor_computation": handle_factor_computation,
     "warm_calendar": handle_warm_calendar,
-    "industry_daily_ingest": handle_industry_daily_ingest,
     "industry_universe_refresh": handle_industry_universe_refresh,
     "industry_bars_refresh": handle_industry_bars_refresh,
     "industry_quality_check": handle_industry_quality_check,
