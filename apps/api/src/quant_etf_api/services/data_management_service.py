@@ -220,6 +220,10 @@ class DataManagementService:
     def overview(self) -> DataManagementOverview:
         """返回所有数据集的当前健康摘要。
 
+        快照不会在服务启动时自动生成：只有手动触发维护操作或数据摄取任务
+        执行后才会写入。因此这里额外回报快照行数，供前端在完全没有快照时
+        给出"尚未检查"的友好提示，而不是把 unknown 当成异常。
+
         Returns:
             数据管理页所需的摘要与状态计数。
         """
@@ -227,6 +231,9 @@ class DataManagementService:
 
         settings = get_settings()
         items = [self._summary(definition) for definition in DATASETS]
+        snapshot_count = int(
+            self._db.query(func.count(DataHealthSnapshotModel.partition_key)).scalar() or 0
+        )
         return DataManagementOverview(
             schedule_time=f"{settings.schedule_time} 自动全局同步（北京时间）",
             datasets=items,
@@ -234,6 +241,7 @@ class DataManagementService:
             warning_count=sum(item.health_status == "warning" for item in items),
             error_count=sum(item.health_status == "error" for item in items),
             unknown_count=sum(item.health_status == "unknown" for item in items),
+            snapshot_count=snapshot_count,
         )
 
     def detail(

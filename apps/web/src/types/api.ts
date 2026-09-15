@@ -188,6 +188,8 @@ export interface DataManagementOverview {
   warning_count: number
   error_count: number
   unknown_count: number
+  /** 当前健康快照行数；0 表示尚未生成任何快照（启动不再自动检查，需手动触发）。 */
+  snapshot_count: number
 }
 
 /** 数据维护操作名称。 */

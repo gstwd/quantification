@@ -63,6 +63,10 @@ class DataManagementOverview(BaseModel):
     warning_count: int
     error_count: int
     unknown_count: int
+    snapshot_count: int = Field(
+        default=0,
+        description="当前健康快照行数；0 表示尚未生成任何快照，前端应提示用户手动检查",
+    )
 
 
 class DataManagementOperationRequest(BaseModel):

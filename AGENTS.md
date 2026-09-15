@@ -237,7 +237,7 @@ Key migrations:
 
 ## Current State
 
-Services fully wired to PostgreSQL. Each data type has exactly **one** source: Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → 未命中时入队 `data_fill` 后台任务并返回空列表（不再在请求线程同步抓取）。后台任务统一走 `background_job` 持久化队列（迁移 0023），调度器仅负责定时入队（周末/节假日也入队，由摄取侧按最近交易日缺口补拉）。`POST /api/runs/daily-ingest` 触发手动入队。Startup 时 lifespan 仅入队 `warm_calendar` 预热任务（启动补全已移除）。
+Services fully wired to PostgreSQL. Each data type has exactly **one** source: Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → 未命中时入队 `data_fill` 后台任务并返回空列表（不再在请求线程同步抓取）。后台任务统一走 `background_job` 持久化队列（迁移 0023），调度器仅负责定时入队（周末/节假日也入队，由摄取侧按最近交易日缺口补拉）。`POST /api/runs/daily-ingest` 触发手动入队。Startup 时 lifespan 仅入队 `warm_calendar` 预热任务（启动补全已移除，**启动也不再自动执行健康检查**）；`daily_ingest`/`index_refresh` 不再按"当天是否交易日"跳过，改为按最近交易日缺口补拉。`data_health_snapshot` 只在手动维护操作或数据摄取任务（全局同步）完成后刷新，首次部署无快照时 `GET /api/data-management` 返回 `snapshot_count=0`，前端据此提示而非报错。
 
 **Strategy Engine**: `engine/` 包实现组件化策略执行管线。策略通过 `strategy_config` 表的 JSON 配置驱动，`StrategyConfigService` 管理 CRUD，`StrategyEngine` 执行管线。`FactorProvider` 桥接因子层与引擎层，`ContextBuilder` 统一构建实时和回测上下文。`BacktestService` 和 `StrategyExecutionService` 统一使用引擎执行。
 

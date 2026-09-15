@@ -330,7 +330,15 @@
         <h2 class="section-title">数据健康</h2>
         <RouterLink to="/data-management" class="link-accent section-link">管理全部数据 →</RouterLink>
       </div>
-      <div class="source-grid">
+      <div v-if="hasNoDataSnapshot" class="health-empty">
+        <span class="health-empty-icon" aria-hidden="true">◔</span>
+        <div class="health-empty-copy">
+          <strong>暂无健康快照数据</strong>
+          <p>健康快照不会在后端启动时自动生成，只在手动执行「检查 / 同步」或数据摄取任务完成后更新。前往数据管理页点击「检查全部质量」即可生成首次快照。</p>
+        </div>
+        <RouterLink to="/data-management" class="btn btn-ghost">前往生成快照</RouterLink>
+      </div>
+      <div v-else class="source-grid">
         <div v-for="src in dataHealth.datasets" :key="src.dataset_key" class="source-card">
           <div class="source-top">
             <div class="source-name">{{ src.display_name }}</div>
@@ -641,7 +649,7 @@ async function loadStatus() {
 /** 将健康状态转换为总览使用的中文标签。 */
 function healthStatusText(status: string): string {
   const labels: Record<string, string> = {
-    healthy: '健康', warning: '需关注', error: '异常', unknown: '检查中', unsupported: '不支持',
+    healthy: '健康', warning: '需关注', error: '异常', unknown: '待检查', unsupported: '不支持',
   }
   return labels[status] ?? status
 }
@@ -673,6 +681,15 @@ async function loadDataHealth(): Promise<void> {
     // 数据管理服务未迁移或暂不可用时不影响研究总览其他内容
   }
 }
+
+/**
+ * 是否尚未生成任何健康快照。
+ *
+ * 后端启动不再自动执行健康检查，快照只在手动触发或数据摄取任务完成后
+ * 生成；快照行数为 0 时用友好提示替代整片"待检查"卡片。字段缺失
+ * （前端已更新、后端未重启）时按 false 处理，回退到原有卡片展示。
+ */
+const hasNoDataSnapshot = computed(() => dataHealth.value?.snapshot_count === 0)
 
 onMounted(() =>
   Promise.all([
@@ -1241,6 +1258,54 @@ onMounted(() =>
   padding: 16px 20px;
 }
 
+/* ── 尚无健康快照时的友好提示 ── */
+.health-empty {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0 20px 16px;
+  padding: 16px 18px;
+  background: rgba(59, 130, 246, 0.07);
+  border: 1px solid rgba(59, 130, 246, 0.22);
+  border-radius: var(--radius-sm);
+}
+
+.health-empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  color: #7db0ff;
+  background: rgba(59, 130, 246, 0.16);
+  font-size: 17px;
+}
+
+.health-empty-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.health-empty-copy strong {
+  display: block;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.health-empty-copy p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.health-empty .btn {
+  flex-shrink: 0;
+  text-decoration: none;
+}
+
 .source-card {
   background: rgba(51, 65, 85, 0.35);
   border: 1px solid rgba(148, 163, 184, 0.06);
@@ -1753,6 +1818,17 @@ onMounted(() =>
   .source-grid,
   .quality-grid {
     grid-template-columns: 1fr;
+  }
+
+  .health-empty {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .health-empty .btn {
+    width: 100%;
+    justify-content: center;
   }
 
   .source-stats {

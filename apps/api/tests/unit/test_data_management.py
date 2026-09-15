@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from quant_etf_api.schemas.data_management import DataSetHealthSummary
 from quant_etf_api.services.data_management_service import (
     DATASETS,
     DataManagementService,
@@ -179,3 +180,47 @@ def test_rebuild_replacement_span_guard() -> None:
             existing_max,
             fetched - {existing_min},
         )
+
+
+def test_overview_reports_zero_snapshot_count_before_first_check() -> None:
+    """尚无健康快照时总览应回报 snapshot_count=0，供前端给出友好提示。"""
+    svc = DataManagementService(MagicMock())
+    svc._db.query.return_value.scalar.return_value = 0
+
+    def fake_summary(definition):
+        """构造未检查数据集摘要。"""
+        return DataSetHealthSummary(
+            dataset_key=definition.key,
+            display_name=definition.name,
+            frequency=definition.frequency,
+            source_label=definition.source_label,
+            supported_operations=list(definition.operations),
+            health_status="unknown",
+        )
+
+    svc._summary = fake_summary
+
+    overview = svc.overview()
+
+    assert overview.snapshot_count == 0
+    assert overview.unknown_count == len(DATASETS)
+    assert overview.healthy_count == 0
+
+
+def test_overview_reports_existing_snapshot_count() -> None:
+    """存在快照行时总览应回报真实行数，前端据此展示健康卡片。"""
+    svc = DataManagementService(MagicMock())
+    svc._db.query.return_value.scalar.return_value = 17
+    svc._summary = lambda definition: DataSetHealthSummary(
+        dataset_key=definition.key,
+        display_name=definition.name,
+        frequency=definition.frequency,
+        source_label=definition.source_label,
+        supported_operations=list(definition.operations),
+        health_status="healthy",
+    )
+
+    overview = svc.overview()
+
+    assert overview.snapshot_count == 17
+    assert overview.healthy_count == len(DATASETS)

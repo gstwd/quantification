@@ -48,6 +48,14 @@
     </section>
 
     <div v-if="error" class="notice error">{{ error }}</div>
+    <div v-if="overview && hasNoSnapshot" class="notice snapshot-hint">
+      <span class="hint-icon" aria-hidden="true">◔</span>
+      <div class="hint-copy">
+        <strong>尚未生成健康快照</strong>
+        <p>健康快照不会在后端启动时自动生成，只会在手动执行「检查 / 同步」或数据摄取任务完成后更新。点击右侧按钮即可生成首次快照。</p>
+      </div>
+      <button class="btn-mini" :disabled="busy" @click="runGlobal('check')">立即检查全部质量</button>
+    </div>
     <div v-if="polling" class="notice polling">
       <span class="spinner" aria-hidden="true"></span>
       数据维护任务执行中，完成后自动刷新健康状态…
@@ -258,6 +266,16 @@ const route = useRoute()
 /** 是否有维护任务正在执行。 */
 const busy = computed(() => submitting.value || polling.value)
 
+/**
+ * 是否尚未生成任何健康快照。
+ *
+ * 快照仅在手动触发或数据摄取任务执行后生成，后端启动不再自动检查，
+ * 因此首次部署时快照行数为 0，页面需要给出友好提示而不是显示成异常。
+ * 字段缺失（前端已更新、后端未重启）时按 false 处理，回退到按数据集
+ * 状态展示的旧逻辑，避免误报"无快照"。
+ */
+const hasNoSnapshot = computed(() => overview.value?.snapshot_count === 0)
+
 /** 筛选后的数据集保持异常、告警优先，便于先处理需要关注的内容。 */
 const filteredDatasets = computed(() => {
   if (!overview.value) return []
@@ -270,6 +288,7 @@ const filteredDatasets = computed(() => {
 
 const overallHealthLabel = computed(() => {
   if (!overview.value) return '等待检查'
+  if (hasNoSnapshot.value) return '尚未生成健康快照'
   if (overview.value.error_count > 0) return '需要处理异常'
   if (overview.value.warning_count > 0) return '运行中，需关注'
   if (overview.value.unknown_count > 0) return '等待首次检查'
@@ -277,6 +296,7 @@ const overallHealthLabel = computed(() => {
 })
 const overallHealthTone = computed(() => {
   if (!overview.value) return 'unknown'
+  if (hasNoSnapshot.value) return 'unknown'
   if (overview.value.error_count > 0) return 'error'
   if (overview.value.warning_count > 0) return 'warning'
   if (overview.value.unknown_count > 0) return 'unknown'
@@ -286,6 +306,7 @@ const overallHealthIcon = computed(() => ({ healthy: '✓', warning: '!', error:
 const overallHealthDescription = computed(() => {
   if (!overview.value) return ''
   const count = overview.value.datasets.length
+  if (hasNoSnapshot.value) return `共 ${count} 个数据集尚无快照，手动检查或数据同步后自动生成。`
   if (overview.value.error_count > 0) return `${overview.value.error_count} 个数据集异常，建议优先检查。`
   if (overview.value.warning_count > 0) return `${overview.value.warning_count} 个数据集需关注，共管理 ${count} 个数据集。`
   if (overview.value.unknown_count > 0) return `${overview.value.unknown_count} 个数据集尚未生成质量快照。`
@@ -557,6 +578,30 @@ onMounted(async () => {
 .notice.error { color: var(--danger); background: rgba(239, 68, 68, .08); }
 .notice.polling { color: var(--accent); background: rgba(59, 130, 246, .08); }
 .notice.success { color: #15803d; background: rgba(34, 197, 94, .08); }
+.notice.snapshot-hint {
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 16px;
+  color: var(--text);
+  background: rgba(59, 130, 246, .07);
+  border: 1px solid rgba(59, 130, 246, .22);
+}
+.notice.snapshot-hint .hint-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  color: #7db0ff;
+  background: rgba(59, 130, 246, .16);
+  font-size: 15px;
+}
+.notice.snapshot-hint .hint-copy { flex: 1; min-width: 0; }
+.notice.snapshot-hint strong { display: block; font-size: 13px; }
+.notice.snapshot-hint p { margin: 3px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.notice.snapshot-hint .btn-mini { flex-shrink: 0; align-self: center; }
 .spinner {
   width: 13px;
   height: 13px;
@@ -777,6 +822,8 @@ onMounted(async () => {
   .head-actions { width: 100%; }
   .head-actions .btn { flex: 1; }
   .health-strip { grid-template-columns: 1fr; }.health-summary { padding: 16px 20px; border-right: 0; }.health-stats { border-top: 1px solid rgba(148, 163, 184, .16); }.health-stat { padding: 12px 10px; }.schedule-status { padding: 14px 20px; }.section-head, .dataset-toolbar { align-items: flex-start; flex-direction: column; }.section-hint { display: none; }
+  .notice.snapshot-hint { flex-direction: column; align-items: flex-start; }
+  .notice.snapshot-hint .btn-mini { align-self: stretch; }
   .dataset-grid { grid-template-columns: 1fr; }
   .card-footer { flex-direction: column; align-items: stretch; }
   .mini-actions { justify-content: flex-start; }
