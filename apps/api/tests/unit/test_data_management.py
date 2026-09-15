@@ -133,6 +133,90 @@ def test_stock_quality_uses_confirmed_source_coverage_not_ipo_boundary() -> None
     ) == (earliest, expected)
 
 
+def test_upstream_missing_ranges_are_trade_day_compressed_and_expanded() -> None:
+    """已确认上游空档按连续交易日压缩，并可按日历准确展开。"""
+    calendar = [
+        date(2026, 1, 2),
+        date(2026, 1, 5),
+        date(2026, 1, 6),
+        date(2026, 1, 9),
+    ]
+    ranges = DataManagementService._compress_upstream_missing_ranges(
+        {date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6)},
+        calendar,
+        [],
+        confirmed_at="2026-09-15T01:02:03Z",
+    )
+
+    assert [(item["start_date"], item["end_date"], item["trading_day_count"]) for item in ranges] == [
+        ("2026-01-02", "2026-01-06", 3)
+    ]
+    assert DataManagementService._range_dates(ranges, calendar) == {
+        date(2026, 1, 2),
+        date(2026, 1, 5),
+        date(2026, 1, 6),
+    }
+
+
+def test_upstream_exemption_is_removed_when_local_date_is_no_longer_missing() -> None:
+    """检查只保留仍未落库的豁免日期，补入本地数据后自动清理。"""
+    service = DataManagementService(MagicMock())
+    ranges = [
+        {
+            "start_date": "2026-01-02",
+            "end_date": "2026-01-06",
+            "trading_day_count": 3,
+            "source": "tushare",
+            "confirmed_at": "2026-09-15T01:02:03Z",
+        }
+    ]
+    still_missing = [date(2026, 1, 2), date(2026, 1, 6)]
+
+    assert service._upstream_exempt_dates(still_missing, ranges) == set(still_missing)
+    cleaned = service._compress_upstream_missing_ranges(
+        service._upstream_exempt_dates(still_missing, ranges),
+        [date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6)],
+        ranges,
+    )
+    assert [(item["start_date"], item["end_date"]) for item in cleaned] == [
+        ("2026-01-02", "2026-01-02"),
+        ("2026-01-06", "2026-01-06"),
+    ]
+
+
+def test_stock_gap_repair_confirms_only_successful_tushare_negative_results() -> None:
+    """成功全市场响应未包含目标证券才写上游豁免；失败响应不得写入。"""
+    db = MagicMock()
+    db.query.return_value.filter.return_value.all.return_value = [("000001",)]
+    service = DataManagementService(db)
+    service._partitions = lambda _: ["000001", "000002"]
+    service._stock_gap_dates_for_repair = lambda *_args, **_kwargs: [date(2026, 1, 5)]
+    service._record_upstream_missing_dates = MagicMock()
+    tushare = MagicMock(
+        sync_trade_date=MagicMock(
+            return_value={"records": {"stock_daily_close": 12}, "errors": []}
+        )
+    )
+
+    result = service._repair_stock_daily_gaps("stock_daily_close", None, tushare, force=False)
+
+    assert result["records"] == 12
+    assert result["gaps_found"] == 2
+    assert result["upstream_missing_confirmed"] == 1
+    service._record_upstream_missing_dates.assert_called_once_with(
+        "stock_daily_close", "000002", {date(2026, 1, 5)}
+    )
+
+    service._record_upstream_missing_dates.reset_mock()
+    tushare.sync_trade_date.return_value = {
+        "records": {"stock_daily_close": 0},
+        "errors": ["stock_daily_close: rate limited"],
+    }
+    failed = service._repair_stock_daily_gaps("stock_daily_close", None, tushare, force=False)
+    assert failed["upstream_missing_confirmed"] == 0
+    service._record_upstream_missing_dates.assert_not_called()
+
+
 def test_non_partitioned_dataset_check_keeps_single_summary_row() -> None:
     """无分区数据集检查结果应作为汇总行保留，不再被空聚合覆盖为 unknown。"""
     svc = _make_service()

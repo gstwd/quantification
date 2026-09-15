@@ -29,6 +29,7 @@ class DataSetHealthSummary(BaseModel):
     missing_count: int = 0
     invalid_count: int = 0
     issue_summary: dict[str, Any] | None = None
+    upstream_missing_ranges: list[dict[str, Any]] = Field(default_factory=list)
     last_run_id: str | None = None
     last_run_status: str | None = None
     last_checked_at: UtcDatetime | None = None

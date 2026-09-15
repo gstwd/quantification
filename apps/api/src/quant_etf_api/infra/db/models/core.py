@@ -927,6 +927,13 @@ class DataHealthSnapshotModel(Base):
         Integer, nullable=False, default=0, comment="字段异常数量"
     )
     issue_summary: Mapped[dict | None] = mapped_column(JSON, comment="当前问题摘要与样例")
+    upstream_missing_ranges: Mapped[list[dict]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=sa.text("'[]'::jsonb"),
+        comment="已由上游成功请求确认缺失的交易日区间",
+    )
     last_run_id: Mapped[str | None] = mapped_column(String(64), comment="最近维护运行 ID")
     last_run_status: Mapped[str | None] = mapped_column(String(32), comment="最近维护运行状态")
     last_checked_at: Mapped[datetime | None] = mapped_column(
