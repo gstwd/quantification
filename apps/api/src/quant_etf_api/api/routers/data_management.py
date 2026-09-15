@@ -14,7 +14,11 @@ from quant_etf_api.schemas.data_management import (
     DataManagementOverview,
     DataSetDetailResponse,
 )
-from quant_etf_api.services.data_management_service import DATASETS, DataManagementService
+from quant_etf_api.services.data_management_service import (
+    DATASETS,
+    HEALTH_STATUSES,
+    DataManagementService,
+)
 from quant_etf_api.services.run_service import RunService
 
 router = APIRouter(prefix="/data-management", tags=["data-management"])
@@ -32,11 +36,36 @@ def get_dataset_detail(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     partition_key: str | None = Query(default=None, min_length=1, max_length=64),
+    health_status: str | None = Query(
+        default=None,
+        description="按健康状态精确过滤：healthy/warning/error/unknown/unsupported",
+    ),
+    problem_only: bool = Query(default=False, description="只返回异常或需关注的分区"),
+    keyword: str | None = Query(
+        default=None, min_length=1, max_length=64, description="按分区代码或名称模糊匹配"
+    ),
     db: Session = Depends(get_db),
 ) -> DataSetDetailResponse:
-    """返回一个数据集的质量规则和分页分区快照。"""
+    """返回一个数据集的质量规则和分页分区快照。
+
+    分区级快照可能上千条，支持服务端筛选：`problem_only` / `health_status` /
+    `keyword` 可叠加，`total` 为过滤后的分区数。
+    """
+    if health_status is not None and health_status not in HEALTH_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"未知健康状态: {health_status}；可选：{', '.join(HEALTH_STATUSES)}",
+        )
     try:
-        return DataManagementService(db).detail(dataset_key, offset, limit, partition_key)
+        return DataManagementService(db).detail(
+            dataset_key,
+            offset,
+            limit,
+            partition_key,
+            health_status=health_status,
+            problem_only=problem_only,
+            keyword=keyword.strip() if keyword else None,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

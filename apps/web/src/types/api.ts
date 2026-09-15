@@ -188,6 +188,8 @@ export interface DataManagementOverview {
   warning_count: number
   error_count: number
   unknown_count: number
+  /** 上游明确不支持的数据集数量（与前四类计数共同覆盖全部数据集）。 */
+  unsupported_count: number
   /** 当前健康快照行数；0 表示尚未生成任何快照（启动不再自动检查，需手动触发）。 */
   snapshot_count: number
 }

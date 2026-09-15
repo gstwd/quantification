@@ -63,6 +63,22 @@ _VALUATION_SUPPORTED_CODES = {
     "000300",
     "000905",
 }
+# 健康快照全部合法状态，供接口过滤参数校验
+HEALTH_STATUSES = ("healthy", "warning", "error", "unknown", "unsupported")
+# "有问题"的口径：异常与需关注，用于分区级快速筛选
+_PROBLEM_HEALTH_STATUSES = ("warning", "error")
+
+
+def _escape_like_pattern(value: str) -> str:
+    """转义 LIKE 通配符，避免用户输入被当作模式匹配。
+
+    Args:
+        value: 原始关键字。
+
+    Returns:
+        转义后的关键字（反斜杠、百分号、下划线均被转义）。
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _dataset_status(metrics: dict[str, Any]) -> str:
@@ -241,6 +257,7 @@ class DataManagementService:
             warning_count=sum(item.health_status == "warning" for item in items),
             error_count=sum(item.health_status == "error" for item in items),
             unknown_count=sum(item.health_status == "unknown" for item in items),
+            unsupported_count=sum(item.health_status == "unsupported" for item in items),
             snapshot_count=snapshot_count,
         )
 
@@ -250,14 +267,26 @@ class DataManagementService:
         offset: int,
         limit: int,
         partition_key: str | None = None,
+        *,
+        health_status: str | None = None,
+        problem_only: bool = False,
+        keyword: str | None = None,
     ) -> DataSetDetailResponse:
         """返回指定数据集的规则与分区健康快照。
+
+        分区数据集（个股/行业/指数）可能有上千个分区，逐页翻找问题分区不现实，
+        因此支持服务端筛选：`problem_only` 只看异常与需关注分区，`health_status`
+        按单一状态精确过滤，`keyword` 按分区代码或名称模糊匹配。三者可叠加，
+        `total` 始终反映过滤后的分区数。
 
         Args:
             dataset_key: 静态数据集键。
             offset: 分区分页偏移量。
             limit: 分区分页大小。
-            partition_key: 可选分区键，指定时仅返回该分区。
+            partition_key: 可选分区键，指定时仅返回该分区（精确匹配，供深链使用）。
+            health_status: 可选健康状态精确过滤（healthy/warning/error/unknown/unsupported）。
+            problem_only: 是否只返回异常（error）与需关注（warning）分区。
+            keyword: 可选模糊关键字，同时匹配分区代码与分区名称。
 
         Returns:
             数据集详情。
@@ -272,6 +301,20 @@ class DataManagementService:
         )
         if partition_key:
             query = query.filter(DataHealthSnapshotModel.partition_key == partition_key)
+        if health_status:
+            query = query.filter(DataHealthSnapshotModel.health_status == health_status)
+        elif problem_only:
+            query = query.filter(
+                DataHealthSnapshotModel.health_status.in_(_PROBLEM_HEALTH_STATUSES)
+            )
+        if keyword:
+            pattern = f"%{_escape_like_pattern(keyword)}%"
+            query = query.filter(
+                or_(
+                    DataHealthSnapshotModel.partition_key.ilike(pattern, escape="\\"),
+                    DataHealthSnapshotModel.partition_name.ilike(pattern, escape="\\"),
+                )
+            )
         total = query.count()
         rows = (
             query.order_by(DataHealthSnapshotModel.partition_key).offset(offset).limit(limit).all()

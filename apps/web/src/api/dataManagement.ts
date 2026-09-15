@@ -14,15 +14,34 @@ export async function fetchDataManagementOverview(): Promise<DataManagementOverv
   return data
 }
 
+/** 数据集分区明细的查询条件。 */
+export interface DataSetDetailQuery {
+  /** 精确分区键（深链使用） */
+  partitionKey?: string
+  /** 只返回异常与需关注分区 */
+  problemOnly?: boolean
+  /** 按健康状态精确过滤 */
+  healthStatus?: string
+  /** 按分区代码或名称模糊匹配 */
+  keyword?: string
+}
+
 /** 获取一个数据集的分页分区健康详情。 */
 export async function fetchDataSetDetail(
   datasetKey: string,
   offset = 0,
   limit = 50,
-  partitionKey?: string,
+  query: DataSetDetailQuery = {},
 ): Promise<DataSetDetailResponse> {
   const { data } = await apiClient.get<DataSetDetailResponse>(`/data-management/datasets/${datasetKey}`, {
-    params: { offset, limit, partition_key: partitionKey },
+    params: {
+      offset,
+      limit,
+      partition_key: query.partitionKey,
+      problem_only: query.problemOnly || undefined,
+      health_status: query.healthStatus,
+      keyword: query.keyword,
+    },
   })
   return data
 }

@@ -205,6 +205,15 @@ def test_overview_reports_zero_snapshot_count_before_first_check() -> None:
     assert overview.snapshot_count == 0
     assert overview.unknown_count == len(DATASETS)
     assert overview.healthy_count == 0
+    # 五类状态计数必须覆盖全部数据集，避免出现"计数合计不等于数据集数"
+    assert (
+        overview.healthy_count
+        + overview.warning_count
+        + overview.error_count
+        + overview.unknown_count
+        + overview.unsupported_count
+        == len(DATASETS)
+    )
 
 
 def test_overview_reports_existing_snapshot_count() -> None:
