@@ -1092,8 +1092,18 @@ class DataManagementService:
         才重算汇总行，单分区检查只更新对应分区。
         """
         partitions = [partition_key] if partition_key else self._partitions(definition.key)
+        exact_missing = not (
+            operation == "sync_latest"
+            and definition.key
+            in {"stock_daily_close", "stock_daily_basic", "stock_moneyflow"}
+        )
         if local_calendar:
             payloads = self._inspect_many(definition, partitions, local_calendar=True)
+        elif not exact_missing:
+            # 日常全局同步只负责补齐近期数据。对每个历史缺口证券再做
+            # count + sample 两次日历反连接会造成数万次查询；完整精查保留给
+            # 手动“检查”和“修复缺口”操作。
+            payloads = self._inspect_many(definition, partitions, exact_missing=False)
         else:
             # 保留旧的无关键字调用形态，便于已有测试和扩展服务替换检查器。
             payloads = self._inspect_many(definition, partitions)
@@ -1164,12 +1174,14 @@ class DataManagementService:
         partitions: list[str],
         *,
         local_calendar: bool = False,
+        exact_missing: bool = True,
     ) -> dict[str, dict[str, Any]]:
         """用聚合 SQL 一次计算一个数据集的所有分区健康指标。
 
         不把历史行情 ORM 实体加载到 Python。个股日线等大表只扫描一次，
-        由数据库完成行数、日期边界和字段异常计数，避免 N+1 查询与长时间
-        占用应用进程内存。
+        由数据库完成行数、日期边界和字段异常计数。``exact_missing=False``
+        用于日常同步：保留聚合缺口计数，但跳过每个问题分区的精确日历反
+        连接；手动检查与修复仍使用精确模式。
         """
         model, partition_column, date_column, source_column = self._model_columns(definition.key)
         date_expression = cast(date_column, Date) if date_column is not None else None
@@ -1257,7 +1269,7 @@ class DataManagementService:
                 valid_count=max(0, record_count - hard_errors),
             )
             missing_sample: list[str] = []
-            if self._is_daily(definition.key) and key and missing:
+            if self._is_daily(definition.key) and key and missing and exact_missing:
                 missing, missing_sample = self._exact_missing_dates(
                     definition.key, key, range_start, range_end, missing
                 )

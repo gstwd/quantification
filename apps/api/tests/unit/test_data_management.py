@@ -146,6 +146,18 @@ def test_partition_only_check_does_not_refresh_aggregate_row() -> None:
     assert [key for key, _ in calls] == ["000300"]
 
 
+def test_daily_sync_skips_per_stock_exact_history_gap_queries() -> None:
+    """日常同步避免为每个历史缺口股票执行日历反连接。"""
+    svc = _make_service()
+    inspect = MagicMock(return_value={})
+    svc._inspect_many = inspect
+
+    svc._check(_definition("stock_daily_close"), None, "run-1", "sync_latest")
+
+    assert inspect.call_args.args == (_definition("stock_daily_close"), [])
+    assert inspect.call_args.kwargs == {"exact_missing": False}
+
+
 def test_dataset_status_derivation() -> None:
     """数据集状态应由分区错误与写入记录数共同决定。"""
     assert _dataset_status({"records": 0, "errors": []}) == "success"
