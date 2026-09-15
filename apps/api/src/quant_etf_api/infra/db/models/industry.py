@@ -86,6 +86,8 @@ class IndustryDailyBarModel(Base):
     __table_args__ = (
         UniqueConstraint("trade_date", "industry_code", name="uq_industry_daily_bar"),
         Index("ix_industry_daily_bar_code_date", "industry_code", "trade_date"),
+        # 系统状态接口需要 max(ingested_at)，无索引会退化为全表扫描
+        Index("ix_industry_daily_bar_ingested_at", "ingested_at"),
     )
 
     id: Mapped[int] = mapped_column(
@@ -122,6 +124,8 @@ class IndustryMembershipEventModel(Base):
             "start_date",
             name="uq_industry_membership_event",
         ),
+        # 系统状态接口需要 max(fetched_at)，无索引会退化为全表扫描
+        Index("ix_industry_membership_event_fetched_at", "fetched_at"),
     )
 
     id: Mapped[int] = mapped_column(
@@ -153,6 +157,8 @@ class StockDailyCloseModel(Base):
     __table_args__ = (
         UniqueConstraint("trade_date", "stock_code", name="uq_stock_daily_close"),
         Index("ix_stock_daily_close_code_date", "stock_code", "trade_date"),
+        # 系统状态接口需要 max(ingested_at)，无索引时该聚合需全表扫描约 1250 万行
+        Index("ix_stock_daily_close_ingested_at", "ingested_at"),
     )
 
     id: Mapped[int] = mapped_column(

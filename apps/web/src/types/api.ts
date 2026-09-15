@@ -85,10 +85,11 @@ export interface ResearchRunItem {
   metrics?: Record<string, unknown> | null
 }
 
-/** 单个数据表/数据源的快照信息 */
+/** 单个数据表/数据源的快照信息（超大表的 record_count 为数据库统计估算值） */
 export interface DataSourceSnapshot {
   source_name: string
   table_name: string
+  /** 该表记录总数，超大表为统计估算值（误差 <1%） */
   record_count: number
   latest_trade_date: string | null
   latest_ingested_at: string | null

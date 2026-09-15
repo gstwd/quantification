@@ -44,11 +44,13 @@ class DataSourceSnapshot(BaseModel):
 
     包含记录总数、最新数据日期和最近一次入库时间，
     供前端"数据源状态"区域展示各表新鲜度。
+    超大表的记录总数取自数据库统计信息估算（避免全表扫描），
+    与精确值可能存在 1% 以内的偏差。
     """
 
     source_name: str  # 展示名称，如 "AkShare 指数日线"
     table_name: str  # 数据库表名，如 "index_daily_bar"
-    record_count: int  # 该表记录总数
+    record_count: int  # 该表记录总数（超大表为统计估算值）
     latest_trade_date: date | None  # 该表最新交易日期
     latest_ingested_at: UtcDatetime | None  # 该表最晚入库时间
 

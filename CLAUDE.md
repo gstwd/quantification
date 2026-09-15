@@ -180,6 +180,7 @@ Key migrations:
 - 0009–0012: 回测模式字段、`index_signal` 表、回测日基准收益和换手率、回测指数原始得分
 - 0013: `trading_calendar` 表、`benchmark_index` 增加 `is_active`/`delisting_date`、`macro_indicator` 增加 `period_date`
 - 0016: `backtest_run` 增加 `progress` 列（回测执行进度 0-100）
+- 0050: `index_daily_bar`/`index_valuation`/`macro_indicator`/`stock_daily_close`/`industry_daily_bar` 的 `ingested_at` 与 `industry_membership_event.fetched_at` 索引（`GET /api/system/status` 的 `max()` 聚合免全表扫描）
 
 ### Frontend
 
@@ -242,6 +243,7 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 - **后台任务状态流转**: `research_run` 状态链：pending → running → success/failed。`RunService.mark_running()` 在 bg 函数开始时调用，`mark_success(run_id, metrics)` / `mark_failed(run_id, error_message)` 在结束时调用。进程重启后 `recover_stuck_runs_on_startup()` 自动恢复卡死任务。
 - **数据刷新按类型拆分**: `IngestService` 提供 `refresh_index_data()`、`refresh_macro_data()` 两个公共方法，各有独立 run 生命周期。对应 API 端点：`POST /runs/index-refresh`、`/runs/macro-refresh`。各数据页面（指数/宏观）有自己的"刷新数据"按钮，RunsPage 纯做监控。
 - **Run detail API**: `GET /runs/{run_id}` 返回 `ResearchRunDetail`（含 metrics、duration_seconds），`GET /runs/{run_id}/items` 返回 `ResearchRunItemSchema` 逐条明细，`POST /runs/{run_id}/retry` 重试失败任务（创建新 run 并提交到线程池）。
+- **`GET /api/system/status` 禁止全表扫描**: 该接口是总览页首屏必调接口，`SystemService` 有两条性能契约：① 各表"记录数"先读 `pg_class.reltuples` 估算值，达到 `_ESTIMATED_COUNT_THRESHOLD`（50 万行）的表直接返回估算值，不再执行 `count(*)`（`stock_daily_close` 精确计数需并行全表扫描约 3.5 秒）；小表仍返回精确值。② "最近入库时间"依赖 `ingested_at`/`fetched_at` 上的 btree 索引做 `max()` 反向扫描（迁移 0050）——**新增数据表并纳入状态快照时必须同时补建该列索引**，否则接口会退化为秒级全表扫描。实测优化前后：15 秒 → 0.3 秒。
 
 ## Coding Standards
 

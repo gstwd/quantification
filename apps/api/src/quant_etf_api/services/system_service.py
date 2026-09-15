@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from sqlalchemy import func, null, text
+from sqlalchemy import func, literal, null, text
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.db.models.core import (
@@ -29,7 +29,18 @@ class SystemService:
 
     从数据库各表中聚合数据概览、数据源新鲜度、最近运行记录和连接状态，
     供前端"数据状态"页面展示。
+
+    性能约定：状态接口是全页首屏的必调接口，因此不做任何全表扫描。
+    超大表的记录数改用 PostgreSQL 统计信息中的行数估算值（见
+    ``_ESTIMATED_COUNT_THRESHOLD``），最新业务日期与最近入库时间依赖
+    btree 索引上的 ``max()`` 反向扫描（见迁移 0050）。
     """
+
+    # 精确 count(*) 在 PostgreSQL 中必须扫描全表：stock_daily_close（约 1250 万行）
+    # 单次约 3.5 秒，且随数据增长线性变慢。估算行数达到该阈值的表改用
+    # pg_class.reltuples 统计值（由 ANALYZE/autovacuum 维护，实测误差 <1%），
+    # 小表仍返回精确计数，兼顾准确性与首屏响应速度。
+    _ESTIMATED_COUNT_THRESHOLD = 500_000
 
     def __init__(
         self,
@@ -60,6 +71,42 @@ class SystemService:
             logger.warning("活跃指数数量查询失败", exc_info=True)
             return 0
 
+    def _load_row_estimates(self, table_names: list[str]) -> dict[str, int]:
+        """批量读取各表的行数统计估算值。
+
+        一次查询取回所有目标表的 ``pg_class.reltuples``，避免为每张表单独
+        发起一次往返。统计信息缺失（reltuples <= 0，表尚未被 ANALYZE 过）
+        的表不会出现在返回值中，调用方据此回退到精确计数。
+
+        Args:
+            table_names: 需要读取估算行数的表名列表。
+
+        Returns:
+            表名 → 估算行数的映射，读取失败时返回空字典。
+        """
+        if not table_names:
+            return {}
+        try:
+            rows = self._db.execute(
+                text(
+                    "SELECT c.relname AS relname, c.reltuples AS reltuples "
+                    "FROM pg_class c "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE c.relkind = 'r' AND n.nspname = current_schema() "
+                    "AND c.relname = ANY(:names)"
+                ),
+                {"names": table_names},
+            ).all()
+            return {
+                row.relname: int(row.reltuples)
+                for row in rows
+                if row.reltuples is not None and row.reltuples > 0
+            }
+        except Exception:
+            self._db.rollback()
+            logger.warning("表行数统计读取失败", exc_info=True)
+            return {}
+
     def _get_table_snapshot(
         self,
         model: type,
@@ -67,6 +114,7 @@ class SystemService:
         table_name: str,
         date_column: str = "trade_date",
         ingested_column: str = "ingested_at",
+        estimated_rows: int | None = None,
     ) -> DataSourceSnapshot:
         """查询单张数据表的统计快照。
 
@@ -77,12 +125,20 @@ class SystemService:
             date_column: 用于获取最新日期的列名，默认 "trade_date"。
                 None 表示该表无业务日期维度（如成分事件，只展示入库时间）。
             ingested_column: 用于获取最近入库时间的列名，默认 "ingested_at"。
+            estimated_rows: 该表的统计估算行数。达到 ``_ESTIMATED_COUNT_THRESHOLD``
+                时直接返回估算值而不执行 ``count(*)``，避免全表扫描。
 
         Returns:
             DataSourceSnapshot，查询失败时返回全零值快照。
         """
         try:
-            query = self._db.query(func.count().label("cnt"))
+            # 估算值足够大时跳过精确计数：count(*) 无索引可用，只能全表扫描
+            count_label = (
+                literal(estimated_rows).label("cnt")
+                if estimated_rows is not None and estimated_rows >= self._ESTIMATED_COUNT_THRESHOLD
+                else func.count().label("cnt")
+            )
+            query = self._db.query(count_label)
             if date_column is not None:
                 query = query.add_columns(
                     func.max(getattr(model, date_column)).label("max_date")
@@ -140,6 +196,9 @@ class SystemService:
         最近运行记录。任一查询失败不影响其他查询结果，
         对应字段返回零值或空列表。
 
+        各表快照的记录数不做全表扫描：先一次性读取行数统计估算值，
+        估算值超过阈值的表直接采用估算结果。
+
         Returns:
             包含完整系统状态的响应对象。
         """
@@ -157,32 +216,48 @@ class SystemService:
 
         active_index_count = self._get_active_index_count()
 
+        # 表名清单同时用于行数统计批量查询与后续快照查询
+        snapshot_table_names = [
+            "index_daily_bar",
+            "index_valuation",
+            "macro_indicator",
+            "stock_daily_close",
+            "industry_daily_bar",
+            "industry_membership_event",
+        ]
+        row_estimates = self._load_row_estimates(snapshot_table_names)
+
         data_sources = [
             self._get_table_snapshot(
                 IndexDailyBarModel,
                 source_name="指数日线行情",
                 table_name="index_daily_bar",
+                estimated_rows=row_estimates.get("index_daily_bar"),
             ),
             self._get_table_snapshot(
                 IndexValuationModel,
                 source_name="指数估值PE/PB",
                 table_name="index_valuation",
+                estimated_rows=row_estimates.get("index_valuation"),
             ),
             self._get_table_snapshot(
                 MacroIndicatorModel,
                 source_name="宏观经济指标",
                 table_name="macro_indicator",
                 date_column="period",
+                estimated_rows=row_estimates.get("macro_indicator"),
             ),
             self._get_table_snapshot(
                 StockDailyCloseModel,
                 source_name="个股日线行情",
                 table_name="stock_daily_close",
+                estimated_rows=row_estimates.get("stock_daily_close"),
             ),
             self._get_table_snapshot(
                 IndustryDailyBarModel,
                 source_name="行业日线行情",
                 table_name="industry_daily_bar",
+                estimated_rows=row_estimates.get("industry_daily_bar"),
             ),
             self._get_table_snapshot(
                 IndustryMembershipEventModel,
@@ -190,6 +265,7 @@ class SystemService:
                 table_name="industry_membership_event",
                 date_column=None,
                 ingested_column="fetched_at",
+                estimated_rows=row_estimates.get("industry_membership_event"),
             ),
         ]
 

@@ -59,6 +59,8 @@ class IndexDailyBarModel(Base):
     __table_args__ = (
         UniqueConstraint("trade_date", "index_code", name="uq_index_daily_bar"),
         Index("ix_index_daily_bar_code_date", "index_code", "trade_date"),
+        # 系统状态接口需要 max(ingested_at)，无索引会退化为全表扫描
+        Index("ix_index_daily_bar_ingested_at", "ingested_at"),
     )
 
     id: Mapped[int] = mapped_column(
@@ -649,6 +651,8 @@ class IndexValuationModel(Base):
     __table_args__ = (
         UniqueConstraint("trade_date", "index_code", name="uq_index_valuation"),
         Index("ix_index_valuation_code_date", "index_code", "trade_date"),
+        # 系统状态接口需要 max(ingested_at)，无索引会退化为全表扫描
+        Index("ix_index_valuation_ingested_at", "ingested_at"),
     )
 
     id: Mapped[int] = mapped_column(
@@ -829,7 +833,11 @@ class MacroIndicatorModel(Base):
     """
 
     __tablename__ = "macro_indicator"
-    __table_args__ = (UniqueConstraint("indicator_code", "period", name="uq_macro_indicator"),)
+    __table_args__ = (
+        UniqueConstraint("indicator_code", "period", name="uq_macro_indicator"),
+        # 系统状态接口需要 max(ingested_at)，无索引会退化为全表扫描
+        Index("ix_macro_indicator_ingested_at", "ingested_at"),
+    )
 
     id: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True, comment="自增主键"
