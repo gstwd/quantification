@@ -125,6 +125,60 @@ class _FakeTushareStockClient:
         ]
 
 
+def test_sync_universe_writes_only_tushare_securities() -> None:
+    """证券基础信息同步不能由申万成分表补写占位证券。"""
+    service = StockDataService(MagicMock())
+    service._tushare_client = MagicMock()
+    service._tushare_client.is_configured.return_value = True
+    service._tushare_client.fetch_stock_basics.return_value = [
+        {
+            "stock_code": "600000",
+            "ts_code": "600000.SH",
+            "name_cn": "浦发银行",
+            "market": "主板",
+            "exchange": "SSE",
+            "ipo_date": date(1999, 11, 10),
+            "delist_date": None,
+            "is_active": True,
+            "source": "tushare",
+        }
+    ]
+    service._universe_repo = MagicMock()
+    service._universe_repo.find_all.return_value = []
+
+    result = service.sync_universe()
+
+    assert result == {"codes": 1, "added": 1, "updated": 1, "conflicts": 0}
+    rows = service._universe_repo.bulk_upsert.call_args.args[0]
+    assert rows == [
+        {
+            "stock_code": "600000",
+            "name_cn": "浦发银行",
+            "industry_code": None,
+            "ts_code": "600000.SH",
+            "market": "主板",
+            "exchange": "SSE",
+            "ipo_date": date(1999, 11, 10),
+            "delist_date": None,
+            "is_active": True,
+            "source": "tushare",
+            "created_at": rows[0]["created_at"],
+            "updated_at": rows[0]["updated_at"],
+        }
+    ]
+
+
+def test_single_stock_task_rejects_code_outside_tushare_universe() -> None:
+    """单股补数不能借由申万成员代码创建非 Tushare 占位行。"""
+    service = StockDataService(MagicMock())
+    service._universe_repo = MagicMock()
+    service._universe_repo.find_by_code.return_value = None
+
+    with pytest.raises(ValueError, match="Tushare 沪深 A 股目录"):
+        service._ensure_stock_row("920000")
+    service._universe_repo.bulk_upsert.assert_not_called()
+
+
 def test_sync_trade_date_merges_adj_factor_and_writes_three_tables() -> None:
     """按交易日同步会把复权因子并入日线，并分表写入。"""
     service = StockDataService(MagicMock())

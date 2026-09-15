@@ -25,7 +25,7 @@ from quant_etf_api.infra.db.base import Base, utcnow
 class StockUniverseModel(Base):
     """个股元数据表，对标 benchmark_index 与 index_daily_bar 的关系。
 
-    stock_universe 仅存放个股目录（Tushare 代码/市场/交易所/申万行业/
+    stock_universe 仅存放 Tushare 沪深 A 股目录（代码/市场/交易所/
     上市与退市状态）；行情明细与质量快照分别存放在 stock_daily_close、
     stock_daily_basic、stock_moneyflow 和 data_health_snapshot。
     """
@@ -63,7 +63,7 @@ class StockUniverseModel(Base):
         comment="是否活跃，False=已退市/停止交易",
     )
     source: Mapped[str | None] = mapped_column(
-        String(32), nullable=True, comment="元数据来源，如 akshare_exchange"
+        String(32), nullable=True, comment="元数据来源；证券基础信息仅允许 tushare"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, comment="记录创建时间（UTC）"

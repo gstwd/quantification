@@ -14,7 +14,6 @@ from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import DataHealthSnapshotModel
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
-    IndustryMembershipEventRepository,
     IndustryUniverseRepository,
     StockDailyCloseRepository,
 )
@@ -54,7 +53,6 @@ class StockDataService:
         self._universe_repo = StockUniverseRepository(db)
         self._health_repo = DataHealthSnapshotRepository(db)
         self._close_repo = StockDailyCloseRepository(db)
-        self._membership_repo = IndustryMembershipEventRepository(db)
         self._bar_repo = IndustryDailyBarRepository(db)
         self._industry_repo = IndustryUniverseRepository(db)
         self._basic_repo = StockDailyBasicRepository(db)
@@ -67,35 +65,15 @@ class StockDataService:
     # 元数据同步
     # ------------------------------------------------------------------
 
-    def ensure_membership_stocks(self) -> int:
-        """确保申万成分事件中的股票都存在于 stock_universe（占位行）。"""
-        events = self._membership_repo.find_all_events()
-        codes = sorted({event.stock_code for event in events})
-        existing = {row.stock_code for row in self._universe_repo.find_all(codes=codes)}
-        missing_codes = [code for code in codes if code not in existing]
-        if missing_codes:
-            placeholders = [
-                {
-                    "stock_code": code,
-                    "name_cn": "",
-                    "source": "sw_membership",
-                    "created_at": utcnow(),
-                    "updated_at": utcnow(),
-                }
-                for code in missing_codes
-            ]
-            self._universe_repo.bulk_upsert(placeholders, update_cols=set())
-            self._db.commit()
-        return len(missing_codes)
-
     def sync_universe(self) -> dict[str, int]:
-        """同步个股元数据：Tushare 沪深 A 股全量名单 + 当前行业归属。
+        """同步个股元数据：仅使用 Tushare 沪深 A 股全量名单。
 
         Tushare 名单按 6 位代码去重；同一代码出现多个 ts_code 时优先保留
-        上市状态、最新上市日期的记录，并把冲突数量写入返回指标。
+        上市状态、最新上市日期的记录，并把冲突数量写入返回指标。申万行业
+        成分表仅作为研究数据输入，不会在此创建证券基础信息或引入北交所代码。
 
         Returns:
-            {codes, added, updated, conflicts, membership_added}。
+            {codes, added, updated, conflicts}。
         """
         basics = self._fetch_universe_basics()
         chosen: dict[str, dict[str, Any]] = {}
@@ -110,8 +88,6 @@ class StockDataService:
             if self._basic_rank(row) > self._basic_rank(current):
                 chosen[code] = row
 
-        membership_added = self.ensure_membership_stocks()
-        industry_map = self._current_industry_map()
         existing_rows = {
             row.stock_code: row for row in self._universe_repo.find_all(codes=sorted(chosen))
         }
@@ -121,7 +97,6 @@ class StockDataService:
         for code in sorted(chosen):
             basic = chosen[code]
             current = existing_rows.get(code)
-            industry = industry_map.get(code)
             delist_date = basic.get("delist_date") or (
                 current.delist_date if current is not None else None
             )
@@ -133,11 +108,7 @@ class StockDataService:
                     "stock_code": code,
                     "name_cn": basic.get("name_cn")
                     or (current.name_cn if current is not None else ""),
-                    "industry_code": (
-                        industry
-                        if industry is not None
-                        else (current.industry_code if current is not None else None)
-                    ),
+                    "industry_code": None,
                     "ts_code": basic.get("ts_code"),
                     "market": basic.get("market"),
                     "exchange": basic.get("exchange"),
@@ -174,7 +145,6 @@ class StockDataService:
             "added": added,
             "updated": len(updates),
             "conflicts": conflicts,
-            "membership_added": membership_added,
         }
 
     @staticmethod
@@ -210,16 +180,6 @@ class StockDataService:
         if not rows:
             raise RuntimeError("Tushare stock_basic 返回空名单，拒绝更新 stock_universe")
         return rows
-
-    def _current_industry_map(self) -> dict[str, str]:
-        """返回股票代码 → 当前有效申万一级行业（start_date 不大于今天的最新事件）。"""
-        events = self._membership_repo.find_events_until(today_cn())
-        best: dict[str, tuple[date, str]] = {}
-        for event in events:
-            current = best.get(event.stock_code)
-            if current is None or (event.start_date, event.industry_code) > current:
-                best[event.stock_code] = (event.start_date, event.industry_code)
-        return {code: industry for code, (_, industry) in best.items()}
 
     # ------------------------------------------------------------------
     # 交易日历
@@ -460,21 +420,12 @@ class StockDataService:
         return items, total
 
     def _ensure_stock_row(self, stock_code: str) -> None:
-        """股票不存在于 stock_universe 时插入占位行。"""
+        """确认单股任务目标属于已同步的 Tushare 沪深 A 股目录。"""
         if self._universe_repo.find_by_code(stock_code) is None:
-            self._universe_repo.bulk_upsert(
-                [
-                    {
-                        "stock_code": stock_code,
-                        "name_cn": "",
-                        "source": "sw_membership",
-                        "created_at": utcnow(),
-                        "updated_at": utcnow(),
-                    }
-                ],
-                update_cols=set(),
+            raise ValueError(
+                f"股票 {stock_code} 不在已同步的 Tushare 沪深 A 股目录中；"
+                "请先执行证券基础信息补最新"
             )
-            self._db.commit()
 
     def _fetch_window(
         self,
