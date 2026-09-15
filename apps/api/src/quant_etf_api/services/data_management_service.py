@@ -1223,26 +1223,6 @@ class DataManagementService:
             if self._is_daily(definition.key)
             else []
         )
-        stock_boundaries: dict[str, tuple[date, date]] = {}
-        if definition.key in {
-            "stock_daily_close",
-            "stock_daily_basic",
-            "stock_moneyflow",
-        }:
-            universe_rows = (
-                self._db.query(
-                    StockUniverseModel.stock_code,
-                    StockUniverseModel.ipo_date,
-                    StockUniverseModel.delist_date,
-                )
-                .filter(StockUniverseModel.stock_code.in_(partitions))
-                .all()
-            )
-            for stock_code, ipo_date, delist_date in universe_rows:
-                start = max(date(2013, 1, 1), ipo_date or date(2013, 1, 1))
-                end = min(expected, delist_date) if expected is not None and delist_date else expected
-                if end is not None:
-                    stock_boundaries[stock_code] = (start, end)
         result: dict[str, dict[str, Any]] = {}
         for key in keys:
             row = raw_rows.get(key)
@@ -1253,10 +1233,9 @@ class DataManagementService:
             latest = row.latest_date if row is not None and date_expression is not None else None
             hard_errors = int(row.error_count) if row is not None else 0
             warnings = int(row.warning_count) if row is not None else 0
-            range_start = earliest
-            range_end = expected
-            if key in stock_boundaries:
-                range_start, range_end = stock_boundaries[key]
+            range_start, range_end = self._coverage_bounds(
+                definition.key, earliest, latest, expected
+            )
             partition_calendar_days = (
                 [day for day in calendar_days if range_end is None or day <= range_end]
                 if range_end is not None
@@ -1313,6 +1292,28 @@ class DataManagementService:
                 else None,
             }
         return result
+
+    @staticmethod
+    def _coverage_bounds(
+        dataset_key: str,
+        earliest: date | None,
+        latest: date | None,
+        expected: date | None,
+    ) -> tuple[date | None, date | None]:
+        """返回用于连续性检查的确认覆盖区间。
+
+        个股日频接口的实际历史覆盖并不总从证券上市日开始，也可能早于
+        最近交易日结束。因而只在该证券、该接口已经确认有数据的最早至最晚
+        日期内检查连续性；最新日期是否落后于目标交易日仍由 freshness 规则
+        单独标记为 stale，避免将上游未覆盖区间误报成缺口。
+        """
+        if dataset_key in {
+            "stock_daily_close",
+            "stock_daily_basic",
+            "stock_moneyflow",
+        }:
+            return earliest, latest
+        return earliest, expected
 
     def _exact_missing_dates(
         self,

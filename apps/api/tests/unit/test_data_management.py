@@ -119,6 +119,20 @@ def test_missing_count_reuses_preloaded_calendar_bounds() -> None:
     assert missing == 1
 
 
+def test_stock_quality_uses_confirmed_source_coverage_not_ipo_boundary() -> None:
+    """个股连续性只在已确认的接口覆盖区间内计算。"""
+    earliest = date(2018, 1, 2)
+    latest = date(2025, 12, 31)
+    expected = date(2026, 9, 15)
+
+    assert DataManagementService._coverage_bounds(
+        "stock_moneyflow", earliest, latest, expected
+    ) == (earliest, latest)
+    assert DataManagementService._coverage_bounds(
+        "index_daily_bar", earliest, latest, expected
+    ) == (earliest, expected)
+
+
 def test_non_partitioned_dataset_check_keeps_single_summary_row() -> None:
     """无分区数据集检查结果应作为汇总行保留，不再被空聚合覆盖为 unknown。"""
     svc = _make_service()
