@@ -324,46 +324,8 @@
       </template>
     </section>
 
-    <!-- 数据健康摘要 -->
-    <section v-if="dataHealth" class="section animate-in stagger-4">
-      <div class="section-header">
-        <h2 class="section-title">数据健康</h2>
-        <RouterLink to="/data-management" class="link-accent section-link">管理全部数据 →</RouterLink>
-      </div>
-      <div v-if="hasNoDataSnapshot" class="health-empty">
-        <span class="health-empty-icon" aria-hidden="true">◔</span>
-        <div class="health-empty-copy">
-          <strong>暂无健康快照数据</strong>
-          <p>健康快照不会在后端启动时自动生成，只在手动执行「检查 / 同步」或数据摄取任务完成后更新。前往数据管理页点击「检查全部质量」即可生成首次快照。</p>
-        </div>
-        <RouterLink to="/data-management" class="btn btn-ghost">前往生成快照</RouterLink>
-      </div>
-      <div v-else class="source-grid">
-        <div v-for="src in dataHealth.datasets" :key="src.dataset_key" class="source-card">
-          <div class="source-top">
-            <div class="source-name">{{ src.display_name }}</div>
-            <div class="source-table mono" :title="formatHealthIssue(src)">{{ healthStatusText(src.health_status) }}</div>
-          </div>
-          <div class="source-stats">
-            <div class="source-stat">
-              <span class="source-stat-label">记录数</span>
-              <span class="source-stat-val">{{ src.record_count.toLocaleString() }}</span>
-            </div>
-            <div class="source-stat">
-              <span class="source-stat-label">实际 / 目标</span>
-              <span class="source-stat-val">{{ src.latest_date ?? '—' }} / {{ src.expected_date ?? '—' }}</span>
-            </div>
-            <div class="source-stat">
-              <span class="source-stat-label">质量问题</span>
-              <span class="source-stat-val mono">{{ formatHealthIssue(src) }}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
     <!-- 最近运行 -->
-    <section v-if="systemStatus" class="section animate-in stagger-6">
+    <section v-if="systemStatus" class="section animate-in stagger-4">
       <div class="section-header">
         <h2 class="section-title">最近运行</h2>
         <div class="section-header-right">
@@ -413,21 +375,20 @@
 /**
  * 研究总览页面（合并自原 DashboardPage + DataStatusPage）。
  *
- * 展示平台统计概览、最新信号、数据健康、最近运行记录。
+ * 展示平台统计概览、最新信号、最近运行记录。
  * 数据维护统一入口在"数据管理"页；本页只做状态浏览。
  */
 
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import type { DailySentimentResponse, DataManagementOverview, MarketSynthesisResponse, StarredSummaryResponse, SystemStatusResponse, TagNewsItem } from '../types/api'
+import type { DailySentimentResponse, MarketSynthesisResponse, StarredSummaryResponse, SystemStatusResponse, TagNewsItem } from '../types/api'
 import { fetchSystemStatus } from '../api/runs'
 import { fetchDailySentiment, fetchMarketSynthesis, fetchPreviousTradingDay, fetchSentimentNews } from '../api/aiFactors'
 import { fetchStarredSummary } from '../api/strategies'
 import { useStrategyStore } from '../stores/strategies'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
-import { fetchDataManagementOverview } from '../api/dataManagement'
 
 /** 获取因子指标描述的快捷方法 */
 function fh(key: string): string {
@@ -435,7 +396,6 @@ function fh(key: string): string {
 }
 
 const systemStatus = ref<SystemStatusResponse | null>(null)
-const dataHealth = ref<DataManagementOverview | null>(null)
 const statusLoading = ref(false)
 const error = ref<string | null>(null)
 
@@ -646,55 +606,9 @@ async function loadStatus() {
   }
 }
 
-/** 将健康状态转换为总览使用的中文标签。 */
-function healthStatusText(status: string): string {
-  const labels: Record<string, string> = {
-    healthy: '健康', warning: '需关注', error: '异常', unknown: '待检查', unsupported: '不支持',
-  }
-  return labels[status] ?? status
-}
-
-/** 将健康快照中的结构化问题压缩为卡片可展示的说明。 */
-function formatHealthIssue(item: DataManagementOverview['datasets'][number]): string {
-  const summary = item.issue_summary
-  const lastError = summary?.last_error
-  if (typeof lastError === 'string') return lastError
-  const reasons = summary?.reasons
-  if (Array.isArray(reasons)) {
-    const labels: Record<string, string> = {
-      empty: '无数据', stale: '已过期', missing_dates: '有缺口',
-      invalid_values: '有异常值', warnings: '有告警',
-    }
-    const readable = reasons.filter((reason): reason is string => typeof reason === 'string')
-      .map((reason) => labels[reason] ?? reason)
-    if (readable.length > 0) return readable.join(' / ')
-  }
-  const warnings = summary?.warning_count
-  return `缺 ${item.missing_count} / 错 ${item.invalid_count}${typeof warnings === 'number' && warnings > 0 ? ` / 告 ${warnings}` : ''}`
-}
-
-/** 加载统一数据健康摘要。 */
-async function loadDataHealth(): Promise<void> {
-  try {
-    dataHealth.value = await fetchDataManagementOverview()
-  } catch {
-    // 数据管理服务未迁移或暂不可用时不影响研究总览其他内容
-  }
-}
-
-/**
- * 是否尚未生成任何健康快照。
- *
- * 后端启动不再自动执行健康检查，快照只在手动触发或数据摄取任务完成后
- * 生成；快照行数为 0 时用友好提示替代整片"待检查"卡片。字段缺失
- * （前端已更新、后端未重启）时按 false 处理，回退到原有卡片展示。
- */
-const hasNoDataSnapshot = computed(() => dataHealth.value?.snapshot_count === 0)
-
 onMounted(() =>
   Promise.all([
     loadStatus(),
-    loadDataHealth(),
     strategyStore.loadAll(),
     loadStarredSummary(),
     loadSentimentOverview(),
@@ -753,7 +667,6 @@ onMounted(() =>
 .stagger-3 { animation-delay: 0.19s; }
 .stagger-4 { animation-delay: 0.26s; }
 .stagger-5 { animation-delay: 0.33s; }
-.stagger-6 { animation-delay: 0.40s; }
 
 /* ── 页头 ── */
 .page-header {
@@ -1250,125 +1163,6 @@ onMounted(() =>
   min-width: 36px;
 }
 
-/* ── 数据源卡片网格 ── */
-.source-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
-  padding: 16px 20px;
-}
-
-/* ── 尚无健康快照时的友好提示 ── */
-.health-empty {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin: 0 20px 16px;
-  padding: 16px 18px;
-  background: rgba(59, 130, 246, 0.07);
-  border: 1px solid rgba(59, 130, 246, 0.22);
-  border-radius: var(--radius-sm);
-}
-
-.health-empty-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
-  color: #7db0ff;
-  background: rgba(59, 130, 246, 0.16);
-  font-size: 17px;
-}
-
-.health-empty-copy {
-  flex: 1;
-  min-width: 0;
-}
-
-.health-empty-copy strong {
-  display: block;
-  font-size: 13px;
-  color: var(--text);
-}
-
-.health-empty-copy p {
-  margin: 4px 0 0;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--text-muted);
-}
-
-.health-empty .btn {
-  flex-shrink: 0;
-  text-decoration: none;
-}
-
-.source-card {
-  background: rgba(51, 65, 85, 0.35);
-  border: 1px solid rgba(148, 163, 184, 0.06);
-  border-radius: var(--radius-sm);
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  transition: all 0.25s ease;
-}
-
-.source-card:hover {
-  border-color: rgba(59, 130, 246, 0.2);
-  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.08);
-}
-
-.source-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.source-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.source-table {
-  font-size: 10px;
-  color: var(--text-muted);
-  background: rgba(0, 0, 0, 0.2);
-  padding: 2px 8px;
-  border-radius: 10px;
-}
-
-.source-stats {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-}
-
-.source-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.source-stat-label {
-  font-size: 10px;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.source-stat-val {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text);
-  font-family: monospace;
-}
-
 /* ── 数据质量 ── */
 .quality-grid {
   display: grid;
@@ -1815,24 +1609,8 @@ onMounted(() =>
     font-size: 24px;
   }
 
-  .source-grid,
   .quality-grid {
     grid-template-columns: 1fr;
-  }
-
-  .health-empty {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 10px;
-  }
-
-  .health-empty .btn {
-    width: 100%;
-    justify-content: center;
-  }
-
-  .source-stats {
-    grid-template-columns: repeat(3, 1fr);
   }
 
   .section-header {
