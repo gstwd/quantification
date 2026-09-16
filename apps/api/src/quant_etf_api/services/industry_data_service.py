@@ -227,6 +227,35 @@ class IndustryDataService:
             "updated_rows": updated_rows,
         }
 
+    def repair_industry_dates(
+        self,
+        industry_code: str,
+        target_dates: set[date],
+        *,
+        commit: bool = True,
+    ) -> dict[str, Any]:
+        """复验指定交易日并只写入这些缺口/异常行。
+
+        上游仍返回完整历史；派生前收和涨跌幅时保留完整响应作为上下文，避免
+        稀疏目标日期失去前一交易日，最终仅把目标日期落库。
+        """
+        code = self._ensure_universe_row(industry_code)
+        rows = self._sw_client.fetch_daily(code)
+        ordered = sorted(
+            (row for row in rows if row.get("close_price") is not None),
+            key=lambda row: row["trade_date"],
+        )
+        derived = derive_prev_close_change(ordered)
+        targeted = [row for row in derived if row["trade_date"] in target_dates]
+        upserted = self._upsert_bars(code, targeted)
+        if commit:
+            self._db.commit()
+        return {
+            "industry_code": code,
+            "upserted_rows": upserted,
+            "returned_dates": {row["trade_date"] for row in targeted},
+        }
+
     def rebuild_industry(self, industry_code: str) -> dict[str, Any]:
         """全量重拉单个行业日线。
 

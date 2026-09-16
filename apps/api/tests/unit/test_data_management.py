@@ -9,6 +9,8 @@ import pytest
 
 from quant_etf_api.infra.clients.index_daily_common import IndexDailyBar
 from quant_etf_api.schemas.data_management import DataSetHealthSummary
+from quant_etf_api.schemas.market_data import IndexValuation
+import quant_etf_api.services.data_management_service as data_management_module
 from quant_etf_api.services.data_management_service import (
     DATASETS,
     DataManagementService,
@@ -183,6 +185,141 @@ def test_upstream_exemption_is_removed_when_local_date_is_no_longer_missing() ->
         ("2026-01-02", "2026-01-02"),
         ("2026-01-06", "2026-01-06"),
     ]
+
+
+def test_upstream_exemptions_keep_verification_sources_separate() -> None:
+    """不同上游验证链的豁免日期不得被压缩为同一来源区间。"""
+    service = DataManagementService(MagicMock())
+    calendar = [date(2026, 1, 2), date(2026, 1, 5)]
+    existing = [
+        {
+            "start_date": "2026-01-02",
+            "end_date": "2026-01-02",
+            "trading_day_count": 1,
+            "source": "index_multi_source",
+            "confirmed_at": "2026-09-15T01:02:03Z",
+        },
+        {
+            "start_date": "2026-01-05",
+            "end_date": "2026-01-05",
+            "trading_day_count": 1,
+            "source": "akshare_sw",
+            "confirmed_at": "2026-09-15T01:02:03Z",
+        },
+    ]
+
+    ranges = service._remaining_upstream_missing_ranges(set(calendar), calendar, existing)
+
+    assert {(item["source"], item["start_date"], item["end_date"]) for item in ranges} == {
+        ("index_multi_source", "2026-01-02", "2026-01-02"),
+        ("akshare_sw", "2026-01-05", "2026-01-05"),
+    }
+
+
+def test_index_repair_writes_only_returned_targets_and_confirms_absent_dates() -> None:
+    """指数修复只 upsert 目标日期；完整源链未返回的日期记录为上游空档。"""
+    db = MagicMock()
+    service = DataManagementService(db)
+    first, second = date(2026, 1, 2), date(2026, 1, 5)
+    service._partitions = lambda _: ["000300"]
+    service._latest_trading_day = lambda **_kwargs: second
+    service._calendar_days_until = lambda *_args, **_kwargs: [first, second]
+    service._daily_gap_targets_for_repair = MagicMock(return_value={"000300": {first, second}})
+    service._record_upstream_missing_dates_batch = MagicMock()
+    bar = IndexDailyBar(
+        trade_date=first,
+        open_price=1.0,
+        high_price=1.1,
+        low_price=0.9,
+        close_price=1.0,
+        prev_close_price=1.0,
+        change_pct=0.0,
+        volume=1.0,
+        turnover=1.0,
+    )
+    client = MagicMock(fetch_index_daily=MagicMock(return_value=[bar]))
+    ingest = MagicMock(_build_index_daily_sources=MagicMock(return_value=[("akshare", client)]))
+    ingest._insert_index_bars.return_value = 1
+
+    result = service._repair_index_daily_gaps(None, ingest, force=False)
+
+    assert result["records"] == 1
+    assert result["upstream_missing_confirmed"] == 1
+    ingest._insert_index_bars.assert_called_once()
+    service._record_upstream_missing_dates_batch.assert_called_once_with(
+        "index_daily_bar",
+        {"000300": {second}},
+        [first, second],
+        source="index_multi_source",
+    )
+
+
+def test_industry_repair_does_not_confirm_when_request_fails() -> None:
+    """申万请求失败不是上游空档证据，必须保留为待修复缺口。"""
+    db = MagicMock()
+    service = DataManagementService(db)
+    trade_date = date(2026, 1, 2)
+    service._partitions = lambda _: ["801010"]
+    service._latest_trading_day = lambda **_kwargs: trade_date
+    service._calendar_days_until = lambda *_args, **_kwargs: [trade_date]
+    service._daily_gap_targets_for_repair = MagicMock(return_value={"801010": {trade_date}})
+    service._record_upstream_missing_dates_batch = MagicMock()
+    industry = MagicMock(repair_industry_dates=MagicMock(side_effect=RuntimeError("upstream down")))
+
+    result = service._repair_industry_daily_gaps(None, industry, force=False)
+
+    assert result["upstream_missing_confirmed"] == 0
+    assert result["errors"]
+    service._record_upstream_missing_dates_batch.assert_not_called()
+
+
+def test_valuation_repair_uses_akshare_when_tushare_omits_target(monkeypatch) -> None:
+    """首选 Tushare 缺日期时，AkShare 返回该日期应直接修复而非豁免。"""
+    db = MagicMock()
+    service = DataManagementService(db)
+    trade_date = date(2026, 1, 2)
+    service._partitions = lambda _: ["000300"]
+    service._latest_trading_day = lambda **_kwargs: trade_date
+    service._calendar_days_until = lambda *_args, **_kwargs: [trade_date]
+    service._daily_gap_targets_for_repair = MagicMock(return_value={"000300": {trade_date}})
+    service._record_upstream_missing_dates_batch = MagicMock()
+
+    class FakeTushare:
+        def is_configured(self) -> bool:
+            return True
+
+        def supports(self, _code: str) -> bool:
+            return True
+
+        def fetch_index_valuation(self, _code: str) -> list[IndexValuation]:
+            return []
+
+    class FakeAkShare:
+        def fetch_index_valuation(self, _code: str) -> list[IndexValuation]:
+            return [
+                IndexValuation(
+                    trade_date=trade_date,
+                    index_code="000300",
+                    pe=10.0,
+                    pe_percentile=50.0,
+                    pb=1.0,
+                    pb_percentile=50.0,
+                    dividend_yield=None,
+                    source="akshare",
+                )
+            ]
+
+    monkeypatch.setattr(data_management_module, "TushareIndexValuationClient", FakeTushare)
+    monkeypatch.setattr(data_management_module, "AkShareIndexClient", FakeAkShare)
+    ingest = MagicMock()
+    ingest._insert_index_valuations.return_value = 1
+
+    result = service._repair_index_valuation_gaps(None, ingest, force=False)
+
+    assert result["records"] == 1
+    assert result["upstream_missing_confirmed"] == 0
+    ingest._insert_index_valuations.assert_called_once()
+    service._record_upstream_missing_dates_batch.assert_not_called()
 
 
 def test_stock_gap_repair_confirms_only_successful_tushare_negative_results() -> None:

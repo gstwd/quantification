@@ -17,6 +17,8 @@ from sqlalchemy import Date, and_, case, cast, func, not_, or_
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.db.base import utcnow
+from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
+from quant_etf_api.infra.clients.tushare_market import TushareIndexValuationClient
 from quant_etf_api.infra.db.models.core import (
     BenchmarkIndexModel,
     DataHealthSnapshotModel,
@@ -63,7 +65,14 @@ _STOCK_DAILY_DATASETS = {
     "stock_daily_basic",
     "stock_moneyflow",
 }
+_UPSTREAM_EXEMPT_DAILY_DATASETS = _STOCK_DAILY_DATASETS | {
+    "index_daily_bar",
+    "index_valuation",
+    "industry_daily_bar",
+}
 _STOCK_REPAIR_COMMIT_BATCH_SIZE = 20
+_DAILY_REPAIR_COMMIT_BATCH_SIZE = 8
+_INDEX_REPAIR_WINDOW_GAP_DAYS = 10
 _VALUATION_SUPPORTED_CODES = {
     "000016",
     "000300",
@@ -561,104 +570,75 @@ class DataManagementService:
                 _fail("trading_calendar", exc)
         elif dataset_key == "index_daily_bar":
             service = IngestService(self._db)
-            for code in self._partitions(dataset_key) if not partition_key else [partition_key]:
+            if operation == "repair_gaps":
                 try:
-                    gaps_before = (
-                        self._partition_missing_count(dataset_key, code)
-                        if operation == "repair_gaps"
-                        else 0
-                    )
-                    invalid_before = (
-                        self._partition_invalid_count(dataset_key, code)
-                        if operation == "repair_gaps"
-                        else 0
-                    )
-                    if operation == "rebuild":
-                        _add_records(self._safe_replace_index_bars(service, code))
-                        _add_fallbacks(service, code)
-                        continue
-                    latest = (
-                        self._db.query(func.max(IndexDailyBarModel.trade_date))
-                        .filter(IndexDailyBarModel.index_code == code)
-                        .scalar()
-                    )
-                    if (
-                        latest is not None
-                        and latest >= expected
-                        and not force
-                        and operation == "sync_latest"
-                    ):
-                        skipped = True
-                        continue
-                    fetched = service._fetch_and_upsert_index_bars(
-                        code,
-                        incremental=operation != "repair_gaps",
-                        overwrite=operation == "repair_gaps",
-                    )
-                    _add_fallbacks(service, code)
-                    _add_records(fetched)
-                    if operation == "repair_gaps":
-                        stats["records_updated"] += fetched
-                        stats["records_inserted"] = max(0, stats["records_inserted"] - fetched)
-                    _add_source(self._latest_source(IndexDailyBarModel, code))
-                    if operation == "repair_gaps":
-                        gaps_after = self._partition_missing_count(dataset_key, code)
-                        invalid_after = self._partition_invalid_count(dataset_key, code)
-                        stats["gaps_found"] += gaps_before
-                        stats["gaps_repaired"] += max(0, gaps_before - gaps_after)
-                        stats["invalid_found"] += invalid_before
-                        stats["invalid_repaired"] += max(0, invalid_before - invalid_after)
+                    result = self._repair_index_daily_gaps(partition_key, service, force=force)
+                    _add_records(int(result.get("records") or 0))
+                    errors.extend(str(error) for error in result.get("errors", []))
+                    stats["gaps_found"] += int(result.get("gaps_found") or 0)
+                    stats["gaps_repaired"] += int(result.get("upstream_missing_confirmed") or 0)
                 except Exception as exc:  # noqa: PERF203
-                    _fail(code, exc)
+                    _fail(partition_key or dataset_key, exc)
+            else:
+                for code in self._partitions(dataset_key) if not partition_key else [partition_key]:
+                    try:
+                        if operation == "rebuild":
+                            _add_records(self._safe_replace_index_bars(service, code))
+                            _add_fallbacks(service, code)
+                            continue
+                        latest = (
+                            self._db.query(func.max(IndexDailyBarModel.trade_date))
+                            .filter(IndexDailyBarModel.index_code == code)
+                            .scalar()
+                        )
+                        if (
+                            latest is not None
+                            and latest >= expected
+                            and not force
+                            and operation == "sync_latest"
+                        ):
+                            skipped = True
+                            continue
+                        fetched = service._fetch_and_upsert_index_bars(
+                            code, incremental=True, overwrite=False
+                        )
+                        _add_fallbacks(service, code)
+                        _add_records(fetched)
+                        _add_source(self._latest_source(IndexDailyBarModel, code))
+                    except Exception as exc:  # noqa: PERF203
+                        _fail(code, exc)
         elif dataset_key == "index_valuation":
             service = IngestService(self._db)
-            for code in self._partitions(dataset_key) if not partition_key else [partition_key]:
+            if operation == "repair_gaps":
                 try:
-                    gaps_before = (
-                        self._partition_missing_count(dataset_key, code)
-                        if operation == "repair_gaps"
-                        else 0
-                    )
-                    invalid_before = (
-                        self._partition_invalid_count(dataset_key, code)
-                        if operation == "repair_gaps"
-                        else 0
-                    )
-                    if operation == "rebuild":
-                        _add_records(self._safe_replace_index_valuations(service, code))
-                        _add_fallbacks(service, code)
-                        continue
-                    latest = (
-                        self._db.query(func.max(IndexValuationModel.trade_date))
-                        .filter(IndexValuationModel.index_code == code)
-                        .scalar()
-                    )
-                    if (
-                        latest is not None
-                        and latest >= expected
-                        and not force
-                        and operation == "sync_latest"
-                    ):
-                        skipped = True
-                        continue
-                    fetched = service._fetch_and_upsert_index_valuation(
-                        code, overwrite=operation == "repair_gaps"
-                    )
-                    _add_fallbacks(service, code)
-                    _add_records(fetched)
-                    if operation == "repair_gaps":
-                        stats["records_updated"] += fetched
-                        stats["records_inserted"] = max(0, stats["records_inserted"] - fetched)
-                    _add_source(self._latest_source(IndexValuationModel, code))
-                    if operation == "repair_gaps":
-                        gaps_after = self._partition_missing_count(dataset_key, code)
-                        invalid_after = self._partition_invalid_count(dataset_key, code)
-                        stats["gaps_found"] += gaps_before
-                        stats["gaps_repaired"] += max(0, gaps_before - gaps_after)
-                        stats["invalid_found"] += invalid_before
-                        stats["invalid_repaired"] += max(0, invalid_before - invalid_after)
+                    result = self._repair_index_valuation_gaps(partition_key, service, force=force)
+                    _add_records(int(result.get("records") or 0))
+                    errors.extend(str(error) for error in result.get("errors", []))
+                    stats["gaps_found"] += int(result.get("gaps_found") or 0)
+                    stats["gaps_repaired"] += int(result.get("upstream_missing_confirmed") or 0)
                 except Exception as exc:  # noqa: PERF203
-                    _fail(code, exc)
+                    _fail(partition_key or dataset_key, exc)
+            else:
+                for code in self._partitions(dataset_key) if not partition_key else [partition_key]:
+                    try:
+                        if operation == "rebuild":
+                            _add_records(self._safe_replace_index_valuations(service, code))
+                            _add_fallbacks(service, code)
+                            continue
+                        latest = (
+                            self._db.query(func.max(IndexValuationModel.trade_date))
+                            .filter(IndexValuationModel.index_code == code)
+                            .scalar()
+                        )
+                        if latest is not None and latest >= expected and not force:
+                            skipped = True
+                            continue
+                        fetched = service._fetch_and_upsert_index_valuation(code)
+                        _add_fallbacks(service, code)
+                        _add_records(fetched)
+                        _add_source(self._latest_source(IndexValuationModel, code))
+                    except Exception as exc:  # noqa: PERF203
+                        _fail(code, exc)
         elif dataset_key == "macro_indicator":
             try:
                 service = IngestService(self._db)
@@ -726,27 +706,20 @@ class DataManagementService:
                 _fail("industry_universe", exc)
         elif dataset_key == "industry_daily_bar":
             service = IndustryDataService(self._db)
-            if partition_key:
+            if operation == "repair_gaps":
+                try:
+                    result = self._repair_industry_daily_gaps(partition_key, service, force=force)
+                    _add_records(int(result.get("records") or 0))
+                    errors.extend(str(error) for error in result.get("errors", []))
+                    stats["gaps_found"] += int(result.get("gaps_found") or 0)
+                    stats["gaps_repaired"] += int(result.get("upstream_missing_confirmed") or 0)
+                except Exception as exc:  # noqa: PERF203
+                    _fail(partition_key or dataset_key, exc)
+            elif partition_key:
                 try:
                     if operation == "rebuild":
                         result = service.rebuild_industry(partition_key)
                         _add_records(int(result.get("upserted_rows") or 0))
-                    elif operation == "repair_gaps":
-                        # 缺口/异常的前后统计统一走本服务的聚合 SQL 口径（与健康快照同源），
-                        # 行业服务只负责抓取与写入，不自行维护第二套质量规则。
-                        gaps_before = self._partition_missing_count(dataset_key, partition_key)
-                        invalid_before = self._partition_invalid_count(dataset_key, partition_key)
-                        result = service.repair_industry_gaps(partition_key)
-                        _add_records(
-                            int(result.get("upserted_rows") or 0),
-                            updated=int(result.get("updated_rows") or 0),
-                        )
-                        gaps_after = self._partition_missing_count(dataset_key, partition_key)
-                        invalid_after = self._partition_invalid_count(dataset_key, partition_key)
-                        stats["gaps_found"] += gaps_before
-                        stats["gaps_repaired"] += max(0, gaps_before - gaps_after)
-                        stats["invalid_found"] += invalid_before
-                        stats["invalid_repaired"] += max(0, invalid_before - invalid_after)
                     elif force or self._industry_code_behind(partition_key, expected):
                         result = service.fill_industry(partition_key)
                         _add_records(int(result.get("fetched_rows") or 0))
@@ -759,24 +732,6 @@ class DataManagementService:
                     try:
                         result = service.rebuild_industry(code)
                         _add_records(int(result.get("upserted_rows") or 0))
-                    except Exception as exc:  # noqa: PERF203
-                        _fail(code, exc)
-            elif operation == "repair_gaps":
-                for code in self._partitions(dataset_key):
-                    try:
-                        gaps_before = self._partition_missing_count(dataset_key, code)
-                        invalid_before = self._partition_invalid_count(dataset_key, code)
-                        result = service.repair_industry_gaps(code)
-                        _add_records(
-                            int(result.get("upserted_rows") or 0),
-                            updated=int(result.get("updated_rows") or 0),
-                        )
-                        gaps_after = self._partition_missing_count(dataset_key, code)
-                        invalid_after = self._partition_invalid_count(dataset_key, code)
-                        stats["gaps_found"] += gaps_before
-                        stats["gaps_repaired"] += max(0, gaps_before - gaps_after)
-                        stats["invalid_found"] += invalid_before
-                        stats["invalid_repaired"] += max(0, invalid_before - invalid_after)
                     except Exception as exc:  # noqa: PERF203
                         _fail(code, exc)
             elif force or self._industry_dataset_behind(expected):
@@ -1182,7 +1137,7 @@ class DataManagementService:
                 for key, row in existing.items()
                 if key
             }
-            if definition.key in _STOCK_DAILY_DATASETS
+            if definition.key in _UPSTREAM_EXEMPT_DAILY_DATASETS
             else None
         )
         inspect_kwargs: dict[str, Any] = {}
@@ -1314,14 +1269,14 @@ class DataManagementService:
             if self._is_daily(definition.key)
             else []
         )
-        stock_exact_missing = (
-            self._stock_exact_missing_summaries(
+        daily_exact_missing = (
+            self._daily_exact_missing_summaries(
                 definition.key,
                 partitions,
                 calendar_days,
                 upstream_missing_by_partition or {},
             )
-            if definition.key in _STOCK_DAILY_DATASETS and exact_missing
+            if definition.key in _UPSTREAM_EXEMPT_DAILY_DATASETS and exact_missing
             else None
         )
         result: dict[str, dict[str, Any]] = {}
@@ -1350,8 +1305,8 @@ class DataManagementService:
             )
             missing_sample: list[str] = []
             upstream_missing_ranges: list[dict[str, Any]] = []
-            if stock_exact_missing is not None and key:
-                exact = stock_exact_missing.get(key, {})
+            if daily_exact_missing is not None and key:
+                exact = daily_exact_missing.get(key, {})
                 missing = int(exact.get("missing_count") or 0)
                 missing_sample = list(exact.get("missing_sample") or [])
                 upstream_missing_ranges = list(exact.get("upstream_missing_ranges") or [])
@@ -1366,10 +1321,12 @@ class DataManagementService:
                 unresolved_dates = [day for day in raw_missing_dates if day not in exempt_dates]
                 missing = len(unresolved_dates)
                 missing_sample = [day.isoformat() for day in unresolved_dates[:20]]
-                upstream_missing_ranges = self._compress_upstream_missing_ranges(
-                    exempt_dates, calendar_days, (upstream_missing_by_partition or {}).get(key, [])
+                upstream_missing_ranges = self._remaining_upstream_missing_ranges(
+                    exempt_dates,
+                    calendar_days,
+                    (upstream_missing_by_partition or {}).get(key, []),
                 )
-            elif definition.key in _STOCK_DAILY_DATASETS and key:
+            elif definition.key in _UPSTREAM_EXEMPT_DAILY_DATASETS and key:
                 # 日常同步不做逐证券反连接；以已确认区间的交易日数修正聚合
                 # 缺口，并原样保留豁免，下一次精查会清理已被本地补入的日期。
                 known_dates = self._range_dates(
@@ -1382,8 +1339,10 @@ class DataManagementService:
                     and (range_end is None or day <= range_end)
                 }
                 missing = max(0, missing - len(known_dates))
-                upstream_missing_ranges = self._compress_upstream_missing_ranges(
-                    known_dates, calendar_days, (upstream_missing_by_partition or {}).get(key, [])
+                upstream_missing_ranges = self._remaining_upstream_missing_ranges(
+                    known_dates,
+                    calendar_days,
+                    (upstream_missing_by_partition or {}).get(key, []),
                 )
             status = self._health_status(
                 definition.key, key, record_count, latest, expected, missing, hard_errors, warnings
@@ -1532,6 +1491,7 @@ class DataManagementService:
         existing: list[dict[str, Any]],
         *,
         confirmed_at: str | None = None,
+        source: str = "tushare",
     ) -> list[dict[str, Any]]:
         """Store exempt dates as contiguous trading-day ranges, retaining confirmation time."""
         if not dates:
@@ -1561,11 +1521,32 @@ class DataManagementService:
                 "start_date": group[0].isoformat(),
                 "end_date": group[-1].isoformat(),
                 "trading_day_count": len(group),
-                "source": "tushare",
+                "source": source,
                 "confirmed_at": confirmed_at,
             }
             for group in groups
         ]
+
+    def _remaining_upstream_missing_ranges(
+        self,
+        missing_dates: set[date],
+        calendar_days: list[date],
+        existing: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """保留仍未落库的豁免日期，并按原验证来源分别压缩。"""
+        by_source: dict[str, list[dict[str, Any]]] = {}
+        for item in existing:
+            if isinstance(item, dict):
+                by_source.setdefault(str(item.get("source") or "unknown"), []).append(item)
+        result: list[dict[str, Any]] = []
+        for source, ranges in by_source.items():
+            retained = missing_dates & self._range_dates(ranges, calendar_days)
+            result.extend(
+                self._compress_upstream_missing_ranges(
+                    retained, calendar_days, ranges, source=source
+                )
+            )
+        return result
 
     def _stock_gap_targets_for_repair(
         self,
@@ -1636,41 +1617,101 @@ class DataManagementService:
                 targets.setdefault(trade_date, set()).add(stock_code)
         return targets
 
-    def _stock_exact_missing_summaries(
+    def _daily_gap_targets_for_repair(
         self,
         dataset_key: str,
-        stock_codes: list[str],
+        partition_keys: list[str],
         calendar_days: list[date],
-        upstream_missing_by_partition: dict[str, list[dict[str, Any]]],
-    ) -> dict[str, dict[str, Any]]:
-        """流式汇总全市场个股真实缺口，供完整质量检查复用。
-
-        资金流向的原始缺口可达数百万行。不能为每只股票单独反连接，也不
-        应把所有结果一次载入 Python；本方法使用一个集合反连接并按块读取，
-        仅保留每证券计数、前 20 个样例和仍有效的已确认上游空档。
-        """
-        if not stock_codes:
+        *,
+        force: bool,
+    ) -> dict[str, set[date]]:
+        """一次集合反连接找出各日频分区需要复验的缺口或异常日期。"""
+        if not partition_keys:
             return {}
         model, partition_column, date_column, _ = self._model_columns(dataset_key)
         assert partition_column is not None and date_column is not None
         error_condition, _ = self._quality_conditions(dataset_key)
         bounds = (
             self._db.query(
-                partition_column.label("stock_code"),
+                partition_column.label("partition_key"),
                 func.min(date_column).label("earliest_date"),
-                func.max(date_column).label("latest_date"),
             )
-            .filter(partition_column.in_(stock_codes))
+            .filter(partition_column.in_(partition_keys))
             .group_by(partition_column)
             .subquery()
         )
         join_condition = and_(
-            partition_column == bounds.c.stock_code,
+            partition_column == bounds.c.partition_key,
             date_column == TradingCalendarModel.trade_date,
             not_(error_condition),
         )
-        known_ranges_by_stock: dict[str, list[tuple[date, date]]] = {}
-        for stock_code, ranges in upstream_missing_by_partition.items():
+        rows = (
+            self._db.query(bounds.c.partition_key, TradingCalendarModel.trade_date)
+            .select_from(bounds)
+            .join(
+                TradingCalendarModel,
+                and_(
+                    TradingCalendarModel.is_trading_day.is_(True),
+                    TradingCalendarModel.trade_date >= bounds.c.earliest_date,
+                    TradingCalendarModel.trade_date <= self._latest_trading_day(local_only=True),
+                ),
+            )
+            .outerjoin(model, join_condition)
+            .filter(getattr(model, "id").is_(None))
+            .order_by(bounds.c.partition_key, TradingCalendarModel.trade_date)
+            .all()
+        )
+        exemptions = {
+            row.partition_key: list(row.upstream_missing_ranges or [])
+            for row in self._db.query(DataHealthSnapshotModel)
+            .filter(
+                DataHealthSnapshotModel.dataset_key == dataset_key,
+                DataHealthSnapshotModel.partition_key.in_(partition_keys),
+            )
+            .all()
+        }
+        targets: dict[str, set[date]] = {}
+        for partition_key, trade_date in rows:
+            if force or trade_date not in self._range_dates(
+                exemptions.get(partition_key, []), calendar_days
+            ):
+                targets.setdefault(partition_key, set()).add(trade_date)
+        return targets
+
+    def _daily_exact_missing_summaries(
+        self,
+        dataset_key: str,
+        partition_keys: list[str],
+        calendar_days: list[date],
+        upstream_missing_by_partition: dict[str, list[dict[str, Any]]],
+    ) -> dict[str, dict[str, Any]]:
+        """流式汇总分区日频真实缺口，供完整质量检查复用。
+
+        不按分区逐一反连接，避免个股大表与多行业/指数检查退化为 N+1 查询；
+        仅保留计数、前 20 个样例和仍有效的已确认上游空档。
+        """
+        if not partition_keys:
+            return {}
+        model, partition_column, date_column, _ = self._model_columns(dataset_key)
+        assert partition_column is not None and date_column is not None
+        error_condition, _ = self._quality_conditions(dataset_key)
+        bounds = (
+            self._db.query(
+                partition_column.label("partition_key"),
+                func.min(date_column).label("earliest_date"),
+                func.max(date_column).label("latest_date"),
+            )
+            .filter(partition_column.in_(partition_keys))
+            .group_by(partition_column)
+            .subquery()
+        )
+        join_condition = and_(
+            partition_column == bounds.c.partition_key,
+            date_column == TradingCalendarModel.trade_date,
+            not_(error_condition),
+        )
+        known_ranges_by_partition: dict[str, list[tuple[date, date]]] = {}
+        for partition_key, ranges in upstream_missing_by_partition.items():
             parsed: list[tuple[date, date]] = []
             for item in ranges:
                 if not isinstance(item, dict):
@@ -1684,32 +1725,40 @@ class DataManagementService:
                     )
                 except (KeyError, TypeError, ValueError):
                     continue
-            known_ranges_by_stock[stock_code] = parsed
+            known_ranges_by_partition[partition_key] = parsed
         missing_count: dict[str, int] = {}
         missing_sample: dict[str, list[str]] = {}
         # (起始日、终止日、交易日数、末日的交易日日历序号)。按 SQL 排序流式
         # 压缩，避免资金流向的数百万个已豁免日期常驻内存。
         retained_groups: dict[str, list[list[Any]]] = {}
         calendar_positions = {day: index for index, day in enumerate(calendar_days)}
+        coverage_end = (
+            bounds.c.latest_date
+            if dataset_key in _STOCK_DAILY_DATASETS
+            else self._latest_trading_day(local_only=True)
+        )
         rows = (
-            self._db.query(bounds.c.stock_code, TradingCalendarModel.trade_date)
+            self._db.query(bounds.c.partition_key, TradingCalendarModel.trade_date)
             .select_from(bounds)
             .join(
                 TradingCalendarModel,
                 and_(
                     TradingCalendarModel.is_trading_day.is_(True),
                     TradingCalendarModel.trade_date >= bounds.c.earliest_date,
-                    TradingCalendarModel.trade_date <= bounds.c.latest_date,
+                    TradingCalendarModel.trade_date <= coverage_end,
                 ),
             )
             .outerjoin(model, join_condition)
             .filter(getattr(model, "id").is_(None))
-            .order_by(bounds.c.stock_code, TradingCalendarModel.trade_date)
+            .order_by(bounds.c.partition_key, TradingCalendarModel.trade_date)
             .yield_per(10_000)
         )
-        for stock_code, trade_date in rows:
-            if any(start <= trade_date <= end for start, end in known_ranges_by_stock.get(stock_code, [])):
-                groups = retained_groups.setdefault(stock_code, [])
+        for partition_key, trade_date in rows:
+            if any(
+                start <= trade_date <= end
+                for start, end in known_ranges_by_partition.get(partition_key, [])
+            ):
+                groups = retained_groups.setdefault(partition_key, [])
                 position = calendar_positions[trade_date]
                 if groups and position == groups[-1][3] + 1:
                     groups[-1][1] = trade_date
@@ -1718,37 +1767,26 @@ class DataManagementService:
                 else:
                     groups.append([trade_date, trade_date, 1, position])
                 continue
-            missing_count[stock_code] = missing_count.get(stock_code, 0) + 1
-            samples = missing_sample.setdefault(stock_code, [])
+            missing_count[partition_key] = missing_count.get(partition_key, 0) + 1
+            samples = missing_sample.setdefault(partition_key, [])
             if len(samples) < 20:
                 samples.append(trade_date.isoformat())
 
         result: dict[str, dict[str, Any]] = {}
-        for stock_code in stock_codes:
-            existing = upstream_missing_by_partition.get(stock_code, [])
-            confirmed_at = next(
-                (
-                    value
-                    for item in existing
-                    if isinstance(item, dict)
-                    for value in [item.get("confirmed_at")]
-                    if isinstance(value, str)
+        for partition_key in partition_keys:
+            existing = upstream_missing_by_partition.get(partition_key, [])
+            retained_dates = {
+                day
+                for start, end, _, _ in retained_groups.get(partition_key, [])
+                for day in calendar_days
+                if start <= day <= end
+            }
+            result[partition_key] = {
+                "missing_count": missing_count.get(partition_key, 0),
+                "missing_sample": missing_sample.get(partition_key, []),
+                "upstream_missing_ranges": self._remaining_upstream_missing_ranges(
+                    retained_dates, calendar_days, existing
                 ),
-                utcnow().replace(microsecond=0).isoformat() + "Z",
-            )
-            result[stock_code] = {
-                "missing_count": missing_count.get(stock_code, 0),
-                "missing_sample": missing_sample.get(stock_code, []),
-                "upstream_missing_ranges": [
-                    {
-                        "start_date": start.isoformat(),
-                        "end_date": end.isoformat(),
-                        "trading_day_count": count,
-                        "source": "tushare",
-                        "confirmed_at": confirmed_at,
-                    }
-                    for start, end, count, _ in retained_groups.get(stock_code, [])
-                ],
             }
         return result
 
@@ -1757,6 +1795,8 @@ class DataManagementService:
         dataset_key: str,
         dates_by_stock: dict[str, set[date]],
         calendar_days: list[date],
+        *,
+        source: str = "tushare",
     ) -> None:
         """一次加载、一次 flush 写入本轮确认的所有上游缺失区间。"""
         if not dates_by_stock:
@@ -1779,11 +1819,18 @@ class DataManagementService:
                 )
                 self._db.add(snapshot)
             existing = list(snapshot.upstream_missing_ranges or [])
-            snapshot.upstream_missing_ranges = self._compress_upstream_missing_ranges(
-                self._range_dates(existing, calendar_days) | dates,
+            same_source = [
+                item for item in existing if isinstance(item, dict) and item.get("source") == source
+            ]
+            other_sources = [
+                item for item in existing if not isinstance(item, dict) or item.get("source") != source
+            ]
+            snapshot.upstream_missing_ranges = other_sources + self._compress_upstream_missing_ranges(
+                self._range_dates(same_source, calendar_days) | dates,
                 calendar_days,
-                existing,
+                same_source,
                 confirmed_at=confirmed_at,
+                source=source,
             )
         self._db.flush()
 
@@ -1849,6 +1896,188 @@ class DataManagementService:
             "records": records,
             "errors": errors,
             "gaps_found": sum(len(codes) for codes in targets_by_day.values()),
+            "upstream_missing_confirmed": confirmed,
+        }
+
+    @staticmethod
+    def _valid_repair_item(dataset_key: str, item: Any) -> bool:
+        """判断上游返回行是否足以覆盖当前硬错误规则。"""
+        if dataset_key in {"index_daily_bar", "industry_daily_bar"}:
+            prices = ("open_price", "high_price", "low_price", "close_price")
+            try:
+                if any(getattr(item, name, None) is None or float(getattr(item, name)) <= 0 for name in prices):
+                    return False
+                change = getattr(item, "change_pct", None)
+                return change is None or abs(float(change)) <= 15
+            except (TypeError, ValueError):
+                return False
+        if dataset_key == "index_valuation":
+            try:
+                for name in ("pe_percentile", "pb_percentile"):
+                    value = getattr(item, name, None)
+                    if value is not None and not 0 <= float(value) <= 100:
+                        return False
+                for name in ("pe", "pb"):
+                    value = getattr(item, name, None)
+                    if value is not None and float(value) < 0:
+                        return False
+            except (TypeError, ValueError):
+                return False
+        return True
+
+    def _repair_index_daily_gaps(
+        self, partition_key: str | None, service: Any, *, force: bool
+    ) -> dict[str, Any]:
+        """按真实缺口窗口复验所有指数源，只写回目标日期。"""
+        codes = [partition_key] if partition_key else self._partitions("index_daily_bar")
+        calendar_days = self._calendar_days_until(self._latest_trading_day(local_only=True), local_calendar=True)
+        targets_by_code = self._daily_gap_targets_for_repair(
+            "index_daily_bar", codes, calendar_days, force=force
+        )
+        records = confirmed = 0
+        errors: list[str] = []
+        confirmed_by_code: dict[str, set[date]] = {}
+        for index, (code, targets) in enumerate(sorted(targets_by_code.items()), start=1):
+            selected: dict[date, tuple[Any, str]] = {}
+            request_failed = False
+            sources = service._build_index_daily_sources()
+            if not sources:
+                errors.append(f"{code}: 无可用指数日线数据源")
+                continue
+            for start, end in self._coalesce_repair_windows(targets, calendar_days):
+                for source, client in sources:
+                    try:
+                        bars = client.fetch_index_daily(
+                            code, start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+                        )
+                    except Exception as exc:
+                        request_failed = True
+                        errors.append(f"{code}/{source}: {type(exc).__name__}: {exc}")
+                        continue
+                    for bar in bars:
+                        if bar.trade_date in targets and self._valid_repair_item("index_daily_bar", bar):
+                            selected.setdefault(bar.trade_date, (bar, source))
+            for source in {source for _, source in selected.values()}:
+                bars = [bar for bar, row_source in selected.values() if row_source == source]
+                records += service._insert_index_bars(code, bars, source=source, overwrite=True)
+            absent = targets - set(selected)
+            if absent and not request_failed:
+                confirmed_by_code[code] = absent
+                confirmed += len(absent)
+            if index % _DAILY_REPAIR_COMMIT_BATCH_SIZE == 0:
+                self._db.commit()
+        if confirmed_by_code:
+            self._record_upstream_missing_dates_batch(
+                "index_daily_bar", confirmed_by_code, calendar_days, source="index_multi_source"
+            )
+        return {
+            "records": records,
+            "errors": errors,
+            "gaps_found": sum(len(days) for days in targets_by_code.values()),
+            "upstream_missing_confirmed": confirmed,
+        }
+
+    @staticmethod
+    def _coalesce_repair_windows(
+        target_dates: set[date], calendar_days: list[date]
+    ) -> list[tuple[date, date]]:
+        """合并相距不超过固定交易日数的缺口，平衡请求次数与无效历史下载。"""
+        positions = {day: index for index, day in enumerate(calendar_days)}
+        ordered = sorted(day for day in target_dates if day in positions)
+        if not ordered:
+            return []
+        windows: list[list[date]] = [[ordered[0], ordered[0]]]
+        for day in ordered[1:]:
+            previous = windows[-1][1]
+            if positions[day] - positions[previous] <= _INDEX_REPAIR_WINDOW_GAP_DAYS:
+                windows[-1][1] = day
+            else:
+                windows.append([day, day])
+        return [(start, end) for start, end in windows]
+
+    def _repair_index_valuation_gaps(
+        self, partition_key: str | None, service: Any, *, force: bool
+    ) -> dict[str, Any]:
+        """对缺口日期独立验证 Tushare/AkShare，避免首选源掩盖可用回退数据。"""
+        codes = [partition_key] if partition_key else self._partitions("index_valuation")
+        calendar_days = self._calendar_days_until(self._latest_trading_day(local_only=True), local_calendar=True)
+        targets_by_code = self._daily_gap_targets_for_repair(
+            "index_valuation", codes, calendar_days, force=force
+        )
+        records = confirmed = 0
+        errors: list[str] = []
+        confirmed_by_code: dict[str, set[date]] = {}
+        for index, (code, targets) in enumerate(sorted(targets_by_code.items()), start=1):
+            clients: list[tuple[str, Any]] = []
+            tushare = TushareIndexValuationClient()
+            if tushare.is_configured() and tushare.supports(code):
+                clients.append(("tushare", tushare))
+            clients.append(("akshare", AkShareIndexClient()))
+            selected: dict[date, Any] = {}
+            request_failed = False
+            for source, client in clients:
+                try:
+                    values = client.fetch_index_valuation(code)
+                except Exception as exc:
+                    request_failed = True
+                    errors.append(f"{code}/{source}: {type(exc).__name__}: {exc}")
+                    continue
+                for value in values:
+                    if value.trade_date in targets and self._valid_repair_item("index_valuation", value):
+                        selected.setdefault(value.trade_date, value)
+            records += service._insert_index_valuations(code, list(selected.values()), overwrite=True)
+            absent = targets - set(selected)
+            if absent and not request_failed:
+                confirmed_by_code[code] = absent
+                confirmed += len(absent)
+            if index % _DAILY_REPAIR_COMMIT_BATCH_SIZE == 0:
+                self._db.commit()
+        if confirmed_by_code:
+            self._record_upstream_missing_dates_batch(
+                "index_valuation", confirmed_by_code, calendar_days, source="valuation_multi_source"
+            )
+        return {
+            "records": records,
+            "errors": errors,
+            "gaps_found": sum(len(days) for days in targets_by_code.values()),
+            "upstream_missing_confirmed": confirmed,
+        }
+
+    def _repair_industry_daily_gaps(
+        self, partition_key: str | None, service: Any, *, force: bool
+    ) -> dict[str, Any]:
+        """申万完整响应只对缺口目标写入，成功缺失则记录上游豁免。"""
+        codes = [partition_key] if partition_key else self._partitions("industry_daily_bar")
+        calendar_days = self._calendar_days_until(self._latest_trading_day(local_only=True), local_calendar=True)
+        targets_by_code = self._daily_gap_targets_for_repair(
+            "industry_daily_bar", codes, calendar_days, force=force
+        )
+        records = confirmed = 0
+        errors: list[str] = []
+        confirmed_by_code: dict[str, set[date]] = {}
+        for index, (code, targets) in enumerate(sorted(targets_by_code.items()), start=1):
+            try:
+                result = service.repair_industry_dates(code, targets, commit=False)
+            except Exception as exc:
+                self._db.rollback()
+                errors.append(f"{code}: {type(exc).__name__}: {exc}")
+                continue
+            returned = set(result.get("returned_dates") or set())
+            records += int(result.get("upserted_rows") or 0)
+            absent = targets - returned
+            if absent:
+                confirmed_by_code[code] = absent
+                confirmed += len(absent)
+            if index % _DAILY_REPAIR_COMMIT_BATCH_SIZE == 0:
+                self._db.commit()
+        if confirmed_by_code:
+            self._record_upstream_missing_dates_batch(
+                "industry_daily_bar", confirmed_by_code, calendar_days, source="akshare_sw"
+            )
+        return {
+            "records": records,
+            "errors": errors,
+            "gaps_found": sum(len(days) for days in targets_by_code.values()),
             "upstream_missing_confirmed": confirmed,
         }
 
