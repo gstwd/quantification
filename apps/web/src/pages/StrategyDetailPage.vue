@@ -621,7 +621,7 @@
           </div>
 
           <details
-            v-for="asset in allocation.pipeline_detail.scoring"
+            v-for="asset in sortedScoringDetails"
             :key="asset.index_code"
             class="debug-asset"
             :class="{ excluded: asset.excluded }"
@@ -1123,6 +1123,17 @@ const debugTabs = computed(() => {
   return tabs
 })
 const activeDebugTab = ref('scoring')
+
+/** 评分明细按最终得分降序展示；无得分的已排除资产置于末尾。 */
+const sortedScoringDetails = computed(() => {
+  const scoring = allocation.value?.pipeline_detail?.scoring ?? []
+  return [...scoring].sort((a, b) => {
+    const aScore = a.final_score ?? Number.NEGATIVE_INFINITY
+    const bScore = b.final_score ?? Number.NEGATIVE_INFINITY
+    if (aScore !== bScore) return bScore - aScore
+    return a.index_code.localeCompare(b.index_code)
+  })
+})
 
 /** 因子状态中文标签映射 */
 function statusLabel(status: string): string {
