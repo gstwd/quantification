@@ -406,9 +406,9 @@ class DataManagementService:
                 "status": (
                     "success"
                     if failed_count == 0 and partial_count == 0
-                    else "failed"
-                    if success_count == 0
                     else "partial_success"
+                    if success_count > 0 or partial_count > 0
+                    else "failed"
                 ),
             }
 
@@ -1442,11 +1442,9 @@ class DataManagementService:
         model, partition_column, date_column, _ = self._model_columns(dataset_key)
         if partition_column is None or date_column is None:
             return []
-        error_condition, _ = self._quality_conditions(dataset_key)
         join_condition = and_(
             partition_column == partition_key,
             date_column == TradingCalendarModel.trade_date,
-            not_(error_condition),
         )
         base = (
             self._db.query(TradingCalendarModel.trade_date)
@@ -1630,7 +1628,6 @@ class DataManagementService:
             return {}
         model, partition_column, date_column, _ = self._model_columns(dataset_key)
         assert partition_column is not None and date_column is not None
-        error_condition, _ = self._quality_conditions(dataset_key)
         bounds = (
             self._db.query(
                 partition_column.label("partition_key"),
@@ -1643,7 +1640,6 @@ class DataManagementService:
         join_condition = and_(
             partition_column == bounds.c.partition_key,
             date_column == TradingCalendarModel.trade_date,
-            not_(error_condition),
         )
         rows = (
             self._db.query(bounds.c.partition_key, TradingCalendarModel.trade_date)
@@ -1661,6 +1657,20 @@ class DataManagementService:
             .order_by(bounds.c.partition_key, TradingCalendarModel.trade_date)
             .all()
         )
+        error_condition, _ = self._quality_conditions(dataset_key)
+        invalid_rows = (
+            self._db.query(partition_column, date_column)
+            .join(
+                bounds,
+                partition_column == bounds.c.partition_key,
+            )
+            .filter(
+                error_condition,
+                date_column >= bounds.c.earliest_date,
+                date_column <= self._latest_trading_day(local_only=True),
+            )
+            .all()
+        )
         exemptions = {
             row.partition_key: list(row.upstream_missing_ranges or [])
             for row in self._db.query(DataHealthSnapshotModel)
@@ -1676,6 +1686,8 @@ class DataManagementService:
                 exemptions.get(partition_key, []), calendar_days
             ):
                 targets.setdefault(partition_key, set()).add(trade_date)
+        for partition_key, trade_date in invalid_rows:
+            targets.setdefault(partition_key, set()).add(trade_date)
         return targets
 
     def _daily_exact_missing_summaries(
@@ -1694,7 +1706,6 @@ class DataManagementService:
             return {}
         model, partition_column, date_column, _ = self._model_columns(dataset_key)
         assert partition_column is not None and date_column is not None
-        error_condition, _ = self._quality_conditions(dataset_key)
         bounds = (
             self._db.query(
                 partition_column.label("partition_key"),
@@ -1708,7 +1719,6 @@ class DataManagementService:
         join_condition = and_(
             partition_column == bounds.c.partition_key,
             date_column == TradingCalendarModel.trade_date,
-            not_(error_condition),
         )
         known_ranges_by_partition: dict[str, list[tuple[date, date]]] = {}
         for partition_key, ranges in upstream_missing_by_partition.items():

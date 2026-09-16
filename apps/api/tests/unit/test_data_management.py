@@ -407,6 +407,31 @@ def test_dataset_status_derivation() -> None:
     assert _dataset_status({"records": 0, "errors": ["000300: boom"]}) == "failed"
 
 
+def test_single_partial_dataset_keeps_operation_partial_success(monkeypatch) -> None:
+    """不能因没有完全成功项而把单数据集部分成功降级成失败。"""
+    service = DataManagementService(MagicMock())
+
+    class FakeRunService:
+        def __init__(self, _db):
+            pass
+
+        def add_item(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(data_management_module, "RunService", FakeRunService)
+    service._execute_dataset = lambda *_args, **_kwargs: {
+        "records": 5,
+        "errors": ["399673/akshare: upstream error"],
+    }
+
+    result = service.execute("repair_gaps", "index_valuation", None, "run-1")
+
+    assert result["success_count"] == 0
+    assert result["partial_count"] == 1
+    assert result["failed_count"] == 0
+    assert result["status"] == "partial_success"
+
+
 def test_rebuild_replacement_span_guard() -> None:
     """重拉数据明显少于/未覆盖现有数据时应拒绝替换。"""
     svc = DataManagementService(MagicMock())

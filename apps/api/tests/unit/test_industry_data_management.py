@@ -47,6 +47,34 @@ def test_derive_prev_close_change_single_row_without_override() -> None:
     assert result[0]["change_pct"] is None
 
 
+def test_targeted_repair_does_not_rederive_full_response_values() -> None:
+    """定向修复已在完整响应中派生前收，不得把目标行再次当成首行。"""
+    from unittest.mock import MagicMock
+
+    from quant_etf_api.services.industry_data_service import IndustryDataService
+
+    service = IndustryDataService(MagicMock())
+    service._bar_repo.bulk_upsert = MagicMock(return_value=1)
+    row = {
+        "trade_date": date(2026, 9, 15),
+        "open_price": 100.0,
+        "high_price": 101.0,
+        "low_price": 99.0,
+        "close_price": 100.0,
+        "prev_close_price": 95.0,
+        "change_pct": (100 / 95 - 1) * 100,
+        "volume": 1.0,
+        "turnover": 1.0,
+        "source": "akshare_sw",
+    }
+
+    service._upsert_bars("801010", [row], already_derived=True)
+
+    persisted = service._bar_repo.bulk_upsert.call_args.args[0][0]
+    assert persisted["prev_close_price"] == 95.0
+    assert persisted["change_pct"] == row["change_pct"]
+
+
 def test_membership_counts_dedupe_latest_and_filter_future() -> None:
     """同一股票取最新有效归属，未来生效事件不计入。"""
     events = [

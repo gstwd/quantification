@@ -142,6 +142,8 @@ class IndustryDataService:
         code: str,
         rows: list[dict[str, Any]],
         prev_close_override: float | None = None,
+        *,
+        already_derived: bool = False,
     ) -> int:
         """将行业日线行按升序补写派生列后幂等写入 industry_daily_bar。
 
@@ -149,6 +151,8 @@ class IndustryDataService:
             code: 申万一级行业代码。
             rows: 拉取的日线字典列表（可为乱序，按 trade_date 排序后处理）。
             prev_close_override: 拉取窗口之前库内最近收盘价，None 表示无前收。
+            already_derived: ``rows`` 已按完整行情序列计算派生列时为 True，
+                避免定向修复把单日记录再次当作窗口首行计算。
 
         Returns:
             参与写入的行数。
@@ -161,7 +165,11 @@ class IndustryDataService:
         )
         if not ordered:
             return 0
-        derived = derive_prev_close_change(ordered, prev_close_override=prev_close_override)
+        derived = (
+            ordered
+            if already_derived
+            else derive_prev_close_change(ordered, prev_close_override=prev_close_override)
+        )
         values = []
         for row in derived:
             values.append(
@@ -247,7 +255,7 @@ class IndustryDataService:
         )
         derived = derive_prev_close_change(ordered)
         targeted = [row for row in derived if row["trade_date"] in target_dates]
-        upserted = self._upsert_bars(code, targeted)
+        upserted = self._upsert_bars(code, targeted, already_derived=True)
         if commit:
             self._db.commit()
         return {

@@ -78,6 +78,61 @@ def test_no_new_records_does_not_requeue_any_factor(monkeypatch) -> None:
     assert "industry_factor_compute" not in job_types
 
 
+def test_data_management_partial_success_is_not_marked_failed(monkeypatch) -> None:
+    """单数据集存在已完成工作和分区错误时，父运行应保留部分成功状态。"""
+    from quant_etf_api.services import data_management_service
+    from quant_etf_api.services import run_service
+
+    calls: list[tuple[str, dict | None]] = []
+
+    class FakeDataManagementService:
+        def __init__(self, _db):
+            pass
+
+        def execute(self, *_args, **_kwargs):
+            return {
+                "status": "partial_success",
+                "items": [
+                    {
+                        "dataset_key": "index_valuation",
+                        "status": "partial_success",
+                        "records": 5,
+                        "errors": ["399673/akshare: upstream error"],
+                    }
+                ],
+                "success_count": 0,
+                "failed_count": 0,
+                "partial_count": 1,
+            }
+
+    class FakeRunService:
+        def __init__(self, _db):
+            pass
+
+        def mark_running(self, _run_id):
+            return None
+
+        def mark_success(self, _run_id, metrics=None):
+            calls.append(("success", metrics))
+
+        def mark_partial_success(self, _run_id, metrics=None):
+            calls.append(("partial_success", metrics))
+
+        def mark_failed(self, _run_id, _message):
+            calls.append(("failed", None))
+
+    monkeypatch.setattr(data_management_service, "DataManagementService", FakeDataManagementService)
+    monkeypatch.setattr(run_service, "RunService", FakeRunService)
+    monkeypatch.setattr("quant_etf_api.infra.db.base.SessionLocal", MagicMock())
+
+    result = handlers.handle_data_management_operation(
+        {"run_id": "run-1", "operation": "repair_gaps", "dataset_key": "index_valuation"}
+    )
+
+    assert result["status"] == "partial_success"
+    assert calls == [("partial_success", result)]
+
+
 def test_industry_daily_ingest_chain_removed() -> None:
     """行业日频摄取链已删除：行业数据只由全局同步按数据集增量补拉。"""
     from quant_etf_api.infra.job_queue.handlers import JOB_HANDLERS
