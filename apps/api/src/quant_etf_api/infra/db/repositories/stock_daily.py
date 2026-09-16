@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from quant_etf_api.infra.db.models.stock import (
@@ -58,16 +58,27 @@ class _StockDailyRepository(BaseRepository):
         return int(result)
 
     def bulk_upsert(self, rows: list[dict[str, Any]]) -> int:
-        """批量幂等写入，冲突时更新全部业务字段。"""
+        """批量幂等写入，仅在业务字段变化时更新。"""
         if not rows:
             return 0
 
         def _build(chunk: list[dict[str, Any]]) -> Any:
             """构造单块 ON CONFLICT DO UPDATE 语句。"""
             stmt = pg_insert(self._model).values(chunk)
+            business_columns = self._update_columns - {"ingested_at"}
             return stmt.on_conflict_do_update(
                 constraint=self._constraint,
                 set_={column: getattr(stmt.excluded, column) for column in self._update_columns},
+                # ingested_at 每次摄取都会变化，不能参与判定；否则重复修复会
+                # 为所有冲突行生成新版本，造成大表和索引持续膨胀。
+                where=or_(
+                    *[
+                        getattr(self._model, column).is_distinct_from(
+                            getattr(stmt.excluded, column)
+                        )
+                        for column in sorted(business_columns)
+                    ]
+                ),
             )
 
         for start in range(0, len(rows), _PG_INSERT_CHUNK_SIZE):

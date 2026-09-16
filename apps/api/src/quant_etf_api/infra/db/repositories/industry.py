@@ -616,9 +616,19 @@ class StockDailyCloseRepository(BaseRepository):
                 "source",
                 "ingested_at",
             }
+            business_columns = update_cols - {"ingested_at"}
             return stmt.on_conflict_do_update(
                 constraint="uq_stock_daily_close",
                 set_={column: getattr(stmt.excluded, column) for column in update_cols},
+                # 避免仅因本次入库时间变化而重写全市场历史日线。
+                where=or_(
+                    *[
+                        getattr(StockDailyCloseModel, column).is_distinct_from(
+                            getattr(stmt.excluded, column)
+                        )
+                        for column in sorted(business_columns)
+                    ]
+                ),
             )
 
         return _exec_pg_insert_chunks(self._db, rows, _build)

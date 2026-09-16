@@ -887,7 +887,12 @@ class DataManagementService:
             "stock_moneyflow",
             "macro_indicator",
         }:
-            stats["source_usage"] = self._source_counts(dataset_key, partition_key)
+            # 个股三张大表的来源在本轮任务中固定为 Tushare；若再对整表
+            # GROUP BY source 会额外扫描千万级历史行，且只为运行指标服务。
+            if dataset_key in _STOCK_DAILY_DATASETS:
+                stats["source_usage"] = {"tushare": records} if records else {}
+            else:
+                stats["source_usage"] = self._source_counts(dataset_key, partition_key)
             stats["requested_ranges"] = self._requested_ranges(
                 dataset_key, partition_key, expected, operation
             )
@@ -965,26 +970,51 @@ class DataManagementService:
         }:
             return []
         keys = [partition_key] if partition_key else self._partitions(dataset_key)
+        # 运行指标最多返回 2,000 个分区；聚合和来源查询也只处理这部分，
+        # 避免全市场操作为不会返回的分区额外扫描大表。
+        display_keys = keys[:2000]
         model, partition_column, date_column, _ = self._model_columns(dataset_key)
         counts: dict[str, int] = {}
         earliest: dict[str, date] = {}
-        if partition_column is not None and keys:
+        source_by_key: dict[str, str | None] = {}
+        if partition_column is not None and display_keys:
             rows = (
                 self._db.query(
                     partition_column,
                     func.count(),
                     func.min(cast(date_column, Date)),
                 )
-                .filter(partition_column.in_(keys))
+                .filter(partition_column.in_(display_keys))
                 .group_by(partition_column)
                 .all()
             )
             counts = {str(key): int(count) for key, count, _ in rows}
             earliest = {str(key): value for key, _, value in rows if value is not None}
+            latest_by_key = (
+                self._db.query(
+                    partition_column.label("partition_key"),
+                    func.max(date_column).label("latest_date"),
+                )
+                .filter(partition_column.in_(display_keys))
+                .group_by(partition_column)
+                .subquery()
+            )
+            source_rows = (
+                self._db.query(partition_column, model.source)
+                .join(
+                    latest_by_key,
+                    and_(
+                        partition_column == latest_by_key.c.partition_key,
+                        date_column == latest_by_key.c.latest_date,
+                    ),
+                )
+                .all()
+            )
+            source_by_key = {str(key): source for key, source in source_rows}
         return [
             {
                 "partition_key": key,
-                "source": self._latest_source(model, key),
+                "source": source_by_key.get(key),
                 "start": (
                     earliest.get(key).isoformat()
                     if operation == "sync_latest" and earliest.get(key) is not None
@@ -994,7 +1024,7 @@ class DataManagementService:
                 "records": counts.get(key, 0),
                 "operation": operation,
             }
-            for key in keys[:2000]
+            for key in display_keys
         ]
 
     def _industry_code_behind(self, industry_code: str, expected: date) -> bool:

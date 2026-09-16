@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from sqlalchemy.orm import load_only
+
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import ResearchRunItemModel, ResearchRunModel
 from quant_etf_api.infra.db.repositories.base import BaseRepository
@@ -29,13 +31,45 @@ class ResearchRunRepository(BaseRepository):
         """
         base_q = self._db.query(ResearchRunModel)
         total = base_q.count()
-        rows = base_q.order_by(ResearchRunModel.started_at.desc()).offset(offset).limit(limit).all()
+        # ``metrics`` may contain the complete data-management result and can be
+        # several hundred KB per row.  The list response does not expose it;
+        # loading it here made a 50-row page transfer megabytes from PostgreSQL.
+        rows = (
+            base_q.options(
+                load_only(
+                    ResearchRunModel.run_id,
+                    ResearchRunModel.run_type,
+                    ResearchRunModel.strategy_id,
+                    ResearchRunModel.trade_date,
+                    ResearchRunModel.status,
+                    ResearchRunModel.started_at,
+                    ResearchRunModel.finished_at,
+                    ResearchRunModel.error_message,
+                )
+            )
+            .order_by(ResearchRunModel.started_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
         return rows, total
 
     def find_recent(self, limit: int = 50) -> list[ResearchRunModel]:
         """获取最近的运行记录，按创建时间倒序。"""
         return (
             self._db.query(ResearchRunModel)
+            .options(
+                load_only(
+                    ResearchRunModel.run_id,
+                    ResearchRunModel.run_type,
+                    ResearchRunModel.strategy_id,
+                    ResearchRunModel.trade_date,
+                    ResearchRunModel.status,
+                    ResearchRunModel.started_at,
+                    ResearchRunModel.finished_at,
+                    ResearchRunModel.error_message,
+                )
+            )
             .order_by(ResearchRunModel.started_at.desc())
             .limit(limit)
             .all()

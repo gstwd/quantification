@@ -283,6 +283,8 @@ def test_stock_close_upsert_updates_extension_fields() -> None:
     )
     assert "DO UPDATE" in sql
     assert "adj_factor" in sql
+    assert "IS DISTINCT FROM" in sql
+    assert "ingested_at IS DISTINCT FROM" not in sql
 
 
 def test_new_daily_tables_upsert_use_do_update() -> None:
@@ -312,4 +314,8 @@ def test_new_daily_tables_upsert_use_do_update() -> None:
         ],
     )
     assert "DO UPDATE" in basic_sql
+    assert "IS DISTINCT FROM" in basic_sql
+    assert "ingested_at IS DISTINCT FROM" not in basic_sql
     assert "DO UPDATE" in moneyflow_sql
+    assert "IS DISTINCT FROM" in moneyflow_sql
+    assert "ingested_at IS DISTINCT FROM" not in moneyflow_sql
