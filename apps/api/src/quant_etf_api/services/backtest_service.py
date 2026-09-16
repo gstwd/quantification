@@ -331,7 +331,8 @@ class BacktestService:
         params = dict(req.params) if req.params else {}
         params["_execution_model"] = req.execution_model
         params["_data_quality_mode"] = req.data_quality_mode
-        # 净口径成本随回测固化，避免"同一回测在不同时点算出不同净收益"
+        # 净口径成本的**默认值**随回测固化（读取路径仍可用 cost_bps 覆盖主口径，
+        # 多档成本始终并列返回），避免不同时点用不同默认成本折算净收益
         params["_cost_bps"] = (
             req.cost_bps if req.cost_bps is not None else get_settings().default_cost_bps
         )
@@ -931,6 +932,7 @@ class BacktestService:
             turnover_model=params.get("_turnover_model") or TURNOVER_MODEL_LEGACY,
             cost_ladder=ladder,
             candidate_pool=_parse_candidate_pool(getattr(row, "candidate_pool", None)),
+            warmup_trading_days=int(params.get("_warmup_trading_days") or 0),
             annualized_turnover=stability.annualized_turnover,
             cost_drag_pct_per_year=stability.cost_drag_pct_per_year,
             net_cumulative_return_pct=stability.net_cumulative_return_pct,
@@ -1426,15 +1428,28 @@ class BacktestService:
 
             # 确定持仓与收益。收盘模式将信号延迟到下一交易日收盘执行。
             if execution_model == "t_plus_1_close":
+                # T+1 收盘成交：上一决策日产生的目标仓位在今日收盘成交，
+                # 因此本行收益区间 [close_T, close_{T+1}] 使用的仓位就是
+                # ``pending_positions``（首次建仓前沿用上一日实际仓位）。
+                # 历史缺陷：此处用 prev_positions 计收益，使新仓位的首个收益
+                # 区间被旧仓位吃掉，实际等价于 T+2 收盘执行。
+                executed_positions = (
+                    dict(pending_positions)
+                    if pending_positions is not None
+                    else dict(prev_positions)
+                )
                 portfolio_return = compute_close_execution_return(
                     executed_positions, trade_date, next_date, all_bars
                 )
-                positions = target_positions
+                # 落库的 positions 表示当日实际持仓（与开盘模型一致）
+                positions = executed_positions
+                next_positions = executed_positions
                 if pending_positions is not None:
-                    turnover = compute_turnover(executed_positions, pending_positions)
-                    next_positions = dict(pending_positions)
+                    # 成交腿 = 昨日实际持仓 → 今日成交后的仓位
+                    turnover = compute_turnover(prev_positions, pending_positions)
                 else:
                     turnover = 0.0
+                last_rebalance_date = trade_date if should_rebalance else last_rebalance_date
                 pending_positions = target_positions if should_rebalance else None
                 day_total_exposure = round(sum(executed_positions.values()), 4)
                 day_cash_ratio = round(1.0 - day_total_exposure, 4)
@@ -1628,6 +1643,28 @@ class BacktestService:
                         f"（{', '.join(non_trading_dates[:5])}"
                         f"{' 等' if len(non_trading_dates) > 5 else ''}），"
                         "已从回测交易日中剔除（上游把行情打在假期日期上）"
+                    ),
+                )
+            )
+        # point-in-time 标的池提示：纳入"已停用但区间内仍存续"的指数，
+        # 让研究者知道资产域包含退市/停发指数（而非只统计活到今天的资产）
+        effective_codes = set(index_codes)
+        delisted_codes = sorted(
+            item["index_code"]
+            for item in universe
+            if item.get("is_active") is False and item["index_code"] in effective_codes
+        )
+        if delisted_codes:
+            run_warnings.append(
+                BacktestWarning(
+                    level="info",
+                    code="UNIVERSE_INCLUDES_DELISTED",
+                    message=(
+                        f"标的池包含 {len(delisted_codes)} 个已停用（退市/停发）指数："
+                        f"{'、'.join(delisted_codes[:5])}"
+                        f"{' 等' if len(delisted_codes) > 5 else ''}；"
+                        "回测按 point-in-time 口径纳入区间内仍存续的指数，"
+                        "其停止发布后的日期由逐日候选池自动剔除（避免幸存者偏差）"
                     ),
                 )
             )
@@ -1938,7 +1975,7 @@ class BacktestService:
             if cached is not None:
                 return cached
 
-        universe = self._resolve_index_universe(row.universe_filter)
+        universe = self._resolve_index_universe(row.universe_filter, row.start_date)
         if not universe:
             raise ValueError("回测标的范围为空，请检查 universe_filter 配置")
 
@@ -1965,8 +2002,13 @@ class BacktestService:
         """为市场级因子补充加载全市场活跃指数行情数据（就地更新 all_bars）。
 
         当策略引用的任一因子的 FactorSpec.market_scope 为 True 时，
-        额外加载全部活跃指数的日线数据作为因子上下文；这些数据只参与
+        额外加载全市场指数的日线数据作为因子上下文；这些数据只参与
         因子计算，不进入回测标的池，避免影响组合收益口径。
+
+        集合口径与回测标的池一致，按 point-in-time 取"区间起点仍在存续"的指数
+        （``find_for_period``）：否则市场级因子（如市场宽度）只统计活到今天的
+        指数，历史上退市的成分被整段抹掉。实时路径只能用当日活跃集合
+        （实时无法知道未来），这是模式固有的差异。
 
         Args:
             config: 策略配置，用于推导所需因子 ID。
@@ -1981,7 +2023,7 @@ class BacktestService:
         if not need_market:
             return
 
-        active = BenchmarkIndexRepository(self._db).find_active()
+        active = BenchmarkIndexRepository(self._db).find_for_period(trading_dates[0])
         market_codes = [idx.index_code for idx in active]
         loaded_codes = {code for code, _ in all_bars}
         missing = [code for code in market_codes if code not in loaded_codes]
@@ -2104,7 +2146,14 @@ class BacktestService:
         1. 当日 bar 存在且收盘价有效；
         2. 策略引用的资产级因子（评分 + 过滤 + compare_to + regime 覆盖）当日均有值；
         3. 若引用 ATR/Donchian/月线等因子，则当日最高/最低价有效；
-        4. 存在下一交易日时，次日收盘价有效；执行模型为 T+1 开盘时还需次日开盘价有效。
+        4. 存在下一交易日时，次日行情可支撑收益结算：次日 bar 与收盘价有效
+           （``MISSING_NEXT_BAR``）、需要高低价时次日高低价有效
+           （``MISSING_NEXT_HIGH_LOW``）；执行模型为 T+1 开盘时还需次日开盘价有效
+           （``MISSING_OPEN``）。
+
+        说明（已知取舍）：条件 1~3 只用当日信息，条件 4 需要"次日行情是否存在"，
+        属 ex-ante 可执行域约束——若不剔除，缺次日行情的资产会以 0 收益参与组合，
+        反而系统性低估波动。剔除明细逐日记录在候选池时间线（C6）中，可审计。
 
         `data_quality_mode` 只影响缺口提示的详细程度（strict 逐指数 / warn 汇总），
         不影响候选池、选股结果与收益序列。
@@ -2163,12 +2212,12 @@ class BacktestService:
                 continue
             next_bar = all_bars.get((code, next_date))
             if next_bar is None or _price_invalid(getattr(next_bar, "close_price", None)):
-                reasons.setdefault(code, set()).add("MISSING_CLOSE")
+                reasons.setdefault(code, set()).add("MISSING_NEXT_BAR")
                 continue
             if needs_high_low and any(
                 _price_invalid(getattr(next_bar, field)) for field in ("high_price", "low_price")
             ):
-                reasons.setdefault(code, set()).add("MISSING_HIGH_LOW")
+                reasons.setdefault(code, set()).add("MISSING_NEXT_HIGH_LOW")
                 continue
             if execution_model == "t_plus_1_open" and _price_invalid(
                 getattr(next_bar, "open_price", None)
@@ -2314,12 +2363,23 @@ class BacktestService:
         # 基准对比
         benchmark_return_pct = None
         excess_return_pct = None
+        annualized_excess_return_pct = None
+        benchmark_up_days_pct = None
         if benchmark_returns:
             bench_cumulative = 1.0
             for r in benchmark_returns:
                 bench_cumulative *= 1 + r / 100
             benchmark_return_pct = round((bench_cumulative - 1) * 100, 2)
             excess_return_pct = round(perf.total_return_pct - benchmark_return_pct, 2)
+            # 年化口径超额（毛口径）：与 stability.net_excess_return_pct（扣成本）
+            # 区分；两者若都叫"超额"会让"累计差"被误读成年化差
+            bench_annualized = compute_performance_metrics(benchmark_returns).annualized_return_pct
+            annualized_excess_return_pct = round(
+                perf.annualized_return_pct - bench_annualized, 2
+            )
+            # 基准上涨日占比：signal_accuracy_pct 的市场基准率参照
+            up_days = sum(1 for r in benchmark_returns if r > 0)
+            benchmark_up_days_pct = round(up_days / len(benchmark_returns) * 100, 2)
 
         metrics = BacktestMetrics(
             cumulative_return_pct=perf.total_return_pct,
@@ -2339,6 +2399,8 @@ class BacktestService:
             information_ratio=perf.information_ratio,
             benchmark_return_pct=benchmark_return_pct,
             excess_return_pct=excess_return_pct,
+            annualized_excess_return_pct=annualized_excess_return_pct,
+            benchmark_up_days_pct=benchmark_up_days_pct,
             data_gap_days=data_gap_days,
         ).model_dump()
         # NaN/Inf 指标转 None，防止 PostgreSQL JSON 列写入失败
@@ -2347,15 +2409,34 @@ class BacktestService:
 
     # ── 辅助方法 ───────────────────────────────────────────────────────────
 
-    def _resolve_index_universe(self, universe_filter: dict[str, Any]) -> list[dict[str, Any]]:
-        """根据 universe_filter 查询回测指数列表。
+    def _resolve_index_universe(
+        self, universe_filter: dict[str, Any], start_date: date
+    ) -> list[dict[str, Any]]:
+        """根据 universe_filter 查询回测指数列表（point-in-time 口径）。
 
-        仅返回活跃指数（is_active=True），排除已退市/停发的指数，
-        避免回测中的幸存者偏差。读取走仓库，过滤走领域纯函数。
+        标的池按"回测区间起点仍在存续"解析（``find_for_period``）：
+        当前活跃指数 + 退市日晚于区间起点的指数一并纳入，消除"只回测活到今天的
+        资产"的幸存者偏差；退市日未知（NULL）的历史行也纳入，交给逐日行情缺口
+        判定实际可交易区间。读取走仓库，过滤走领域纯函数。
+
+        结果字典额外带 ``is_active`` 标记，供主循环产出
+        ``UNIVERSE_INCLUDES_DELISTED`` 提示（引擎只读取 index_code 等已知键）。
+
+        Args:
+            universe_filter: {"mode": "all"} 或 {"mode": "subset", "index_codes": [...]}。
+            start_date: 回测区间起始日期（含）。
+
+        Returns:
+            universe 字典列表（index_code/name_cn/category/is_active）。
         """
-        rows = BenchmarkIndexRepository(self._db).find_active()
+        repo = BenchmarkIndexRepository(self._db)
+        rows = repo.find_for_period(start_date)
         rows = filter_universe_rows(rows, universe_filter)
-        return build_universe_items(rows)
+        items = build_universe_items(rows)
+        active_codes = {row.index_code for row in repo.find_active()}
+        for item in items:
+            item["is_active"] = item["index_code"] in active_codes
+        return items
 
     def _get_index_trading_dates(
         self, start: date, end: date, index_codes: list[str]

@@ -79,15 +79,25 @@ python -m quant_etf_api.cli robustness abandon <robustness_id> --reason "回测�
 | `summary.pool.delta_median` | pool | 子池扰动的中位 Δ夏普；接近 0 说明结果不依赖特定成分 |
 | `variants[].windows` / `windows_available` | 所有类型 | 参与比较的窗口数 / 该变体自己跑成功的窗口数；两者不等说明该变体有缺窗 |
 | `statistics.pbo.value` | stats | CSCV-PBO，约 0.5 相当于纯噪声；越高越可疑；**null = 窗口数不足（<4）**，看 `pbo.reason` |
+| `statistics.pbo.power_note` | stats | 对称切分 < 10 时的分辨率提示；PBO 取值只有粗粒度，别把 0.17 与 0.33 的差异当真 |
 | `statistics.deflated_sharpe.deflated_sharpe` | stats | 计入试验次数后的显著性概率；< 0.5 基本可以认为不显著 |
-| `statistics.bootstrap.lower/upper` | stats | 年化夏普置信区间；跨 0 表示无法区分于噪声 |
+| `statistics.n_trials_breakdown` | stats | N 的来源拆分（`robustness` 变体数 + `optimization` 已评估会话数，或 `explicit`） |
+| `statistics.bootstrap.lower/upper` | stats | 年化循环块自助法置信区间；跨 0 表示无法区分于噪声 |
 | `coverage.missing_windows` / `failed_windows` | 所有类型 | "回测已被删除"与"执行失败"分开报；前者说明证据缺失，不是执行问题 |
 
 ## 试验次数 N 的取法
 
-`stats` 默认 `--n-trials` 取自"该策略历史所有稳健性批次的变体总数"台账。
-若同一段时间内还做过多次不经批次的手工对比，应显式 `--n-trials` 传入更大的估计值——
+`stats` 默认 `--n-trials` 取自台账：**该策略历史所有稳健性批次的变体总数 + 已评估
+（`evaluated`/`accepted`/`rejected`）的优化会话数**，拆分见 `n_trials_breakdown`。
+若同一段时间内还做过多次不经批次/会话的手工对比，应显式 `--n-trials` 传入更大的估计值——
 多重检验的严重程度只会被低估，不会被高估。
+
+## 验收清单第 6 项的证据匹配
+
+`optimization finish` 的"参数邻域"项只接受与**当前配置**对应的 scan 批次：
+`robustness_run.baseline_config_hash` 必须等于会话的基线哈希或候选哈希，
+或者批次直接跑在候选策略上（`strategy_id == candidate_strategy_id`）。
+promote 之后基线配置已变，上一轮的批次不再复用——忘了跑 scan 会直接判不通过。
 
 ## 写进优化报告的要求
 

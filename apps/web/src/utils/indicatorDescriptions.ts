@@ -62,9 +62,14 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
       formula: '正收益持仓日 / 持仓日 × 100',
     },
     signal_accuracy_pct: {
-      label: '信号准确率',
-      description: '在持仓的指数中，T+1 日实际收益为正的比例（%）。<br>衡量策略发出的买入信号是否准确。<br>仅统计 in_portfolio=true 的指数，判断其下一日收益是否 > 0。<br>> 55% 即有一定预测能力，> 60% 较强。',
+      label: '持仓次日正收益率',
+      description: '在持仓的指数中，T+1 日实际收益为正的比例（%）。<br>该指标含市场 β：牛市里任何持仓都会偏高，必须与"基准上涨日占比"对比才有信号质量含义。<br>明显高于基准上涨日占比，才说明选股/择时提供了正向信息。<br>仅统计 in_portfolio=true 的指数，与总收益不构成因果关系。',
       formula: '持仓且次日收益 > 0 的指数次数 / 总持仓次数 × 100',
+    },
+    benchmark_up_days_pct: {
+      label: '基准上涨日占比',
+      description: '回测区间内基准日收益为正的交易日占比（%）。<br>作为"持仓次日正收益率"的市场基准率：策略该指标只有明显高于它，才体现选股能力。<br>未启用基准时为 -。',
+      formula: '基准日收益 > 0 的天数 / 回测交易日数 × 100',
     },
     profit_loss_ratio: {
       label: '盈亏比',
@@ -89,9 +94,14 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
       formula: '∏(1 + 基准日收益率/100) - 1',
     },
     excess_return_pct: {
-      label: '超额收益',
-      description: '策略累计收益减去基准累计收益（%）。<br>正数表示策略跑赢基准，负数表示跑输。<br>这是评价主动管理策略的核心指标。<br>年化超额 > 5% 为良好，> 10% 为优秀。',
+      label: '超额收益（累计）',
+      description: '策略累计收益减去基准累计收益（%），是**累计口径**（不是年化）。<br>正数表示策略跑赢基准，负数表示跑输。<br>跨不同长度的回测不可直接横向比较——需要年化口径请用"年化超额（毛口径）"，需要扣成本口径请用"净口径超额"。',
       formula: '策略累计收益(%) - 基准累计收益(%)',
+    },
+    annualized_excess_return_pct: {
+      label: '年化超额（毛口径）',
+      description: '策略年化收益减去基准年化收益（%），未扣交易成本。<br>与"净口径超额（年化）"的区别只在于是否扣除换手成本。<br>跨区间长度比较超额能力时应使用本指标。',
+      formula: '策略年化收益(%) - 基准年化收益(%)',
     },
     alpha: {
       label: 'Alpha',

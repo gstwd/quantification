@@ -38,6 +38,9 @@ HEALTH_HEALTHY = "HEALTHY"
 HEALTH_WATCH = "WATCH"
 HEALTH_WARNING = "WARNING"
 HEALTH_CRITICAL = "CRITICAL"
+# 样本不足以覆盖任何监控窗口：**不能**记成 HEALTHY——"没算出问题"与"没有问题"
+# 是两回事，后者需要证据
+HEALTH_UNKNOWN = "UNKNOWN"
 # 诊断结论
 DIAGNOSIS_INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
 DIAGNOSIS_NORMAL = "NORMAL"
@@ -55,7 +58,8 @@ class HealthAssessment:
     """策略健康诊断结果。
 
     Attributes:
-        health_level: 健康等级（HEALTHY/WATCH/WARNING/CRITICAL）。
+        health_level: 健康等级（HEALTHY/WATCH/WARNING/CRITICAL/UNKNOWN，UNKNOWN
+            表示监控样本还不足以覆盖任何窗口）。
         diagnosis: 诊断结论（NORMAL/DRAWDOWN_EXTREME/ALPHA_DECAY/INSUFFICIENT_DATA）。
         recommended_action: 建议动作（KEEP/WATCH/REDUCE_RISK/RESEARCH）。
         reasons: 触发该结论的具体依据，逐条中文说明。
@@ -192,7 +196,9 @@ def assess_health(
     3. 超额随窗口单调衰减且 IC 同向衰减 → WARNING / ALPHA_DECAY / RESEARCH；
     4. 3M 超额分位连续 ``consecutive_windows`` 次低于 ``alpha_warning_percentile``
        → WATCH / ALPHA_DECAY；
-    5. 其余 → HEALTHY / NORMAL / KEEP。
+    5. 所有监控窗口样本不足 → UNKNOWN / INSUFFICIENT_DATA / KEEP
+       （"没算出问题"不记为"健康"）；
+    6. 其余 → HEALTHY / NORMAL / KEEP。
 
     Args:
         drawdown_percentile_pct: 当前回撤在研究期回撤分布中的分位（0-100）。
@@ -251,7 +257,7 @@ def assess_health(
     if window_percentiles and all(v is None for v in window_percentiles.values()):
         reasons.append("上线样本不足以覆盖任何监控窗口，仅记录数据")
         return HealthAssessment(
-            HEALTH_HEALTHY, DIAGNOSIS_INSUFFICIENT_DATA, ACTION_KEEP, reasons
+            HEALTH_UNKNOWN, DIAGNOSIS_INSUFFICIENT_DATA, ACTION_KEEP, reasons
         )
 
     reasons.append("表现处于研究期历史分布之内")

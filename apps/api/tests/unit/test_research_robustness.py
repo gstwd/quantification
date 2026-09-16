@@ -134,6 +134,24 @@ class TestBootstrap:
         with pytest.raises(ValueError):
             block_bootstrap_sharpe_ci(returns, confidence=1.0)
 
+    def test_circular_block_supports_block_longer_than_sample(self) -> None:
+        """循环块：块长度超过样本长度时也能抽样（不再被尾部截断限制）。"""
+        returns = [0.01, -0.02, 0.03, -0.01, 0.005]
+        ci = block_bootstrap_sharpe_ci(returns, block=20, n_bootstrap=100, confidence=0.9)
+
+        assert ci.block == 20
+        assert ci.lower <= ci.upper
+        assert ci.sharpe_annualized == pytest.approx(annualized_sharpe(returns))
+
+    def test_circular_block_keeps_tail_samples_representable(self) -> None:
+        """循环块抽样必须能抽到序列尾部样本（尾部不再被系统性欠采样）。"""
+        # 前 95 个观测为 0，最后 5 个为大正收益：只有抽到尾部才可能得到高夏普
+        returns = [0.0] * 95 + [0.05] * 5
+        ci = block_bootstrap_sharpe_ci(returns, block=10, n_bootstrap=500, confidence=0.9)
+
+        assert ci.upper > ci.sharpe_annualized
+        assert ci.lower <= ci.sharpe_annualized
+
 
 class TestNeighborhood:
     """参数邻域稳定度。"""

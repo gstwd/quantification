@@ -29,7 +29,11 @@
           <h3 class="strategy-name">{{ item.display_name }}</h3>
           <div class="chips">
             <span class="chip chip-version">v{{ item.version }}</span>
-            <span class="chip chip-freq">{{ item.frequency }}</span>
+            <span
+              class="chip chip-freq"
+              title="策略标注频率（元数据，不控制调仓；实际调仓频率见策略配置的调仓模块）"
+              >{{ item.frequency }}</span
+            >
             <span :class="['chip', item.status === 'active' ? 'chip-active' : 'chip-disabled']">
               {{ item.status === 'active' ? '启用' : '禁用' }}
             </span>
@@ -172,7 +176,13 @@ async function loadLifecycles(): Promise<void> {
  */
 function healthText(level: string | null): string {
   if (!level) return '未体检'
-  return { HEALTHY: '健康', WATCH: '观察', WARNING: '警告', CRITICAL: '严重' }[level] ?? level
+  return {
+    HEALTHY: '健康',
+    WATCH: '观察',
+    WARNING: '警告',
+    CRITICAL: '严重',
+    UNKNOWN: '待观察（样本不足）',
+  }[level] ?? level
 }
 
 const form = ref({

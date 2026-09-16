@@ -219,7 +219,7 @@ class TestFoldSummary:
     """逐折聚合统计。"""
 
     def test_mean_median_and_wins(self) -> None:
-        """均值/中位数与候选胜出折数计算。"""
+        """均值/中位数与候选胜出折数按**配对折**计算。"""
         folds = [
             {
                 "fold": 0,
@@ -239,10 +239,18 @@ class TestFoldSummary:
         ]
         summary = _compute_fold_summary(folds)
         sharpe = summary["metrics"]["sharpe_ratio"]
+        # 第 2 折基线侧缺失 → 该折不进任何统计（配对口径），
+        # 否则基线均值与候选均值不在同一样本上，Δ 结论不可比
         assert sharpe["baseline_mean"] == pytest.approx(1.05)
-        assert sharpe["candidate_mean"] == pytest.approx((1.2 + 1.0 + 1.5) / 3)
+        assert sharpe["candidate_mean"] == pytest.approx((1.2 + 1.0) / 2)
         assert sharpe["candidate_wins"] == 1
-        assert sharpe["total_folds"] == 3
+        assert sharpe["paired_folds"] == 2
+        assert sharpe["evaluated_folds"] == 3
+        assert sharpe["total_folds"] == 2
+        # 双边都有值的指标不受影响
+        drawdown = summary["metrics"]["max_drawdown_pct"]
+        assert drawdown["paired_folds"] == 3
+        assert drawdown["baseline_mean"] == pytest.approx((-10.0 - 9.0 - 11.0) / 3)
 
 
 class TestFinish:
@@ -292,6 +300,8 @@ class TestFinish:
             "accept",
             report_text="# 报告",
             promote=True,
+            # 严格验收默认开启；本用例只验证 promote 写回行为，故显式关闭清单硬校验
+            strict=False,
         )
 
         assert result["status"] == "accepted"
@@ -327,3 +337,42 @@ class TestFinish:
         svc._repo.find_by_id.return_value = session
         with pytest.raises(ValueError, match="严格验收未通过"):
             svc.finish("opt1", "accept", strict=True)
+
+    def test_accept_requires_checklist_by_default(self) -> None:
+        """验收清单默认强制：无匹配的邻域证据时 accept 直接失败。"""
+        svc = _make_service()
+        session = _make_session(
+            fold_summary={
+                "metrics": {
+                    "sharpe_ratio": {
+                        "baseline_mean": 1.0,
+                        "candidate_mean": 1.5,
+                        "candidate_wins": 3,
+                        "total_folds": 4,
+                    },
+                    "max_drawdown_pct": {
+                        "baseline_mean": -10.0,
+                        "candidate_mean": -9.0,
+                    },
+                    "cumulative_return_pct": {
+                        "baseline_mean": 5.0,
+                        "candidate_mean": 8.0,
+                    },
+                }
+            }
+        )
+        svc._repo = MagicMock()
+        svc._repo.find_by_id.return_value = session
+        # 邻域证据查询返回空（未跑过 scan）
+        svc._db.query.return_value.filter.return_value.order_by.return_value.first.return_value = (
+            None
+        )
+        svc._backtest_repo = MagicMock()
+        svc._backtest_repo.find_by_id.return_value = None
+
+        with pytest.raises(ValueError, match="严格验收未通过") as exc:
+            svc.finish("opt1", "accept")
+
+        assert "参数邻域" in str(exc.value)
+        # 未通过时不得改动会话状态
+        assert session.status == "evaluated"

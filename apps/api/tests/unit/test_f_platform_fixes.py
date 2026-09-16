@@ -155,10 +155,11 @@ class TestOptimizationShowChecklist:
         svc._backtest_repo = MagicMock()
         svc._backtest_repo.find_by_id.return_value = None
         monkeypatch.setattr(
-            OptimizationService, "_check_neighborhood", lambda self, sid: {
+            OptimizationService, "_check_neighborhood", lambda self, session: {
                 "key": "neighborhood",
                 "description": "参数邻域无方向反转",
                 "pass": True,
+                "evidence": None,
             }
         )
         monkeypatch.setattr(
@@ -166,6 +167,7 @@ class TestOptimizationShowChecklist:
                 "key": "net_cost_nonnegative",
                 "description": "净成本口径验证窗平均夏普 ≥ 基线",
                 "pass": True,
+                "evidence": None,
             }
         )
 
@@ -255,7 +257,7 @@ class TestPromoteVersionHistory:
             ),
         ]
 
-        svc.finish("opt1", verdict="accept", promote=True)
+        svc.finish("opt1", verdict="accept", promote=True, strict=False)
 
         update = svc._config_svc.update_config.call_args
         assert update.args[0] == "base"

@@ -187,6 +187,48 @@ class TestBuildCandidatePool:
             assert codes == [], factor_id
             assert reasons["000300"] == {"MISSING_HIGH_LOW"}, factor_id
 
+    def test_excludes_missing_next_bar_with_distinct_reason(self) -> None:
+        """次日整根 bar 缺失记 MISSING_NEXT_BAR（与当日缺收盘 MISSING_CLOSE 区分）。"""
+        svc = _make_service()
+        bars = {
+            ("000300", DATES[0]): _bar(100.0, 100.0),
+            ("000300", DATES[1]): _bar(101.0, 101.0),
+            ("000905", DATES[0]): _bar(200.0, 200.0),
+            # 000905 次日无行情
+        }
+        factors = {("000300", "return_5d"): 1.0, ("000905", "return_5d"): 2.0}
+
+        codes, reasons = svc._build_candidate_pool(
+            _config(), DATES[0], DATES[1], ["000300", "000905"], bars, factors, "t_plus_1_open"
+        )
+
+        assert codes == ["000300"]
+        assert reasons["000905"] == {"MISSING_NEXT_BAR"}
+
+    def test_excludes_missing_next_high_low_for_atr_factor(self) -> None:
+        """次日最高/最低价缺失时记 MISSING_NEXT_HIGH_LOW。"""
+        svc = _make_service(specs=["atr_14d"])
+        bars = {
+            ("000300", DATES[0]): _bar(100.0, 100.0),
+            ("000300", DATES[1]): SimpleNamespace(
+                close_price=101.0, open_price=101.0, high_price=None, low_price=None
+            ),
+        }
+        factors = {("000300", "atr_14d"): 1.0}
+
+        codes, reasons = svc._build_candidate_pool(
+            _config(score_factors={"atr_14d": 1.0}),
+            DATES[0],
+            DATES[1],
+            ["000300"],
+            bars,
+            factors,
+            "t_plus_1_open",
+        )
+
+        assert codes == []
+        assert reasons["000300"] == {"MISSING_NEXT_HIGH_LOW"}
+
     def test_last_trading_day_has_no_next_day_requirement(self) -> None:
         """回测最后一日无下一交易日，不再校验次日行情。"""
         svc = _make_service()

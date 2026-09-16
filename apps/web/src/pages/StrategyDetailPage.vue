@@ -24,7 +24,11 @@
           </h1>
           <div class="chips">
             <span class="chip chip-version">v{{ store.current.version }}</span>
-            <span class="chip chip-freq">{{ store.current.frequency }}</span>
+            <span
+              class="chip chip-freq"
+              title="策略标注频率（元数据，不控制调仓；实际调仓频率见下方调仓模块的 frequency）"
+              >{{ store.current.frequency }}</span
+            >
             <span :class="['chip', store.current.status === 'active' ? 'chip-active' : 'chip-disabled']">
               {{ store.current.status === 'active' ? '启用' : '禁用' }}
             </span>
@@ -256,7 +260,7 @@
               </div>
               <div v-if="rebalanceConfig.day_of_month != null" class="config-row">
                 <span class="config-key">月调仓日</span>
-                <span class="config-val">每月第 {{ rebalanceConfig.day_of_month }} 个交易日</span>
+                <span class="config-val">每月 {{ rebalanceConfig.day_of_month }} 日（遇非交易日顺延）</span>
               </div>
             </div>
             <div v-else class="config-empty">未配置（默认每日调仓）</div>

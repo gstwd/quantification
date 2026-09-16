@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -148,15 +148,21 @@ class RiskConfig(BaseModel):
 class RebalanceConfig(BaseModel):
     """调仓配置（可选模块）。
 
+    严格校验（避免静默失效）：
+    - ``frequency`` 只接受 daily / weekly / monthly——历史上未知频率会在调度器
+      末尾 ``return True``，静默退化为每日调仓（换手与成本最大）；
+    - ``day_of_week`` 0-4（周一至周五）；``day_of_month`` 1-31，超出当月天数时
+      按当月最后一日处理（不再整月不调仓）。
+
     Attributes:
         frequency: 调仓频率，daily / weekly / monthly。
         day_of_week: 周度调仓日（0=周一, 4=周五）。
-        day_of_month: 月度调仓日。
+        day_of_month: 月度调仓日（1-31，建议 ≤28）。
     """
 
-    frequency: str = "daily"
-    day_of_week: int | None = None
-    day_of_month: int | None = None
+    frequency: Literal["daily", "weekly", "monthly"] = "daily"
+    day_of_week: int | None = Field(default=None, ge=0, le=4)
+    day_of_month: int | None = Field(default=None, ge=1, le=31)
 
 
 class RegimeRuleConfig(BaseModel):
@@ -187,7 +193,8 @@ class StrategyConfig(BaseModel):
         version: 版本号。
         schema_version: 引擎配置 schema 版本，用于配置模型演进时的兼容检测。
         description: 策略描述。
-        frequency: 运行频率。
+        frequency: 策略标注频率（元数据，**不控制调仓**；实际调仓频率见
+            ``rebalance.frequency``）。保留该字段是为了列表/标签展示的兼容。
         timing: 择时配置，None 表示无择时。
         score: 评分配置（必填）。
         filters: 过滤配置，None 表示无过滤。

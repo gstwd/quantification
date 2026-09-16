@@ -584,7 +584,7 @@
             class="fp-input"
             placeholder="1-28"
           />
-          <span class="threshold-hint">每月第几个交易日进行调仓（1-28）</span>
+          <span class="threshold-hint">每月第几日调仓（1-28；遇非交易日顺延至其后第一个交易日，日期超出当月天数时按当月最后一日处理）</span>
         </div>
       </div>
     </div>

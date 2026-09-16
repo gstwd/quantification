@@ -660,7 +660,19 @@ def _build_optimization_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--verdict", required=True, choices=["accept", "reject"])
     p.add_argument("--report-file", help="最终报告 Markdown 文件")
     p.add_argument("--promote", action="store_true", help="accept 时把候选配置写回基线")
-    p.add_argument("--strict", action="store_true", help="强制验收清单全部通过")
+    p.add_argument(
+        "--strict",
+        dest="strict",
+        action="store_true",
+        default=True,
+        help="强制验收清单全部通过（默认开启）",
+    )
+    p.add_argument(
+        "--no-strict",
+        dest="strict",
+        action="store_false",
+        help="跳过验收清单硬校验（不推荐，需在报告中说明理由）",
+    )
     _add_json_flag(p)
 
     p = sub.add_parser("show", help="查看会话详情")

@@ -66,7 +66,34 @@ class BacktestCreateRequest(BaseModel):
 
 
 class BacktestMetrics(BaseModel):
-    """回测汇总绩效指标。"""
+    """回测汇总绩效指标。
+
+    Attributes:
+        cumulative_return_pct: 累计收益率（%，毛口径）。
+        max_drawdown_pct: 最大回撤（%）。
+        sharpe_ratio: 年化夏普（全期口径，含空仓日）。
+        win_rate_pct: 胜率（持仓期口径）。
+        signal_accuracy_pct: "持仓资产次日正收益"次数占比（%）。含市场 β：
+            与 ``benchmark_up_days_pct`` 对比才有信号质量含义，不可单独解读。
+        total_trading_days: 回测交易日数。
+        active_days: 持仓日数（空仓日不计）。
+        annualized_return_pct: 年化收益率（%）。
+        sortino_ratio: 年化索提诺比率。
+        calmar_ratio: 年化卡玛比率。
+        max_drawdown_days: 最长回撤持续交易日数。
+        profit_loss_ratio: 盈亏比。
+        alpha: 相对基准的年化 Alpha（%）。
+        beta: 相对基准的 Beta。
+        information_ratio: 信息比率。
+        benchmark_return_pct: 基准累计收益率（%）。
+        excess_return_pct: 累计口径超额（%）= 策略累计收益 − 基准累计收益。
+            注意与 ``BacktestStability.net_excess_return_pct``（年化、扣成本）
+            以及 ``annualized_excess_return_pct``（年化、毛口径）口径不同。
+        benchmark_up_days_pct: 基准日收益为正的交易日占比（%），
+            作为 ``signal_accuracy_pct`` 的市场基准率参照。
+        data_gap_days: 至少一个持仓资产受数据缺失影响的交易日数。
+        net_*: 净成本口径指标（读取路径按单边换手率现算）。
+    """
 
     cumulative_return_pct: float
     max_drawdown_pct: float
@@ -86,6 +113,10 @@ class BacktestMetrics(BaseModel):
     information_ratio: float | None = None
     benchmark_return_pct: float | None = None
     excess_return_pct: float | None = None
+    # 年化口径超额（毛口径，与 stability.net_excess_return_pct 的成本口径区分）
+    annualized_excess_return_pct: float | None = None
+    # 基准上涨日占比：signal_accuracy_pct 的市场基准率参照
+    benchmark_up_days_pct: float | None = None
     # B10：数据缺口统计
     data_gap_days: int = 0
     # 净口径指标（按单边换手率折算成本），默认成本 10bp，明细见 stability 块
@@ -113,6 +144,8 @@ class BacktestStability(BaseModel):
             legacy_v1=历史口径，未计入）。
         cost_ladder: 多档成本并列的净口径指标（C3）。
         candidate_pool: 逐日有效候选池时间线（C6），存量回测为 None。
+        warmup_trading_days: 回测前段因子预热交易日数（长周期因子数据不足），
+            0 表示无预热期；仅作提示，指标仍包含该段行情。
         annualized_turnover: 年化单边换手率（倍）。
         cost_drag_pct_per_year: 成本拖累（百分点/年）。
         net_cumulative_return_pct: 扣成本后累计收益率（%）。
@@ -144,6 +177,7 @@ class BacktestStability(BaseModel):
     turnover_model: str | None = None
     cost_ladder: list[CostLadderEntry] = Field(default_factory=list)
     candidate_pool: BacktestCandidatePool | None = None
+    warmup_trading_days: int = 0
     annualized_turnover: float = 0.0
     cost_drag_pct_per_year: float = 0.0
     net_cumulative_return_pct: float = 0.0

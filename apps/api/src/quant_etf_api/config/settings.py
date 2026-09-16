@@ -118,6 +118,13 @@ class Settings(BaseSettings):
         ge=1,
         description="回测有效候选池剔除明细（指数—日期区间）保留条数上限，超出按天数截断",
     )
+    # 参数邻域稳定度容差（指标绝对值，默认夏普单位）：全部扰动变体的 |Δ| 都在该
+    # 范围内才算"落在参数高原"；同时用于判定方向反转（两侧落差都超过容差）
+    robustness_neighborhood_tolerance: float = Field(
+        default=0.1,
+        gt=0.0,
+        description="参数邻域扰动的稳定度容差（|Δ指标| ≤ 容差记为仍在高原内）",
+    )
 
     # LLM 配置（可选，不配置则 AI 分析功能不可用）
     llm_api_key: str | None = Field(default=None, description="LLM API Key")

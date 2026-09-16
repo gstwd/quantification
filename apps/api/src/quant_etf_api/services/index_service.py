@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
 
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.clients.akshare_index import AkShareIndexClient
 from quant_etf_api.infra.db.models.core import BenchmarkIndexModel
 from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
+from quant_etf_api.infra.time import today_cn
 from quant_etf_api.schemas.market_data import BenchmarkIndex
 
 logger = logging.getLogger(__name__)
@@ -90,6 +92,9 @@ class IndexService:
             if final_name:
                 existing.name_cn = final_name
             existing.is_active = True
+            # 重新激活必须清空退市日，否则 point-in-time 回测标的池会按旧的
+            # 退市日把该指数从区间内错误排除
+            existing.delisting_date = None
             try:
                 self._db.commit()
                 self._db.refresh(existing)
@@ -119,14 +124,17 @@ class IndexService:
             logger.error("添加指数 %s 失败", index_code, exc_info=True)
             raise
 
-    def remove_index(self, index_code: str) -> None:
+    def remove_index(self, index_code: str, delisting_date: date | None = None) -> None:
         """停用基准指数（软删除）。
 
-        将 is_active 设为 False，保留历史数据关联。
-        策略引擎和回测服务已通过 is_active=True 过滤，停用后自动不再参与计算。
+        将 is_active 设为 False 并记录退市/停发日期（缺省为今天），保留历史数据
+        关联。退市日是 point-in-time 回测标的池的判定依据
+        （``BenchmarkIndexRepository.find_for_period``）：只有登记了退市日，
+        "回测区间内仍存续的已停用指数"才能被正确纳入回测，避免幸存者偏差。
 
         Args:
             index_code: 指数代码
+            delisting_date: 退市/停发日期；None 时取当前北京时间日期
 
         Raises:
             ValueError: 指数不存在或已停用
@@ -138,8 +146,11 @@ class IndexService:
             raise ValueError(f"指数 {index_code} 已停用")
         try:
             row.is_active = False
+            row.delisting_date = delisting_date or today_cn()
             self._db.commit()
-            logger.info("指数 %s 已停用（软删除）", index_code)
+            logger.info(
+                "指数 %s 已停用（软删除），退市日=%s", index_code, row.delisting_date
+            )
         except Exception:
             self._db.rollback()
             logger.error("停用指数 %s 失败", index_code, exc_info=True)
@@ -158,8 +169,9 @@ class IndexService:
         if existing and existing.is_active:
             return
         if existing and not existing.is_active:
-            # 已停用则重新激活
+            # 已停用则重新激活（同时清空退市日，避免 point-in-time 标的池误排除）
             existing.is_active = True
+            existing.delisting_date = None
             if name_cn:
                 existing.name_cn = name_cn
             try:

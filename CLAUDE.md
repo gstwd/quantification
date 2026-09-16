@@ -257,9 +257,17 @@ Key rules (details in the doc):
 - No `any` types in TypeScript; use semantic HTTP status codes in routers
 - **FactorSpec.lookback_days**: 新增因子时必须设置合理的 `lookback_days`（自然日），`FactorService._load_context()` 取所有因子的最大值。参考：5d→15, 20d→40, 60d→90, 估值百分位→730（2年），技术指标→period×1.5+5。
 - **volume_ratio_20d 返回值变更**: 数据不足时返回 `None`（原为 1.0），区分"无数据"与"量比恰好为 1"。`calc_volume_ratio_20d()` 返回 `float | None`，`calc_5d_return()` 仍返回 `float`（默认 0.0）。
-- **BenchmarkIndexModel.is_active**: `ContextBuilder._build_live()` 和 `BacktestService._resolve_index_universe()` 只查询 `is_active=True` 的指数。新增指数默认 `is_active=True`。
+- **BenchmarkIndexModel.is_active**: `ContextBuilder._build_live()` 只查询 `is_active=True` 的指数（实时只能用当日活跃集合）；`BacktestService._resolve_index_universe()` 用 point-in-time 口径（见下条）。新增指数默认 `is_active=True`。
 - **TradingCalendar 缓存**: 首次调用时从 AkShare 加载（`tool_trade_date_hist_sina()`），TTL=1 天。`IngestService._drop_non_trading_bars`（剔除假期伪行情）与 `DataManagementService` 的缺口检查（`_latest_trading_day`）已接入，不再用 `weekday()>=5`。
-- **rebalance.py 交易日历对齐**: `DefaultRebalanceScheduler` 接受 `TradingCalendar` 实例，周度/月度调仓如遇非交易日自动顺延至下一交易日。
+- **rebalance.py 交易日历对齐**: `DefaultRebalanceScheduler` 接受 `TradingCalendar` 实例，周度/月度调仓的对齐语义是"**目标日（含）之后的第一个交易日**"：同周顺延、跨周顺延（目标周五休市 → 下周一）、跨月顺延（月末休市 → 下月首个交易日）都成立；`day_of_month` 超出当月天数时按当月最后一日处理；传入非交易日一律返回 False；日历不可用时异常上抛（不降级为按星期比较）。`last_rebalance_date` 参数当前不参与判定。
+- **RebalanceConfig 强校验**: `frequency` 为 `Literal[daily|weekly|monthly]`，`day_of_week ∈ [0,4]`，`day_of_month ∈ [1,31]`（>28 时结构校验给 warning）。历史行为是未知频率静默退化为每日调仓，新增频率分支时必须同步更新 `should_rebalance` 与该枚举。
+- **`StrategyConfig.frequency` 只是标注字段**: 不控制调仓（实际频率见 `rebalance.frequency`），前端 chip 有 title 说明。
+- **回测标的池是 point-in-time 口径**: `BacktestService._resolve_index_universe()` 用 `BenchmarkIndexRepository.find_for_period(start_date)`，即 `is_active OR delisting_date IS NULL OR delisting_date >= 区间起点`——退市日晚于区间起点的指数必须纳入（否则是幸存者偏差）；`IndexService.remove_index()` 会记录退市日（API 支持可选 `delisting_date`），重新激活时清空该列。`_ensure_market_scope_bars()` 用同一口径。
+- **`t_plus_1_close` 执行模型**: T 日信号在 T+1 收盘成交，逐日收益必须用 `pending_positions`（今日收盘成交后的仓位），`positions`/`total_exposure` 同步反映实际持仓；用 `prev_positions` 会让新仓位首个收益区间被旧仓位吃掉（等价 T+2）。
+- **验收清单默认强制**: `OptimizationService.finish(strict=True)` 是默认值（CLI `--no-strict` 才跳过）；"参数邻域"项的证据必须匹配当前配置（`robustness_run.baseline_config_hash` = 会话基线或候选哈希，或批次跑在候选策略上），promote 之后旧批次不再复用。
+- **Deflated Sharpe 的试验次数台账**: `RobustnessService._trial_ledger()` = 稳健性批次 `trial_count` 累加 + 已评估（`evaluated`/`accepted`/`rejected`）优化会话数；手工不入批次的对比仍需 `--n-trials` 显式补充。拆分为 `statistics.n_trials_breakdown`。
+- **候选池剔除原因码**: 当日缺行情记 `MISSING_CLOSE`/`MISSING_HIGH_LOW`，次日缺行情记 `MISSING_NEXT_BAR`/`MISSING_NEXT_HIGH_LOW`/`MISSING_OPEN`（后者仅 T+1 开盘执行）；判断"哪些资产不可交易"时必须区分这两类。
+- **健康等级新增 `UNKNOWN`**: `assess_health()` 在所有监控窗口样本不足时返回 `UNKNOWN`（不再是 `HEALTHY`）；前端 `healthText`/`healthClass` 两处映射需同步维护。
 - **StrategyConfig.index_codes**: 存储在 `config_json` 内部（非独立 DB 列），通过 `**row.config_json` 展开到 engine 的 `StrategyConfig` 模型。前端 API 请求中 `index_codes` 应在 `config_json` 内传递，非顶层字段。非空时 `_filter_by_scope()` 仅保留指定指数（实时和回测模式均生效）。
 - **index_codes 回测强制应用**: `BacktestService.create_backtest()` 检查策略的 `config.index_codes`，非空时强制覆盖 `universe_filter` 为 subset 模式；`ContextBuilder._build_backtest()` 对传入的 index_codes 做交集过滤（双重保护）。
 - **StrategyConfigForm 与 engine/config.py 的 StrategyConfig 同步**: 引擎新增配置模块时，需同步更新 `StrategyConfigForm.vue`（表单）、`StrategyDetailPage.vue`（详情展示）。目前已覆盖全部 7 个模块（score/timing/filters/rank/portfolio/risk/rebalance）+ 资产范围 index_codes。

@@ -529,6 +529,14 @@ class StrategyConfigService:
             if config.risk.min_cash_ratio < 0 or config.risk.min_cash_ratio >= 1:
                 errors.append("min_cash_ratio 必须在 [0, 1) 范围内")
 
+        # 调仓配置校验（warning 级）：不阻塞历史配置，但显式提示口径歧义
+        if config.rebalance:
+            if config.rebalance.day_of_month is not None and config.rebalance.day_of_month > 28:
+                warnings.append(
+                    f"rebalance.day_of_month={config.rebalance.day_of_month} 超出 28："
+                    "月末日期随月份变化，系统按'当月最后一日'处理，建议改用 ≤28 的日期"
+                )
+
         return errors, warnings
 
     def _factor_reference_errors(self, config: StrategyConfig) -> list[str]:

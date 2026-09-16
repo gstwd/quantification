@@ -1,7 +1,8 @@
 """调仓规则（纯领域逻辑）。
 
 支持 daily / weekly / monthly 频率，并支持交易日历对齐：
-调仓目标日如遇非交易日，自动顺延至下一交易日。
+调仓目标日如遇非交易日，自动顺延至该目标日之后（含）的第一个交易日，
+可跨自然周、跨自然月，不受固定天数窗口限制。
 领域层仅依赖 TradingCalendarLike 协议，不依赖任何 infra 实现。
 
 严格口径（C1）：交易日历为**必填依赖**，不再提供"未注入时降级为周末判断"
@@ -12,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+from calendar import monthrange
 from datetime import date, timedelta
 from typing import Protocol
 
@@ -74,58 +76,72 @@ class DefaultRebalanceScheduler:
     ) -> bool:
         """判断是否应该调仓。
 
-        交易日历对齐逻辑：
-        - daily：永远在当前交易日调仓。
-        - weekly：若目标 weekday 非交易日，顺延至下一交易日；
-          若当前已是该周最后一个交易日且之后无交易日 → 在当前日调仓。
-        - monthly：若目标 day_of_month 非交易日，顺延至下一交易日；
-          若当月剩余日期无交易日 → 在当前日调仓。
+        对齐语义为"目标日（含）之后的第一个交易日"：
+        - daily：每个交易日都调仓。
+        - weekly：目标 weekday（默认 4=周五）取 current_date 所在自然周内不晚于
+          current_date 的那一天，若该周尚未到目标 weekday，则取上一自然周的目标日；
+          再判断 current_date 是否为目标日之后（含）的第一个交易日。
+        - monthly：目标 day_of_month（默认 1）同上；目标日超出当月天数时按当月
+          最后一日处理。
+
+        由此，目标日休市时会顺延到下一个开市日，且既支持同周顺延（周三休市 →
+          周四开市）、也支持跨周（周五休市 → 下周一）与跨月（1 月 28 日休市 →
+          2 月首个交易日）顺延；同一自然周/月内至多触发一次。
 
         Args:
             config: 调仓配置。
-            current_date: 当前日期。
-            last_rebalance_date: 上次调仓日期。
+            current_date: 当前日期（调用方应只传交易日）。
+            last_rebalance_date: 上次调仓日期。本实现**不使用**该参数：同一自然
+                周/月内"目标日之后的第一个交易日"唯一，无需额外状态即可判定。
 
         Returns:
             是否应该调仓。
 
         Raises:
             TradingCalendarUnavailableError: 交易日历不可用时抛出。
+            ValueError: 调仓频率不在 daily/weekly/monthly 之内时抛出
+                （配置层已做枚举校验，此处为防守，避免静默退化为每日调仓）。
         """
         if config.frequency == "daily":
             return True
 
         if config.frequency == "weekly":
             target_day = config.day_of_week if config.day_of_week is not None else 4
-            # 如果当前日正好是目标 weekday，直接调仓
-            if current_date.weekday() == target_day:
-                return True
-            # 如果当前日之后的最近交易日仍在同一周且 weekday 匹配 → 顺延
-            return self._is_nearest_in_window(current_date, target_day, "week")
+            # 距最近一次目标 weekday 的天数（0 表示今天就是目标日）
+            delta = (current_date.weekday() - target_day) % 7
+            return self._is_carried_target(current_date, current_date - timedelta(days=delta))
 
         if config.frequency == "monthly":
-            target_day = config.day_of_month if config.day_of_month is not None else 1
-            # 如果当前日正好是目标日，直接调仓
-            if current_date.day == target_day:
-                return True
-            # 如果当前日是该月剩余日中的第一个可交易日 → 顺延
-            return self._is_nearest_in_window(current_date, target_day, "month")
+            target = config.day_of_month if config.day_of_month is not None else 1
+            this_month_last = monthrange(current_date.year, current_date.month)[1]
+            this_month_target = min(target, this_month_last)
+            if current_date.day >= this_month_target:
+                target_date = current_date.replace(day=this_month_target)
+            else:
+                prev_month_last = current_date.replace(day=1) - timedelta(days=1)
+                prev_month_target = min(
+                    target, monthrange(prev_month_last.year, prev_month_last.month)[1]
+                )
+                target_date = prev_month_last.replace(day=prev_month_target)
+            return self._is_carried_target(current_date, target_date)
 
-        return True
+        raise ValueError(
+            f"未知的调仓频率 {config.frequency!r}：可选 daily / weekly / monthly"
+        )
 
-    def _is_nearest_in_window(self, current_date: date, target: int, window: str) -> bool:
-        """判断当前日是否为目标窗口内的最近交易日。
+    def _is_carried_target(self, current_date: date, target_date: date) -> bool:
+        """判断当前日是否为目标日（含）之后的第一个交易日。
 
-        算法：从目标日向后查找，第一个交易日即为调仓日。
-        如果该交易日就是 current_date，则调仓。
+        算法：从目标日逐日推进到 current_date 之前，若中途存在交易日，说明调仓
+        已在更早的交易日发生，当前日不再调仓；否则当前日就是顺延后的调仓日。
+        不设固定天数上限，因此春节等超长休市也能正确顺延。
 
         日历异常（TradingCalendarUnavailableError）**直接上抛**，不再降级为
         "按星期比较"——那正是 C1 记录的静默口径分叉来源。
 
         Args:
             current_date: 当前日期。
-            target: 目标 weekday(0-6) 或 day_of_month(1-31)。
-            window: "week" 或 "month"。
+            target_date: 目标调仓日（自然日，可能早于 current_date）。
 
         Returns:
             是否应在当前日调仓。
@@ -133,38 +149,14 @@ class DefaultRebalanceScheduler:
         Raises:
             TradingCalendarUnavailableError: 交易日历不可用时抛出。
         """
-        if window == "week":
-            # 查找本周内 >= 目标 weekday 的最近交易日
-            days_since_target = current_date.weekday() - target
-            if days_since_target < 0:
-                return False  # 还没到目标 weekday
-            # 从目标 weekday 开始，找到的第一个交易日
-            target_date = current_date - timedelta(days=days_since_target)
-        else:
-            # 查找本月内 >= 目标 day_of_month 的最近交易日
-            if current_date.day < target:
-                return False  # 还没到目标日
-            target_date = current_date.replace(day=target)
-
-        # 从目标日起向前查找，检查 current_date 是否为第一个交易日
+        if not self._cal.is_trading_day(current_date):
+            # 调用方应只传交易日；非交易日一律不调仓（历史缺陷：
+            # "current_date.weekday() == 目标日" 会让休市日也返回 True）
+            logger.warning("调仓判定收到非交易日 %s，按不调仓处理", current_date)
+            return False
         check = target_date
-        max_days = 10  # 最多查找 10 天，足以覆盖春节等最长休市
-        for _ in range(max_days):
+        while check < current_date:
             if self._cal.is_trading_day(check):
-                return check == current_date
+                return False
             check += timedelta(days=1)
-            # 如果跨出当前周/月，停止
-            if window == "week" and check.weekday() == 0:
-                break
-            if window == "month" and check.day == 1:
-                break
-
-        # 窗口内确实无交易日：真实日历下意味着日历数据异常（如区间缺失），
-        # 记录告警并使用当前日，避免整段无调仓；但绝不按星期近似。
-        logger.warning(
-            "%s 调仓窗口内未找到交易日: target=%s current=%s, 使用当前日",
-            window,
-            target,
-            current_date,
-        )
         return True

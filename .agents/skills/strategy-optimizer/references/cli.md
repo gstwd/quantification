@@ -42,7 +42,7 @@
 | `optimization start --strategy <基线> --candidate-file <path> --hypothesis "<假设>" [--start] [--end] [--folds 4] [--candidate-id] [--version]` | 建草稿候选 + 会话；候选 ID 默认 `<基线>__opt_<会话前8位>`；`--version` 建议必传（promote 用） |
 | `optimization evaluate <opt_id> [--folds] [--async]` | 全区间 + 逐折回测；多方向或多段执行时按批控制跨度与并发 |
 | `optimization report <opt_id> [--file <path>]` | 生成 Markdown 报告骨架 |
-| `optimization finish <opt_id> --verdict accept\|reject [--report-file] [--promote] [--strict]` | 结束会话；accept+promote 把候选配置写回基线（strategy_id 不变、version 取候选版本） |
+| `optimization finish <opt_id> --verdict accept\|reject [--report-file] [--promote] [--no-strict]` | 结束会话；accept+promote 把候选配置写回基线（strategy_id 不变、version 取候选版本）。**验收清单默认强制**，`--no-strict` 才跳过 |
 | `optimization show <opt_id>` | 会话详情（含逐折指标与聚合） |
 | `optimization list [--strategy] [--limit]` | 会话列表 |
 
@@ -99,8 +99,8 @@
 - 分段原则（C4 起）：研究期内任意跨度都可单次回测，**不存在跨度上限、也不再要求"总跨度 > 5 年必须分段"**。分段只是可选的分析视角（分年度绩效 + 三段一致性），需要逐段比较时再按自然年/等分段跑。
 - 探索与验收分工（D1）：几十个变体的快速筛选用 `research batch`（不落库、分钟级、同一条执行路径），**验收与报告数字必须来自落库回测**（`backtest run` / `robustness`）。
 - 异步并行：`backtest run --async` 与 `optimization evaluate --async` 只把任务写入 `background_job`，由服务端 uvicorn 多 worker 进程经 `FOR UPDATE SKIP LOCKED` 并行认领执行，互不重复；实际并行度 = min(worker 数, CPU 核心数)。多方向/多段并行时用 `--async`，入队后 CLI 进程可退出，任务继续在服务端执行。
-- `fold_summary`：每个指标输出基线/候选的均值、中位数、候选胜出折数。
-- 验收清单默认阈值（共 7 项）：验证窗平均夏普 Δ≥0；平均最大回撤劣化 ≤ 2pct；夏普胜出折数 ≥ 50%；验证窗平均累计收益 Δ≥0；净成本口径夏普 Δ≥0；参数邻域无方向反转（需先跑 `robustness scan`）；分段一致性（剔除最好折后候选夏普不低于基线）。`--strict` 时 accept 必须全部满足。
+- `fold_summary`：每个指标输出基线/候选的均值、中位数、候选胜出折数；只统计两侧都有值的**配对折**（`paired_folds`），`evaluated_folds` 是实际评估的折数。
+- 验收清单默认阈值（共 7 项）：验证窗平均夏普 Δ≥0；平均最大回撤劣化 ≤ 2pct；夏普胜出折数 ≥ 50%；验证窗平均累计收益 Δ≥0；净成本口径夏普 Δ≥0；参数邻域无方向反转（需先跑 `robustness scan`，且批次哈希必须匹配本次会话基线或候选配置）；分段一致性（剔除最好折后候选夏普不低于基线）。**`finish` 默认强制全部满足**，`--no-strict` 才跳过。
 - 验收清单现在随 `optimization show` 一起返回（`acceptance_checklist`），不必先 `finish` 就能看到哪一项没过；`metrics_full` / `metrics_folds` 也带净口径（`net_sharpe_ratio` / `net_annualized_return_pct` / `annualized_turnover`）。
 - `optimization start` 的 `--start` 缺省为**研究期起点**（不是"最近两年"）；`finish --promote` 会把版本历史追加进策略描述。
 

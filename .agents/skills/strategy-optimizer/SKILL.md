@@ -54,9 +54,10 @@ description: >
    - `robustness collect <id> --wait` 后 `robustness stats <id>` 取 PBO 与 Deflated Sharpe。
    详见 [references/robustness.md](references/robustness.md)。
 8. **出报告**：`optimization report <opt_id> --file <path>` 生成骨架，补写"分析结论"：假设是否成立、数据支持（含净口径与稳健性数字）、风险、下一步方向。
-9. **收尾**：对照验收清单（共 7 项）——
-   - 通过 → `optimization finish <opt_id> --verdict accept --report-file <path> --promote --strict`
+9. **收尾**：对照验收清单（共 7 项，`finish` **默认强制**，只有 `--no-strict` 才跳过）——
+   - 通过 → `optimization finish <opt_id> --verdict accept --report-file <path> --promote`
    - 未通过 → `--verdict reject`（不 promote），会话保留作审计。
+   - 确需在清单未全过时接受时用 `--no-strict`，并在报告的"分析结论"里写明哪一项没过、为什么不构成否决。
 10. **确认落地**：`strategy show <基线>` 验证 promote 生效，必要时用 `strategy update --version` 补版本号。
 11. **收尾清理**：这一轮产生的稳健性变体草稿策略（`<基线>__rbXXXX_*`）用
     `strategy prune-variants --batch <批次>` 预演、确认后 `--apply` 清理（变体已被回测引用时
@@ -82,7 +83,9 @@ description: >
 
 ## 关键约束
 
-- **防过拟合**：每轮只测一个假设；以滚动样本外（fold）聚合为准，不能只看全区间；`--strict` 强制验收清单。
+- **防过拟合**：每轮只测一个假设；以滚动样本外（fold）聚合为准，不能只看全区间；`finish` 默认强制验收清单（`--no-strict` 才跳过）。
+  **fold 一致性 ≠ 样本外**：候选是看过全区间结果后提出的，4 折只是同一研究期内的
+  一致性检查；真正的样本外只有 2026-01-01 起的验证期，且一旦观察即被消费。
 - **研究期 / 验证期边界（硬约束）**：研究期固定为 2016-01-01 ~ 2025-12-31，
   2026-01-01 起为验证期。优化属于研究行为，区间越过研究期末端会被**系统直接拒绝**，
   `optimization start` 的默认 `--end` 即研究期末端。**禁止读验证期结果来调参**：
@@ -91,16 +94,19 @@ description: >
 - **净口径成本**：回测汇总为毛收益口径，验收必须同时看净口径指标
   （默认 10bp 单边，`backtest run --cost-bps` 可覆盖）。
   净收益 = 毛收益 − 单边换手 × 成本；换手越高，成本对结论的影响越大。
-- **验收清单默认阈值**（`--strict` 强制 accept，共 7 项）：
+- **验收清单默认阈值**（`finish` 默认强制 accept，共 7 项；`--no-strict` 可显式跳过）：
   1. 验证窗平均夏普 ≥ 基线；
   2. 平均最大回撤劣化 ≤ 2pct；
-  3. 夏普胜出折数 ≥ 50%；
+  3. 夏普胜出折数 ≥ 50%（只统计基线/候选两侧都有值的**配对折**）；
   4. 验证窗平均累计收益 ≥ 基线；
   5. **净成本口径**验证窗平均夏普 ≥ 基线；
-  6. **参数邻域**无方向反转且处于平台（需先跑 `robustness scan`，未跑直接判不通过）；
+  6. **参数邻域**无方向反转且处于平台（需先跑 `robustness scan`，且批次的
+     `baseline_config_hash` 必须等于**本次会话的基线或候选配置哈希**——
+     promote 之后上一轮的旧批次不再被复用；未提供匹配证据直接判不通过）；
   7. **分段一致性**：剔除最好折后候选夏普仍不低于基线。
-- **试验次数台账**：`robustness stats --n-trials` 缺省取该策略历史所有稳健性批次的
-  变体总数；手工做过的不入批次的对比要额外计入，多重检验的 N 只会被低估不会被高估。
+- **试验次数台账**：`robustness stats --n-trials` 缺省取"该策略历史所有稳健性批次的
+  变体总数 + 已评估的优化会话数"（`statistics.n_trials_breakdown` 给出拆分）；
+  手工做过但不入批次/会话的对比仍要显式补，多重检验的 N 只会被低估不会被高估。
 - **改动要小且可解释**；候选明显更差时先 reject 换假设，不要在同一轮叠加多个改动。
 - **并行前提与上限**：并行必须走 `--async` + 服务端多 worker，实际并行度 = min(worker 数, CPU 核心数)；每个 worker 进程持有独立 DB 连接池（pool_size=5 + max_overflow=10），6 worker 最坏约 90 连接，并行前先确认 PostgreSQL max_connections 够用。
 - 命令默认 JSON 输出；回测同步执行不依赖服务端进程（但无并行收益）。

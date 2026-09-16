@@ -486,7 +486,13 @@ function statusClass(status: string): string {
 /** 健康等级中文文案 */
 function healthText(level: string | null): string {
   if (!level) return '未体检'
-  return { HEALTHY: '健康', WATCH: '观察', WARNING: '警告', CRITICAL: '严重' }[level] ?? level
+  return {
+    HEALTHY: '健康',
+    WATCH: '观察',
+    WARNING: '警告',
+    CRITICAL: '严重',
+    UNKNOWN: '待观察（样本不足）',
+  }[level] ?? level
 }
 
 /** 健康等级样式类 */
@@ -497,6 +503,7 @@ function healthClass(level: string | null): string {
     WATCH: 'chip-warn',
     WARNING: 'chip-warn',
     CRITICAL: 'chip-danger',
+    UNKNOWN: 'chip-disabled',
   }[level] ?? 'chip-disabled'
 }
 

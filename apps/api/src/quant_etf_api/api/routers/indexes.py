@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import date
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
@@ -44,10 +46,17 @@ def create_index(
 @router.delete("/indexes/{index_code}", status_code=204)
 def delete_index(
     index_code: str,
+    delisting_date: date | None = Query(
+        default=None,
+        description=(
+            "退市/停发日期（含），留空取当前北京时间日期；"
+            "该日期是 point-in-time 回测标的池的判定依据"
+        ),
+    ),
     db: Session = Depends(get_db),
 ) -> None:
-    """停用基准指数（软删除，保留历史数据）。"""
+    """停用基准指数（软删除，保留历史数据），并登记退市/停发日期。"""
     try:
-        IndexService(db).remove_index(index_code)
+        IndexService(db).remove_index(index_code, delisting_date=delisting_date)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

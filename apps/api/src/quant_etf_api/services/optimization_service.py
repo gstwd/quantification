@@ -16,6 +16,7 @@ from datetime import date
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from quant_etf_api.config.settings import get_settings
@@ -57,6 +58,7 @@ _FOLD_METRICS: list[str] = [
     "win_rate_pct",
     "benchmark_return_pct",
     "excess_return_pct",
+    "annualized_excess_return_pct",
 ]
 
 # 报告逐折明细中展示的核心指标
@@ -283,7 +285,7 @@ class OptimizationService:
         verdict: str,
         report_text: str | None = None,
         promote: bool = False,
-        strict: bool = False,
+        strict: bool = True,
     ) -> dict[str, Any]:
         """结束会话：记录结论与报告，可选将候选配置提升为基线。
 
@@ -292,7 +294,10 @@ class OptimizationService:
             verdict: 结论，accept=接受，reject=拒绝。
             report_text: 最终优化报告 Markdown，可选。
             promote: verdict=accept 时是否把候选配置写回基线策略。
-            strict: 是否强制验收清单全部通过才允许 accept。
+            strict: 是否强制验收清单全部通过才允许 accept。**默认 True**：
+                验收清单是平台的防过拟合底线，历史默认 False 使"未验证的
+                accept"成为沉默默认；确需在清单未全过时接受，必须显式传入
+                False（CLI 对应 ``--no-strict``）并在报告中说明理由。
 
         Returns:
             会话摘要字典。
@@ -759,7 +764,7 @@ class OptimizationService:
             )
         )
         items.append(self._check_net_cost(session))
-        items.append(self._check_neighborhood(session.strategy_id))
+        items.append(self._check_neighborhood(session))
         items.append(self._check_segment_consistency(session))
         return items
 
@@ -793,25 +798,45 @@ class OptimizationService:
             _ge(cand_mean, base_mean),
         )
 
-    def _check_neighborhood(self, strategy_id: str) -> dict[str, Any]:
+    def _check_neighborhood(self, session: StrategyOptimizationModel) -> dict[str, Any]:
         """要求已完成参数邻域扰动且不存在方向反转（参数脆弱即拒绝）。
 
-        未做过 scan 批次时判定为不通过：参数是否处于平台必须用证据回答，
+        **证据必须匹配当前配置**（防止旧批次复用）：只接受满足以下任一条的
+        最近一次成功 scan 批次——
+
+        - 跑在本次会话的基线上且 ``baseline_config_hash`` 与会话基线一致；
+        - ``baseline_config_hash`` 与会话候选配置一致（等价于已对候选做过扫描）；
+        - 扫描对象就是候选策略（``strategy_id == candidate_strategy_id``）。
+
+        历史缺陷：只按 ``strategy_id`` 取最近批次，promote 之后基线配置已变，
+        上一轮的扫描结果仍会让本项通过（过期证据）。
+
+        未做过匹配的 scan 批次时判定为不通过：参数是否处于平台必须用证据回答，
         不能靠"看起来稳定"。
 
         Args:
-            strategy_id: 基线策略 ID。
+            session: 优化会话 ORM 行。
 
         Returns:
-            单条验收清单项。
+            单条验收清单项；未通过时 ``evidence`` 为空。
         """
         try:
             row = (
                 self._db.query(RobustnessRunModel)
                 .filter(
-                    RobustnessRunModel.strategy_id == strategy_id,
                     RobustnessRunModel.kind == "scan",
                     RobustnessRunModel.status == "success",
+                    or_(
+                        (
+                            (RobustnessRunModel.strategy_id == session.strategy_id)
+                            & (
+                                RobustnessRunModel.baseline_config_hash
+                                == session.baseline_config_hash
+                            )
+                        ),
+                        RobustnessRunModel.baseline_config_hash == session.candidate_config_hash,
+                        RobustnessRunModel.strategy_id == session.candidate_strategy_id,
+                    ),
                 )
                 .order_by(RobustnessRunModel.created_at.desc())
                 .first()
@@ -822,14 +847,36 @@ class OptimizationService:
         if row is None:
             return self._check_item(
                 "neighborhood_no_reversal",
-                "参数邻域无方向反转（需先执行 robustness scan）",
+                (
+                    "参数邻域无方向反转（需对当前配置执行 robustness scan："
+                    f"{session.strategy_id} 或候选 {session.candidate_strategy_id}）"
+                ),
                 False,
             )
         neighborhood = (row.summary or {}).get("neighborhood") or {}
+        scan_params = row.scan_params or {}
+        matched_config = (
+            "candidate"
+            if (
+                row.baseline_config_hash == session.candidate_config_hash
+                or row.strategy_id == session.candidate_strategy_id
+            )
+            else "baseline"
+        )
         return self._check_item(
             "neighborhood_no_reversal",
             "参数邻域无方向反转且落在参数高原",
             bool(neighborhood.get("is_plateau")) and not bool(neighborhood.get("reversal")),
+            evidence={
+                "robustness_id": row.robustness_id,
+                "matched_config": matched_config,
+                "preset": scan_params.get("preset"),
+                "windows": scan_params.get("windows"),
+                "n_variants": neighborhood.get("n_variants"),
+                "is_plateau": neighborhood.get("is_plateau"),
+                "reversal": neighborhood.get("reversal"),
+                "tolerance": neighborhood.get("tolerance"),
+            },
         )
 
     def _check_segment_consistency(self, session: StrategyOptimizationModel) -> dict[str, Any]:
@@ -891,12 +938,29 @@ class OptimizationService:
         return metrics.net_sharpe_ratio
 
     @staticmethod
-    def _check_item(key: str, description: str, passed: bool) -> dict[str, Any]:
-        """构造单条验收清单项。"""
+    def _check_item(
+        key: str,
+        description: str,
+        passed: bool,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """构造单条验收清单项。
+
+        Args:
+            key: 清单项标识。
+            description: 中文判据说明。
+            passed: 是否通过。
+            evidence: 可选的证据明细（如参数邻域扫描的批次 ID 与口径），
+                便于报告引用；不通过时为 None。
+
+        Returns:
+            清单项字典。
+        """
         return {
             "key": key,
             "description": description,
             "pass": passed,
+            "evidence": evidence,
         }
 
     @staticmethod
@@ -906,32 +970,39 @@ class OptimizationService:
 
 
 def _compute_fold_summary(metrics_folds: list[dict[str, Any]]) -> dict[str, Any]:
-    """计算逐折指标的均值、中位数与候选胜出折数。
+    """计算逐折指标的配对均值、中位数与候选胜出折数。
+
+    口径（配对比较）：只有基线侧与候选侧**同时有数值**的折才进入统计，避免
+    "某折缺候选值却仍计入基线均值"，使 Δ 与胜出折数建立在同一时间样本上
+    （与稳健性汇总"只在共同窗口比较"的原则一致）。
 
     Args:
-        metrics_folds: 逐折指标列表。
+        metrics_folds: 逐折指标列表，元素含 fold/start/end/baseline/candidate。
 
     Returns:
-        聚合统计字典，形如 {"total_folds": n, "metrics": {指标: {...}}}。
+        聚合统计字典：``{"total_folds": 评估折数, "metrics": {指标: {...}}}``；
+        每个指标含 ``evaluated_folds`` / ``paired_folds`` 与配对均值、中位数、
+        胜出折数。``total_folds`` 为配对折数（验收清单阈值依赖它）。
     """
     summary: dict[str, Any] = {"total_folds": len(metrics_folds), "metrics": {}}
     for metric in _FOLD_METRICS:
-        baseline_values: list[float] = []
-        candidate_values: list[float] = []
+        pairs: list[tuple[float, float]] = []
         for fold in metrics_folds:
             base_val = (fold.get("baseline") or {}).get(metric)
             cand_val = (fold.get("candidate") or {}).get(metric)
-            if isinstance(base_val, (int, float)):
-                baseline_values.append(float(base_val))
-            if isinstance(cand_val, (int, float)):
-                candidate_values.append(float(cand_val))
+            if isinstance(base_val, (int, float)) and isinstance(cand_val, (int, float)):
+                pairs.append((float(base_val), float(cand_val)))
+        baseline_values = [base for base, _ in pairs]
+        candidate_values = [cand for _, cand in pairs]
         summary["metrics"][metric] = {
             "baseline_mean": _mean(baseline_values),
             "candidate_mean": _mean(candidate_values),
             "baseline_median": _median(baseline_values),
             "candidate_median": _median(candidate_values),
-            "candidate_wins": sum(1 for a, b in zip(baseline_values, candidate_values) if b > a),
-            "total_folds": len(metrics_folds),
+            "candidate_wins": sum(1 for base, cand in pairs if cand > base),
+            "evaluated_folds": len(metrics_folds),
+            "paired_folds": len(pairs),
+            "total_folds": len(pairs),
         }
     return summary
 

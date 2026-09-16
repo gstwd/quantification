@@ -86,8 +86,15 @@
             <div class="metric-value">{{ store.current.metrics.win_rate_pct.toFixed(1) }}%</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">信号准确率 <HelpTip :text="metricHelp('signal_accuracy_pct')" /></div>
+            <div class="metric-label">持仓次日正收益率 <HelpTip :text="metricHelp('signal_accuracy_pct')" /></div>
             <div class="metric-value">{{ store.current.metrics.signal_accuracy_pct.toFixed(1) }}%</div>
+            <div
+              v-if="store.current.metrics.benchmark_up_days_pct !== null && store.current.metrics.benchmark_up_days_pct !== undefined"
+              class="metric-sub"
+            >
+              基准上涨日 {{ store.current.metrics.benchmark_up_days_pct.toFixed(1) }}%
+              <HelpTip :text="metricHelp('benchmark_up_days_pct')" />
+            </div>
           </div>
           <div class="metric-card">
             <div class="metric-label">盈亏比 <HelpTip :text="metricHelp('profit_loss_ratio')" /></div>
@@ -120,9 +127,15 @@
               </div>
             </div>
             <div class="metric-card">
-              <div class="metric-label">超额收益 <HelpTip :text="metricHelp('excess_return_pct')" /></div>
+              <div class="metric-label">超额收益（累计） <HelpTip :text="metricHelp('excess_return_pct')" /></div>
               <div class="metric-value" :class="(store.current.metrics.excess_return_pct ?? 0) >= 0 ? 'success' : 'danger'">
                 {{ formatPct(store.current.metrics.excess_return_pct ?? 0) }}
+              </div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-label">年化超额（毛口径） <HelpTip :text="metricHelp('annualized_excess_return_pct')" /></div>
+              <div class="metric-value" :class="(store.current.metrics.annualized_excess_return_pct ?? 0) >= 0 ? 'success' : 'danger'">
+                {{ store.current.metrics.annualized_excess_return_pct !== null && store.current.metrics.annualized_excess_return_pct !== undefined ? formatPct(store.current.metrics.annualized_excess_return_pct) : '-' }}
               </div>
             </div>
             <div class="metric-card">
@@ -204,7 +217,7 @@
             <div class="metric-value">{{ store.current.stability.net_sharpe_ratio.toFixed(2) }}</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">净口径超额</div>
+            <div class="metric-label">净口径超额（年化）</div>
             <div class="metric-value" :class="pctClass(store.current.stability.net_excess_return_pct ?? 0)">
               {{ store.current.stability.net_excess_return_pct !== null ? formatPct(store.current.stability.net_excess_return_pct) : '-' }}
             </div>
@@ -1081,6 +1094,7 @@ onUnmounted(() => {
 }
 .metric-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
 .metric-value { font-size: 20px; font-weight: 700; }
+.metric-sub { font-size: 11px; color: var(--text-muted); }
 .success { color: var(--success); }
 .danger { color: var(--danger); }
 

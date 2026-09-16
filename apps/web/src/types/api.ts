@@ -246,8 +246,12 @@ export interface BacktestMetrics {
   information_ratio: number | null
   /** 基准累计收益率（%） */
   benchmark_return_pct: number | null
-  /** 超额收益率（%） */
+  /** 累计口径超额（%）= 策略累计收益 − 基准累计收益 */
   excess_return_pct: number | null
+  /** 年化口径超额（%，毛口径）：与稳定性块的净口径年化超额区分 */
+  annualized_excess_return_pct?: number | null
+  /** 基准上涨日占比（%）：信号准确率的市场基准率参照 */
+  benchmark_up_days_pct?: number | null
   /** 数据缺口天数：至少一个持仓资产受缺失行情影响的交易日数 */
   data_gap_days: number
   /** 扣成本后年化收益率（%），明细见 BacktestStability */
@@ -326,6 +330,8 @@ export interface BacktestStability {
   cost_ladder?: CostLadderEntry[]
   /** 逐日有效候选池时间线（C6），存量回测为 null */
   candidate_pool?: BacktestCandidatePool | null
+  /** 回测前段因子预热交易日数（0=无预热期；指标仍包含该段） */
+  warmup_trading_days?: number
   /** 年化单边换手率（倍） */
   annualized_turnover: number
   /** 成本拖累（百分点/年） */

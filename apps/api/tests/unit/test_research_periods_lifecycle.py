@@ -17,6 +17,7 @@ from quant_etf_api.domain.research.lifecycle import (
     DIAGNOSIS_NORMAL,
     HEALTH_CRITICAL,
     HEALTH_HEALTHY,
+    HEALTH_UNKNOWN,
     HEALTH_WARNING,
     HEALTH_WATCH,
     assess_health,
@@ -196,7 +197,9 @@ class TestHealthAssessment:
         assert result.health_level == HEALTH_HEALTHY
 
     def test_insufficient_data_is_reported(self) -> None:
-        """所有窗口样本不足时明确标注样本不足。"""
+        """所有窗口样本不足时明确标注样本不足，且不得记为 HEALTHY。"""
         result = assess_health(None, {"1m": None, "3m": None, "6m": None})
         assert result.diagnosis == DIAGNOSIS_INSUFFICIENT_DATA
         assert result.recommended_action == ACTION_KEEP
+        # "没算出问题" ≠ "没有问题"：等级必须是 UNKNOWN
+        assert result.health_level == HEALTH_UNKNOWN

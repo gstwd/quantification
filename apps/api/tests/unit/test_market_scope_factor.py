@@ -28,20 +28,20 @@ class TestEnsureMarketScopeBars:
     """回测引用市场级因子时补充加载全市场行情。"""
 
     def test_loads_market_bars_when_market_scope_factor_used(self, monkeypatch) -> None:
-        """策略引用 breadth_ma20_pct 时应加载全市场活跃指数行情。"""
+        """策略引用 breadth_ma20_pct 时应加载全市场 point-in-time 指数行情。"""
         svc = _make_service()
         config = _make_config()
         trading_dates = [date(2024, 1, 2), date(2024, 1, 3)]
         all_bars: dict = {("000300", date(2024, 1, 2)): object()}
 
-        # Mock 活跃指数列表
-        active_rows = [
-            SimpleNamespace(index_code="000300"),
-            SimpleNamespace(index_code="399673"),
-            SimpleNamespace(index_code="931743"),
+        # Mock point-in-time 指数列表（区间起点仍在存续的指数）
+        period_rows = [
+            SimpleNamespace(index_code="000300", is_active=True),
+            SimpleNamespace(index_code="399673", is_active=True),
+            SimpleNamespace(index_code="931743", is_active=False),
         ]
         fake_repo = MagicMock()
-        fake_repo.find_active.return_value = active_rows
+        fake_repo.find_for_period.return_value = period_rows
         monkeypatch.setattr(
             "quant_etf_api.services.backtest_service.BenchmarkIndexRepository",
             lambda db: fake_repo,
@@ -61,6 +61,9 @@ class TestEnsureMarketScopeBars:
         # 全市场数据应并入 all_bars
         assert ("399673", date(2024, 1, 2)) in all_bars
         assert ("931743", date(2024, 1, 3)) in all_bars
+        # 集合口径按区间起点解析（point-in-time），而不是"当前活跃"
+        fake_repo.find_for_period.assert_called_once_with(trading_dates[0])
+        fake_repo.find_active.assert_not_called()
         svc._load_all_index_bars.assert_called_once_with(
             trading_dates, ["399673", "931743"]
         )

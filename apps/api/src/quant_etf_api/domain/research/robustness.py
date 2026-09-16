@@ -303,7 +303,9 @@ def block_bootstrap_sharpe_ci(
     """用块自助法估计年化夏普的置信区间。
 
     连续抽样（块内保留原顺序）以保留收益序列的自相关结构，避免 iid 抽样
-    低估尾部风险。固定随机种子保证同一输入得到可复现的区间。
+    低估尾部风险；块越界时循环回到序列开头续接（circular block bootstrap），
+    避免"尾部块被截断"导致序列两端样本被系统性欠采样。固定随机种子保证
+    同一输入得到可复现的区间。
 
     Args:
         daily_returns: 日收益率序列（小数口径）。
@@ -335,7 +337,8 @@ def block_bootstrap_sharpe_ci(
         resampled: list[float] = []
         while len(resampled) < n:
             start = rng.randrange(n)
-            resampled.extend(daily_returns[start : start + block])
+            # 循环块：越过尾部时回到开头续接，保证每个位置被抽中的概率相同
+            resampled.extend(daily_returns[(start + offset) % n] for offset in range(block))
         samples.append(annualized_sharpe(resampled[:n], trading_days))
     samples.sort()
     lower_index = int((1 - confidence) / 2 * len(samples))

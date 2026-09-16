@@ -39,6 +39,7 @@ from quant_etf_api.infra.db.models.core import (
     BacktestRunModel,
     IndexDailyBarModel,
     RobustnessRunModel,
+    StrategyOptimizationModel,
 )
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
@@ -706,6 +707,7 @@ class RobustnessService:
                 "n_splits": pbo_result.n_splits,
                 "n_blocks": pbo_result.n_blocks,
                 "reason": pbo_result.reason,
+                "power_note": _pbo_power_note(pbo_result.n_splits),
             }
         else:
             pbo_payload = {
@@ -714,9 +716,15 @@ class RobustnessService:
                 "n_splits": 0,
                 "n_blocks": n_blocks,
                 "reason": pbo_reason,
+                "power_note": _pbo_power_note(0),
             }
         baseline_returns = self._baseline_daily_returns(row, cost_bps)
-        trials = n_trials if n_trials is not None else self._trial_ledger(row.strategy_id)
+        if n_trials is not None:
+            trials = n_trials
+            trials_breakdown: dict[str, int] = {"explicit": int(n_trials)}
+        else:
+            trials_breakdown = self._trial_ledger_breakdown(row.strategy_id)
+            trials = max(1, trials_breakdown["robustness"] + trials_breakdown["optimization"])
         dsr = (
             deflated_sharpe_ratio(baseline_returns, trials) if len(baseline_returns) >= 3 else None
         )
@@ -727,6 +735,8 @@ class RobustnessService:
         )
         statistics = {
             "n_trials": trials,
+            # 台账来源拆分：便于复核 N 是否被低估（稳健性变体 / 优化会话 / 显式指定）
+            "n_trials_breakdown": trials_breakdown,
             "n_windows": n_blocks,
             "cost_bps": (cost_bps if cost_bps is not None else get_settings().default_cost_bps),
             "is_partial": row.status == "partial",
@@ -1185,9 +1195,11 @@ class RobustnessService:
                 if baseline_sharpe is not None
                 else []
             )
+            tolerance = get_settings().robustness_neighborhood_tolerance
             neighborhood = summarize_neighborhood(
                 baseline_sharpe if baseline_sharpe is not None else 0.0,
                 variant_values,
+                tolerance=tolerance,
             )
             summary["neighborhood"] = {
                 "n_variants": neighborhood.n_variants,
@@ -1196,6 +1208,8 @@ class RobustnessService:
                 "worse_ratio": _round(neighborhood.worse_ratio),
                 "reversal": neighborhood.reversal,
                 "is_plateau": neighborhood.is_plateau,
+                # 口径自描述：容差随结果落库，避免日后改配置后无法复核旧结论
+                "tolerance": tolerance,
             }
         elif row.kind == "ablate":
             summary["marginal"] = sorted(
@@ -1259,8 +1273,48 @@ class RobustnessService:
         # 统计函数按小数口径接收收益，避免与百分比口径混用
         return [r / 100 for r in series]
 
+    def _trial_ledger_breakdown(self, strategy_id: str) -> dict[str, int]:
+        """按来源拆分试验次数台账：稳健性批次变体 + 已评估优化会话数。
+
+        台账由两部分组成（N 只会被低估、不会被高估）：
+        - 稳健性批次：``robustness_run.trial_count`` 累加（每个变体 = 一次试验）；
+        - 优化会话：已评估过的会话数（每个会话 = 一个候选配置被试验一次），
+          历史实现漏计这部分，使 Deflated Sharpe 的 N 偏小而偏乐观。
+
+        手工跑过但未入批次/会话的对比仍需通过 ``--n-trials`` 显式补充。
+
+        Args:
+            strategy_id: 策略 ID。
+
+        Returns:
+            {"robustness": int, "optimization": int}；查询失败时返回
+            {"robustness": 1, "optimization": 0}（保持"至少一次试验"的历史行为）。
+        """
+        try:
+            robustness_total = (
+                self._db.query(sa.func.coalesce(sa.func.sum(RobustnessRunModel.trial_count), 0))
+                .filter(RobustnessRunModel.strategy_id == strategy_id)
+                .scalar()
+            )
+            optimization_total = (
+                self._db.query(sa.func.count())
+                .select_from(StrategyOptimizationModel)
+                .filter(
+                    StrategyOptimizationModel.strategy_id == strategy_id,
+                    StrategyOptimizationModel.status.in_(("evaluated", "accepted", "rejected")),
+                )
+                .scalar()
+            )
+        except Exception:
+            logger.warning("统计试验次数台账失败", exc_info=True)
+            return {"robustness": 1, "optimization": 0}
+        return {
+            "robustness": int(robustness_total or 0),
+            "optimization": int(optimization_total or 0),
+        }
+
     def _trial_ledger(self, strategy_id: str) -> int:
-        """统计该策略历史上的试验次数（变体总数），作为多重检验的 N。
+        """统计该策略历史上的试验次数（至少为 1），作为多重检验的 N。
 
         Args:
             strategy_id: 策略 ID。
@@ -1268,16 +1322,8 @@ class RobustnessService:
         Returns:
             试验次数（至少为 1）。
         """
-        try:
-            total = (
-                self._db.query(sa.func.coalesce(sa.func.sum(RobustnessRunModel.trial_count), 0))
-                .filter(RobustnessRunModel.strategy_id == strategy_id)
-                .scalar()
-            )
-        except Exception:
-            logger.warning("统计试验次数台账失败", exc_info=True)
-            return 1
-        return max(1, int(total or 0))
+        parts = self._trial_ledger_breakdown(strategy_id)
+        return max(1, parts["robustness"] + parts["optimization"])
 
     def _find(self, robustness_id: str) -> RobustnessRunModel | None:
         """读取批次行，不存在时返回 None。"""
@@ -1623,6 +1669,23 @@ def build_variant_strategy_id(base_strategy_id: str, robustness_id: str, label: 
         label if len(label) <= 30 else f"{label[:22]}{md5(label.encode('utf-8')).hexdigest()[:8]}"
     )
     return f"{base_strategy_id[:20]}__rb{robustness_id[:4]}_{suffix}"
+
+
+def _pbo_power_note(n_splits: int) -> str | None:
+    """给出 CSCV-PBO 的分辨率提示（切分太少时 PBO 只有粗粒度取值）。
+
+    Args:
+        n_splits: 对称切分数量（C(S, S/2)）。
+
+    Returns:
+        提示文本；切分充足（≥10）时返回 None。
+    """
+    if n_splits >= 10:
+        return None
+    return (
+        f"对称切分仅 {n_splits} 个，PBO 取值分辨率低（分块数 = 验证窗口数）；"
+        "需要更细的 PBO 时用更大的偶数窗口数重跑（如 --windows 6/8）"
+    )
 
 
 def _mean(values: list[float]) -> float | None:
