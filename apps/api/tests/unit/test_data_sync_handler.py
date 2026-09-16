@@ -86,14 +86,32 @@ def test_industry_daily_ingest_chain_removed() -> None:
     assert "industry_daily_ingest" not in JOB_HANDLERS
     assert not hasattr(handlers, "handle_industry_daily_ingest")
     assert not hasattr(IndustryDataService, "run_daily_ingest")
-    # 行业单对象手动入口仍保留
+    # 行业单对象与整批手动入口同样已下线（统一走数据管理操作）
     assert {
         "industry_universe_refresh",
         "industry_bars_refresh",
         "industry_quality_check",
         "industry_data_fill",
         "industry_data_rebuild",
-    } <= set(JOB_HANDLERS)
+    }.isdisjoint(JOB_HANDLERS)
+
+
+def test_industry_stock_quality_helpers_removed() -> None:
+    """行业/个股的平行质量实现已删除，质量只由数据管理服务写入。"""
+    from quant_etf_api.services.industry_data_service import IndustryDataService
+    from quant_etf_api.services.stock_data_service import StockDataService
+
+    for service, method in (
+        (IndustryDataService, "quality_check"),
+        (IndustryDataService, "bulk_quality"),
+        (IndustryDataService, "_persist_quality_snapshots"),
+        (IndustryDataService, "industry_quality_detail"),
+        (IndustryDataService, "backfill_industry_bars"),
+        (StockDataService, "quality_check"),
+        (StockDataService, "bulk_quality"),
+        (StockDataService, "_persist_quality_snapshots"),
+    ):
+        assert not hasattr(service, method), f"{service.__name__}.{method} 应已删除"
 
 
 def test_legacy_index_macro_ingest_entries_removed() -> None:

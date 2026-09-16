@@ -15,6 +15,7 @@
       缺失数 = “库内首根日线 → 最近交易日”区间内按交易日历统计的缺口（含中间缺口与
       尾部滞后）；头部截断不计入，补全/重拉后仍可能因上游滞后残留尾部缺失。
       成分股数量按最近交易日有效归属去重统计；“综合”(801230) 默认从 RRG 基准剔除。
+      质量列与数据管理页同源（后端 data_health_snapshot），未检查过的行业显示为“—”。
     </div>
 
     <div v-if="message" class="refresh-banner" :class="messageOk ? 'banner-ok' : 'banner-err'">
@@ -29,11 +30,10 @@
         @keyup.enter="handleSearch"
       />
       <button class="btn-secondary" @click="handleSearch">查询</button>
-      <span v-if="polling" class="poll-tip">后台任务执行中...</span>
     </div>
 
     <div v-if="loading" class="loading">加载中...</div>
-    <div v-else-if="filteredItems.length === 0" class="empty">暂无行业数据（先执行 industry init-universe）</div>
+    <div v-else-if="filteredItems.length === 0" class="empty">暂无行业数据（在数据管理页对 industry_universe 执行「补最新」）</div>
     <div v-else class="table-wrap">
       <table class="data-table">
         <thead>
@@ -96,8 +96,9 @@
 /**
  * 申万行业数据管理列表页。
  *
- * 展示 31 个申万一级行业的成分股数量、日线质量快照与最新行情；
- * 数据维护统一跳转至数据管理页，按数据集或单行业执行质量检查、补数和重拉。
+ * 展示 31 个申万一级行业的成分股数量、日线健康快照与最新行情；
+ * 质量列取自后端统一健康快照（data_health_snapshot，与数据管理页同源），
+ * 数据维护统一跳转至数据管理页按数据集或单行业执行。
  */
 
 import { computed, onMounted, ref } from 'vue'
@@ -107,17 +108,6 @@ import {
   fetchIndustrySummaries,
   type IndustrySummaryItem,
 } from '../api/industry'
-import { fetchRunDetail } from '../api/runs'
-import {
-  triggerIndustryBarsRefresh,
-  triggerIndustryFill,
-  triggerIndustryQualityCheck,
-  triggerIndustryRebuild,
-  triggerIndustryUniverseRefresh,
-  type IndustryRunAccepted,
-} from '../api/runs'
-import type { ResearchRunDetail } from '../types/api'
-import { usePolling } from '../composables/usePolling'
 
 const router = useRouter()
 const items = ref<IndustrySummaryItem[]>([])
@@ -125,56 +115,6 @@ const keyword = ref('')
 const loading = ref(false)
 const message = ref('')
 const messageOk = ref(true)
-
-/** 行级任务：industry_code -> run_id */
-const activeRuns = ref<Record<string, string>>({})
-/** 全局任务：run_type -> run_id */
-const globalRuns = ref<Record<string, string>>({})
-/** run_id -> industry_code（行级任务结束后刷新列表用） */
-const runIndustries = ref<Record<string, string>>({})
-
-const { polling, start } = usePolling<ResearchRunDetail[]>({
-  fetcher: async () => {
-    const runIds = [...Object.values(activeRuns.value), ...Object.values(globalRuns.value)]
-    const results = await Promise.allSettled(runIds.map((runId) => fetchRunDetail(runId)))
-    return results
-      .filter(
-        (result): result is PromiseFulfilledResult<ResearchRunDetail> =>
-          result.status === 'fulfilled',
-      )
-      .map((result) => result.value)
-  },
-  isDone: (runs) =>
-    runs.length > 0 &&
-    runs.every((run) => ['success', 'failed', 'skipped'].includes(run.status)),
-  intervalMs: 2000,
-  immediate: false,
-  onData: (runs) => {
-    let needReload = false
-    for (const run of runs) {
-      if (!['success', 'failed', 'skipped'].includes(run.status)) continue
-      const industryCode = runIndustries.value[run.run_id]
-      if (industryCode) {
-        delete activeRuns.value[industryCode]
-        delete runIndustries.value[run.run_id]
-        needReload = true
-      }
-      const globalType = Object.keys(globalRuns.value).find(
-        (type) => globalRuns.value[type] === run.run_id,
-      )
-      if (globalType) {
-        delete globalRuns.value[globalType]
-        needReload = true
-      }
-      if (run.status === 'failed') {
-        showMessage(`后台任务失败: ${run.error_message ?? '未知错误'}`, false)
-      } else if (run.run_type === 'industry_universe_refresh') {
-        showMessage('行业信息更新完成', true)
-      }
-    }
-    if (needReload) void loadSummaries()
-  },
-})
 
 const filteredItems = computed(() => {
   const q = keyword.value.trim().toLowerCase()
@@ -185,31 +125,6 @@ const filteredItems = computed(() => {
       item.name_cn.toLowerCase().includes(q),
   )
 })
-
-function globalBusy(runType: string): boolean {
-  return Boolean(globalRuns.value[runType])
-}
-
-function globalLabel(runType: string, label: string): string {
-  if (!globalRuns.value[runType]) return label
-  return runType === 'industry_bars_refresh' ? '日线刷新中...' : '信息更新中...'
-}
-
-function isRunning(industryCode: string): boolean {
-  return Boolean(activeRuns.value[industryCode])
-}
-
-/** 行级任务执行中文案映射 */
-const runningText: Record<string, string> = {
-  industry_quality_check: '检查中...',
-  industry_data_fill: '补全中...',
-  industry_data_rebuild: '重拉中...',
-}
-
-function rowLabel(industryCode: string, runType: string, label: string): string {
-  if (!activeRuns.value[industryCode]) return label
-  return runningText[runType] ?? label
-}
 
 function showMessage(text: string, ok: boolean): void {
   message.value = text
@@ -235,57 +150,6 @@ function goDetail(industryCode: string): void {
 
 function handleSearch(): void {
   // 列表已本地过滤，仅保留交互语义
-}
-
-async function ensurePolling(): Promise<void> {
-  if (!polling.value && (Object.keys(activeRuns.value).length > 0 || Object.keys(globalRuns.value).length > 0)) {
-    await start()
-  }
-}
-
-async function runGlobal(runType: 'industry_bars_refresh' | 'industry_universe_refresh'): Promise<void> {
-  if (globalBusy(runType)) return
-  try {
-    const accepted =
-      runType === 'industry_bars_refresh'
-        ? await triggerIndustryBarsRefresh()
-        : await triggerIndustryUniverseRefresh()
-    globalRuns.value[runType] = accepted.run_id
-    showMessage(
-      `${runType === 'industry_bars_refresh' ? '日线刷新' : '行业信息更新'}已触发（${accepted.run_id.slice(0, 8)}…）`,
-      true,
-    )
-    await ensurePolling()
-  } catch {
-    showMessage('任务触发失败，请重试', false)
-  }
-}
-
-async function triggerAction(
-  industryCode: string,
-  runType: string,
-): Promise<IndustryRunAccepted> {
-  if (runType === 'industry_quality_check') return triggerIndustryQualityCheck(industryCode)
-  if (runType === 'industry_data_fill') return triggerIndustryFill(industryCode)
-  return triggerIndustryRebuild(industryCode)
-}
-
-async function runRow(industryCode: string, runType: string): Promise<void> {
-  if (isRunning(industryCode)) return
-  if (runType === 'industry_data_rebuild') {
-    if (!window.confirm(`确认全量重拉 ${industryCode}？将删除该行业库内全部日线并重新拉取。`)) {
-      return
-    }
-  }
-  try {
-    const accepted = await triggerAction(industryCode, runType)
-    activeRuns.value[industryCode] = accepted.run_id
-    runIndustries.value[accepted.run_id] = industryCode
-    showMessage(`已触发${industryCode}的${runType}任务（${accepted.run_id.slice(0, 8)}…）`, true)
-    await ensurePolling()
-  } catch {
-    showMessage('任务触发失败，请重试', false)
-  }
 }
 
 async function loadSummaries(): Promise<void> {

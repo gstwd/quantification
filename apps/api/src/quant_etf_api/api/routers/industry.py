@@ -36,7 +36,6 @@ from quant_etf_api.schemas.industry import (
     IndustryIndexSummary,
     IndustryIndexCorrelationItem,
     IndustryIndexCorrelationResponse,
-    IndustryQualityDetail,
     IndustryRRGMeta,
     IndustryRRGPoint,
     IndustryRRGResponse,
@@ -211,19 +210,6 @@ def industry_daily_bars(
         )
         for row in rows
     ]
-
-
-@router.get("/indexes/{industry_code}/quality", response_model=IndustryQualityDetail)
-def industry_quality_detail(
-    industry_code: str,
-    db: Session = Depends(get_db),
-) -> IndustryQualityDetail:
-    """行业详情页数据质量（快照 + OHLC/change_pct 字段完整性）。"""
-    code = normalize_sw_code(industry_code)
-    try:
-        return IndustryDataService(db).industry_quality_detail(code)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/correlation", response_model=IndustryIndexCorrelationResponse)

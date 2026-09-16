@@ -202,23 +202,7 @@ class IndustrySummaryItem(BaseModel):
     latest_change_pct: float | None = None
 
 
-class IndustryQualityDetail(BaseModel):
-    """行业详情页数据质量（快照 + 日线字段完整性）。"""
-
-    industry_code: str
-    data_start_date: date | None = None
-    data_end_date: date | None = None
-    bar_count: int | None = None
-    missing_day_count: int | None = None
-    quality_checked_at: UtcDatetime | None = None
-    total: int = 0
-    min_date: date | None = None
-    max_date: date | None = None
-    missing_open: int = 0
-    missing_high: int = 0
-    missing_low: int = 0
-    missing_close: int = 0
-    incomplete_rows: int = 0
-    incomplete_ratio: float = 0.0
-    change_pct_null: int = 0
-    change_pct_null_rate: float = 0.0
+# 说明：原 `IndustryQualityDetail`（行业详情页质量：industry_universe 快照列 +
+# 每请求重算的 OHLC/change_pct 缺失）已随行业质量口径统一而删除。前端改读
+# `GET /data-management/datasets/industry_daily_bar?partition_key=<code>`
+# 返回的统一健康快照（data_health_snapshot）。

@@ -674,34 +674,15 @@ def _build_optimization_group(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _build_industry_group(subparsers: argparse._SubParsersAction) -> None:
-    """注册 industry 命令组（申万行业轮动子系统工具）。"""
+    """注册 industry 命令组（申万行业轮动子系统工具）。
+
+    说明：行业目录/日线/成分的同步、检查、补缺口与全量重拉统一走
+    `POST /api/data-management/operations`（`DataManagementService` 编排），
+    因此原有的 init-universe / backfill-bars / quality / fill / rebuild /
+    backfill-membership 子命令已删除，仅保留 DMS 无法表达的操作。
+    """
     group = subparsers.add_parser("industry", help="申万行业 RRG/扩散子系统")
     sub = group.add_subparsers(dest="subcommand", required=True)
-
-    p = sub.add_parser("init-universe", help="同步 31 个申万一级行业目录")
-    _add_json_flag(p)
-
-    p = sub.add_parser("backfill-bars", help="全量回填行业指数日线")
-    p.add_argument("--codes", dest="industry_codes", help="逗号分隔的行业代码，默认全部")
-    _add_json_flag(p)
-
-    p = sub.add_parser("quality", help="批量重算并落库行业日线质量快照")
-    p.add_argument("--all", action="store_true", help="全部行业（默认）")
-    p.add_argument("--codes", dest="industry_codes", help="逗号分隔的行业代码")
-    _add_json_flag(p)
-
-    p = sub.add_parser("fill", help="批量补全行业日线到最近交易日")
-    p.add_argument("--all", action="store_true", help="全部行业（默认）")
-    p.add_argument("--codes", dest="industry_codes", help="逗号分隔的行业代码")
-    _add_json_flag(p)
-
-    p = sub.add_parser("rebuild", help="批量全量重拉行业日线（先拉取成功后清空旧行）")
-    p.add_argument("--codes", dest="industry_codes", required=True, help="逗号分隔的行业代码")
-    _add_json_flag(p)
-
-    p = sub.add_parser("backfill-membership", help="同步申万行业成分事件")
-    p.add_argument("--force", action="store_true", help="忽略最近刷新时间强制重取")
-    _add_json_flag(p)
 
     p = sub.add_parser("backfill-stock-close", help="回填成分股历史收盘价")
     p.add_argument("--start", default="20130101", help="起始日 YYYYMMDD，默认 20130101")
@@ -713,68 +694,6 @@ def _run_industry(args: argparse.Namespace) -> None:
     """执行 industry 命令组。"""
     db = SessionLocal()
     try:
-        from quant_etf_api.services.industry_data_service import (  # noqa: PLC0415
-            IndustryDataService,
-        )
-
-        if args.subcommand == "init-universe":
-            result = IndustryDataService(db).sync_universe()
-            _emit(result, not args.no_json)
-            return
-        if args.subcommand == "backfill-bars":
-            codes = _split_codes(args.industry_codes)
-            result = IndustryDataService(db).backfill_industry_bars(codes)
-            _emit(result, not args.no_json)
-            if result["errors"]:
-                sys.exit(1)
-            return
-        if args.subcommand == "quality":
-            codes = _split_codes(args.industry_codes)
-            if args.all:
-                codes = None
-            result = IndustryDataService(db).bulk_quality(codes)
-            _emit(result, not args.no_json)
-            if result["errors"]:
-                sys.exit(1)
-            return
-        if args.subcommand in ("fill", "rebuild"):
-            codes = _split_codes(args.industry_codes)
-            if args.all or (args.subcommand == "fill" and codes is None):
-                codes = None
-            if args.subcommand == "rebuild" and not codes:
-                _fail("rebuild 必须通过 --codes 指定要重拉的行业")
-            if codes is None:
-                from quant_etf_api.infra.db.repositories.industry import (  # noqa: PLC0415
-                    IndustryUniverseRepository,
-                )
-
-                codes = IndustryUniverseRepository(db).find_active_codes()
-            service = IndustryDataService(db)
-            errors: list[str] = []
-            items: list[dict[str, Any]] = []
-            for code in codes:
-                try:
-                    items.append(
-                        service.fill_industry(code)
-                        if args.subcommand == "fill"
-                        else service.rebuild_industry(code)
-                    )
-                except Exception as exc:
-                    errors.append(f"{code}: {type(exc).__name__}: {exc}")
-                    logger.warning("行业 %s %s 失败: %s", code, args.subcommand, exc)
-            summary = {
-                "codes": len(codes),
-                "items": items,
-                "errors": errors,
-            }
-            _emit(summary, not args.no_json)
-            if errors:
-                sys.exit(1)
-            return
-        if args.subcommand == "backfill-membership":
-            result = IndustryDataService(db).refresh_membership(force=args.force)
-            _emit(result, not args.no_json)
-            return
         if args.subcommand == "backfill-stock-close":
             codes = _split_codes(args.stock_codes)
             from quant_etf_api.services.stock_data_service import (  # noqa: PLC0415
@@ -803,15 +722,16 @@ def _run_industry(args: argparse.Namespace) -> None:
 
 
 def _build_index_group(subparsers: argparse._SubParsersAction) -> None:
-    """注册 index 命令组（指数成分数据管理）。"""
+    """注册 index 命令组（指数成分数据管理）。
+
+    说明：指数当前成分快照的同步走 `POST /api/data-management/operations`
+    （dataset=index_membership），故 `members refresh` 子命令已删除；
+    这里保留任意区间 PIT 回填与覆盖状态查询。
+    """
     group = subparsers.add_parser("index", help="指数成分数据（PIT/当前快照）")
     sub = group.add_subparsers(dest="subcommand", required=True)
     members = sub.add_parser("members", help="指数成分管理")
     msub = members.add_subparsers(dest="member_action", required=True)
-
-    p = msub.add_parser("refresh", help="拉取并替换指数当前成分/权重快照")
-    p.add_argument("--index-codes", dest="index_codes", help="逗号分隔指数代码，默认全部启用指数")
-    _add_json_flag(p)
 
     p = msub.add_parser(
         "backfill-pit", help="按月末取样回填历史 PIT 成分（Tushare 优先/baostock 兜底）"
@@ -841,12 +761,6 @@ def _run_index(args: argparse.Namespace) -> None:
         if codes is None:
             codes = [row.index_code for row in BenchmarkIndexRepository(db).find_active()]
         service = IndexMembershipDataService(db)
-        if args.member_action == "refresh":
-            result = service.refresh_current_snapshots(codes)
-            _emit(result, not args.no_json)
-            if result["errors"]:
-                sys.exit(1)
-            return
         if args.member_action == "backfill-pit":
             end = args.end or date.today()
             if args.start > end:
@@ -864,32 +778,20 @@ def _run_index(args: argparse.Namespace) -> None:
 
 
 def _build_stock_group(subparsers: argparse._SubParsersAction) -> None:
-    """注册 stock 命令组（个股元数据/质量/补全，批量操作仅限 CLI）。"""
-    group = subparsers.add_parser("stock", help="个股数据管理（质量快照与批量补全）")
+    """注册 stock 命令组（批量补全与清洗）。
+
+    说明：个股目录/日线/指标的同步、检查、补缺口与全量重拉统一走
+    `POST /api/data-management/operations`，故 init-universe / quality /
+    rebuild 子命令已删除；这里只保留 DMS 无法表达的批量选择器、区间回填、
+    指定交易日抓取与破坏性清洗。
+    """
+    group = subparsers.add_parser("stock", help="个股数据管理（批量补全与清洗）")
     sub = group.add_subparsers(dest="subcommand", required=True)
-
-    p = sub.add_parser("init-universe", help="同步 Tushare 沪深 A 股全量目录")
-    _add_json_flag(p)
-
-    p = sub.add_parser("quality", help="批量重算并落库个股数据质量快照")
-    p.add_argument("--all", action="store_true", help="全部股票（默认）")
-    p.add_argument("--codes", dest="stock_codes", help="逗号分隔股票代码")
-    _add_json_flag(p)
 
     p = sub.add_parser("fill", help="批量补全个股日线到最近交易日")
     p.add_argument("--all", action="store_true", help="全部股票（默认）")
     p.add_argument("--codes", dest="stock_codes", help="逗号分隔股票代码")
     p.add_argument("--only-missing", action="store_true", help="仅处理缺失>0或无数据的股票")
-    p.add_argument("--start", default="20130101", help="起始日 YYYYMMDD，默认 20130101")
-    p.add_argument(
-        "--datasets",
-        default="daily,basic,moneyflow",
-        help="逗号分隔数据集：daily/basic/moneyflow",
-    )
-    _add_json_flag(p)
-
-    p = sub.add_parser("rebuild", help="批量全量重拉个股日线（先拉取成功后清空旧行）")
-    p.add_argument("--codes", dest="stock_codes", required=True, help="逗号分隔股票代码")
     p.add_argument("--start", default="20130101", help="起始日 YYYYMMDD，默认 20130101")
     p.add_argument(
         "--datasets",
@@ -938,33 +840,17 @@ def _run_stock(args: argparse.Namespace) -> None:
         )
 
         service = StockDataService(db)
-        if args.subcommand == "init-universe":
-            result = service.sync_universe()
-            _emit(result, not args.no_json)
-            return
-
-        if args.subcommand == "quality":
-            codes = _split_codes(args.stock_codes)
-            if args.all:
-                codes = None
-            result = service.bulk_quality(codes)
-            _emit(result, not args.no_json)
-            if result["errors"]:
-                sys.exit(1)
-            return
-        if args.subcommand in ("fill", "rebuild"):
+        if args.subcommand == "fill":
             codes = _split_codes(args.stock_codes)
             start_date = datetime.strptime(args.start, "%Y%m%d").date()
-            if args.subcommand == "rebuild" and codes is None:
-                _fail("rebuild 必须通过 --codes 指定要重拉的股票")
             if args.all:
                 codes = None
             datasets = _split_codes(args.datasets)
             result = service.bulk_fill(
                 codes=codes,
                 start_date=start_date,
-                only_missing=args.only_missing if args.subcommand == "fill" else False,
-                rebuild=args.subcommand == "rebuild",
+                only_missing=args.only_missing,
+                rebuild=False,
                 datasets=datasets,
             )
             _emit(result, not args.no_json)

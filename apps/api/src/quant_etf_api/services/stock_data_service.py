@@ -1,4 +1,4 @@
-"""个股数据管理服务：元数据同步、质量快照、单股补全/重拉与 CLI 批量入口。"""
+"""个股数据管理服务：元数据同步、单股补全/重拉与 CLI 批量入口。"""
 
 from __future__ import annotations
 
@@ -8,10 +8,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from quant_etf_api.domain.stocks.quality import compute_stock_quality
 from quant_etf_api.infra.clients.tushare_market import TushareStockClient
 from quant_etf_api.infra.db.base import utcnow
-from quant_etf_api.infra.db.models.core import DataHealthSnapshotModel
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
     IndustryUniverseRepository,
@@ -251,107 +249,6 @@ class StockDataService:
         if start > end:
             start, end = end, start
         return start, end
-
-    def _quality_snapshot(
-        self,
-        stock_code: str,
-        start_override: date | None = None,
-    ) -> dict[str, Any]:
-        """计算单只股票质量快照（只读，不落库）。"""
-        row = self._universe_repo.find_by_code(stock_code)
-        if row is None:
-            raise ValueError(
-                f"股票 {stock_code} 不在 stock_universe 中，请先执行 stock init-universe"
-            )
-        actual = self._close_repo.find_trade_dates_by_code(stock_code)
-        start, end = self._expected_bounds(row, actual, start_override=start_override)
-        trading_days = [] if start > end else self._trading_days(start, end)
-        result = compute_stock_quality(
-            actual_dates=actual,
-            trading_days=trading_days,
-            expected_start=start,
-            expected_end=end,
-        )
-        return {
-            "stock_code": stock_code,
-            "data_start_date": result["data_start_date"],
-            "data_end_date": result["data_end_date"],
-            "bar_count": result["bar_count"],
-            "missing_day_count": result["missing_day_count"],
-        }
-
-    def quality_check(self, stock_code: str) -> dict[str, Any]:
-        """检查单只股票质量并落库快照（页面/后台任务入口）。"""
-        snapshot = self._quality_snapshot(stock_code)
-        self._persist_quality_snapshots([snapshot])
-        self._db.commit()
-        return snapshot
-
-    def bulk_quality(self, codes: list[str] | None = None) -> dict[str, Any]:
-        """批量质量检查并落库快照（仅 CLI）。"""
-        target_codes = self._resolve_codes(codes)
-        errors: list[str] = []
-        snapshots: list[dict[str, Any]] = []
-        total = len(target_codes)
-        for i, code in enumerate(target_codes, start=1):
-            try:
-                snapshots.append(self._quality_snapshot(code))
-            except Exception as exc:
-                errors.append(f"{code}: {type(exc).__name__}: {exc}")
-                logger.warning("个股 %s 质量检查失败: %s", code, exc)
-            if len(snapshots) >= 200:
-                self._persist_quality_snapshots(snapshots)
-                self._db.commit()
-                snapshots = []
-            if i % 200 == 0:
-                logger.info("个股质量检查进度: %s/%s", i, total)
-        if snapshots:
-            self._persist_quality_snapshots(snapshots)
-            self._db.commit()
-        return {
-            "codes": total,
-            "checked": total - len(errors),
-            "errors": errors,
-        }
-
-    def _persist_quality_snapshots(self, snapshots: list[dict[str, Any]]) -> None:
-        """把个股质量快照批量写入统一健康快照表。"""
-        if not snapshots:
-            return
-        expected_date = self._latest_trading_day()
-        for snapshot in snapshots:
-            row = self._health_repo.find_one("stock_daily_close", snapshot["stock_code"])
-            if row is None:
-                row = DataHealthSnapshotModel(
-                    dataset_key="stock_daily_close",
-                    partition_key=snapshot["stock_code"],
-                )
-                self._db.add(row)
-            stock_row = self._universe_repo.find_by_code(snapshot["stock_code"])
-            row.partition_name = (
-                stock_row.name_cn if stock_row is not None else snapshot["stock_code"]
-            )
-            row.health_status = (
-                "error"
-                if not snapshot["bar_count"]
-                else "warning"
-                if snapshot["missing_day_count"]
-                else "healthy"
-            )
-            row.earliest_date = snapshot["data_start_date"]
-            row.latest_date = snapshot["data_end_date"]
-            row.expected_date = expected_date
-            row.record_count = snapshot["bar_count"]
-            row.missing_count = snapshot["missing_day_count"] or 0
-            row.invalid_count = 0
-            row.issue_summary = (
-                {"missing_count": snapshot["missing_day_count"]}
-                if snapshot["missing_day_count"]
-                else None
-            )
-            row.last_checked_at = utcnow()
-            row.last_run_status = "success"
-            row.last_success_at = row.last_checked_at
 
     # ------------------------------------------------------------------
     # 数据拉取与补全
@@ -601,7 +498,7 @@ class StockDataService:
         start_date: date | None = None,
         datasets: list[str] | None = None,
     ) -> dict[str, Any]:
-        """补全单只股票 Tushare 明细到最近交易日并刷新质量快照。
+        """补全单只股票 Tushare 明细到最近交易日。
 
         Args:
             stock_code: 6 位股票代码。
@@ -610,7 +507,8 @@ class StockDataService:
             datasets: 需要补全的数据集；None 表示日线、每日指标、资金流向全部。
 
         Returns:
-            写入统计与质量快照字段。
+            写入统计；质量结论不在此写入，统一由 DataManagementService 的
+            检查步骤落到 data_health_snapshot。
         """
         del in_session  # 兼容旧调用签名；Tushare 客户端不使用 baostock 会话
         selected = self._normalize_datasets(datasets)
@@ -631,16 +529,12 @@ class StockDataService:
                 stock_code, dataset_key, fetched.get(dataset_key, [])
             )
         self._db.commit()
-        snapshot = self._quality_snapshot(stock_code, start_override=start_date)
-        self._persist_quality_snapshots([snapshot])
-        self._db.commit()
         return {
             "stock_code": stock_code,
             "datasets": selected,
             "fetched_rows": {key: len(fetched.get(key, [])) for key in selected},
             "upserted_rows": upserted,
             "upserted_total": sum(upserted.values()),
-            **snapshot,
         }
 
     def rebuild_stock(
@@ -660,7 +554,7 @@ class StockDataService:
             datasets: 需要重拉的数据集；None 表示全部个股数据集。
 
         Returns:
-            删除/写入统计与质量快照字段。
+            删除/写入统计；质量结论由 DataManagementService 的检查步骤重算。
         """
         del in_session  # 兼容旧调用签名；Tushare 客户端不使用 baostock 会话
         selected = self._normalize_datasets(datasets)
@@ -690,16 +584,12 @@ class StockDataService:
                 deleted[dataset_key] = self._moneyflow_repo.delete_by_code(stock_code)
             self._upsert_dataset_rows(stock_code, dataset_key, fetched.get(dataset_key, []))
         self._db.commit()
-        snapshot = self._quality_snapshot(stock_code, start_override=start_date)
-        self._persist_quality_snapshots([snapshot])
-        self._db.commit()
         return {
             "stock_code": stock_code,
             "datasets": selected,
             "deleted_rows": deleted,
             "upserted_rows": {key: len(fetched.get(key, [])) for key in selected},
             "upserted_total": sum(len(fetched.get(key, [])) for key in selected),
-            **snapshot,
         }
 
     def sync_trade_date(

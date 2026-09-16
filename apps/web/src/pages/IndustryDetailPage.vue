@@ -46,66 +46,52 @@
             {{ qualityLoading ? '加载中...' : '刷新' }}
           </button>
         </div>
-        <div v-if="qualityLoading && !quality" class="chart-placeholder">加载中...</div>
-        <div v-else-if="quality" class="quality-body">
+        <div v-if="qualityLoading && !qualitySnapshot" class="chart-placeholder">加载中...</div>
+        <div v-else-if="qualitySnapshot" class="quality-body">
           <div class="quality-grid">
             <div class="quality-block">
-              <div class="quality-block-title">质量快照</div>
-              <div class="quality-row">
-                <span>覆盖范围</span>
-                <span class="mono">{{ rangeText(quality.data_start_date, quality.data_end_date) }}</span>
-              </div>
-              <div class="quality-row">
-                <span>日线条数</span>
-                <span class="mono">{{ quality.bar_count ?? '—' }}</span>
-              </div>
-              <div class="quality-row">
-                <span>缺失交易日</span>
-                <span class="mono" :class="(quality.missing_day_count ?? 0) > 0 ? 'text-warn' : 'text-ok'">
-                  {{ quality.missing_day_count ?? '—' }}
+              <div class="quality-block-title">
+                {{ qualitySnapshot.display_name }}
+                <span class="health-badge" :class="healthClass(qualitySnapshot.health_status)">
+                  {{ healthLabel(qualitySnapshot.health_status) }}
                 </span>
               </div>
-              <div class="quality-row">
-                <span>检查时间</span>
-                <span class="mono">{{ formatTime(quality.quality_checked_at) }}</span>
-              </div>
-            </div>
-            <div class="quality-block">
-              <div class="quality-block-title">字段完整性</div>
               <div class="quality-row">
                 <span>记录数</span>
-                <span class="mono">{{ quality.total }}</span>
+                <span class="mono">{{ qualitySnapshot.record_count }}</span>
               </div>
               <div class="quality-row">
-                <span>OHLC 不完整</span>
-                <span class="mono" :class="quality.incomplete_rows > 0 ? 'text-warn' : 'text-ok'">
-                  {{ quality.incomplete_rows }} 行（{{ (quality.incomplete_ratio * 100).toFixed(1) }}%）
+                <span>覆盖范围</span>
+                <span class="mono">{{ rangeText(qualitySnapshot.earliest_date, qualitySnapshot.latest_date) }}</span>
+              </div>
+              <div class="quality-row">
+                <span>缺口 / 字段异常</span>
+                <span
+                  class="mono"
+                  :class="qualitySnapshot.missing_count + qualitySnapshot.invalid_count > 0 ? 'text-warn' : 'text-ok'"
+                >
+                  {{ qualitySnapshot.missing_count }} / {{ qualitySnapshot.invalid_count }}
                 </span>
               </div>
               <div class="quality-row">
-                <span>开/高/低/收缺失</span>
-                <span class="mono">
-                  {{ quality.missing_open }}/{{ quality.missing_high }}/{{ quality.missing_low }}/{{ quality.missing_close }}
-                </span>
+                <span>最近检查</span>
+                <span class="mono">{{ qualitySnapshot.last_checked_at ? formatTime(qualitySnapshot.last_checked_at) : '尚未检查' }}</span>
               </div>
-              <div class="quality-row">
-                <span>change_pct 缺失率</span>
-                <span class="mono" :class="quality.change_pct_null > 0 ? 'text-warn' : 'text-ok'">
-                  {{ (quality.change_pct_null_rate * 100).toFixed(1) }}%
-                </span>
+              <div class="quality-sub">
+                目标日期 {{ qualitySnapshot.expected_date ?? '—' }}{{ qualitySnapshot.source_name ? ` · 来源 ${qualitySnapshot.source_name}` : '' }}
               </div>
             </div>
           </div>
+          <div class="quality-note">
+            口径与「数据管理」页同源（data_health_snapshot 健康快照）；补齐缺口或修复字段异常请在数据管理页发起。
+          </div>
         </div>
-        <div v-else class="chart-placeholder">质量数据加载失败或无数据</div>
+        <div v-else class="chart-placeholder">暂无健康快照，请在数据管理页执行「检查全部质量」</div>
         <div class="quality-actions">
           <RouterLink
             :to="{ path: '/data-management', query: { dataset: 'industry_daily_bar', partition: props.industryCode } }"
             class="btn-secondary"
           >数据维护</RouterLink>
-          <span v-if="taskMessage || taskStatus" class="task-status" :class="taskStatusClass">
-            {{ taskMessage || taskStatusText }}
-          </span>
         </div>
       </div>
 
@@ -154,39 +140,29 @@
  * K 线图；单行业维护统一由数据管理页承接，并链向 RRG 调试页。
  */
 
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { ECharts } from 'echarts'
 
 import {
   fetchIndustryDailyBars,
-  fetchIndustryQuality,
   fetchIndustrySummaries,
   type DailyBarLike,
-  type IndustryQualityDetail,
   type IndustrySummaryItem,
 } from '../api/industry'
-import {
-  fetchRunDetail,
-  triggerIndustryFill,
-  triggerIndustryQualityCheck,
-  triggerIndustryRebuild,
-} from '../api/runs'
-import type { ResearchRunDetail } from '../types/api'
-import { usePolling } from '../composables/usePolling'
+import { fetchDataSetDetail } from '../api/dataManagement'
+import type { DataPartitionHealth } from '../types/api'
 
 const props = defineProps<{ industryCode: string }>()
 
 const summary = ref<IndustrySummaryItem | null>(null)
-const quality = ref<IndustryQualityDetail | null>(null)
+/** 数据健康快照（与数据管理页同源：后端 data_health_snapshot） */
+const qualitySnapshot = ref<DataPartitionHealth | null>(null)
 const bars = ref<DailyBarLike[]>([])
 const loading = ref(true)
 const qualityLoading = ref(false)
 const barsLoading = ref(false)
 const barsError = ref(false)
-const taskRunId = ref('')
-const taskStatus = ref('')
-const taskMessage = ref('')
 const chartEl = ref<HTMLElement | null>(null)
 
 const barStartDate = ref('')
@@ -203,46 +179,6 @@ const rangePresets = [
   { label: '近3年', days: 1100 },
   { label: '近2000根', days: 0 },
 ]
-
-const { start: startTaskPolling } = usePolling<ResearchRunDetail | null>({
-  fetcher: async () => {
-    if (!taskRunId.value) return null
-    try {
-      return await fetchRunDetail(taskRunId.value)
-    } catch {
-      return null
-    }
-  },
-  isDone: (run) => run !== null && ['success', 'failed', 'skipped'].includes(run.status),
-  intervalMs: 2000,
-  immediate: false,
-  onData: (run) => {
-    if (!run) return
-    if (['success', 'failed', 'skipped'].includes(run.status)) {
-      taskStatus.value = run.status
-      if (run.status === 'failed') {
-        taskMessage.value = run.error_message ?? '任务失败'
-      } else {
-        taskMessage.value = run.status === 'success' ? '任务完成' : '任务已跳过'
-      }
-      void refreshAfterTask()
-    }
-  },
-})
-
-const taskActive = computed(() => Boolean(taskRunId.value))
-const taskStatusClass = computed(() => {
-  if (taskStatus.value === 'failed') return 'status-failed'
-  if (taskStatus.value === 'success') return 'status-ok'
-  return ''
-})
-const taskStatusText = computed(() => {
-  const labels: Record<string, string> = {
-    pending: '排队中',
-    running: '执行中',
-  }
-  return labels[taskStatus.value] ?? ''
-})
 
 function formatPct(pct: number | null | undefined): string {
   if (pct === null || pct === undefined) return '—'
@@ -270,22 +206,36 @@ function rangeText(start: string | null | undefined, end: string | null | undefi
   return '—'
 }
 
-function taskRunning(runType: string, label: string): string {
-  if (!taskRunId.value) return label
+/** 健康状态中文标签（与后端 health_status 取值对齐） */
+function healthLabel(status: string): string {
   const labels: Record<string, string> = {
-    industry_quality_check: '检查中...',
-    industry_data_fill: '补全中...',
-    industry_data_rebuild: '重拉中...',
+    healthy: '正常',
+    warning: '需关注',
+    error: '异常',
+    unknown: '尚未检查',
+    unsupported: '上游不支持',
   }
-  return labels[runType] ?? label
+  return labels[status] ?? status
 }
 
+/** 健康状态样式类 */
+function healthClass(status: string): string {
+  if (status === 'healthy') return 'health-ok'
+  if (status === 'warning') return 'health-warn'
+  if (status === 'error') return 'health-error'
+  return 'health-unknown'
+}
+
+/** 加载行业日线的数据健康快照（数据管理页同一口径，不自行重算质量） */
 async function loadQuality(): Promise<void> {
   qualityLoading.value = true
   try {
-    quality.value = await fetchIndustryQuality(props.industryCode)
+    const detail = await fetchDataSetDetail('industry_daily_bar', 0, 1, {
+      partitionKey: props.industryCode,
+    })
+    qualitySnapshot.value = detail.items[0] ?? null
   } catch {
-    quality.value = null
+    qualitySnapshot.value = null
   } finally {
     qualityLoading.value = false
   }
@@ -351,37 +301,6 @@ function toDateStr(d: Date): string {
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
-}
-
-async function refreshAfterTask(): Promise<void> {
-  await Promise.all([loadSummary(), loadQuality(), loadBars()])
-  taskRunId.value = ''
-  taskStatus.value = ''
-}
-
-async function triggerTask(runType: string): Promise<void> {
-  if (taskActive.value) return
-  if (runType === 'industry_data_rebuild') {
-    if (!window.confirm('全量重拉将删除该行业库内全部日线并从数据源重新拉取，确定继续？')) {
-      return
-    }
-  }
-  try {
-    const accepted =
-      runType === 'industry_data_fill'
-        ? await triggerIndustryFill(props.industryCode)
-        : runType === 'industry_quality_check'
-          ? await triggerIndustryQualityCheck(props.industryCode)
-          : await triggerIndustryRebuild(props.industryCode)
-    taskRunId.value = accepted.run_id
-    taskStatus.value = 'pending'
-    taskMessage.value = '任务已提交，排队中...'
-    await startTaskPolling()
-    await refreshAfterTask()
-  } catch {
-    taskStatus.value = 'failed'
-    taskMessage.value = '触发失败，请重试'
-  }
 }
 
 async function renderKlineChart(): Promise<void> {
@@ -630,31 +549,46 @@ onMounted(async () => {
   padding: 10px 12px;
 }
 .quality-block-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 12px;
   color: var(--text-muted);
   margin-bottom: 8px;
 }
+.health-badge {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+.health-ok { background: rgba(74, 222, 128, 0.12); color: #4ade80; }
+.health-warn { background: rgba(251, 191, 36, 0.12); color: #fbbf24; }
+.health-error { background: rgba(248, 113, 113, 0.12); color: #f87171; }
+.health-unknown { background: rgba(148, 163, 184, 0.12); color: var(--text-muted); }
 .quality-row {
   display: flex;
   justify-content: space-between;
   padding: 3px 0;
   font-size: 13px;
 }
+.quality-sub {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.quality-note {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
 .quality-actions {
   display: flex;
   gap: 8px;
   align-items: center;
   margin-top: 10px;
-}
-.task-status {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.task-status.status-ok {
-  color: var(--success, #22c55e);
-}
-.task-status.status-failed {
-  color: var(--danger, #ef4444);
 }
 .range-controls {
   display: flex;

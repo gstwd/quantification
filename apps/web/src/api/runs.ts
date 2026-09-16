@@ -45,57 +45,10 @@ export async function fetchSystemStatus(): Promise<SystemStatusResponse> {
 // （见 api/dataManagement.ts 的 fetchDataManagementOverview / fetchDataSetDetail），
 // 原 `/system/data-quality` 独立口径已下线。
 
-// 数据同步/补缺口/全量重拉统一由 /data-management/operations 提交，
-// 指数与宏观不再保留各自的触发入口（见 api/dataManagement.ts）。
+// 数据同步/补缺口/全量重拉/质量检查统一由 /data-management/operations 提交，
+// 指数、宏观、行业与个股均不再保留各自的触发入口（见 api/dataManagement.ts）。
 
 export async function triggerStrategyRun(strategyId: string): Promise<{ run_id: string }> {
   const { data } = await apiClient.post<{ run_id: string }>(`/runs/strategies/${strategyId}/run`)
-  return data
-}
-
-/** 后台行业任务触发结果 */
-export interface IndustryRunAccepted {
-  status: string
-  run_type: string
-  run_id: string
-}
-
-/** 触发行业目录与成分事件强制刷新（更新行业信息） */
-export async function triggerIndustryUniverseRefresh(): Promise<IndustryRunAccepted> {
-  const { data } = await apiClient.post<IndustryRunAccepted>('/runs/industry/refresh-info')
-  return data
-}
-
-/** 触发全部行业日线增量刷新并重算质量快照 */
-export async function triggerIndustryBarsRefresh(): Promise<IndustryRunAccepted> {
-  const { data } = await apiClient.post<IndustryRunAccepted>('/runs/industry/refresh-bars')
-  return data
-}
-
-/** 触发单个行业数据质量检查 */
-export async function triggerIndustryQualityCheck(
-  industryCode: string,
-): Promise<IndustryRunAccepted> {
-  const { data } = await apiClient.post<IndustryRunAccepted>(
-    `/runs/industries/${industryCode}/quality`,
-  )
-  return data
-}
-
-/** 触发单个行业日线补全 */
-export async function triggerIndustryFill(industryCode: string): Promise<IndustryRunAccepted> {
-  const { data } = await apiClient.post<IndustryRunAccepted>(
-    `/runs/industries/${industryCode}/fill`,
-  )
-  return data
-}
-
-/** 触发单个行业全量重拉 */
-export async function triggerIndustryRebuild(
-  industryCode: string,
-): Promise<IndustryRunAccepted> {
-  const { data } = await apiClient.post<IndustryRunAccepted>(
-    `/runs/industries/${industryCode}/rebuild`,
-  )
   return data
 }

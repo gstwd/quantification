@@ -732,12 +732,21 @@ class DataManagementService:
                         result = service.rebuild_industry(partition_key)
                         _add_records(int(result.get("upserted_rows") or 0))
                     elif operation == "repair_gaps":
-                        result = service.repair_industry_gaps(partition_key, expected)
-                        _add_records(int(result.get("upserted_rows") or 0), updated=int(result.get("updated_rows") or 0))
-                        stats["gaps_found"] += int(result.get("gaps_found") or 0)
-                        stats["gaps_repaired"] += int(result.get("gaps_repaired") or 0)
-                        stats["invalid_found"] += int(result.get("invalid_found") or 0)
-                        stats["invalid_repaired"] += int(result.get("invalid_repaired") or 0)
+                        # 缺口/异常的前后统计统一走本服务的聚合 SQL 口径（与健康快照同源），
+                        # 行业服务只负责抓取与写入，不自行维护第二套质量规则。
+                        gaps_before = self._partition_missing_count(dataset_key, partition_key)
+                        invalid_before = self._partition_invalid_count(dataset_key, partition_key)
+                        result = service.repair_industry_gaps(partition_key)
+                        _add_records(
+                            int(result.get("upserted_rows") or 0),
+                            updated=int(result.get("updated_rows") or 0),
+                        )
+                        gaps_after = self._partition_missing_count(dataset_key, partition_key)
+                        invalid_after = self._partition_invalid_count(dataset_key, partition_key)
+                        stats["gaps_found"] += gaps_before
+                        stats["gaps_repaired"] += max(0, gaps_before - gaps_after)
+                        stats["invalid_found"] += invalid_before
+                        stats["invalid_repaired"] += max(0, invalid_before - invalid_after)
                     elif force or self._industry_code_behind(partition_key, expected):
                         result = service.fill_industry(partition_key)
                         _add_records(int(result.get("fetched_rows") or 0))
@@ -755,15 +764,19 @@ class DataManagementService:
             elif operation == "repair_gaps":
                 for code in self._partitions(dataset_key):
                     try:
-                        result = service.repair_industry_gaps(code, expected)
+                        gaps_before = self._partition_missing_count(dataset_key, code)
+                        invalid_before = self._partition_invalid_count(dataset_key, code)
+                        result = service.repair_industry_gaps(code)
                         _add_records(
                             int(result.get("upserted_rows") or 0),
                             updated=int(result.get("updated_rows") or 0),
                         )
-                        stats["gaps_found"] += int(result.get("gaps_found") or 0)
-                        stats["gaps_repaired"] += int(result.get("gaps_repaired") or 0)
-                        stats["invalid_found"] += int(result.get("invalid_found") or 0)
-                        stats["invalid_repaired"] += int(result.get("invalid_repaired") or 0)
+                        gaps_after = self._partition_missing_count(dataset_key, code)
+                        invalid_after = self._partition_invalid_count(dataset_key, code)
+                        stats["gaps_found"] += gaps_before
+                        stats["gaps_repaired"] += max(0, gaps_before - gaps_after)
+                        stats["invalid_found"] += invalid_before
+                        stats["invalid_repaired"] += max(0, invalid_before - invalid_after)
                     except Exception as exc:  # noqa: PERF203
                         _fail(code, exc)
             elif force or self._industry_dataset_behind(expected):

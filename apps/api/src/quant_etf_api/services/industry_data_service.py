@@ -17,10 +17,10 @@ from quant_etf_api.domain.industry.constants import (
     SW_L1_NAMES,
     normalize_sw_code,
 )
-from quant_etf_api.domain.industry.quality import compute_industry_bar_quality
 from quant_etf_api.infra.clients.sw_industry_client import SwIndustryClient
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.industry import IndustryUniverseModel
+from quant_etf_api.infra.db.repositories.data_health import DataHealthSnapshotRepository
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
     IndustryMembershipEventRepository,
@@ -29,7 +29,7 @@ from quant_etf_api.infra.db.repositories.industry import (
 from quant_etf_api.infra.db.repositories.stock import StockUniverseRepository
 from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.infra.time import today_cn
-from quant_etf_api.schemas.industry import IndustryQualityDetail, IndustrySummaryItem
+from quant_etf_api.schemas.industry import IndustrySummaryItem
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,7 @@ class IndustryDataService:
         self._stock_universe_repo = StockUniverseRepository(db)
         self._bar_repo = IndustryDailyBarRepository(db)
         self._membership_repo = IndustryMembershipEventRepository(db)
+        self._health_repo = DataHealthSnapshotRepository(db)
         self._sw_client = SwIndustryClient()
         self._calendar = TradingCalendar()
         self._trading_cache: tuple[date, date, list[date]] | None = None
@@ -100,26 +101,6 @@ class IndustryDataService:
     # ------------------------------------------------------------------
     # 行业指数日线
     # ------------------------------------------------------------------
-
-    def backfill_industry_bars(self, industry_codes: list[str] | None = None) -> dict[str, Any]:
-        """全量回填行业指数日线（从申万官网全历史，顺带补写派生列）。
-
-        每个行业独立提交事务；某个行业失败时先回滚再继续处理后续行业，
-        避免“当前事务已中止”或超长事务导致的连接层错误拖垮整批回填。
-        """
-        codes = self._resolve_codes(industry_codes)
-        total = 0
-        errors: list[str] = []
-        for code in codes:
-            try:
-                rows = self._sw_client.fetch_daily(code)
-                total += self._upsert_bars(code, rows)
-                self._db.commit()
-            except Exception as e:
-                self._db.rollback()
-                logger.warning("行业 %s 日线全量回填失败: %s", code, e)
-                errors.append(f"{code}: {type(e).__name__}: {e}")
-        return {"codes": len(codes), "records": total, "errors": errors}
 
     def refresh_industry_bars_incremental(
         self, industry_codes: list[str] | None = None
@@ -202,90 +183,61 @@ class IndustryDataService:
         return self._bar_repo.bulk_upsert(values)
 
     def fill_industry(self, industry_code: str) -> dict[str, Any]:
-        """补全单个行业日线并刷新质量快照（全历史重拉，幂等 upsert）。
+        """补全单个行业日线（全历史重拉，幂等 upsert）。
 
         Args:
             industry_code: 申万一级行业代码，如 801010。
 
         Returns:
-            {industry_code, fetched_rows, upserted_rows, 质量快照字段}。
+            {industry_code, fetched_rows, upserted_rows}。
+            质量结论不在此写入：统一由 DataManagementService 的检查步骤
+            写入 data_health_snapshot。
         """
         code = self._ensure_universe_row(industry_code)
         rows = self._sw_client.fetch_daily(code)
         upserted = self._upsert_bars(code, rows)
         self._db.commit()
-        snapshot = self._quality_snapshot(code)
-        self._persist_quality_snapshots([snapshot])
-        self._db.commit()
         return {
             "industry_code": code,
             "fetched_rows": len(rows),
             "upserted_rows": upserted,
-            **snapshot,
         }
 
-    def repair_industry_gaps(self, industry_code: str, expected_end: date) -> dict[str, Any]:
+    def repair_industry_gaps(self, industry_code: str) -> dict[str, Any]:
         """修复单个行业的历史缺口和异常日线。
 
         申万接口不支持可靠的日期增量，因此仍然全量拉取后本地裁剪写入；
-        与 fill_industry 的区别是该入口无论最新日期是否正常都会执行，并
-        返回修复前后的精确统计。
+        与 fill_industry 的区别是该入口无论最新日期是否正常都会执行。
+        修复前后的缺口/异常统计由调用方（DataManagementService）在统一健康
+        快照口径下计算，本方法只负责抓取与写入。
         """
         code = self._ensure_universe_row(industry_code)
         actual_dates = set(self._bar_repo.find_trade_dates_by_code(code))
-        before = self._quality_snapshot(code)
-        invalid_before = self._invalid_bar_count(code)
         rows = self._sw_client.fetch_daily(code)
         fetched_dates = {row["trade_date"] for row in rows if row.get("trade_date")}
         inserted_rows = len(fetched_dates - actual_dates)
         updated_rows = len(fetched_dates & actual_dates)
         self._upsert_bars(code, rows)
         self._db.commit()
-        after = self._quality_snapshot(code)
-        self._persist_quality_snapshots([after])
-        self._db.commit()
-        gaps_found = int(before.get("missing_day_count") or 0)
-        gaps_after = int(after.get("missing_day_count") or 0)
-        invalid_after = self._invalid_bar_count(code)
         return {
             "industry_code": code,
             "fetched_rows": len(rows),
             "upserted_rows": inserted_rows + updated_rows,
             "inserted_rows": inserted_rows,
             "updated_rows": updated_rows,
-            "gaps_found": gaps_found,
-            "gaps_repaired": max(0, gaps_found - gaps_after),
-            "invalid_found": invalid_before,
-            "invalid_repaired": max(0, invalid_before - invalid_after),
-            **after,
         }
 
-    def _invalid_bar_count(self, industry_code: str) -> int:
-        """统计单行业日线的基础字段异常数量。"""
-        return sum(
-            1
-            for row in self._bar_repo.find_by_code(industry_code)
-            if any(
-                value is None or value <= 0
-                for value in (
-                    row.open_price,
-                    row.high_price,
-                    row.low_price,
-                    row.close_price,
-                )
-            )
-        )
-
     def rebuild_industry(self, industry_code: str) -> dict[str, Any]:
-        """全量重拉单个行业日线并刷新质量快照。
+        """全量重拉单个行业日线。
 
         先完整拉取成功，再在同一事务内清空旧行并写回；拉取失败时旧数据保留。
+        质量结论由调用方（DataManagementService）在统一健康快照口径下重算。
 
         Args:
             industry_code: 申万一级行业代码，如 801010。
 
         Returns:
-            {industry_code, deleted_rows, upserted_rows, 质量快照字段}。
+            {industry_code, deleted_rows, upserted_rows}。
         """
         code = self._ensure_universe_row(industry_code)
         rows = self._sw_client.fetch_daily(code)
@@ -305,14 +257,10 @@ class IndustryDataService:
         deleted = self._bar_repo.delete_by_code(code)
         self._upsert_bars(code, rows)
         self._db.commit()
-        snapshot = self._quality_snapshot(code)
-        self._persist_quality_snapshots([snapshot])
-        self._db.commit()
         return {
             "industry_code": code,
             "deleted_rows": deleted,
             "upserted_rows": len(rows),
-            **snapshot,
         }
 
     def _ensure_universe_row(self, industry_code: str) -> str:
@@ -497,158 +445,44 @@ class IndustryDataService:
             return days[-1]
         raise ValueError("交易日历不可用，无法确定最近交易日")
 
-    def _quality_snapshot(self, industry_code: str) -> dict[str, Any]:
-        """计算单个行业日线质量快照（只读，不落库）。"""
-        row = self._universe_repo.find_by_code(industry_code)
-        if row is None:
-            raise ValueError(
-                f"行业 {industry_code} 不在 industry_universe 中，请先执行 industry init-universe"
-            )
-        actual = self._bar_repo.find_trade_dates_by_code(industry_code)
-        if not actual:
-            trading_days: list[date] = []
-            end = self._latest_trading_day()
-        else:
-            end = self._latest_trading_day()
-            trading_days = self._trading_days(actual[0], end)
-        result = compute_industry_bar_quality(
-            actual_dates=actual,
-            trading_days=trading_days,
-            expected_end=end,
-        )
-        return {
-            "industry_code": industry_code,
-            "data_start_date": result["data_start_date"],
-            "data_end_date": result["data_end_date"],
-            "bar_count": result["bar_count"],
-            "missing_day_count": result["missing_day_count"],
-        }
-
-    def quality_check(self, industry_code: str) -> dict[str, Any]:
-        """检查单个行业日线质量并落库快照（页面/后台任务入口）。"""
-        snapshot = self._quality_snapshot(industry_code)
-        self._persist_quality_snapshots([snapshot])
-        self._db.commit()
-        return snapshot
-
-    def bulk_quality(self, industry_codes: list[str] | None = None) -> dict[str, Any]:
-        """批量质量检查并落库快照（全部行业或指定列表，仅 CLI/日频摄取使用）。"""
-        target_codes = self._resolve_codes(industry_codes)
-        errors: list[str] = []
-        snapshots: list[dict[str, Any]] = []
-        for code in target_codes:
-            try:
-                snapshots.append(self._quality_snapshot(code))
-            except Exception as exc:
-                errors.append(f"{code}: {type(exc).__name__}: {exc}")
-                logger.warning("行业 %s 质量检查失败: %s", code, exc)
-        if snapshots:
-            self._persist_quality_snapshots(snapshots)
-            self._db.commit()
-        return {"codes": len(target_codes), "checked": len(snapshots), "errors": errors}
-
-    def _persist_quality_snapshots(self, snapshots: list[dict[str, Any]]) -> None:
-        """把行业质量快照批量写回 industry_universe 质量列。"""
-        if not snapshots:
-            return
-        # name_cn 无数据库默认值：INSERT..ON CONFLICT 也会校验新行非空，
-        # 因此必须把当前目录行名称合并进写入行
-        current_rows = {row.industry_code: row for row in self._universe_repo.find_all()}
-        rows: list[dict[str, Any]] = []
-        for snap in snapshots:
-            current = current_rows.get(snap["industry_code"])
-            rows.append(
-                {
-                    "industry_code": snap["industry_code"],
-                    "name_cn": (
-                        current.name_cn
-                        if current is not None
-                        else SW_L1_NAMES.get(snap["industry_code"], "")
-                    ),
-                    "data_start_date": snap["data_start_date"],
-                    "data_end_date": snap["data_end_date"],
-                    "bar_count": snap["bar_count"],
-                    "missing_day_count": snap["missing_day_count"],
-                    "quality_checked_at": utcnow(),
-                    "updated_at": utcnow(),
-                }
-            )
-        self._universe_repo.bulk_upsert(
-            rows,
-            update_cols={
-                "data_start_date",
-                "data_end_date",
-                "bar_count",
-                "missing_day_count",
-                "quality_checked_at",
-                "updated_at",
-            },
-        )
-
     def _membership_ref_date(self) -> date:
         """返回成分计数参考日：优先行业日线最新交易日，缺数据时用今天。"""
         return self._bar_repo.latest_trade_date() or today_cn()
 
     def list_summary(self) -> list[IndustrySummaryItem]:
-        """聚合行业目录、当前成分数、质量快照与最新一根行情，供管理列表页。"""
+        """聚合行业目录、当前成分数、健康快照与最新一根行情，供管理列表页。
+
+        质量字段取自 `data_health_snapshot` 的 `industry_daily_bar` 分区行
+        （与数据管理页同源）；从未检查过的行业这些字段为 None，前端显示为
+        “尚未检查”，不再自行重算质量。
+        """
         rows = self._universe_repo.find_all()
         member_counts = self._membership_repo.current_membership_counts(self._membership_ref_date())
         latest_bars = self._bar_repo.find_latest_bars()
+        health = self._health_repo.find_by_dataset_and_partitions(
+            "industry_daily_bar", [row.industry_code for row in rows]
+        )
         items: list[IndustrySummaryItem] = []
         for row in rows:
             bar = latest_bars.get(row.industry_code)
+            snapshot = health.get(row.industry_code)
             items.append(
                 IndustrySummaryItem(
                     industry_code=row.industry_code,
                     name_cn=row.name_cn,
                     is_benchmark_excluded=row.is_benchmark_excluded,
                     member_count=member_counts.get(row.industry_code, 0),
-                    data_start_date=row.data_start_date,
-                    data_end_date=row.data_end_date,
-                    bar_count=row.bar_count,
-                    missing_day_count=row.missing_day_count,
-                    quality_checked_at=row.quality_checked_at,
+                    data_start_date=snapshot.earliest_date if snapshot is not None else None,
+                    data_end_date=snapshot.latest_date if snapshot is not None else None,
+                    bar_count=snapshot.record_count if snapshot is not None else None,
+                    missing_day_count=snapshot.missing_count if snapshot is not None else None,
+                    quality_checked_at=snapshot.last_checked_at if snapshot is not None else None,
                     latest_trade_date=bar.trade_date if bar else None,
                     latest_close=bar.close_price if bar else None,
                     latest_change_pct=bar.change_pct if bar else None,
                 )
             )
         return items
-
-    def industry_quality_detail(self, industry_code: str) -> IndustryQualityDetail:
-        """计算行业详情页质量（快照 + 全历史日线字段完整性）。"""
-        row = self._universe_repo.find_by_code(industry_code)
-        if row is None:
-            raise ValueError(f"行业 {industry_code} 不在 industry_universe 中")
-        bars = self._bar_repo.find_by_code(industry_code)
-        total = len(bars)
-        missing_open = sum(1 for b in bars if b.open_price is None)
-        missing_high = sum(1 for b in bars if b.high_price is None)
-        missing_low = sum(1 for b in bars if b.low_price is None)
-        missing_close = sum(1 for b in bars if b.close_price is None)
-        incomplete_rows = sum(
-            1 for b in bars if b.open_price is None or b.high_price is None or b.low_price is None
-        )
-        change_pct_null = sum(1 for b in bars if b.change_pct is None)
-        return IndustryQualityDetail(
-            industry_code=industry_code,
-            data_start_date=row.data_start_date,
-            data_end_date=row.data_end_date,
-            bar_count=row.bar_count,
-            missing_day_count=row.missing_day_count,
-            quality_checked_at=row.quality_checked_at,
-            total=total,
-            min_date=bars[0].trade_date if bars else None,
-            max_date=bars[-1].trade_date if bars else None,
-            missing_open=missing_open,
-            missing_high=missing_high,
-            missing_low=missing_low,
-            missing_close=missing_close,
-            incomplete_rows=incomplete_rows,
-            incomplete_ratio=round(incomplete_rows / total, 4) if total else 0.0,
-            change_pct_null=change_pct_null,
-            change_pct_null_rate=round(change_pct_null / total, 4) if total else 0.0,
-        )
 
     def _resolve_codes(self, codes: list[str] | None) -> list[str]:
         """解析行业代码列表；为空时使用全部启用行业。"""

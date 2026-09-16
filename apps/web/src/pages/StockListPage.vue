@@ -36,7 +36,6 @@
         <option value="delisted">已退市</option>
       </select>
       <button class="btn-secondary" @click="handleSearch">查询</button>
-      <span v-if="polling" class="poll-tip">单股任务执行中...</span>
     </div>
 
     <div v-if="message" class="refresh-banner" :class="messageOk ? 'banner-ok' : 'banner-err'">
@@ -44,7 +43,7 @@
     </div>
 
     <div v-if="loading" class="loading">加载中...</div>
-    <div v-else-if="items.length === 0" class="empty">暂无个股数据（先执行 stock init-universe）</div>
+    <div v-else-if="items.length === 0" class="empty">暂无个股数据（在数据管理页对 stock_universe 执行「补最新」）</div>
     <div v-else class="table-wrap">
       <table class="data-table">
         <thead>
@@ -109,25 +108,18 @@
 
 <script setup lang="ts">
 /**
- * 个股数据列表页：展示个股元数据与日线质量快照，
- * 单股维护统一由数据管理页承接，不提供批量操作入口。
+ * 个股数据列表页：展示个股元数据与日线健康快照（后端 data_health_snapshot），
+ * 单股维护统一由数据管理页承接，页面不提供任务触发入口。
  */
 
 import { onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { fetchIndustryIndexes, type IndustryIndexSummary } from '../api/industry'
-import { fetchRunDetail } from '../api/runs'
 import {
   fetchStockSummaries,
-  triggerStockFill,
-  triggerStockQualityCheck,
-  triggerStockRebuild,
-  type StockRunAccepted,
   type StockSummary,
 } from '../api/stocks'
-import type { ResearchRunDetail } from '../types/api'
-import { usePolling } from '../composables/usePolling'
 
 const items = ref<StockSummary[]>([])
 const industries = ref<IndustryIndexSummary[]>([])
@@ -141,112 +133,12 @@ const loading = ref(false)
 const message = ref('')
 const messageOk = ref(true)
 
-/** 正在执行的后台任务：stock_code -> run_id */
-const activeRuns = ref<Record<string, string>>({})
-/** run_id -> stock_code，用于任务结束后清理 */
-const runStocks = ref<Record<string, string>>({})
-/** run_id -> run_type，用于按钮文案 */
-const activeTypes = ref<Record<string, string>>({})
-
-const { polling, start } = usePolling<ResearchRunDetail[]>({
-  fetcher: async () => {
-    const runIds = Object.values(activeRuns.value)
-    const results = await Promise.allSettled(runIds.map((runId) => fetchRunDetail(runId)))
-    return results
-      .filter(
-        (result): result is PromiseFulfilledResult<ResearchRunDetail> =>
-          result.status === 'fulfilled',
-      )
-      .map((result) => result.value)
-  },
-  isDone: (runs) =>
-    runs.length > 0 &&
-    runs.every((run) => ['success', 'failed', 'skipped'].includes(run.status)),
-  intervalMs: 2000,
-  immediate: false,
-  onData: (runs) => {
-    for (const run of runs) {
-      if (['success', 'failed', 'skipped'].includes(run.status)) {
-        const stockCode = runStocks.value[run.run_id]
-        if (stockCode) {
-          delete activeRuns.value[stockCode]
-          delete runStocks.value[run.run_id]
-        }
-        delete activeTypes.value[run.run_id]
-        if (run.status === 'failed') {
-          showMessage(`股票任务失败: ${run.error_message ?? '未知错误'}`, false)
-        }
-      }
-    }
-  },
-})
-
-function isRunning(stockCode: string): boolean {
-  return Boolean(activeRuns.value[stockCode])
-}
-
-function runningLabel(stockCode: string, runType: string): string {
-  const runId = activeRuns.value[stockCode]
-  if (!runId || activeTypes.value[runId] !== runType) return ''
-  if (runType === 'stock_quality_check') return '检查中...'
-  if (runType === 'stock_data_fill') return '补全中...'
-  return '重拉中...'
-}
-
 function showMessage(text: string, ok: boolean): void {
   message.value = text
   messageOk.value = ok
   window.setTimeout(() => {
     message.value = ''
   }, 5000)
-}
-
-/** 触发任务后启动轮询（已在轮询中则复用） */
-async function ensurePolling(): Promise<void> {
-  if (!polling.value && Object.keys(activeRuns.value).length > 0) {
-    await start()
-    await loadStocks()
-  }
-}
-
-async function triggerAction(
-  stockCode: string,
-  runType: string,
-): Promise<StockRunAccepted> {
-  if (runType === 'stock_quality_check') return triggerStockQualityCheck(stockCode)
-  if (runType === 'stock_data_fill') return triggerStockFill(stockCode)
-  return triggerStockRebuild(stockCode)
-}
-
-async function runQuality(stockCode: string): Promise<void> {
-  if (isRunning(stockCode)) return
-  await startRun(stockCode, 'stock_quality_check')
-}
-
-async function runFill(stockCode: string): Promise<void> {
-  if (isRunning(stockCode)) return
-  await startRun(stockCode, 'stock_data_fill')
-}
-
-async function runRebuild(stockCode: string): Promise<void> {
-  if (isRunning(stockCode)) return
-  if (!window.confirm(`确认全量重拉 ${stockCode}？将删除该股票库内全部日线并重新拉取。`)) {
-    return
-  }
-  await startRun(stockCode, 'stock_data_rebuild')
-}
-
-async function startRun(stockCode: string, runType: string): Promise<void> {
-  try {
-    const accepted = await triggerAction(stockCode, runType)
-    activeRuns.value[stockCode] = accepted.run_id
-    runStocks.value[accepted.run_id] = stockCode
-    activeTypes.value[accepted.run_id] = accepted.run_type
-    showMessage(`已触发${stockCode}的${runType}任务（${accepted.run_id.slice(0, 8)}…）`, true)
-    await ensurePolling()
-  } catch {
-    showMessage('任务触发失败，请重试', false)
-  }
 }
 
 async function loadStocks(): Promise<void> {

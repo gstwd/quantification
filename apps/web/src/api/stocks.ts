@@ -27,13 +27,6 @@ export interface StockListQuery {
   status?: 'active' | 'delisted'
 }
 
-/** 后台单股任务触发结果 */
-export interface StockRunAccepted {
-  status: string
-  run_type: string
-  run_id: string
-}
-
 /**
  * 分页查询个股元数据与质量快照。
  *
@@ -58,24 +51,6 @@ export async function fetchStockSummaries(
   return data
 }
 
-/** 触发单只股票数据质量检查（重算并落库质量快照） */
-export async function triggerStockQualityCheck(stockCode: string): Promise<StockRunAccepted> {
-  const { data } = await apiClient.post<StockRunAccepted>(
-    `/runs/stocks/${stockCode}/quality`,
-  )
-  return data
-}
-
-/** 触发单只股票日线补全 */
-export async function triggerStockFill(stockCode: string): Promise<StockRunAccepted> {
-  const { data } = await apiClient.post<StockRunAccepted>(`/runs/stocks/${stockCode}/fill`)
-  return data
-}
-
-/** 触发单只股票全量重拉 */
-export async function triggerStockRebuild(stockCode: string): Promise<StockRunAccepted> {
-  const { data } = await apiClient.post<StockRunAccepted>(
-    `/runs/stocks/${stockCode}/rebuild`,
-  )
-  return data
-}
+// 说明：个股的质量检查/补全/重拉已统一走数据管理页
+// （POST /data-management/operations，dataset=stock_daily_close|stock_daily_basic|stock_moneyflow），
+// 原 `/runs/stocks/{code}/quality|fill|rebuild` 触发函数已删除。

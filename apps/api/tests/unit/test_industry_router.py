@@ -12,7 +12,6 @@ from quant_etf_api.api.routers.industry import (
     get_diffusion_series,
     get_rrg_series,
     industry_daily_bars,
-    industry_quality_detail,
 )
 
 
@@ -27,21 +26,6 @@ def test_bars_inverted_range_returns_422() -> None:
             db=db,
         )
     assert exc_info.value.status_code == 422
-
-
-def test_quality_unknown_industry_returns_404(monkeypatch) -> None:
-    """未知行业的质量详情端点返回 404。"""
-    fake_service = MagicMock()
-    fake_service.industry_quality_detail.side_effect = ValueError(
-        "行业 999999 不在 industry_universe 中"
-    )
-    monkeypatch.setattr(
-        "quant_etf_api.api.routers.industry.IndustryDataService",
-        lambda db: fake_service,
-    )
-    with pytest.raises(HTTPException) as exc_info:
-        industry_quality_detail("999999", db=MagicMock())
-    assert exc_info.value.status_code == 404
 
 
 def test_rrg_range_exceeds_cap_returns_422() -> None:

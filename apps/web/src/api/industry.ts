@@ -7,7 +7,7 @@ export interface IndustryIndexSummary {
   is_benchmark_excluded: boolean
 }
 
-/** 行业数据管理列表摘要（元数据 + 成分数 + 质量快照 + 最新行情） */
+/** 行业数据管理列表摘要（元数据 + 成分数 + 健康快照 + 最新行情） */
 export interface IndustrySummaryItem {
   industry_code: string
   name_cn: string
@@ -21,27 +21,6 @@ export interface IndustrySummaryItem {
   latest_trade_date: string | null
   latest_close: number | null
   latest_change_pct: number | null
-}
-
-/** 行业详情页数据质量 */
-export interface IndustryQualityDetail {
-  industry_code: string
-  data_start_date: string | null
-  data_end_date: string | null
-  bar_count: number | null
-  missing_day_count: number | null
-  quality_checked_at: string | null
-  total: number
-  min_date: string | null
-  max_date: string | null
-  missing_open: number
-  missing_high: number
-  missing_low: number
-  missing_close: number
-  incomplete_rows: number
-  incomplete_ratio: number
-  change_pct_null: number
-  change_pct_null_rate: number
 }
 
 /** RRG 单点数据 */
@@ -230,16 +209,6 @@ export async function fetchIndustryDailyBars(
         limit: params.limit ?? 250,
       },
     },
-  )
-  return data
-}
-
-/** 拉取单个申万一级行业的数据质量详情 */
-export async function fetchIndustryQuality(
-  industryCode: string,
-): Promise<IndustryQualityDetail> {
-  const { data } = await apiClient.get<IndustryQualityDetail>(
-    `/industry/indexes/${industryCode}/quality`,
   )
   return data
 }
