@@ -46,56 +46,46 @@
           </button>
         </div>
         <div v-if="qualityLoading" class="chart-placeholder">加载中...</div>
-        <div v-else-if="dataQuality" class="quality-body">
+        <div v-else-if="qualitySnapshots.length > 0" class="quality-body">
           <div class="quality-grid">
-            <div class="quality-block">
-              <div class="quality-block-title">日线行情</div>
+            <div v-for="item in qualitySnapshots" :key="item.dataset_key" class="quality-block">
+              <div class="quality-block-title">
+                {{ item.display_name }}
+                <span class="health-badge" :class="healthClass(item.health_status)">{{ healthLabel(item.health_status) }}</span>
+              </div>
               <div class="quality-row">
                 <span>记录数</span>
-                <span class="mono">{{ dataQuality.bars.total }}</span>
+                <span class="mono">{{ item.record_count }}</span>
               </div>
               <div class="quality-row">
                 <span>覆盖范围</span>
-                <span class="mono">{{ rangeText(dataQuality.bars.min_date, dataQuality.bars.max_date) }}</span>
+                <span class="mono">{{ rangeText(item.earliest_date, item.latest_date) }}</span>
               </div>
               <div class="quality-row">
-                <span>OHLC 不完整</span>
-                <span class="mono" :class="dataQuality.bars.incomplete_rows > 0 ? 'text-warn' : 'text-ok'">
-                  {{ dataQuality.bars.incomplete_rows }} 行（{{ (dataQuality.bars.incomplete_ratio * 100).toFixed(1) }}%）
+                <span>缺口 / 字段异常</span>
+                <span class="mono" :class="item.missing_count + item.invalid_count > 0 ? 'text-warn' : 'text-ok'">
+                  {{ item.missing_count }} / {{ item.invalid_count }}
                 </span>
               </div>
+              <div class="quality-row">
+                <span>最近检查</span>
+                <span class="mono">{{ item.last_checked_at ? formatCnTime(item.last_checked_at) : '尚未检查' }}</span>
+              </div>
               <div class="quality-sub">
-                开盘/最高/最低缺失 {{ dataQuality.bars.missing_open }}/{{ dataQuality.bars.missing_high }}/{{ dataQuality.bars.missing_low }}，收盘缺失 {{ dataQuality.bars.missing_close }}
+                目标日期 {{ item.expected_date ?? '—' }}{{ item.source_name ? ` · 来源 ${item.source_name}` : '' }}
               </div>
-            </div>
-            <div class="quality-block">
-              <div class="quality-block-title">估值数据</div>
-              <div class="quality-row">
-                <span>记录数</span>
-                <span class="mono">{{ dataQuality.valuations.total }}</span>
-              </div>
-              <div class="quality-row">
-                <span>覆盖范围</span>
-                <span class="mono">{{ rangeText(dataQuality.valuations.min_date, dataQuality.valuations.max_date) }}</span>
-              </div>
-              <div class="quality-row">
-                <span>PE 缺失</span>
-                <span class="mono" :class="dataQuality.valuations.missing_pe > 0 ? 'text-warn' : 'text-ok'">{{ dataQuality.valuations.missing_pe }}</span>
-              </div>
-              <div class="quality-row">
-                <span>PB 缺失</span>
-                <span class="mono" :class="dataQuality.valuations.missing_pb > 0 ? 'text-warn' : 'text-ok'">{{ dataQuality.valuations.missing_pb }}</span>
-              </div>
-              <div class="quality-sub">股息率缺失 {{ dataQuality.valuations.missing_dividend_yield }}</div>
             </div>
           </div>
+          <div class="quality-note">
+            口径与「数据管理」页同源（data_health_snapshot 健康快照）；补齐缺口或修复字段异常请在数据管理页发起。
+          </div>
         </div>
+        <div v-else class="chart-placeholder">暂无健康快照，请在数据管理页执行「检查全部质量」</div>
         <div class="quality-actions">
           <RouterLink
             :to="{ path: '/data-management', query: { dataset: 'index_daily_bar', partition: props.indexCode } }"
             class="btn-secondary"
           >数据维护</RouterLink>
-          <span v-if="taskMessage || taskStatus" class="task-status" :class="taskStatusClass">{{ taskStatusText }}</span>
         </div>
       </div>
 
@@ -168,21 +158,16 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import {
   fetchIndexDailyBars,
-  fetchIndexDataQuality,
   fetchIndexDateRange,
   fetchIndexSummaries,
   fetchIndexValuation,
   fetchPreviousTradingDay,
 } from '../api/market_data'
-import {
-  fetchRunDetail,
-  triggerIndexIncrementalFill,
-  triggerIndexRebuild,
-} from '../api/runs'
-import type { DailyBar, DateRange, IndexDataQuality, IndexSummary, IndexValuation, ResearchRunDetail } from '../types/api'
+import { fetchDataSetDetail } from '../api/dataManagement'
+import type { DailyBar, DataPartitionHealth, DateRange, IndexSummary, IndexValuation } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
-import { usePolling } from '../composables/usePolling'
 import { getIndicator } from '../utils/indicatorDescriptions'
+import { formatCnTime } from '../utils/date'
 
 /** 获取指标描述的快捷方法 */
 function mktHelp(key: string): string {
@@ -217,63 +202,29 @@ const snapshot = ref<IndexSummary | null>(null)
 /** 前一交易日（来自交易日历，用于数据新鲜度判断） */
 const prevTradingDay = ref<string | null>(null)
 
-/** 数据质量统计 */
-const dataQuality = ref<IndexDataQuality | null>(null)
+/** 数据健康快照（与数据管理页同源：后端 data_health_snapshot） */
+const qualitySnapshots = ref<DataPartitionHealth[]>([])
 const qualityLoading = ref(false)
 
-/** 数据维护任务（全量覆盖/增量补充）状态 */
-const taskRunId = ref('')
-const taskStatus = ref('')
-const taskMessage = ref('')
-
-/** 后台任务轮询：任务达到终态（success/skipped/failed）后自动停止 */
-const { start: startTaskPolling, polling: taskPolling } = usePolling<ResearchRunDetail>({
-  fetcher: () => fetchRunDetail(taskRunId.value),
-  isDone: (d) => d.status === 'success' || d.status === 'skipped' || d.status === 'failed',
-  intervalMs: 2000,
-  onData: (d) => {
-    taskStatus.value = d.status
-    if (d.status === 'pending') {
-      taskMessage.value = '任务排队中…'
-    } else if (d.status === 'running') {
-      taskMessage.value = '任务执行中…'
-    } else if (d.status === 'success') {
-      taskMessage.value = `任务完成：日线写入 ${d.metrics?.bar_records ?? '?'} 条，估值写入 ${d.metrics?.valuation_records ?? '?'} 条`
-    } else if (d.status === 'skipped') {
-      taskMessage.value = d.metrics?.reason === 'holiday' ? '非交易日，任务跳过' : '任务被跳过（已有其他摄取任务在执行）'
-    } else if (d.status === 'failed') {
-      taskMessage.value = d.error_message ?? '任务失败'
-    }
-  },
-})
-
-/** 是否有数据维护任务正在执行（pending/running） */
-const taskActive = computed(
-  () => ['pending', 'running'].includes(taskStatus.value) || taskPolling.value,
-)
-
-/** 任务状态文案（优先展示失败/跳过等终态说明） */
-const taskStatusText = computed(() => {
-  if (!taskMessage.value && taskStatus.value) {
-    const labels: Record<string, string> = {
-      pending: '任务排队中…',
-      running: '任务执行中…',
-      success: '任务完成',
-      skipped: '任务被跳过',
-      failed: '任务失败',
-    }
-    return labels[taskStatus.value] ?? taskStatus.value
+/** 健康状态中文标签（与后端 health_status 取值对齐） */
+function healthLabel(status: string): string {
+  const labels: Record<string, string> = {
+    healthy: '正常',
+    warning: '需关注',
+    error: '异常',
+    unknown: '尚未检查',
+    unsupported: '上游不支持',
   }
-  return taskMessage.value
-})
+  return labels[status] ?? status
+}
 
-/** 任务状态样式类 */
-const taskStatusClass = computed(() => {
-  if (taskStatus.value === 'success') return 'text-ok'
-  if (taskStatus.value === 'skipped') return 'text-warn'
-  if (taskStatus.value === 'failed') return 'text-err'
-  return ''
-})
+/** 健康状态样式类 */
+function healthClass(status: string): string {
+  if (status === 'healthy') return 'health-ok'
+  if (status === 'warning') return 'health-warn'
+  if (status === 'error') return 'health-error'
+  return 'health-unknown'
+}
 
 /** 最新收盘（来自独立快照，不随图表区间变化） */
 const latestBar = computed(() =>
@@ -510,56 +461,19 @@ async function loadSnapshot() {
   }
 }
 
-/** 加载数据质量统计 */
+/** 加载指数日线与估值的数据健康快照（数据管理页同一口径，不自行重算质量） */
 async function loadDataQuality() {
   qualityLoading.value = true
   try {
-    dataQuality.value = await fetchIndexDataQuality(props.indexCode)
+    const [bars, valuations] = await Promise.all([
+      fetchDataSetDetail('index_daily_bar', 0, 1, { partitionKey: props.indexCode }),
+      fetchDataSetDetail('index_valuation', 0, 1, { partitionKey: props.indexCode }),
+    ])
+    qualitySnapshots.value = [...bars.items, ...valuations.items]
   } catch {
-    dataQuality.value = null
+    qualitySnapshots.value = []
   } finally {
     qualityLoading.value = false
-  }
-}
-
-/** 任务完成后刷新数据质量、页头快照与图表数据 */
-async function refreshAfterTask() {
-  await Promise.all([
-    loadDataQuality(),
-    loadSnapshot(),
-    loadBars(),
-    loadValuation(currentValuationRange.value),
-  ])
-}
-
-/** 触发单指数增量补数据并轮询任务状态 */
-async function triggerIncrementalFill() {
-  try {
-    const { run_id } = await triggerIndexIncrementalFill(props.indexCode)
-    taskRunId.value = run_id
-    taskStatus.value = 'pending'
-    taskMessage.value = '任务已提交，排队中…'
-    await startTaskPolling()
-    await refreshAfterTask()
-  } catch {
-    taskStatus.value = 'failed'
-    taskMessage.value = '触发失败，请重试'
-  }
-}
-
-/** 触发单指数全量覆盖重拉（需确认）并轮询任务状态 */
-async function triggerRebuild() {
-  if (!window.confirm('全量覆盖将删除该指数数据库中的历史日线和估值数据，并从数据源重新拉取全部历史。确定继续？')) return
-  try {
-    const { run_id } = await triggerIndexRebuild(props.indexCode)
-    taskRunId.value = run_id
-    taskStatus.value = 'pending'
-    taskMessage.value = '任务已提交，排队中…'
-    await startTaskPolling()
-    await refreshAfterTask()
-  } catch {
-    taskStatus.value = 'failed'
-    taskMessage.value = '触发失败，请重试'
   }
 }
 
@@ -857,10 +771,25 @@ onUnmounted(() => {
   border-radius: var(--radius-sm);
 }
 .quality-block-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 12px;
   font-weight: 600;
   color: var(--accent);
 }
+.health-badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 8px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+.health-ok { background: rgba(74, 222, 128, 0.12); color: #4ade80; }
+.health-warn { background: rgba(251, 191, 36, 0.12); color: #fbbf24; }
+.health-error { background: rgba(248, 113, 113, 0.12); color: #f87171; }
+.health-unknown { background: rgba(148, 163, 184, 0.12); color: var(--text-muted); }
 .quality-row {
   display: flex;
   align-items: baseline;
@@ -870,6 +799,12 @@ onUnmounted(() => {
 }
 .quality-row span:first-child { color: var(--text-muted); }
 .quality-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+.quality-note {
+  margin-top: 14px;
   font-size: 12px;
   color: var(--text-muted);
   line-height: 1.6;
@@ -900,20 +835,4 @@ onUnmounted(() => {
 }
 .btn-secondary:hover:not(:disabled) { background: var(--surface-2); border-color: var(--accent); }
 .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.btn-danger {
-  background: rgba(239, 68, 68, 0.12);
-  color: #f87171;
-  border: 1px solid rgba(239, 68, 68, 0.4);
-  border-radius: var(--radius-sm);
-  padding: 7px 14px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.btn-danger:hover:not(:disabled) { background: rgba(239, 68, 68, 0.22); }
-.btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.task-status { font-size: 12px; color: var(--text-muted); }
 </style>

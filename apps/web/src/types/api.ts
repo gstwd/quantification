@@ -106,35 +106,6 @@ export interface SystemStatusResponse {
   db_connected: boolean
 }
 
-/** 单个指数的数据新鲜度 */
-export interface DataFreshnessItem {
-  code: string
-  name: string
-  latest_date: string | null
-  is_stale: boolean
-}
-
-/** 单个数据表的新鲜度汇总 */
-export interface DataFreshnessGroup {
-  total: number
-  up_to_date: number
-  stale: DataFreshnessItem[]
-  missing: DataFreshnessItem[]
-  latest_date: string | null
-  /** 大数据量表（如个股）的完整过期/缺失计数，数组仅含样本 */
-  stale_total?: number | null
-  missing_total?: number | null
-}
-
-/** 数据质量总览响应 */
-export interface DataQualityResponse {
-  index_bars: DataFreshnessGroup
-  index_valuation: DataFreshnessGroup
-  stock_bars?: DataFreshnessGroup | null
-  industry_bars?: DataFreshnessGroup | null
-  checked_at: string
-}
-
 // =============================================================================
 // 统一数据管理
 // =============================================================================
@@ -740,36 +711,6 @@ export interface IndexCreatePayload {
 export interface DateRange {
   min_date: string | null
   max_date: string | null
-}
-
-/** 单指数日线数据质量统计 */
-export interface BarQuality {
-  total: number
-  min_date: string | null
-  max_date: string | null
-  missing_open: number
-  missing_high: number
-  missing_low: number
-  missing_close: number
-  incomplete_rows: number
-  incomplete_ratio: number
-}
-
-/** 单指数估值数据质量统计 */
-export interface ValuationQuality {
-  total: number
-  min_date: string | null
-  max_date: string | null
-  missing_pe: number
-  missing_pb: number
-  missing_dividend_yield: number
-}
-
-/** 指数详情页数据质量总览 */
-export interface IndexDataQuality {
-  index_code: string
-  bars: BarQuality
-  valuations: ValuationQuality
 }
 
 export interface FactorSpec {

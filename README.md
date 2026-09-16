@@ -111,13 +111,14 @@ services/           ← 业务逻辑层：编排数据摄取、策略执行、�
 | 路由文件 | 路径前缀 | 主要端点 |
 |---------|---------|---------|
 | `health.py` | `/api/health` | 健康检查 |
-| `system.py` | `/api/system` | 系统状态与数据质量 |
+| `system.py` | `/api/system` | 系统状态快照（数据概览、各表新鲜度、最近运行） |
 | `indexes.py` | `/api/indexes` | 基准指数 CRUD |
 | `market_data.py` | `/api/market-data` | 指数日线、估值、宏观指标 |
 | `strategies.py` | `/api/strategies` | 策略 CRUD、校验、配置模式决策 |
 | `factors.py` | `/api/factors` | 因子定义、IC/IR、相关性矩阵 |
-| `runs.py` | `/api/runs` | 运行记录与数据刷新触发 |
+| `runs.py` | `/api/runs` | 运行记录与查询 |
 | `backtests.py` | `/api/backtests` | 回测与策略对比 |
+| `data_management.py` | `/api/data-management` | 数据集健康快照与同步/检查/修复/重拉 |
 | `ai_factors.py` | `/api/ai-factors` | AI 舆情分析 |
 | `keyword_tags.py` | `/api/keyword-tags` | 关键词标签映射 |
 
@@ -129,7 +130,7 @@ services/           ← 业务逻辑层：编排数据摄取、策略执行、�
 
 | 路径 | 页面组件 | 说明 |
 |------|---------|------|
-| `/` | `DashboardPage.vue` | 总览：指数数量、数据质量、最近运行 |
+| `/` | `DashboardPage.vue` | 总览：指数数量、关注策略、AI 舆情、最近运行 |
 | `/indexes` | `IndexListPage.vue` | 指数列表（行情 + 估值快照） |
 | `/indexes/:indexCode` | `IndexDetailPage.vue` | 单只指数详情 |
 | `/strategies` | `StrategiesPage.vue` | 策略列表 |

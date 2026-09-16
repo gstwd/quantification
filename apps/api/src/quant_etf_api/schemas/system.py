@@ -7,38 +7,6 @@ from quant_etf_api.schemas.run import ResearchRunSummary
 from quant_etf_api.schemas.types import UtcDatetime
 
 
-class DataFreshnessItem(BaseModel):
-    """单个指数的数据新鲜度。"""
-
-    code: str
-    name: str
-    latest_date: date | None = None
-    is_stale: bool = False
-
-
-class DataFreshnessGroup(BaseModel):
-    """数据表维度的新鲜度汇总。"""
-
-    total: int
-    up_to_date: int
-    stale: list[DataFreshnessItem] = []
-    missing: list[DataFreshnessItem] = []
-    latest_date: date | None = None
-    # 大数据量表（如个股）stale/missing 只返回样本，完整计数放 *_total
-    stale_total: int | None = None
-    missing_total: int | None = None
-
-
-class DataQualityResponse(BaseModel):
-    """数据质量总览。"""
-
-    index_bars: DataFreshnessGroup
-    index_valuation: DataFreshnessGroup
-    stock_bars: DataFreshnessGroup | None = None
-    industry_bars: DataFreshnessGroup | None = None
-    checked_at: UtcDatetime
-
-
 class DataSourceSnapshot(BaseModel):
     """单个数据表/数据源的快照信息。
 

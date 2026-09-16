@@ -17,34 +17,6 @@ from quant_etf_api.infra.time import today_cn
 logger = logging.getLogger(__name__)
 
 
-def handle_daily_ingest(payload: dict) -> None:
-    """执行日频数据摄取，落库完成后按实际行情日期入队因子计算。"""
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.infra.job_queue.queue import get_job_queue
-    from quant_etf_api.services.ingest_service import IngestService
-    from quant_etf_api.services.run_service import RunService
-
-    run_id = payload.get("run_id") or ""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        # 返回值仅在本次有新数据落库时非空：按实际补齐的交易日入队因子
-        # 计算，避免按日历"今天"产生无行情日期的因子，也避免空跑重复计算
-        data_date = IngestService(db).run_daily_ingest(run_id)
-        if data_date is not None:
-            get_job_queue().enqueue(
-                "factor_computation",
-                {"trade_date": data_date.isoformat()},
-                job_key=f"factor_computation:{data_date.isoformat()}",
-            )
-    except Exception as e:
-        logger.exception("数据摄取任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"数据摄取异常: {type(e).__name__}: {e}")
-        raise
-    finally:
-        db.close()
-
-
 def handle_strategy_run(payload: dict) -> None:
     """执行策略信号计算任务。"""
     from quant_etf_api.infra.db.base import SessionLocal
@@ -68,103 +40,6 @@ def handle_strategy_run(payload: dict) -> None:
     except Exception as e:
         logger.exception("策略执行任务异常: run_id=%s strategy_id=%s", run_id, strategy_id)
         RunService(db).mark_failed(run_id, f"策略执行异常: {type(e).__name__}: {e}")
-        raise
-    finally:
-        db.close()
-
-
-def handle_cold_start(payload: dict) -> None:
-    """执行冷启动：拉取全部指数从成立至今的全量历史日线。"""
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.services.ingest_service import IngestService
-    from quant_etf_api.services.run_service import RunService
-
-    run_id = payload.get("run_id") or ""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        IngestService(db).run_cold_start(run_id)
-    except Exception as e:
-        logger.exception("冷启动任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"冷启动异常: {type(e).__name__}: {e}")
-        raise
-    finally:
-        db.close()
-
-
-def handle_index_refresh(payload: dict) -> None:
-    """刷新指数日线和估值数据。"""
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.services.ingest_service import IngestService
-    from quant_etf_api.services.run_service import RunService
-
-    run_id = payload.get("run_id") or ""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        IngestService(db).refresh_index_data(run_id)
-    except Exception as e:
-        logger.exception("指数数据刷新任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"指数数据刷新异常: {type(e).__name__}: {e}")
-        raise
-    finally:
-        db.close()
-
-
-def handle_macro_refresh(payload: dict) -> None:
-    """刷新宏观指标数据。"""
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.services.ingest_service import IngestService
-    from quant_etf_api.services.run_service import RunService
-
-    run_id = payload.get("run_id") or ""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        IngestService(db).refresh_macro_data(run_id)
-    except Exception as e:
-        logger.exception("宏观数据刷新任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"宏观数据刷新异常: {type(e).__name__}: {e}")
-        raise
-    finally:
-        db.close()
-
-
-def handle_index_rebuild(payload: dict) -> None:
-    """单指数全量覆盖重拉（删除旧历史数据后重新拉取全量）。"""
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.services.ingest_service import IngestService
-    from quant_etf_api.services.run_service import RunService
-
-    run_id = payload.get("run_id") or ""
-    index_code = payload.get("index_code") or ""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        IngestService(db).rebuild_index_data(run_id, index_code)
-    except Exception as e:
-        logger.exception("指数全量覆盖重拉任务异常: run_id=%s index_code=%s", run_id, index_code)
-        RunService(db).mark_failed(run_id, f"指数全量覆盖重拉异常: {type(e).__name__}: {e}")
-        raise
-    finally:
-        db.close()
-
-
-def handle_index_incremental_fill(payload: dict) -> None:
-    """单指数增量补数据（从数据库最新交易日补充到当天）。"""
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.services.ingest_service import IngestService
-    from quant_etf_api.services.run_service import RunService
-
-    run_id = payload.get("run_id") or ""
-    index_code = payload.get("index_code") or ""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        IngestService(db).incremental_fill_index_data(run_id, index_code)
-    except Exception as e:
-        logger.exception("指数增量补数据任务异常: run_id=%s index_code=%s", run_id, index_code)
-        RunService(db).mark_failed(run_id, f"指数增量补数据异常: {type(e).__name__}: {e}")
         raise
     finally:
         db.close()
@@ -640,13 +515,7 @@ def handle_industry_data_rebuild(payload: dict) -> None:
 
 
 JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
-    "daily_ingest": handle_daily_ingest,
     "strategy_run": handle_strategy_run,
-    "cold_start": handle_cold_start,
-    "index_refresh": handle_index_refresh,
-    "macro_refresh": handle_macro_refresh,
-    "index_rebuild": handle_index_rebuild,
-    "index_incremental_fill": handle_index_incremental_fill,
     "ai_analysis": handle_ai_analysis,
     "backtest": handle_backtest,
     "comparison": handle_comparison,

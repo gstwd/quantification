@@ -94,3 +94,35 @@ def test_industry_daily_ingest_chain_removed() -> None:
         "industry_data_fill",
         "industry_data_rebuild",
     } <= set(JOB_HANDLERS)
+
+
+def test_legacy_index_macro_ingest_entries_removed() -> None:
+    """指数/宏观的旧摄取入口已下线：同步与全量重拉统一走数据管理操作。
+
+    IngestService 只保留抓取、落库与读穿透；运行状态流转、进程内互斥锁与
+    批量编排全部收敛到 DataManagementService，避免两套入口并发写同一批表。
+    """
+    from quant_etf_api.infra.job_queue.handlers import JOB_HANDLERS
+    from quant_etf_api.services.ingest_service import IngestService
+
+    legacy_job_types = {
+        "daily_ingest",
+        "cold_start",
+        "index_refresh",
+        "macro_refresh",
+        "index_rebuild",
+        "index_incremental_fill",
+    }
+    assert legacy_job_types.isdisjoint(JOB_HANDLERS)
+    for method_name in (
+        "run_daily_ingest",
+        "run_cold_start",
+        "refresh_index_data",
+        "refresh_macro_data",
+        "rebuild_index_data",
+        "incremental_fill_index_data",
+    ):
+        assert not hasattr(IngestService, method_name)
+    # GET 未命中触发的后台补数链路仍保留（与批量编排无关）
+    assert "data_fill" in JOB_HANDLERS
+    assert hasattr(IngestService, "fill_resource")

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from quant_etf_api.infra.clients.index_daily_common import IndexDailyBar
 from quant_etf_api.schemas.data_management import DataSetHealthSummary
 from quant_etf_api.services.data_management_service import (
     DATASETS,
@@ -296,6 +297,37 @@ def test_rebuild_replacement_span_guard() -> None:
             existing_max,
             fetched - {existing_min},
         )
+
+
+def test_safe_replace_index_bars_uses_multi_source() -> None:
+    """指数日线全量重拉必须走多源降级链，并把实际数据源写入库。
+
+    回归点：重拉曾由 IngestService.rebuild_index_data 承载，现收敛到
+    数据管理操作的 rebuild；不得退化为绕过降级链直连单一上游。
+    """
+    db = MagicMock()
+    # 库内暂无该指数数据 -> 覆盖范围校验直接放行
+    db.query.return_value.filter.return_value.one.return_value = (0, None, None)
+    svc = DataManagementService(db)
+    bars = [
+        IndexDailyBar(
+            trade_date=date(2026, 1, 5) + timedelta(days=i),
+            open_price=100.0 + i,
+            close_price=100.0 + i,
+            high_price=101.0 + i,
+            low_price=99.0 + i,
+            volume=1000.0,
+            turnover=1000000.0,
+        )
+        for i in range(3)
+    ]
+    ingest = MagicMock()
+    ingest._fetch_index_daily_multi_source.return_value = (bars, "tickflow")
+
+    assert svc._safe_replace_index_bars(ingest, "000300") == 3
+
+    ingest._fetch_index_daily_multi_source.assert_called_once_with("000300")
+    ingest._insert_index_bars.assert_called_once_with("000300", bars, source="tickflow")
 
 
 def test_overview_reports_zero_snapshot_count_before_first_check() -> None:

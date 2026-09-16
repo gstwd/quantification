@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import math
-import threading
 from datetime import date
 from typing import Any
 
@@ -27,37 +26,25 @@ from quant_etf_api.infra.clients.tushare_market import (
     TushareMacroClient,
 )
 from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
-from quant_etf_api.infra.trading_calendar import TradingCalendar, resolve_trading_calendar
+from quant_etf_api.infra.trading_calendar import resolve_trading_calendar
 from quant_etf_api.infra.db.base import utcnow
-from quant_etf_api.infra.time import today_cn
 from quant_etf_api.infra.db.models.core import (
     BenchmarkIndexModel,
     IndexDailyBarModel,
     IndexValuationModel,
     MacroIndicatorModel,
 )
-from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
 from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
-from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.schemas.market_data import (
-    BarQuality,
-    BenchmarkIndex,
     DailyBar,
-    IndexDataQuality,
     IndexSummary,
     IndexValuation,
     MacroIndicatorSchema,
-    ValuationQuality,
 )
-from quant_etf_api.services.run_service import RunService
-from quant_etf_api.services.data_freshness_service import DataFreshnessService
 
 logger = logging.getLogger(__name__)
-
-# 防止 run_daily_ingest 被调度器、手动按钮、重试同时触发
-_daily_ingest_lock = threading.Lock()
 
 
 def _clean_price(value: Any) -> float | None:
@@ -126,35 +113,24 @@ def _macro_row_to_schema(row: MacroIndicatorModel) -> MacroIndicatorSchema:
 
 
 class IngestService:
-    """数据摄取服务。
+    """指数/宏观数据抓取与读取服务。
 
-    提供指数日线 / 指数估值 / 宏观指标的数据拉取、
-    幂等写入和读穿透缓存，供 API 路由和定时调度器使用。
-    读取统一走仓库；运行记录生命周期委托 RunService；
-    摄取完成后自动执行数据质量检测（data_quality 接入数据闭环）。
+    只做三件事：多数据源抓取与字段归一化、幂等写入、读穿透缓存；读取统一走仓库。
+    批量同步、缺口修复、全量重拉、质量检查与运行记录生命周期统一由
+    ``DataManagementService`` 编排，本服务只作为其抓取后端，
+    因此不再持有运行状态流转逻辑与进程内互斥锁。
     """
 
-    def __init__(
-        self,
-        db: Session,
-        run_svc: RunService | None = None,
-        run_repo: ResearchRunRepository | None = None,
-    ) -> None:
+    def __init__(self, db: Session) -> None:
         """初始化数据摄取服务。
 
         Args:
             db: SQLAlchemy 同步 Session。
-            run_svc: 运行记录服务（生命周期状态流转），未提供时自动创建。
-            run_repo: 运行记录仓库（子项明细写入），未提供时自动创建。
         """
         self._db = db
-        self._run_repo = run_repo or ResearchRunRepository(db)
-        self._run_svc = run_svc or RunService(db, run_repo=self._run_repo)
         self._index_bar_repo = IndexDailyBarRepository(db)
         self._valuation_repo = IndexValuationRepository(db)
         self._macro_repo = MacroIndicatorRepository(db)
-        self._index_repo = BenchmarkIndexRepository(db)
-        self._freshness_svc = DataFreshnessService(db)
         self._last_fallbacks: list[dict[str, str]] = []
 
     def _enqueue_data_fill(self, resource: str, code: str | None = None) -> None:
@@ -196,16 +172,8 @@ class IngestService:
             return self._fetch_and_upsert_macro()
         raise ValueError(f"未知补数资源类型: {resource}")
 
-    def latest_trade_date(self) -> date:
-        """获取最近交易日，通过交易日历而非简单返回今天。
-
-        Returns:
-            最近交易日日期。
-        """
-        return TradingCalendar().latest_trading_day()
-
     # ==================================================================
-    # 指数日线（AkShare）
+    # 指数日线（多数据源）
     # ==================================================================
 
     def _insert_index_bars(
@@ -512,11 +480,6 @@ class IngestService:
         dropped = [b for b in bars if not calendar.is_trading_day(b.trade_date)]
         return kept, dropped
 
-    def get_benchmark_indexes(self) -> list[BenchmarkIndex]:
-        """返回所有活跃的基准指数（从种子表读取，已停用的不返回）。"""
-        rows = self._index_repo.find_active()
-        return [BenchmarkIndex(index_code=r.index_code, index_name=r.name_cn) for r in rows]
-
     def get_index_summaries(self) -> list["IndexSummary"]:
         """返回所有活跃指数的汇总数据（最新行情 + 估值快照），单次查询。
 
@@ -801,77 +764,6 @@ class IngestService:
         """查询指数日线数据的最早和最晚日期（读取走仓库）。"""
         return self._index_bar_repo.get_date_range(index_code)
 
-    def get_index_data_quality(self, index_code: str) -> IndexDataQuality:
-        """统计单指数的数据质量：日线覆盖范围、OHLC 缺失情况、估值覆盖与缺失。
-
-        完全无数据时入队后台补数任务并返回零值统计（与 GET 读穿透语义一致）。
-        OHLC 字段的"缺失"口径与 data_quality 模块一致：
-        值为 None、NaN 或非正数均视为缺失/异常。
-
-        Args:
-            index_code: 指数代码。
-
-        Returns:
-            指数数据质量统计。
-        """
-        bars = self._index_bar_repo.find_all_by_code(index_code)
-        valuations = self._valuation_repo.find_all_by_code(index_code)
-
-        if not bars:
-            self._enqueue_data_fill("index_bars", index_code)
-        if not valuations:
-            self._enqueue_data_fill("index_valuation", index_code)
-
-        def _invalid(value: Any) -> bool:
-            """判断价格字段是否缺失/异常（None、NaN 或非正值）。"""
-            if value is None:
-                return True
-            try:
-                if math.isnan(value):
-                    return True
-            except TypeError:
-                pass
-            return value <= 0
-
-        bar_dates = [b.trade_date for b in bars]
-        missing_open = sum(1 for b in bars if _invalid(b.open_price))
-        missing_high = sum(1 for b in bars if _invalid(b.high_price))
-        missing_low = sum(1 for b in bars if _invalid(b.low_price))
-        missing_close = sum(1 for b in bars if _invalid(b.close_price))
-        incomplete_rows = sum(
-            1
-            for b in bars
-            if _invalid(b.open_price) or _invalid(b.high_price) or _invalid(b.low_price)
-        )
-        total_bars = len(bars)
-        bar_quality = BarQuality(
-            total=total_bars,
-            min_date=min(bar_dates) if bar_dates else None,
-            max_date=max(bar_dates) if bar_dates else None,
-            missing_open=missing_open,
-            missing_high=missing_high,
-            missing_low=missing_low,
-            missing_close=missing_close,
-            incomplete_rows=incomplete_rows,
-            incomplete_ratio=round(incomplete_rows / total_bars, 4) if total_bars else 0.0,
-        )
-
-        val_dates = [v.trade_date for v in valuations]
-        valuation_quality = ValuationQuality(
-            total=len(valuations),
-            min_date=min(val_dates) if val_dates else None,
-            max_date=max(val_dates) if val_dates else None,
-            missing_pe=sum(1 for v in valuations if v.pe is None),
-            missing_pb=sum(1 for v in valuations if v.pb is None),
-            missing_dividend_yield=sum(1 for v in valuations if v.dividend_yield is None),
-        )
-
-        return IndexDataQuality(
-            index_code=index_code,
-            bars=bar_quality,
-            valuations=valuation_quality,
-        )
-
     # ==================================================================
     # 宏观指标（Tushare 优先，AkShare 兜底）
     # ==================================================================
@@ -988,498 +880,4 @@ class IngestService:
             self._db.rollback()
 
         return []
-
-    # ==================================================================
-    # 数据质量检查
-    # ==================================================================
-
-    def check_data_freshness(self) -> dict[str, Any]:
-        """返回各类行情数据的新鲜度和覆盖率汇总。"""
-        return self._freshness_svc.check_data_freshness()
-
-    # ==================================================================
-    # 共享私有方法
-    # ==================================================================
-
-    # ==================================================================
-    # 全量日频摄取（后台线程入口）
-    # ==================================================================
-
-    def _has_bar_gap(self, index_code: str, target_date: date) -> bool:
-        """判断指数日线相对目标交易日是否存在需要补拉的缺口。
-
-        最新日线日期为 None（尚无数据）或早于目标交易日时视为存在缺口，
-        触发增量补拉；周末/节假日触发时目标为最近交易日，可自动补齐
-        缺失的上一交易日数据。
-
-        Args:
-            index_code: 指数代码。
-            target_date: 目标交易日（最近交易日）。
-
-        Returns:
-            True 表示需要补拉该指数日线。
-        """
-        latest = self._index_bar_repo.get_latest_date(index_code)
-        return latest is None or latest < target_date
-
-    def _has_valuation_gap(self, index_code: str, target_date: date) -> bool:
-        """判断指数估值相对目标交易日是否存在需要补拉的缺口。
-
-        口径与 _has_bar_gap 一致：估值来源更新晚于日线时也会单独补拉，
-        避免日线已就绪而 PE/PB 仍停留在更早交易日。
-
-        Args:
-            index_code: 指数代码。
-            target_date: 目标交易日（最近交易日）。
-
-        Returns:
-            True 表示需要补拉该指数估值。
-        """
-        latest = self._valuation_repo.get_latest_date(index_code)
-        return latest is None or latest < target_date
-
-    def _try_acquire_ingest_lock(self, run_id: str) -> bool:
-        """尝试获取摄取互斥锁，失败时将运行记录标记为 skipped。
-
-        daily_ingest 与两个手动刷新入口（指数/宏观）共享同一把进程内互斥锁，
-        保证同一时刻只有一条摄取流水线在写数据。
-
-        Args:
-            run_id: 运行记录 ID。
-
-        Returns:
-            True 表示成功获取锁，可继续执行；False 表示已有摄取任务在运行。
-        """
-        if _daily_ingest_lock.acquire(blocking=False):
-            return True
-        self._run_svc.mark_skipped(
-            run_id,
-            metrics={
-                "reason": "concurrent_skip",
-                "message": "另一个摄取任务正在运行，跳过本次执行",
-            },
-        )
-        return False
-
-    def _run_quality_checks(self, trade_date: date) -> dict[str, Any]:
-        """对当日摄取结果执行数据质量检测并返回统计（接入数据闭环）。
-
-        检测项：日线异常（涨跌幅/零量/收盘价）、估值异常（负值/百分位越界）、
-        连续性缺口。异常仅记录日志并计入运行指标，不中断摄取流程。
-
-        Args:
-            trade_date: 需要检测的交易日。
-
-        Returns:
-            quality 统计字典：{scope: 异常数量}。
-        """
-        from quant_etf_api.domain.market_data.quality import (
-            check_continuity,
-            check_daily_bar_anomalies,
-            check_valuation_anomalies,
-        )
-
-        stats: dict[str, Any] = {}
-        try:
-            index_bars = self._index_bar_repo.find_by_date_range(trade_date, trade_date)
-            bar_anomalies = check_daily_bar_anomalies(index_bars)
-            bar_gaps = check_continuity(index_bars)
-            stats["index_bar_anomalies"] = len(bar_anomalies)
-            stats["index_bar_gaps"] = len(bar_gaps)
-            if bar_anomalies:
-                logger.warning("日线异常检测发现 %d 个问题", len(bar_anomalies))
-            if bar_gaps:
-                logger.warning("连续性检测发现 %d 个缺口", len(bar_gaps))
-        except Exception:
-            logger.warning("指数日线质量检测失败", exc_info=True)
-            stats["index_bar_anomalies"] = 0
-            stats["index_bar_gaps"] = 0
-
-        try:
-            valuation_rows = self._valuation_repo.find_by_date_range(trade_date, trade_date)
-            valuation_anomalies = check_valuation_anomalies(valuation_rows)
-            stats["valuation_anomalies"] = len(valuation_anomalies)
-            if valuation_anomalies:
-                logger.warning("估值异常检测发现 %d 个问题", len(valuation_anomalies))
-        except Exception:
-            logger.warning("估值质量检测失败", exc_info=True)
-            stats["valuation_anomalies"] = 0
-
-        logger.info("数据质量检测完成: trade_date=%s stats=%s", trade_date, stats)
-        return stats
-
-    def run_daily_ingest(self, run_id: str) -> date | None:
-        """执行日频数据全量摄取任务（后台线程入口）。
-
-        无论当天是否为交易日都会执行：以最近一个交易日为目标日期，逐个指数
-        检查日线/估值是否落后于目标并增量补拉（周末/节假日触发时自动把数据
-        补到最近交易日）；已覆盖到最近交易日时不会发起外部拉取。
-
-        依次拉取：
-        1. 所有基准指数的日线和估值（仅补有缺口的指数）
-        2. 宏观指标（CPI/PMI/LPR）
-
-        完成后更新 research_run 状态：
-        - success：本次执行完成（无缺口时写入 0 条）
-        - skipped：与其它摄取任务并发冲突（metrics.reason=concurrent_skip）
-        - failed：整体异常
-
-        Args:
-            run_id: 运行记录 ID。
-
-        Returns:
-            实际有新数据落库时返回执行后全库最新日线日期（供处理器触发
-            对应日期的因子计算）；未产生新数据、并发冲突或失败时返回 None。
-        """
-        # 非阻塞并发控制：如果已有 ingest 正在运行，跳过本次执行
-        if not self._try_acquire_ingest_lock(run_id):
-            return None
-        try:
-            start_time = utcnow()
-            self._run_svc.mark_running(run_id)
-
-            # 以最近交易日为补拉目标：非交易日（周末/节假日）也能把缺失的
-            # 上一交易日数据补上，而不是按"今天是否交易日"一刀切跳过
-            target_date = TradingCalendar().latest_trading_day(today_cn())
-
-            # ------------------------------ 1. 指数日线 + 估值 ------------------------------
-            indexes = self._index_repo.find_all()
-            index_bar_count = 0
-            index_valuation_count = 0
-
-            for idx in indexes:
-                if self._has_bar_gap(idx.index_code, target_date):
-                    try:
-                        index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code)
-                    except Exception as e:
-                        logger.warning("指数 %s 日线补拉失败: %s", idx.index_code, e)
-
-                if self._has_valuation_gap(idx.index_code, target_date):
-                    try:
-                        index_valuation_count += self._fetch_and_upsert_index_valuation(
-                            idx.index_code
-                        )
-                    except Exception as e:
-                        logger.warning("指数 %s 估值补拉失败: %s", idx.index_code, e)
-
-            # ------------------------------ 2. 宏观指标 ------------------------------
-            macro_count = 0
-            try:
-                macro_count = self._fetch_and_upsert_macro()
-            except Exception as e:
-                logger.warning("宏观指标拉取失败: %s", e)
-
-            # 数据质量检测接入摄取闭环：以目标交易日为准检测新补齐的数据
-            quality = self._run_quality_checks(target_date)
-
-            # 汇总时返回执行后最新行情日期，供因子计算按实际数据日期入队
-            data_date = self._index_bar_repo.get_latest_trade_date()
-            self._run_svc.mark_success(
-                run_id,
-                metrics={
-                    "index": {
-                        "total": len(indexes),
-                        "bar_records": index_bar_count,
-                        "valuation_records": index_valuation_count,
-                    },
-                    "macro": {"records": macro_count},
-                    "quality": quality,
-                    "target_date": target_date.isoformat(),
-                    "data_date": data_date.isoformat() if data_date is not None else None,
-                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-                },
-            )
-            # 仅在实际有新数据落库时返回数据日期，避免空跑（如周末无缺口）
-            # 时重复入队同一交易日的因子计算
-            has_new_data = index_bar_count > 0 or index_valuation_count > 0
-            return data_date if has_new_data and data_date is not None else None
-
-        except Exception as e:
-            self._db.rollback()
-            logger.warning("run_daily_ingest 整体失败: %s", e, exc_info=True)
-            self._run_svc.mark_failed(run_id, str(e)[:1000])
-            return None
-        finally:
-            _daily_ingest_lock.release()
-
-    # ==================================================================
-    # 按类型拆分的数据刷新（后台线程入口）
-    # ==================================================================
-
-    def refresh_index_data(self, run_id: str) -> None:
-        """刷新所有基准指数的日线和估值数据（后台线程入口）。
-
-        与 daily_ingest 同样不再按"当天是否交易日"跳过：以最近交易日为
-        目标日期，仅补拉落后于该日期的指数（周末/节假日触发会补齐缺失的
-        最近交易日数据），已是最新时不会发起外部拉取。
-
-        Args:
-            run_id: 运行记录 ID。
-        """
-        if not self._try_acquire_ingest_lock(run_id):
-            return
-        start_time = utcnow()
-        try:
-            self._run_svc.mark_running(run_id)
-
-            # 补拉目标 = 最近交易日；非交易日触发时自动补上一交易日
-            target_date = TradingCalendar().latest_trading_day(today_cn())
-
-            indexes = self._index_repo.find_all()
-            index_bar_count = 0
-            index_valuation_count = 0
-
-            for idx in indexes:
-                if self._has_bar_gap(idx.index_code, target_date):
-                    try:
-                        index_bar_count += self._fetch_and_upsert_index_bars(idx.index_code)
-                    except Exception as e:
-                        logger.warning("指数 %s 日线补拉失败: %s", idx.index_code, e)
-
-                if self._has_valuation_gap(idx.index_code, target_date):
-                    try:
-                        index_valuation_count += self._fetch_and_upsert_index_valuation(
-                            idx.index_code
-                        )
-                    except Exception as e:
-                        logger.warning("指数 %s 估值补拉失败: %s", idx.index_code, e)
-
-            quality = self._run_quality_checks(target_date)
-            self._run_svc.mark_success(
-                run_id,
-                metrics={
-                    "index": {
-                        "total": len(indexes),
-                        "bar_records": index_bar_count,
-                        "valuation_records": index_valuation_count,
-                    },
-                    "quality": quality,
-                    "target_date": target_date.isoformat(),
-                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-                },
-            )
-
-        except Exception as e:
-            self._db.rollback()
-            logger.warning("refresh_index_data 整体失败: %s", e, exc_info=True)
-            self._run_svc.mark_failed(run_id, str(e)[:1000])
-        finally:
-            _daily_ingest_lock.release()
-
-    def refresh_macro_data(self, run_id: str) -> None:
-        """刷新宏观指标数据（后台线程入口）。
-
-        拉取 CPI、PMI、LPR 等宏观指标。
-
-        Args:
-            run_id: 运行记录 ID。
-        """
-        if not self._try_acquire_ingest_lock(run_id):
-            return
-        start_time = utcnow()
-        try:
-            self._run_svc.mark_running(run_id)
-
-            today = today_cn()
-            cal = TradingCalendar()
-            if not cal.is_trading_day(today):
-                self._run_svc.mark_skipped(
-                    run_id,
-                    metrics={"reason": "holiday", "message": "非交易日，跳过数据摄取"},
-                )
-                return
-
-            macro_count = self._fetch_and_upsert_macro()
-
-            self._run_svc.mark_success(
-                run_id,
-                metrics={
-                    "macro": {"records": macro_count},
-                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-                },
-            )
-
-        except Exception as e:
-            self._db.rollback()
-            logger.warning("refresh_macro_data 整体失败: %s", e, exc_info=True)
-            self._run_svc.mark_failed(run_id, str(e)[:1000])
-        finally:
-            _daily_ingest_lock.release()
-
-    # ==================================================================
-    # 单指数数据维护（后台线程入口）
-    # ==================================================================
-
-    def rebuild_index_data(self, run_id: str, index_code: str) -> None:
-        """单指数全量覆盖重拉：删除该指数历史日线与估值后重新拉取全量数据。
-
-        先拉取外部数据、后删除旧数据，任一环节失败都会回滚，保证不会出现
-        "旧数据已删、新数据未入库"的中间态。
-
-        Args:
-            run_id: 运行记录 ID。
-            index_code: 指数代码。
-        """
-        if self._index_repo.find_by_code(index_code) is None:
-            self._run_svc.mark_failed(run_id, f"指数不存在: {index_code}")
-            return
-        if not self._try_acquire_ingest_lock(run_id):
-            return
-        start_time = utcnow()
-        try:
-            self._run_svc.mark_running(run_id)
-
-            # 1. 先拉取全量数据（失败时不触碰现有数据）；
-            #    日线走多数据源切换（OHLC 严格校验 + 最少缺失兜底），入库记录实际数据源
-            bars, source = self._fetch_index_daily_multi_source(index_code)
-            #    估值走“Tushare 优先、AkShare 兜底”，source 由客户端标识
-            valuations = self._fetch_index_valuation_preferred(index_code)
-            logger.info(
-                "指数 %s 全量覆盖重拉：日线数据源 %s，共 %d 条，估值 %d 条",
-                index_code,
-                source,
-                len(bars),
-                len(valuations),
-            )
-
-            # 2. 删除旧数据
-            deleted_bars = (
-                self._db.query(IndexDailyBarModel)
-                .filter(IndexDailyBarModel.index_code == index_code)
-                .delete(synchronize_session=False)
-            )
-            deleted_valuations = (
-                self._db.query(IndexValuationModel)
-                .filter(IndexValuationModel.index_code == index_code)
-                .delete(synchronize_session=False)
-            )
-
-            # 3. 写入新数据并统一提交（失败回滚后旧数据保留）
-            bar_records = self._insert_index_bars(index_code, bars, source=source)
-            valuation_records = self._insert_index_valuations(index_code, valuations)
-            self._db.commit()
-
-            self._run_svc.mark_success(
-                run_id,
-                metrics={
-                    "index_code": index_code,
-                    "deleted_bar_records": deleted_bars,
-                    "deleted_valuation_records": deleted_valuations,
-                    "bar_records": bar_records,
-                    "valuation_records": valuation_records,
-                    "bar_source": source,
-                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-                },
-            )
-        except Exception as e:
-            self._db.rollback()
-            logger.warning("指数 %s 全量覆盖重拉失败: %s", index_code, e, exc_info=True)
-            self._run_svc.mark_failed(run_id, str(e)[:1000])
-        finally:
-            _daily_ingest_lock.release()
-
-    def incremental_fill_index_data(self, run_id: str, index_code: str) -> None:
-        """单指数增量补数据：从数据库最新交易日补充到当天（后台线程入口）。
-
-        本入口服务于指数详情页的单指数手动增量，仍按"当天是否交易日"
-        判断：非交易日标记 skipped（不参与 daily_ingest/index_refresh 的
-        "按最近交易日缺口补拉"语义）。
-
-        Args:
-            run_id: 运行记录 ID。
-            index_code: 指数代码。
-        """
-        if self._index_repo.find_by_code(index_code) is None:
-            self._run_svc.mark_failed(run_id, f"指数不存在: {index_code}")
-            return
-        if not self._try_acquire_ingest_lock(run_id):
-            return
-        start_time = utcnow()
-        try:
-            self._run_svc.mark_running(run_id)
-
-            today = today_cn()
-            if not TradingCalendar().is_trading_day(today):
-                self._run_svc.mark_skipped(
-                    run_id,
-                    metrics={"reason": "holiday", "message": "非交易日，跳过数据摄取"},
-                )
-                return
-
-            bar_records = self._fetch_and_upsert_index_bars(index_code)
-            valuation_records = self._fetch_and_upsert_index_valuation(index_code)
-
-            self._run_svc.mark_success(
-                run_id,
-                metrics={
-                    "index_code": index_code,
-                    "bar_records": bar_records,
-                    "valuation_records": valuation_records,
-                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-                },
-            )
-        except Exception as e:
-            self._db.rollback()
-            logger.warning("指数 %s 增量补数据失败: %s", index_code, e, exc_info=True)
-            self._run_svc.mark_failed(run_id, str(e)[:1000])
-        finally:
-            _daily_ingest_lock.release()
-
-    def run_cold_start(self, run_id: str) -> None:
-        """冷启动：拉取全部指数的全量历史数据（后台线程入口）。
-
-        与 run_daily_ingest 的区别：
-        - 指数日线拉取全量历史
-        - 跳过周末检查（冷启动可随时执行）
-        - 指数日线/估值/宏观复用现有全量方法
-        """
-        start_time = utcnow()
-        try:
-            self._run_svc.mark_running(run_id)
-
-            # 1. 指数全量日线 + 估值
-            indexes = (
-                self._db.query(BenchmarkIndexModel).order_by(BenchmarkIndexModel.index_code).all()
-            )
-            index_bar_count = 0
-            index_valuation_count = 0
-
-            for idx in indexes:
-                try:
-                    index_bar_count += self._fetch_and_upsert_index_bars(
-                        idx.index_code, incremental=False
-                    )
-                except Exception as e:
-                    logger.warning("指数 %s 日线拉取失败: %s", idx.index_code, e)
-
-                try:
-                    index_valuation_count += self._fetch_and_upsert_index_valuation(idx.index_code)
-                except Exception as e:
-                    logger.warning("指数 %s 估值拉取失败: %s", idx.index_code, e)
-
-            # 2. 宏观指标
-            macro_count = 0
-            try:
-                macro_count = self._fetch_and_upsert_macro()
-            except Exception as e:
-                logger.warning("宏观指标拉取失败: %s", e)
-
-            # 汇总
-            self._run_svc.mark_success(
-                run_id,
-                metrics={
-                    "index": {
-                        "total": len(indexes),
-                        "bar_records": index_bar_count,
-                        "valuation_records": index_valuation_count,
-                    },
-                    "macro": {"records": macro_count},
-                    "duration_seconds": round((utcnow() - start_time).total_seconds(), 1),
-                },
-            )
-
-        except Exception as e:
-            self._db.rollback()
-            logger.warning("run_cold_start 整体失败: %s", e, exc_info=True)
-            self._run_svc.mark_failed(run_id, str(e)[:1000])
 

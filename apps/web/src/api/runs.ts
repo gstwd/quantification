@@ -1,6 +1,5 @@
 import { apiClient } from './client'
 import type {
-  DataQualityResponse,
   PaginatedResponse,
   ResearchRunDetail,
   ResearchRunItem,
@@ -42,42 +41,12 @@ export async function fetchSystemStatus(): Promise<SystemStatusResponse> {
   return data
 }
 
-export async function fetchDataQuality(): Promise<DataQualityResponse> {
-  const { data } = await apiClient.get<DataQualityResponse>('/system/data-quality')
-  return data
-}
+// 数据质量只保留一个口径：数据管理页的 data_health_snapshot
+// （见 api/dataManagement.ts 的 fetchDataManagementOverview / fetchDataSetDetail），
+// 原 `/system/data-quality` 独立口径已下线。
 
-export async function triggerDailyIngest(): Promise<{ run_id: string }> {
-  const { data } = await apiClient.post<{ run_id: string }>('/runs/daily-ingest')
-  return data
-}
-
-export async function triggerIndexRefresh(): Promise<{ run_id: string }> {
-  const { data } = await apiClient.post<{ run_id: string }>('/runs/index-refresh')
-  return data
-}
-
-export async function triggerMacroRefresh(): Promise<{ run_id: string }> {
-  const { data } = await apiClient.post<{ run_id: string }>('/runs/macro-refresh')
-  return data
-}
-
-export async function triggerColdStart(): Promise<{ run_id: string }> {
-  const { data } = await apiClient.post<{ run_id: string }>('/runs/cold-start')
-  return data
-}
-
-/** 触发单指数全量覆盖重拉（删除旧历史数据后重新拉取全量） */
-export async function triggerIndexRebuild(indexCode: string): Promise<{ run_id: string }> {
-  const { data } = await apiClient.post<{ run_id: string }>(`/runs/indexes/${indexCode}/rebuild`)
-  return data
-}
-
-/** 触发单指数增量补数据（从数据库最新交易日补充到当天） */
-export async function triggerIndexIncrementalFill(indexCode: string): Promise<{ run_id: string }> {
-  const { data } = await apiClient.post<{ run_id: string }>(`/runs/indexes/${indexCode}/incremental-fill`)
-  return data
-}
+// 数据同步/补缺口/全量重拉统一由 /data-management/operations 提交，
+// 指数与宏观不再保留各自的触发入口（见 api/dataManagement.ts）。
 
 export async function triggerStrategyRun(strategyId: string): Promise<{ run_id: string }> {
   const { data } = await apiClient.post<{ run_id: string }>(`/runs/strategies/${strategyId}/run`)

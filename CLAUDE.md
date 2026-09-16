@@ -94,7 +94,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 
 - **`api/routers/`** — 10 route groups: `health`, `system`, `indexes`, `market_data`, `strategies`, `factors`, `runs`, `backtests`, `ai_factors`, `keyword_tags`
 - **`api/middleware.py`** — `RequestIdMiddleware`：为每个请求注入唯一 request_id，写入响应头和日志 ContextVar
-- **`services/`** — Business logic; `IngestService` uses read-through cache (DB → lock → external API → upsert). `ContextBuilder` shim re-exports from `engine/context_builder.py`. `DataFreshnessService` 独立负责数据新鲜度汇总，`IngestService` 只保留摄取编排门面。其他服务包括 `index_service.py`。基准收益、数据质量和绩效指标规则位于 `domain/`，`services/benchmark.py`、`services/data_quality.py`、`services/metrics.py` 仅保留历史导入兼容转发。
+- **`services/`** — Business logic; `IngestService` 收敛为**抓取后端**：只做外部数据拉取、字段归一化、幂等写入与读穿透缓存（GET 未命中入队 `data_fill`），不再持有运行状态流转、进程内互斥锁与批量编排；定时/手动同步、补缺口、全量重拉、**质量快照**统一由 `DataManagementService` 编排，**数据质量只有 `data_health_snapshot` 一个口径**（经数据管理页暴露，不再有独立重算的质量接口）。`ContextBuilder` shim re-exports from `engine/context_builder.py`。其他服务包括 `index_service.py`（基准指数增删查：`list_indexes`/`add_index`/`remove_index`）。基准收益和绩效指标规则位于 `domain/`，`services/benchmark.py`、`services/metrics.py` 仅保留历史导入兼容转发。
 - **`engine/`** — **策略引擎核心**：组件化、配置驱动的策略执行管线（11 个文件）：
   - `config.py` — Pydantic 配置模型（含 `TimingConfig`、`ScoreConfig`、`FilterConfig`、`RankConfig`、`PortfolioConfig`、`RiskConfig`、`RebalanceConfig`）
   - `base.py` — `EngineContext`、`EngineResult` 数据结构
@@ -117,7 +117,6 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - **`domain/`** — Pure domain logic (no SQLAlchemy/FastAPI imports):
   - `common/` — `bar_metrics.py` (BAR computation), `numeric.py`（NaN/Inf 和价格字段容错）、`enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, AllocationPlan dataclasses)
-  - `market_data/` — `quality.py`（日线、估值与连续性质量规则）
   - `research/` — 研究评估领域规则（绩效指标、walk-forward 窗口切分）
 - **`factors/`** — Single-factor computation layer: `base.py` (FactorSpec/FactorContext/FactorValue/FactorComputer Protocol), `registry.py` (FactorRegistry), `service.py` (FactorService orchestrates computation + persistence), `evaluation.py` (IC/IR analysis + factor correlation matrix), `normalization.py` (zscore/rank/minmax/winsorize/MAD 横截面标准化), `builtins/` (18 built-in computers: volume×1, momentum×3, volatility×1, valuation×2, ma×4, atr×1, donchian×2, rsi×1). **所有因子基于指数数据计算**（`index_factor_value` 表）。**架构原则：因子层只使用指数数据**。
 - **`config/`** — Pydantic settings loaded from `.env`
@@ -192,7 +191,7 @@ Key migrations:
 
 ## Current State
 
-Services fully wired to PostgreSQL. Each data type has exactly **one** source: Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → 未命中时入队 `data_fill` 后台任务并返回空列表。后台任务统一走 `background_job` 持久化队列（迁移 0023）。`POST /api/runs/daily-ingest` 触发手动入队。Startup 时 lifespan 仅入队 `warm_calendar` 预热任务（启动补全已移除，**启动也不再自动执行健康检查**）；`daily_ingest`/`index_refresh` 不再按"当天是否交易日"跳过，改为按最近交易日缺口补拉。`data_health_snapshot` 只在手动维护操作或数据摄取任务（全局同步）完成后刷新，首次部署无快照时 `GET /api/data-management` 返回 `snapshot_count=0`，前端据此提示而非报错。
+Services fully wired to PostgreSQL. Each data type has exactly **one** source: Index K-line→AkShare, Index valuation→AkShare, Macro→AkShare. Read-through cache pattern: GET endpoint → check DB → 未命中时入队 `data_fill` 后台任务并返回空列表。后台任务统一走 `background_job` 持久化队列（迁移 0023）。**所有外部数据的定时与手动同步、补缺口、全量重拉统一走 `POST /api/data-management/operations`**；旧入口 `POST /api/runs/daily-ingest`、`/runs/index-refresh`、`/runs/macro-refresh`、`/runs/cold-start`、`/runs/indexes/{code}/rebuild|incremental-fill` 已下线。Startup 时 lifespan 仅入队 `warm_calendar` 预热任务（启动补全已移除，**启动也不再自动执行健康检查**）；同步不再按"当天是否交易日"跳过，改为按最近交易日缺口补拉。`data_health_snapshot` 只在手动维护操作或数据摄取任务（全局同步）完成后刷新，首次部署无快照时 `GET /api/data-management` 返回 `snapshot_count=0`，前端据此提示而非报错。
 
 **Strategy Engine**: `engine/` 包实现组件化策略执行管线。策略通过 `strategy_config` 表的 JSON 配置驱动，`StrategyConfigService` 管理 CRUD，`StrategyEngine` 执行管线。`FactorProvider` 桥接因子层与引擎层，`ContextBuilder` 统一构建实时和回测上下文。`BacktestService` 和 `StrategyExecutionService` 统一使用引擎执行。
 
@@ -241,7 +240,7 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 - **FactorProvider.collect_required_factor_ids() 必须收集 compare_to**: 遍历 filter rules 时不仅要收集 `rule.factor`，还要收集 `rule.compare_to`（若存在）。遗漏会导致被比较的因子值未加载，filter 始终失败 → 空仓。
 - **FilterRuleValue 前端接口**: 定义在 `StrategyConfigForm.vue`（非共享 types 文件）。修改 FilterRule schema 时需同步更新：接口定义、表单模板、`initFilter()`、`buildConfig()`、校验逻辑，以及 `StrategyDetailPage.vue` 的只读展示。
 - **后台任务状态流转**: `research_run` 状态链：pending → running → success/failed。`RunService.mark_running()` 在 bg 函数开始时调用，`mark_success(run_id, metrics)` / `mark_failed(run_id, error_message)` 在结束时调用。进程重启后 `recover_stuck_runs_on_startup()` 自动恢复卡死任务。
-- **数据刷新按类型拆分**: `IngestService` 提供 `refresh_index_data()`、`refresh_macro_data()` 两个公共方法，各有独立 run 生命周期。对应 API 端点：`POST /runs/index-refresh`、`/runs/macro-refresh`。各数据页面（指数/宏观）有自己的"刷新数据"按钮，RunsPage 纯做监控。
+- **数据维护只有一条入口**: 指数/宏观/行业/个股的全部同步、补缺口与全量重拉统一走 `POST /api/data-management/operations`（`DataManagementService` 编排，`IngestService` 只作为抓取后端）。`IngestService` 因此不含任何 `run_id` 生命周期方法、缺口判断与进程内互斥锁；并发互斥由 `DataManagementService._operation_lock` 与 `background_job` 队列 `job_key` 保证，不再存在"两套入口并发写同一批表"。历史 `research_run` 中的旧 `run_type`（daily_ingest/index_refresh/macro_refresh/cold_start/index_rebuild/index_incremental_fill）保留用于展示，但已不支持重试。
 - **Run detail API**: `GET /runs/{run_id}` 返回 `ResearchRunDetail`（含 metrics、duration_seconds），`GET /runs/{run_id}/items` 返回 `ResearchRunItemSchema` 逐条明细，`POST /runs/{run_id}/retry` 重试失败任务（创建新 run 并提交到线程池）。
 - **`GET /api/system/status` 禁止全表扫描**: 该接口是总览页首屏必调接口，`SystemService` 有两条性能契约：① 各表"记录数"先读 `pg_class.reltuples` 估算值，达到 `_ESTIMATED_COUNT_THRESHOLD`（50 万行）的表直接返回估算值，不再执行 `count(*)`（`stock_daily_close` 精确计数需并行全表扫描约 3.5 秒）；小表仍返回精确值。② "最近入库时间"依赖 `ingested_at`/`fetched_at` 上的 btree 索引做 `max()` 反向扫描（迁移 0050）——**新增数据表并纳入状态快照时必须同时补建该列索引**，否则接口会退化为秒级全表扫描。实测优化前后：15 秒 → 0.3 秒。
 
@@ -258,7 +257,7 @@ Key rules (details in the doc):
 - **FactorSpec.lookback_days**: 新增因子时必须设置合理的 `lookback_days`（自然日），`FactorService._load_context()` 取所有因子的最大值。参考：5d→15, 20d→40, 60d→90, 估值百分位→730（2年），技术指标→period×1.5+5。
 - **volume_ratio_20d 返回值变更**: 数据不足时返回 `None`（原为 1.0），区分"无数据"与"量比恰好为 1"。`calc_volume_ratio_20d()` 返回 `float | None`，`calc_5d_return()` 仍返回 `float`（默认 0.0）。
 - **BenchmarkIndexModel.is_active**: `ContextBuilder._build_live()` 和 `BacktestService._resolve_index_universe()` 只查询 `is_active=True` 的指数。新增指数默认 `is_active=True`。
-- **TradingCalendar 缓存**: 首次调用时从 AkShare 加载（`tool_trade_date_hist_sina()`），TTL=1 天。`ingest_service.run_daily_ingest` 和 `check_data_freshness` 已接入，不再用 `weekday()>=5`。
+- **TradingCalendar 缓存**: 首次调用时从 AkShare 加载（`tool_trade_date_hist_sina()`），TTL=1 天。`IngestService._drop_non_trading_bars`（剔除假期伪行情）与 `DataManagementService` 的缺口检查（`_latest_trading_day`）已接入，不再用 `weekday()>=5`。
 - **rebalance.py 交易日历对齐**: `DefaultRebalanceScheduler` 接受 `TradingCalendar` 实例，周度/月度调仓如遇非交易日自动顺延至下一交易日。
 - **StrategyConfig.index_codes**: 存储在 `config_json` 内部（非独立 DB 列），通过 `**row.config_json` 展开到 engine 的 `StrategyConfig` 模型。前端 API 请求中 `index_codes` 应在 `config_json` 内传递，非顶层字段。非空时 `_filter_by_scope()` 仅保留指定指数（实时和回测模式均生效）。
 - **index_codes 回测强制应用**: `BacktestService.create_backtest()` 检查策略的 `config.index_codes`，非空时强制覆盖 `universe_filter` 为 subset 模式；`ContextBuilder._build_backtest()` 对传入的 index_codes 做交集过滤（双重保护）。
@@ -268,7 +267,7 @@ Key rules (details in the doc):
 - **`get_default_factor_registry()` vs `build_default_factor_registry()`**: 进程级单例通过 `get_default_factor_registry()` 获取（首次构建后缓存），避免 `BacktestService` 每请求重建。只有 `cli.py` 和 `registry.py` 内部使用 `build_default_factor_registry()`。
 - **`BatchFactorComputer` Protocol**: 定义在 `factors/base.py`，回测因子预计算时优先调用 `compute_batch()`（一次遍历 bar 数据覆盖所有日期）。已在 momentum.py（return_5d/20d/60d/120d）实现。新增回测频繁使用的因子时建议实现此协议。
 - **`validate_config` 是 `@staticmethod`**: `StrategyConfigService.validate_config()` 不依赖 DB 会话，直接静态调用无需实例化服务。
-- **AI 分析双调度器**: 数据摄取+因子计算在 `schedule_time`（默认 17:30）执行，AI 舆情分析在 `ai_schedule_time`（默认 23:30）独立执行。两个调度器通过 `main.py` lifespan 分别启动，互不影响。`ai_analysis_enabled=False` 时 AI 调度器不启动。**所有数据源的定时摄取统一走全局数据同步调度器**（`data_sync_all`，覆盖指数/宏观/行业/个股等全部受管数据集）：原独立的行业摄取调度器（`get_industry_scheduler` / `IndustryIngestScheduler`）已取消，行业日频摄取链（`handle_industry_daily_ingest` 任务处理器与 `IndustryDataService.run_daily_ingest()`）已一并删除，行业数据按 `industry_universe`/`industry_daily_bar`/`industry_membership` 数据集由全局同步增量补拉；行业单对象的手动入口（`industry_universe_refresh`/`industry_bars_refresh`/`industry_quality_check`/`industry_data_fill`/`industry_data_rebuild`）保留。
+- **AI 分析双调度器**: 数据摄取+因子计算在 `schedule_time`（默认 17:30）执行，AI 舆情分析在 `ai_schedule_time`（默认 23:30）独立执行。两个调度器通过 `main.py` lifespan 分别启动，互不影响。`ai_analysis_enabled=False` 时 AI 调度器不启动。**所有数据源的定时摄取统一走全局数据同步调度器**（`data_sync_all` → `DataManagementService.sync_latest`，覆盖指数/宏观/行业/个股等全部受管数据集）：原独立的行业摄取调度器（`get_industry_scheduler` / `IndustryIngestScheduler`）已取消，行业日频摄取链（`handle_industry_daily_ingest` 任务处理器与 `IndustryDataService.run_daily_ingest()`）已一并删除，行业数据按 `industry_universe`/`industry_daily_bar`/`industry_membership` 数据集由全局同步增量补拉；行业单对象的手动入口（`industry_universe_refresh`/`industry_bars_refresh`/`industry_quality_check`/`industry_data_fill`/`industry_data_rebuild`）保留。同理，指数/宏观的旧定时与手动摄取入口（`daily_ingest`/`index_refresh`/`macro_refresh`/`cold_start`/`index_rebuild`/`index_incremental_fill` 处理器与路由）已删除，统一由数据管理操作承担。
 - **AI 因子在策略引擎中的行为**: AI 因子仅在已有 `daily_sentiment_aggregate` 数据的交易日有效。缺失数据时返回 `FactorValue(numeric=None)`，评分引擎默认 `missing_factor_strategy="ignore"` 会静默跳过。不要在 filter 规则中使用 AI 因子（None 会导致 filter 失败=资产被排除）。AI 因子专用 transform 函数：`sentiment_score`（[-1,1]→[0,100]）、`attention_score`（裁剪到 [0,100]）。
 - **关键词标签可配置化**: `keyword_tag_config` 表存储关键词→资产标签映射，替代硬编码的 `classifier._KEYWORD_TAG_MAP`。`TagClassifier._classify_via_keyword()` 优先使用 DB 映射，回退到静态默认值。CRUD 端点: `GET/POST/PUT/DELETE /keyword-tags`。
 - **市场综合研判**: `market_synthesis` 表存储每日 AI 生成的市场概况（200-300 字中文研判）。在 `AIFactorService.run_full_pipeline()` 步骤 7 自动生成，LLM 不可用时静默跳过。API: `GET /ai-factors/synthesis/{date}`。

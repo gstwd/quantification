@@ -32,6 +32,11 @@ def _enqueue_for_run(
 ) -> bool:
     """按运行类型将任务入队，返回是否支持该类型。
 
+    仅支持仍可新建的运行类型；历史运行记录中的旧类型
+    （daily_ingest / index_refresh / macro_refresh / cold_start /
+    index_rebuild / index_incremental_fill）已收敛到数据管理操作，
+    不再支持重试。
+
     Args:
         run_type: 运行类型（与 research_run.run_type 对齐）。
         run_id: 运行记录 ID。
@@ -43,30 +48,12 @@ def _enqueue_for_run(
         True 表示已入队；False 表示不支持的运行类型。
     """
     queue = get_job_queue()
-    if run_type == "daily_ingest":
-        queue.enqueue("daily_ingest", {"run_id": run_id}, job_key="daily_ingest")
-    elif run_type == "strategy_run":
+    if run_type == "strategy_run":
         if not strategy_id:
             return False
         queue.enqueue(
             "strategy_run",
             {"strategy_id": strategy_id, "run_id": run_id, "params": params},
-        )
-    elif run_type == "cold_start":
-        queue.enqueue("cold_start", {"run_id": run_id})
-    elif run_type == "index_refresh":
-        queue.enqueue("index_refresh", {"run_id": run_id})
-    elif run_type == "macro_refresh":
-        queue.enqueue("macro_refresh", {"run_id": run_id})
-    elif run_type == "index_rebuild":
-        queue.enqueue(
-            "index_rebuild",
-            {"run_id": run_id, "index_code": (params or {}).get("index_code", "")},
-        )
-    elif run_type == "index_incremental_fill":
-        queue.enqueue(
-            "index_incremental_fill",
-            {"run_id": run_id, "index_code": (params or {}).get("index_code", "")},
         )
     elif run_type == "ai_analysis":
         queue.enqueue("ai_analysis", {"run_id": run_id}, job_key=f"ai_analysis:{trade_date}")
@@ -174,73 +161,9 @@ def get_run_items(run_id: str, db: Session = Depends(get_db)) -> list[ResearchRu
 # 触发端点
 # ---------------------------------------------------------------------------
 
-
-@router.post("/runs/daily-ingest")
-def daily_ingest(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发增量日频数据摄取（指数 + 宏观），入队后台任务执行。"""
-    summary = RunService(db).create_run("daily_ingest", None, today_cn())
-    _enqueue_for_run("daily_ingest", summary.run_id, None, None, summary.trade_date or date.today())
-    return {"status": "accepted", "run_type": "daily_ingest", "run_id": summary.run_id}
-
-
-@router.post("/runs/index-refresh")
-def index_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发指数日线和估值数据刷新，入队后台任务执行。"""
-    summary = RunService(db).create_run("index_refresh", None, date.today())
-    _enqueue_for_run("index_refresh", summary.run_id, None, None, summary.trade_date or date.today())
-    return {"status": "accepted", "run_type": "index_refresh", "run_id": summary.run_id}
-
-
-@router.post("/runs/macro-refresh")
-def macro_refresh(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发宏观指标数据刷新，入队后台任务执行。"""
-    summary = RunService(db).create_run("macro_refresh", None, date.today())
-    _enqueue_for_run("macro_refresh", summary.run_id, None, None, summary.trade_date or date.today())
-    return {"status": "accepted", "run_type": "macro_refresh", "run_id": summary.run_id}
-
-
-@router.post("/runs/cold-start")
-def cold_start(db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发冷启动：拉取全部指数从成立至今的全量历史日线数据。"""
-    summary = RunService(db).create_run("cold_start", None, date.today())
-    _enqueue_for_run("cold_start", summary.run_id, None, None, summary.trade_date or date.today())
-    return {"status": "accepted", "run_type": "cold_start", "run_id": summary.run_id}
-
-
-@router.post("/runs/indexes/{index_code}/rebuild")
-def rebuild_index_data(index_code: str, db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发单指数全量覆盖重拉（删除旧历史数据后重新拉取全量），入队后台任务执行。"""
-    summary = RunService(db).create_run(
-        "index_rebuild", None, date.today(), params={"index_code": index_code}
-    )
-    _enqueue_for_run(
-        "index_rebuild",
-        summary.run_id,
-        None,
-        {"index_code": index_code},  # ResearchRunSummary 不含 params，直接传参数字典
-        summary.trade_date or date.today(),
-    )
-    return {"status": "accepted", "run_type": "index_rebuild", "run_id": summary.run_id}
-
-
-@router.post("/runs/indexes/{index_code}/incremental-fill")
-def incremental_fill_index_data(index_code: str, db: Session = Depends(get_db)) -> dict[str, str]:
-    """触发单指数增量补数据（从数据库最新交易日补充到当天），入队后台任务执行。"""
-    summary = RunService(db).create_run(
-        "index_incremental_fill", None, date.today(), params={"index_code": index_code}
-    )
-    _enqueue_for_run(
-        "index_incremental_fill",
-        summary.run_id,
-        None,
-        {"index_code": index_code},  # ResearchRunSummary 不含 params，直接传参数字典
-        summary.trade_date or date.today(),
-    )
-    return {
-        "status": "accepted",
-        "run_type": "index_incremental_fill",
-        "run_id": summary.run_id,
-    }
+# 说明：指数/宏观/行业/个股等全部外部数据的同步、补缺口与全量重拉统一由
+# POST /api/data-management/operations 提交（DataManagementService 编排），
+# 本路由只保留策略运行、AI 分析与数据管理任务本身的触发入口。
 
 
 @router.post("/runs/strategies/{strategy_id}/run")

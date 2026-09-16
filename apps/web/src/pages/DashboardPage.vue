@@ -497,18 +497,13 @@ function formatTime(ts: string | null | undefined): string {
   })
 }
 
-/** 运行类型中文映射 */
+/** 运行类型中文映射（含已下线类型的标签，供历史运行记录展示） */
 function formatRunType(runType: string): string {
   const map: Record<string, string> = {
-    daily_ingest: '日频入库',
     data_sync_all: '全局数据同步',
     data_manage_operation: '数据维护',
     strategy_run: '策略运行',
-    cold_start: '历史回补',
-    index_refresh: '指数数据刷新',
-    macro_refresh: '宏观数据刷新',
     factor_computation: '因子计算',
-    industry_ingest: '行业数据刷新',
     industry_universe_refresh: '更新行业信息',
     industry_bars_refresh: '行业日线刷新',
     industry_quality_check: '行业质量检查',
@@ -517,6 +512,14 @@ function formatRunType(runType: string): string {
     stock_quality_check: '个股质量检查',
     stock_data_fill: '个股日线补全',
     stock_data_rebuild: '个股全量重拉',
+    // 以下类型已下线（统一走数据管理操作），仅用于展示历史运行记录
+    daily_ingest: '日频入库（已下线）',
+    cold_start: '历史回补（已下线）',
+    index_refresh: '指数数据刷新（已下线）',
+    macro_refresh: '宏观数据刷新（已下线）',
+    index_rebuild: '指数全量重拉（已下线）',
+    index_incremental_fill: '指数增量补数（已下线）',
+    industry_ingest: '行业数据刷新（已下线）',
   }
   return map[runType] ?? runType
 }
@@ -1163,107 +1166,6 @@ onMounted(() =>
   min-width: 36px;
 }
 
-/* ── 数据质量 ── */
-.quality-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 12px;
-  padding: 16px 20px;
-}
-
-.quality-card {
-  background: rgba(51, 65, 85, 0.35);
-  border: 1px solid rgba(148, 163, 184, 0.06);
-  border-left: 3px solid var(--success);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  transition: all 0.25s ease;
-}
-
-.quality-card-warn {
-  border-left-color: var(--warning);
-  animation: warnGlow 2s ease-in-out infinite;
-}
-
-@keyframes warnGlow {
-  0%, 100% { border-left-color: var(--warning); }
-  50% { border-left-color: rgba(245, 158, 11, 0.4); }
-}
-
-.quality-card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.quality-name {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.quality-ratio {
-  font-size: 13px;
-  font-weight: 700;
-  font-family: monospace;
-}
-
-.ratio-ok { color: var(--success); }
-.ratio-warn { color: var(--warning); }
-
-.quality-date {
-  font-size: 11px;
-  color: var(--text-muted);
-  font-family: monospace;
-}
-
-.quality-issues {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.issue-label {
-  font-size: 10px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 20px;
-  white-space: nowrap;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.issue-label.warn {
-  background: rgba(245, 158, 11, 0.12);
-  color: var(--warning);
-}
-
-.issue-label.danger {
-  background: rgba(239, 68, 68, 0.12);
-  color: var(--danger);
-}
-
-.issue-item {
-  font-family: monospace;
-  font-size: 11px;
-  color: var(--text-muted);
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 4px;
-  padding: 1px 6px;
-  cursor: default;
-  transition: color 0.15s;
-}
-
-.issue-item:hover { color: var(--text); }
-
-.issue-more {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
 /* ── 最近运行表格 ── */
 .table-wrap {
   overflow-x: auto;
@@ -1607,10 +1509,6 @@ onMounted(() =>
 
   .stat-value {
     font-size: 24px;
-  }
-
-  .quality-grid {
-    grid-template-columns: 1fr;
   }
 
   .section-header {

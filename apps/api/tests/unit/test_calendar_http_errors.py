@@ -1,13 +1,13 @@
 """交易日历不可用时的 HTTP 语义（C1）。
 
 严格口径下日历不可用必须显式报错，不能返回近似日期或空数组：
-- ``GET /system/data-quality`` → 503
 - ``GET /ai-factors/previous-trading-day`` → 503
+
+说明：原先的 ``GET /system/data-quality`` 同样返回 503，该端点已随质量口径
+统一（改由数据管理页的 ``data_health_snapshot`` 承担）而删除，相应用例一并移除。
 """
 
 from __future__ import annotations
-
-from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,16 +32,6 @@ def _raise_unavailable(*args: object, **kwargs: object) -> None:
 class TestCalendarUnavailableHttp:
     """503 语义。"""
 
-    def test_data_quality_returns_503(self, client: TestClient, monkeypatch) -> None:
-        """数据质量总览在日历不可用时返回 503 而非 500/空结果。"""
-        monkeypatch.setattr(
-            "quant_etf_api.services.ingest_service.IngestService.check_data_freshness",
-            _raise_unavailable,
-        )
-        response = client.get("/api/system/data-quality")
-        assert response.status_code == 503
-        assert "交易日历不可用" in response.json()["detail"]
-
     def test_previous_trading_day_returns_503(self, client: TestClient, monkeypatch) -> None:
         """前一交易日查询在日历不可用时返回 503。"""
         monkeypatch.setattr(
@@ -53,20 +43,16 @@ class TestCalendarUnavailableHttp:
         assert "交易日历不可用" in response.json()["detail"]
 
 
-class TestCalendarAvailablePath:
-    """日历可用时接口正常返回。"""
+class TestQualityCaliberEndpoints:
+    """质量口径端点收敛：旧口径下线，新口径为数据管理页快照。"""
 
-    def test_data_quality_ok(self, client: TestClient, monkeypatch) -> None:
-        """日历正常时数据质量接口返回 200（服务被替换为桩返回值）。"""
-        empty_group = {"total": 0, "up_to_date": 0, "stale": [], "missing": []}
-        monkeypatch.setattr(
-            "quant_etf_api.services.ingest_service.IngestService.check_data_freshness",
-            lambda self: {
-                "index_bars": empty_group,
-                "index_valuation": empty_group,
-                "checked_at": datetime(2025, 1, 2, tzinfo=timezone.utc),
-            },
-        )
-        response = client.get("/api/system/data-quality")
-        assert response.status_code == 200
-        assert isinstance(response.json(), dict)
+    def test_legacy_quality_endpoints_are_gone(self, client: TestClient) -> None:
+        """``/system/data-quality`` 与单指数 data-quality 端点应返回 404。"""
+        assert client.get("/api/system/data-quality").status_code == 404
+        assert client.get("/api/market-data/indexes/000300/data-quality").status_code == 404
+
+    def test_data_management_routes_registered(self) -> None:
+        """数据管理口径端点（总览与数据集分区详情）应已注册。"""
+        paths = set(app.openapi()["paths"])
+        assert "/api/data-management" in paths
+        assert "/api/data-management/datasets/{dataset_key}" in paths

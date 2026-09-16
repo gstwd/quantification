@@ -9,13 +9,13 @@ from quant_etf_api.schemas.market_data import (
     BenchmarkIndex,
     DailyBar,
     DateRangeResponse,
-    IndexDataQuality,
     IndexSummary,
     IndexValuation,
     MacroIndicatorSchema,
 )
 from quant_etf_api.schemas.pagination import PaginatedResponse
 from quant_etf_api.schemas.stock import StockSummary
+from quant_etf_api.services.index_service import IndexService
 from quant_etf_api.services.ingest_service import IngestService
 from quant_etf_api.services.stock_data_service import StockDataService
 
@@ -27,7 +27,7 @@ def list_benchmark_indexes(
     db: Session = Depends(get_db),
 ) -> list[BenchmarkIndex]:
     """列出所有活跃的基准指数。"""
-    return IngestService(db).get_benchmark_indexes()
+    return IndexService(db).list_indexes()
 
 
 @router.get("/market-data/indexes/summary", response_model=list[IndexSummary])
@@ -116,10 +116,6 @@ def index_date_range(
     return DateRangeResponse(min_date=min_d, max_date=max_d)
 
 
-@router.get("/market-data/indexes/{index_code}/data-quality", response_model=IndexDataQuality)
-def index_data_quality(
-    index_code: str,
-    db: Session = Depends(get_db),
-) -> IndexDataQuality:
-    """返回指定指数的数据质量统计：日线覆盖、OHLC 缺失、估值覆盖与缺失。"""
-    return IngestService(db).get_index_data_quality(index_code)
+# 说明：指数数据质量不再在此暴露独立口径。日线/估值/缺口/异常的统一口径
+# 取自 data_health_snapshot，通过 `GET /data-management/datasets/{dataset_key}`
+# 按 partition_key=<index_code> 查询（数据管理页同源）。

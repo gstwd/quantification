@@ -66,7 +66,7 @@ class Settings(BaseSettings):
         description="运行期僵尸任务判定阈值（秒）：心跳超过该时长未更新即视为卡死",
     )
     job_zombie_scan_enabled: bool = Field(
-        default=True,
+        default=False,
         description="是否启用运行期僵尸任务扫描线程（按心跳超时回收 running 任务）",
     )
     job_zombie_scan_interval_seconds: float = Field(
