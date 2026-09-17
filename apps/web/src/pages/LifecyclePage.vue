@@ -29,7 +29,7 @@
     <div v-else class="layout">
       <div class="list">
         <div
-          v-for="item in items"
+          v-for="item in activeItems"
           :key="item.strategy_id"
           class="list-card"
           :class="{ active: item.strategy_id === selectedId }"
@@ -51,6 +51,43 @@
             {{ item.last_refreshed_at ? `最近体检 ${formatCnTime(item.last_refreshed_at)}` : '尚未体检' }}
           </div>
         </div>
+
+        <section v-if="retiredItems.length" class="retired-section">
+          <button
+            class="retired-toggle"
+            type="button"
+            :aria-expanded="showRetired"
+            @click="showRetired = !showRetired"
+          >
+            <span>已退役策略（{{ retiredItems.length }}）</span>
+            <span aria-hidden="true">{{ showRetired ? '收起' : '展开' }}</span>
+          </button>
+          <div v-if="showRetired" class="retired-list">
+            <div
+              v-for="item in retiredItems"
+              :key="item.strategy_id"
+              class="list-card"
+              :class="{ active: item.strategy_id === selectedId }"
+              @click="select(item.strategy_id)"
+            >
+              <div class="list-top">
+                <span class="name">{{ item.display_name || item.strategy_id }}</span>
+                <span :class="['chip', statusClass(item.lifecycle_status)]">
+                  {{ statusText(item.lifecycle_status) }}
+                </span>
+              </div>
+              <div class="list-meta">
+                <span>上线 {{ item.live_at }}（{{ item.live_days }} 天）</span>
+                <span :class="['chip', healthClass(item.health_level)]">
+                  {{ healthText(item.health_level) }}
+                </span>
+              </div>
+              <div class="list-sub">
+                {{ item.last_refreshed_at ? `最近体检 ${formatCnTime(item.last_refreshed_at)}` : '尚未体检' }}
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
 
       <div v-if="detail" class="detail">
@@ -284,6 +321,7 @@ const loading = ref(false)
 const busy = ref(false)
 const error = ref<string | null>(null)
 const showOnline = ref(false)
+const showRetired = ref(false)
 
 const strategyStore = useStrategyStore()
 
@@ -295,6 +333,10 @@ const onlineCandidates = computed(() => {
   const online = new Set(items.value.map(item => item.strategy_id))
   return strategyStore.items.filter(item => !online.has(item.strategy_id))
 })
+
+/** 在役策略优先展示；退役策略保留在列表底部并默认折叠。 */
+const activeItems = computed(() => items.value.filter(item => item.lifecycle_status !== 'RETIRED'))
+const retiredItems = computed(() => items.value.filter(item => item.lifecycle_status === 'RETIRED'))
 
 // 最新一次体检快照
 const latest = computed(() => detail.value?.snapshots?.[0] ?? null)
@@ -383,7 +425,16 @@ async function loadList(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    items.value = await fetchLifecycles()
+    const lifecycleItems = await fetchLifecycles()
+    // 即使接口排序规则变化，页面仍保证退役策略固定排在最后。
+    items.value = [...lifecycleItems].sort((a, b) => {
+      const aRetired = a.lifecycle_status === 'RETIRED'
+      const bRetired = b.lifecycle_status === 'RETIRED'
+      return Number(aRetired) - Number(bRetired)
+    })
+    if (selectedId.value && retiredItems.value.some(item => item.strategy_id === selectedId.value)) {
+      showRetired.value = true
+    }
     if (selectedId.value && !items.value.some(i => i.strategy_id === selectedId.value)) {
       selectedId.value = null
       detail.value = null
@@ -405,6 +456,9 @@ async function loadList(): Promise<void> {
  */
 async function select(strategyId: string): Promise<void> {
   selectedId.value = strategyId
+  if (retiredItems.value.some(item => item.strategy_id === strategyId)) {
+    showRetired.value = true
+  }
   error.value = null
   try {
     detail.value = await fetchLifecycleDetail(strategyId)
@@ -565,10 +619,18 @@ onMounted(async () => {
   background: var(--surface); cursor: pointer; display: flex; flex-direction: column; gap: 6px;
 }
 .list-card.active { border-color: var(--accent); }
-.list-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.name { font-weight: 600; }
+.list-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-meta { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-muted); }
 .list-sub { font-size: 12px; color: var(--text-muted); }
+.list-top > .chip { flex: 0 0 auto; white-space: nowrap; }
+.retired-section { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.retired-toggle {
+  display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: transparent;
+  color: var(--text-muted); font-size: 12px; cursor: pointer;
+}
+.retired-list { display: flex; flex-direction: column; gap: 10px; }
 
 .detail { display: flex; flex-direction: column; gap: 16px; }
 .card { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
