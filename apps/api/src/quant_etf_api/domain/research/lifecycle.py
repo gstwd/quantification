@@ -215,13 +215,14 @@ def assess_health(
         HealthAssessment 实例。
     """
     reasons: list[str] = []
-    monotonic_decay = _is_monotonic_decay(window_percentiles, ic_decay)
+    performance_decay = _has_monotonic_performance_decay(window_percentiles)
+    confirmed_decay = performance_decay and _has_ic_decay(ic_decay)
     drawdown_extreme = (
         drawdown_percentile_pct is not None
         and drawdown_percentile_pct > drawdown_warning_percentile
     )
 
-    if drawdown_extreme and monotonic_decay:
+    if drawdown_extreme and confirmed_decay:
         reasons.append(
             f"当前回撤处于研究期 {drawdown_percentile_pct:.1f} 分位，且超额与 IC 同步衰减"
         )
@@ -233,11 +234,14 @@ def assess_health(
         return HealthAssessment(
             HEALTH_WARNING, DIAGNOSIS_DRAWDOWN_EXTREME, ACTION_REDUCE_RISK, reasons
         )
-    if monotonic_decay:
+    if confirmed_decay:
         reasons.append("超额收益随监控窗口单调衰减，且因子 IC 同向衰减")
         return HealthAssessment(
             HEALTH_WARNING, DIAGNOSIS_ALPHA_DECAY, ACTION_RESEARCH, reasons
         )
+    if performance_decay:
+        reasons.append("超额收益随监控窗口单调衰减，但 IC 衰减证据不足")
+        return HealthAssessment(HEALTH_WATCH, DIAGNOSIS_ALPHA_DECAY, ACTION_WATCH, reasons)
 
     recent = [p for p in (trailing_alpha_percentiles or []) if p is not None]
     short_window = window_percentiles.get("3m")
@@ -264,36 +268,24 @@ def assess_health(
     return HealthAssessment(HEALTH_HEALTHY, DIAGNOSIS_NORMAL, ACTION_KEEP, reasons)
 
 
-def _is_monotonic_decay(
-    window_percentiles: dict[str, float | None],
-    ic_decay: dict[str, float | None] | None,
-) -> bool:
-    """判断是否存在"短窗口 < 中窗口 < 长窗口"的单调衰减。
-
-    同时要求因子 IC 同向衰减，避免把正常的窗口噪声误判为 Alpha 衰减。
-    IC 不可用（监控区间过短、因子无值）时不做否决——没有证据不能当作证据不足
-    以外的结论，避免用一个恒为假的检查把衰减告警永久屏蔽。
-
-    Args:
-        window_percentiles: 各窗口超额分位。
-        ic_decay: IC 前半段与后半段均值，可为 None。
-
-    Returns:
-        满足单调衰减时返回 True。
-    """
+def _has_monotonic_performance_decay(window_percentiles: dict[str, float | None]) -> bool:
+    """判断是否存在“短窗口 < 中窗口 < 长窗口”的收益分位衰减。"""
     order = ["3m", "6m", "12m"]
     values = [window_percentiles.get(label) for label in order]
     if any(v is None for v in values):
         return False
     p3, p6, p12 = values  # type: ignore[misc]
-    if not (p3 < p6 < p12):
-        return False
+    return p3 < p6 < p12
+
+
+def _has_ic_decay(ic_decay: dict[str, float | None] | None) -> bool:
+    """只有前后半段 IC 都可用且后半段更低时才确认 IC 衰减。"""
     if not ic_decay:
-        return True
+        return False
     first = ic_decay.get("first_half_mean")
     second = ic_decay.get("second_half_mean")
     if first is None or second is None:
-        return True
+        return False
     return second < first
 
 

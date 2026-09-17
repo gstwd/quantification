@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from quant_etf_api.schemas.backtest import BacktestCreateRequest
-from quant_etf_api.schemas.lifecycle import LifecycleOnlineRequest
+from quant_etf_api.schemas.lifecycle import LifecycleOnlineRequest, LifecycleStatusRequest
 from quant_etf_api.schemas.strategy import StrategyConfigUpdate
 from quant_etf_api.services import backtest_service as backtest_module
 from quant_etf_api.services.backtest_service import BacktestService
@@ -58,7 +58,7 @@ class TestBacktestPeriodGuard:
         )
         svc.create_backtest(req)
         row = svc._db.add.call_args[0][0]
-        assert row.params["_cost_bps"] == pytest.approx(10.0)
+        assert row.params["_cost_bps"] == pytest.approx(0.5)
         assert row.purpose == "research"
 
 
@@ -172,3 +172,22 @@ class TestLifecycleOnline:
         with pytest.raises(ValueError) as exc:
             svc.online("s1", LifecycleOnlineRequest(live_at=date(2025, 6, 1)))
         assert "验证期起点" in str(exc.value)
+
+
+class TestLifecycleRestore:
+    """恢复 LIVE 前必须确认策略仍是上线时冻结的版本。"""
+
+    def test_restore_live_rejects_changed_config(self) -> None:
+        svc = StrategyLifecycleService(db=MagicMock())
+        svc._find = MagicMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(
+                strategy_id="s1",
+                lifecycle_status="SUSPENDED",
+                frozen_config_hash="different",
+            )
+        )
+        svc._config_svc = MagicMock()
+        svc._config_svc.get_config.return_value = SimpleNamespace(config_json={"score": {}})
+        with pytest.raises(ValueError) as exc:
+            svc.update_status("s1", LifecycleStatusRequest(status="LIVE"))
+        assert "冻结版本" in str(exc.value)

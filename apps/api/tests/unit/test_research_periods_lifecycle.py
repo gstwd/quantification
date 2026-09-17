@@ -9,7 +9,6 @@ import pytest
 from quant_etf_api.domain.research.lifecycle import (
     ACTION_KEEP,
     ACTION_REDUCE_RISK,
-    ACTION_RESEARCH,
     ACTION_WATCH,
     DIAGNOSIS_ALPHA_DECAY,
     DIAGNOSIS_DRAWDOWN_EXTREME,
@@ -72,12 +71,27 @@ class TestPeriodRules:
             _BOUNDARIES, PURPOSE_RESEARCH, date(2016, 1, 1), date(2025, 12, 31)
         )
 
+    def test_research_cannot_start_before_research_period(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            validate_backtest_period(
+                _BOUNDARIES, PURPOSE_RESEARCH, date(2015, 12, 31), date(2025, 12, 31)
+            )
+        assert "研究期起点" in str(exc.value)
+
     @pytest.mark.parametrize("purpose", [PURPOSE_VALIDATION, PURPOSE_MONITOR])
     def test_validation_purposes_may_use_validation_data(self, purpose: str) -> None:
         """验证与监控用途允许使用验证期数据。"""
         validate_backtest_period(
             _BOUNDARIES, purpose, date(2026, 1, 1), date(2026, 9, 13)
         )
+
+    @pytest.mark.parametrize("purpose", [PURPOSE_VALIDATION, PURPOSE_MONITOR])
+    def test_validation_purposes_reject_research_dates(self, purpose: str) -> None:
+        with pytest.raises(ValueError) as exc:
+            validate_backtest_period(
+                _BOUNDARIES, purpose, date(2025, 12, 31), date(2026, 1, 5)
+            )
+        assert "验证期起点" in str(exc.value)
 
     def test_unknown_purpose_raises(self) -> None:
         """未知用途直接拒绝。"""
@@ -143,12 +157,12 @@ class TestHealthAssessment:
         assert result.diagnosis == DIAGNOSIS_DRAWDOWN_EXTREME
         assert result.recommended_action == ACTION_REDUCE_RISK
 
-    def test_monotonic_decay_triggers_warning(self) -> None:
-        """超额随窗口单调衰减时判定为 Alpha 衰减。"""
+    def test_monotonic_decay_without_ic_triggers_watch(self) -> None:
+        """收益衰减但没有 IC 证据时只进入观察。"""
         result = assess_health(30.0, {"3m": 2.0, "6m": 20.0, "12m": 60.0})
-        assert result.health_level == HEALTH_WARNING
+        assert result.health_level == HEALTH_WATCH
         assert result.diagnosis == DIAGNOSIS_ALPHA_DECAY
-        assert result.recommended_action == ACTION_RESEARCH
+        assert result.recommended_action == ACTION_WATCH
 
     def test_decay_not_confirmed_when_ic_improves(self) -> None:
         """IC 未同步衰减时不应把窗口差异判为 Alpha 衰减。"""
@@ -157,7 +171,8 @@ class TestHealthAssessment:
             {"3m": 2.0, "6m": 20.0, "12m": 60.0},
             ic_decay={"first_half_mean": 0.01, "second_half_mean": 0.03},
         )
-        assert result.diagnosis == DIAGNOSIS_NORMAL
+        assert result.health_level == HEALTH_WATCH
+        assert result.diagnosis == DIAGNOSIS_ALPHA_DECAY
 
     def test_decay_confirmed_when_ic_also_decays(self) -> None:
         """超额与 IC 同步衰减时判定为 Alpha 衰减。"""
@@ -168,18 +183,22 @@ class TestHealthAssessment:
         )
         assert result.diagnosis == DIAGNOSIS_ALPHA_DECAY
 
-    def test_decay_detected_when_ic_unavailable(self) -> None:
-        """IC 不可用时不否决衰减结论（避免恒假检查屏蔽告警）。"""
+    def test_decay_without_ic_is_not_confirmed(self) -> None:
+        """IC 不可用时收益衰减不能升级为确认的 Alpha 衰减告警。"""
         result = assess_health(
             30.0,
             {"3m": 2.0, "6m": 20.0, "12m": 60.0},
             ic_decay={"first_half_mean": None, "second_half_mean": None},
         )
-        assert result.diagnosis == DIAGNOSIS_ALPHA_DECAY
+        assert result.health_level == HEALTH_WATCH
 
-    def test_drawdown_plus_decay_is_critical(self) -> None:
-        """回撤极端且存在衰减时升级为严重。"""
-        result = assess_health(99.0, {"3m": 2.0, "6m": 20.0, "12m": 60.0})
+    def test_drawdown_plus_confirmed_decay_is_critical(self) -> None:
+        """回撤极端且收益、IC 均衰减时升级为严重。"""
+        result = assess_health(
+            99.0,
+            {"3m": 2.0, "6m": 20.0, "12m": 60.0},
+            ic_decay={"first_half_mean": 0.04, "second_half_mean": 0.01},
+        )
         assert result.health_level == HEALTH_CRITICAL
         assert result.diagnosis == DIAGNOSIS_ALPHA_DECAY
 

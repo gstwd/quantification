@@ -22,8 +22,8 @@ class TimingThresholds(BaseModel):
         defensive: 综合得分 <= 此值时判定为防守 regime。
     """
 
-    offensive: float = 65.0
-    defensive: float = 35.0
+    offensive: float = Field(default=65.0, ge=0.0, le=100.0)
+    defensive: float = Field(default=35.0, ge=0.0, le=100.0)
 
 
 class TimingConfig(BaseModel):
@@ -111,8 +111,8 @@ class RankConfig(BaseModel):
 
     sort_by: str = "score"
     order: str = "desc"
-    top_n: int | None = None
-    bottom_n: int | None = None
+    top_n: int | None = Field(default=None, ge=1)
+    bottom_n: int | None = Field(default=None, ge=1)
     momentum_factor: str = "return_20d"
     valuation_factor: str = "pe_percentile"
 
@@ -128,7 +128,7 @@ class PortfolioConfig(BaseModel):
 
     method: str
     timing_exposure: dict[str, float] | None = None
-    default_exposure: float = 0.50
+    default_exposure: float = Field(default=0.50, ge=0.0, le=1.0)
 
 
 class RiskConfig(BaseModel):
@@ -140,9 +140,9 @@ class RiskConfig(BaseModel):
         min_cash_ratio: 最低现金比例。
     """
 
-    max_asset_weight: float = 0.30
-    max_portfolio_exposure: float = 1.0
-    min_cash_ratio: float = 0.0
+    max_asset_weight: float = Field(default=0.30, gt=0.0, le=1.0)
+    max_portfolio_exposure: float = Field(default=1.0, ge=0.0, le=1.0)
+    min_cash_ratio: float = Field(default=0.0, ge=0.0, lt=1.0)
 
 
 class RebalanceConfig(BaseModel):

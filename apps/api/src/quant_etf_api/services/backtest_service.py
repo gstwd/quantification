@@ -273,6 +273,7 @@ class BacktestService:
         self,
         req: BacktestCreateRequest,
         optimization_id: str | None = None,
+        config_snapshot_override: dict[str, Any] | None = None,
     ) -> BacktestSummary:
         """创建回测记录，状态为 pending，立即返回。
 
@@ -284,6 +285,8 @@ class BacktestService:
         Args:
             req: 创建回测请求。
             optimization_id: 关联的优化会话 ID（由优化 CLI 写入），普通回测为 None。
+            config_snapshot_override: 内部调用可指定不可变策略快照；生命周期监控
+                使用它保证回测对象与上线时冻结的配置一致。
 
         Returns:
             回测摘要。
@@ -300,7 +303,11 @@ class BacktestService:
 
         # 加载策略配置，检查是否有 index_codes 限定
         config_svc = StrategyConfigService(self._db)
-        strategy_config = config_svc.get_parsed_config(req.strategy_id)
+        strategy_config = (
+            config_svc.parse_snapshot(config_snapshot_override)
+            if config_snapshot_override is not None
+            else config_svc.get_parsed_config(req.strategy_id)
+        )
         if strategy_config is None:
             raise ValueError(f"策略 {req.strategy_id} 配置不存在或解析失败，无法执行回测")
 
@@ -344,19 +351,22 @@ class BacktestService:
         params["_turnover_model"] = TURNOVER_MODEL_DELTA_W
 
         # 创建时快照策略配置，保证回测结果与当时配置严格对应
-        config_snapshot: dict[str, Any] | None = None
+        config_snapshot: dict[str, Any] | None = config_snapshot_override
         config_hash: str | None = None
         try:
-            detail = config_svc.get_config(req.strategy_id)
-            if detail is not None:
-                config_snapshot = {
-                    "strategy_id": detail.strategy_id,
-                    "display_name": detail.display_name,
-                    "version": detail.version,
-                    "frequency": detail.frequency,
-                    "config_json": detail.config_json,
-                }
-                config_hash = compute_config_hash(detail.config_json)
+            if config_snapshot_override is not None:
+                config_hash = compute_config_hash(config_snapshot_override["config_json"])
+            else:
+                detail = config_svc.get_config(req.strategy_id)
+                if detail is not None:
+                    config_snapshot = {
+                        "strategy_id": detail.strategy_id,
+                        "display_name": detail.display_name,
+                        "version": detail.version,
+                        "frequency": detail.frequency,
+                        "config_json": detail.config_json,
+                    }
+                    config_hash = compute_config_hash(detail.config_json)
         except Exception:
             # 快照属于增强能力，读取失败不应阻塞回测创建；
             # 无快照时 run_backtest 会回退到实时配置

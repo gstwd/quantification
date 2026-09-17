@@ -17,8 +17,8 @@ from datetime import date
 
 # 年化系数与绩效指标模块保持一致，避免"汇总一套、稳健性一套"的口径漂移
 DEFAULT_TRADING_DAYS_PER_YEAR = 252
-# 默认单边交易成本（基点）：1bp = 0.01%，与 v8 验证使用的成本档位对齐
-DEFAULT_COST_BPS = 10.0
+# 默认单边交易成本（基点）：1bp = 0.01%
+DEFAULT_COST_BPS = 0.5
 
 
 @dataclass

@@ -105,11 +105,11 @@ class Settings(BaseSettings):
     # 回测与监控的默认交易成本（单边，基点）：系统回测为毛收益口径，
     # 净口径指标按"单边换手率 × cost_bps"在读取路径折算
     default_cost_bps: float = Field(
-        default=10.0, ge=0.0, description="默认单边交易成本（基点），用于净口径指标折算"
+        default=0.5, ge=0.0, description="默认单边交易成本（基点），用于净口径指标折算"
     )
     # 净口径多档并列（C3）：读取路径按该梯子现算，无需重跑回测；0 表示毛口径
     stability_cost_ladder: list[float] = Field(
-        default_factory=lambda: [0.0, 10.0, 20.0, 30.0, 50.0],
+        default_factory=lambda: [0.0, 0.5, 5.0, 10.0],
         description=("回测详情并列展示的净口径成本档位（基点，JSON 数组）；0 表示毛口径"),
     )
     # 有效候选池时间线（C6）：剔除明细最多保留多少条指数区间

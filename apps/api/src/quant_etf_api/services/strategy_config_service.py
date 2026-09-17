@@ -479,6 +479,29 @@ class StrategyConfigService:
         # 择时代理指数校验
         if config.timing and not config.timing.proxy_index_codes:
             errors.append("timing.proxy_index_codes 不能为空")
+        if config.timing and config.timing.thresholds.defensive > config.timing.thresholds.offensive:
+            errors.append("timing.thresholds.defensive 不能大于 offensive")
+        portfolio_configs = [("portfolio", config.portfolio)]
+        portfolio_configs.extend(
+            (f"regime_rules.{regime}.portfolio", rule.portfolio)
+            for regime, rule in config.regime_rules.items()
+            if rule.portfolio is not None
+        )
+        valid_regimes = {"offensive", "neutral", "defensive"}
+        for path, portfolio in portfolio_configs:
+            if not portfolio.timing_exposure:
+                continue
+            unknown_regimes = set(portfolio.timing_exposure) - valid_regimes
+            if unknown_regimes:
+                errors.append(
+                    f"{path}.timing_exposure 包含未知 regime: "
+                    + ", ".join(sorted(unknown_regimes))
+                )
+            for regime, exposure in portfolio.timing_exposure.items():
+                if not 0.0 <= exposure <= 1.0:
+                    errors.append(
+                        f"{path}.timing_exposure.{regime} 必须在 [0, 1] 范围内"
+                    )
 
         # 评分权重校验
         for factor_id, weight in config.score.factors.items():
@@ -513,7 +536,7 @@ class StrategyConfigService:
 
         # 排名配置校验
         if config.rank.top_n is not None and config.rank.bottom_n is not None:
-            warnings.append("top_n 和 bottom_n 同时设置，top_n 优先")
+            errors.append("top_n 和 bottom_n 不能同时设置")
 
         # 组合配置校验
         valid_methods = {"equal_weight", "score_weight", "winner_take_all"}
@@ -528,6 +551,8 @@ class StrategyConfigService:
                 errors.append("max_asset_weight 必须在 (0, 1] 范围内")
             if config.risk.min_cash_ratio < 0 or config.risk.min_cash_ratio >= 1:
                 errors.append("min_cash_ratio 必须在 [0, 1) 范围内")
+            if config.risk.max_portfolio_exposure > 1 - config.risk.min_cash_ratio:
+                errors.append("max_portfolio_exposure 不能大于 1 - min_cash_ratio")
 
         # 调仓配置校验（warning 级）：不阻塞历史配置，但显式提示口径歧义
         if config.rebalance:

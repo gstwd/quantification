@@ -69,11 +69,22 @@ def validate_backtest_period(
         raise ValueError(f"未知的回测用途：{purpose}，可选值为 {', '.join(ALL_PURPOSES)}")
     if start > end:
         raise ValueError(f"回测起始日期 {start} 不能晚于截止日期 {end}")
-    if purpose == PURPOSE_RESEARCH and boundaries.is_validation_scope(end):
+    if purpose == PURPOSE_RESEARCH:
+        if start < boundaries.research_start:
+            raise ValueError(
+                f"研究类回测不得早于研究期起点 {boundaries.research_start.isoformat()}："
+                f"起始日期 {start.isoformat()} 不属于当前研究期。"
+            )
+        if boundaries.is_validation_scope(end):
+            raise ValueError(
+                f"研究类回测不得越过研究期末端 {boundaries.research_end.isoformat()}："
+                f"截止日期 {end.isoformat()} 属于验证期数据。"
+                "验证期数据只能用于否决，不能用于研究调参；"
+                "如需验收请使用 purpose=validation，"
+                "上线后监控请使用 purpose=monitor。"
+            )
+    elif start < boundaries.validation_start:
         raise ValueError(
-            f"研究类回测不得越过研究期末端 {boundaries.research_end.isoformat()}："
-            f"截止日期 {end.isoformat()} 属于验证期数据。"
-            "验证期数据只能用于否决，不能用于研究调参；"
-            "如需验收请使用 purpose=validation，"
-            "上线后监控请使用 purpose=monitor。"
+            f"{purpose} 回测必须从验证期起点 {boundaries.validation_start.isoformat()} "
+            f"或之后开始：起始日期为 {start.isoformat()}。"
         )

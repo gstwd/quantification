@@ -249,6 +249,16 @@ class StrategyLifecycleService:
         row = self._find(strategy_id)
         if row is None:
             raise ValueError(f"策略 {strategy_id} 尚未标记上线，无法变更生命周期状态")
+        if req.status == "LIVE":
+            current = self._config_svc.get_config(strategy_id)
+            if current is None:
+                raise ValueError(f"策略 {strategy_id} 不存在，无法恢复上线")
+            current_hash = compute_config_hash(current.config_json)
+            if current_hash != row.frozen_config_hash:
+                raise ValueError(
+                    f"策略 {strategy_id} 的当前配置已不同于上线冻结版本，"
+                    "不能直接恢复 LIVE；请重新执行上线以重建研究期基线。"
+                )
         row.lifecycle_status = req.status
         if req.status == "RETIRED":
             row.retired_at = today_cn()
@@ -285,6 +295,10 @@ class StrategyLifecycleService:
             raise ValueError(f"策略 {strategy_id} 尚未标记上线，无法刷新健康快照")
         if row.lifecycle_status == "RETIRED":
             raise ValueError(f"策略 {strategy_id} 已退役，不再接受健康刷新")
+        if not row.frozen_config_snapshot:
+            raise ValueError(
+                f"策略 {strategy_id} 缺少上线冻结配置，无法生成可审计监控；请重新执行上线。"
+            )
 
         live_start = row.live_at
         live_end = today_cn()
@@ -302,7 +316,8 @@ class StrategyLifecycleService:
                 purpose=PURPOSE_MONITOR,
                 purpose_reason=f"lifecycle refresh: {strategy_id}",
                 cost_bps=cost_bps,
-            )
+            ),
+            config_snapshot_override=row.frozen_config_snapshot,
         )
         self._backtest_svc.run_backtest(created.backtest_id)
         run_detail = self._backtest_svc.get_backtest(created.backtest_id)
@@ -333,11 +348,13 @@ class StrategyLifecycleService:
             for label, entry in (evaluation.get("windows") or {}).items()
         }
         drawdown_percentile = (evaluation.get("drawdown") or {}).get("percentile_pct")
-        ic_metrics = self._compute_factor_ic(strategy_id, live_start, live_end, live_end)
+        ic_metrics = self._compute_factor_ic(
+            strategy_id, live_start, live_end, live_end, row.frozen_config_snapshot
+        )
         assessment = assess_health(
             drawdown_percentile,
             window_percentiles,
-            trailing_alpha_percentiles=self._trailing_alpha_percentiles(strategy_id),
+            trailing_alpha_percentiles=self._trailing_alpha_percentiles(strategy_id, live_end),
             ic_decay=ic_metrics.get("ic_decay"),
         )
 
@@ -367,6 +384,15 @@ class StrategyLifecycleService:
                 "average_exposure": stability.average_exposure,
             },
             "evaluation": evaluation,
+            "evaluation_window_periods": {
+                label: {
+                    "start": trade_dates[-int(entry["days"])].isoformat()
+                    if entry.get("available") and len(trade_dates) >= int(entry["days"])
+                    else None,
+                    "end": live_end.isoformat() if entry.get("available") else None,
+                }
+                for label, entry in (evaluation.get("windows") or {}).items()
+            },
             "factors": ic_metrics,
             "validation_backtest_id": created.backtest_id,
         }
@@ -456,7 +482,9 @@ class StrategyLifecycleService:
             [r.trade_date for r in daily_rows],
         )
 
-    def _trailing_alpha_percentiles(self, strategy_id: str) -> list[float | None]:
+    def _trailing_alpha_percentiles(
+        self, strategy_id: str, as_of_date: date
+    ) -> list[float | None]:
         """取最近几次快照的 3M 超额分位，用于判断"连续多次低于阈值"。
 
         Args:
@@ -470,20 +498,38 @@ class StrategyLifecycleService:
                 self._db.query(StrategyHealthSnapshotModel)
                 .filter(StrategyHealthSnapshotModel.strategy_id == strategy_id)
                 .order_by(StrategyHealthSnapshotModel.computed_at.desc())
-                .limit(5)
+                .limit(24)
                 .all()
             )
         except Exception:
             logger.warning("读取历史快照失败", exc_info=True)
             return []
         result: list[float | None] = []
+        selected_dates: list[date] = [as_of_date]
         for row in rows:
+            if any(
+                len(
+                    self._backtest_svc._index_bar_repo.find_all_trading_dates(  # noqa: SLF001
+                        row.as_of_date, selected
+                    )
+                ) <= 21
+                for selected in selected_dates
+            ):
+                continue
             windows = ((row.metrics or {}).get("evaluation") or {}).get("windows") or {}
             result.append((windows.get("3m") or {}).get("excess_return_percentile_pct"))
+            selected_dates.append(row.as_of_date)
+            if len(result) == 5:
+                break
         return result
 
     def _compute_factor_ic(
-        self, strategy_id: str, start: date, end: date, as_of: date
+        self,
+        strategy_id: str,
+        start: date,
+        end: date,
+        as_of: date,
+        config_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """计算策略引用因子在监控区间的 Rank IC 与 ICIR。
 
@@ -500,7 +546,11 @@ class StrategyLifecycleService:
         Returns:
             含 factor_ids / per_factor / ic_mean / ic_ir / window_ic 的字典。
         """
-        config = self._config_svc.get_parsed_config(strategy_id)
+        config = (
+            self._config_svc.parse_snapshot(config_snapshot)
+            if config_snapshot is not None
+            else self._config_svc.get_parsed_config(strategy_id)
+        )
         factor_ids: list[str] = []
         if config is not None:
             score = getattr(config, "score", None)
