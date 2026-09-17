@@ -897,14 +897,22 @@ export interface StarredStrategyItem {
   strategy_id: string
   display_name: string
   frequency: string
-  /** 是否为调仓日 */
+  /** 是否为调仓日（两腿任一到期） */
   is_rebalance_day: boolean
-  /** 调仓频率（daily/weekly/monthly） */
+  /** 选股腿当日是否到期（重建成分） */
+  is_selection_rebalance_day: boolean
+  /** 风险腿当日是否到期（按择时等比缩放总仓位） */
+  is_risk_rebalance_day: boolean
+  /** 选股腿调仓频率（daily/weekly/biweekly/monthly） */
   rebalance_frequency: string | null
-  /** 周度调仓的星期几（0=周一） */
+  /** 选股腿周度调仓的星期几（0=周一） */
   rebalance_day_of_week: number | null
-  /** 月度调仓的日期（1-31） */
+  /** 选股腿月度调仓的日期（1-31） */
   rebalance_day_of_month: number | null
+  /** 选股腿日程（frequency/day_of_week/week_parity/day_of_month） */
+  selection_rebalance_schedule: Record<string, unknown> | null
+  /** 风险腿日程（两腿日程一致时等价于改造前的单腿口径） */
+  risk_rebalance_schedule: Record<string, unknown> | null
   timing: AllocationTiming | null
   rankings: AllocationRanking[]
   plan: AllocationPlan

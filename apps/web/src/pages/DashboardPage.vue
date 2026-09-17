@@ -114,9 +114,19 @@
             <span :class="['rebalance-badge', item.is_rebalance_day ? 'rebalance-yes' : 'rebalance-no']">
               {{ item.is_rebalance_day ? '今日调仓' : '非调仓日' }}
             </span>
-            <span v-if="!item.is_rebalance_day" class="rebalance-detail">
-              {{ formatRebalanceLabel(item) }}
+            <span v-if="item.is_selection_rebalance_day" class="rebalance-detail">选股腿到期</span>
+            <span v-if="item.is_risk_rebalance_day" class="rebalance-detail">风险腿到期</span>
+            <span v-if="legsIdentical(item)" class="rebalance-detail">
+              两腿同频：{{ formatRebalanceLabel(item.selection_rebalance_schedule, item.rebalance_frequency, item.rebalance_day_of_week, item.rebalance_day_of_month) }}
             </span>
+            <template v-else>
+              <span class="rebalance-detail">
+                选股腿：{{ formatRebalanceLabel(item.selection_rebalance_schedule, item.rebalance_frequency, item.rebalance_day_of_week, item.rebalance_day_of_month) }}
+              </span>
+              <span class="rebalance-detail">
+                风险腿：{{ formatRebalanceLabel(item.risk_rebalance_schedule, 'daily', null, null) }}
+              </span>
+            </template>
             <span v-if="item.data_date" class="exec-date">
               数据截止 {{ formatExecDate(item.data_date) }}
             </span>
@@ -382,7 +392,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import type { DailySentimentResponse, MarketSynthesisResponse, StarredSummaryResponse, SystemStatusResponse, TagNewsItem } from '../types/api'
+import type { DailySentimentResponse, MarketSynthesisResponse, StarredStrategyItem, StarredSummaryResponse, SystemStatusResponse, TagNewsItem } from '../types/api'
 import { fetchSystemStatus } from '../api/runs'
 import { fetchDailySentiment, fetchMarketSynthesis, fetchPreviousTradingDay, fetchSentimentNews } from '../api/aiFactors'
 import { fetchStarredSummary } from '../api/strategies'
@@ -546,14 +556,35 @@ function formatExecDate(dateStr: string): string {
   return `${mm}-${dd}`
 }
 
+/** 两条腿的日程是否等价（等价时合并展示为单腿口径） */
+function legsIdentical(item: StarredStrategyItem): boolean {
+  const selection = item.selection_rebalance_schedule
+  const risk = item.risk_rebalance_schedule
+  if (!selection || !risk) return true
+  const keys = ['frequency', 'day_of_week', 'week_parity', 'day_of_month']
+  return keys.every(k => (selection[k] ?? null) === (risk[k] ?? null))
+}
+
 /** 格式化调仓频率标签 */
-function formatRebalanceLabel(item: { rebalance_frequency: string | null; rebalance_day_of_week: number | null; rebalance_day_of_month: number | null }): string {
+function formatRebalanceLabel(
+  schedule: Record<string, unknown> | null,
+  fallbackFrequency: string | null,
+  fallbackDayOfWeek: number | null,
+  fallbackDayOfMonth: number | null,
+): string {
   const weekNames = ['周一', '周二', '周三', '周四', '周五']
-  if (item.rebalance_frequency === 'weekly' && item.rebalance_day_of_week != null) {
-    return `每${weekNames[item.rebalance_day_of_week] || '五'}调仓`
+  const frequency = (schedule?.frequency as string | undefined) || fallbackFrequency || 'daily'
+  const dayOfWeek = (schedule?.day_of_week as number | undefined) ?? fallbackDayOfWeek
+  const dayOfMonth = (schedule?.day_of_month as number | undefined) ?? fallbackDayOfMonth
+  if (frequency === 'biweekly') {
+    const parity = schedule?.week_parity === 'odd' ? '奇数' : '偶数'
+    return `双周${parity}周（ISO）${weekNames[dayOfWeek ?? 4]}`
   }
-  if (item.rebalance_frequency === 'monthly' && item.rebalance_day_of_month != null) {
-    return `每月${item.rebalance_day_of_month}日调仓`
+  if (frequency === 'weekly' && dayOfWeek != null) {
+    return `每${weekNames[dayOfWeek] || '五'}调仓`
+  }
+  if (frequency === 'monthly' && dayOfMonth != null) {
+    return `每月${dayOfMonth}日调仓`
   }
   return '每日调仓'
 }

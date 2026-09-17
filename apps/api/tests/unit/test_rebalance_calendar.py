@@ -25,6 +25,7 @@ from quant_etf_api.engine.config import (
     PortfolioConfig,
     RankConfig,
     RebalanceConfig,
+    RebalanceScheduleConfig,
     RiskConfig,
     ScoreConfig,
     StrategyConfig,
@@ -64,7 +65,13 @@ class _BrokenCalendar:
 
 
 def _config(frequency: str | None) -> StrategyConfig:
-    """构造带可选调仓频率的最小策略配置。"""
+    """构造带可选调仓频率的最小策略配置（两腿同频，等价旧单腿口径）。"""
+    schedule: dict[str, Any] = {"frequency": frequency} if frequency else {}
+    if frequency == "biweekly":
+        schedule["day_of_week"] = 3
+        schedule["week_parity"] = "odd"
+    elif frequency:
+        schedule["day_of_week"] = 3
     return StrategyConfig(
         strategy_id="t_cal",
         display_name="t_cal",
@@ -73,7 +80,21 @@ def _config(frequency: str | None) -> StrategyConfig:
         rank=RankConfig(top_n=1),
         portfolio=PortfolioConfig(method="equal_weight"),
         risk=RiskConfig(max_asset_weight=1.0),
-        rebalance=RebalanceConfig(frequency=frequency, day_of_week=3) if frequency else None,
+        rebalance=RebalanceConfig(**schedule) if frequency else None,
+    )
+
+
+def _split_config(selection: RebalanceScheduleConfig, risk: RebalanceScheduleConfig) -> StrategyConfig:
+    """构造两腿频率不同的策略配置。"""
+    return StrategyConfig(
+        strategy_id="t_cal_split",
+        display_name="t_cal_split",
+        index_codes=["000300"],
+        score=ScoreConfig(factors={"return_5d": 1.0}),
+        rank=RankConfig(top_n=1),
+        portfolio=PortfolioConfig(method="equal_weight"),
+        risk=RiskConfig(max_asset_weight=1.0),
+        rebalance=RebalanceConfig(selection=selection, risk=risk),
     )
 
 
@@ -177,6 +198,54 @@ class TestResolveRebalanceCalendar:
         with pytest.raises(TradingCalendarUnavailableError):
             svc._resolve_rebalance_calendar(_row(), _config("monthly"))
 
+    def test_biweekly_requires_calendar(self, monkeypatch) -> None:
+        """双周调仓同样必须解析真实日历（新频率不能绕过 C1 严格口径）。"""
+        svc = _service()
+        monkeypatch.setattr(
+            "quant_etf_api.services.backtest_service.resolve_trading_calendar",
+            lambda db, required_range=None: (_StubCalendar(set(DATES)), "database"),
+        )
+        row = _row()
+        source = svc._resolve_rebalance_calendar(row, _config("biweekly"))
+        assert source == "database"
+        assert row.params["_calendar_source"] == "database"
+
+    def test_split_legs_risk_weekly_still_requires_calendar(self, monkeypatch) -> None:
+        """选股腿每日但风险腿双周时仍需日历（两腿都要检查）。"""
+        svc = _service()
+        monkeypatch.setattr(
+            "quant_etf_api.services.backtest_service.resolve_trading_calendar",
+            lambda db, required_range=None: (_StubCalendar(set(DATES)), "database"),
+        )
+        row = _row()
+        source = svc._resolve_rebalance_calendar(
+            row,
+            _split_config(
+                RebalanceScheduleConfig(frequency="daily"),
+                RebalanceScheduleConfig(frequency="biweekly", week_parity="odd"),
+            ),
+        )
+        assert source == "database"
+        assert row.params["_calendar_source"] == "database"
+
+    def test_both_legs_daily_marks_not_required(self, monkeypatch) -> None:
+        """两腿都是每日调仓时不解析日历。"""
+        svc = _service()
+        called = MagicMock()
+        monkeypatch.setattr(
+            "quant_etf_api.services.backtest_service.resolve_trading_calendar", called
+        )
+        row = _row()
+        source = svc._resolve_rebalance_calendar(
+            row,
+            _split_config(
+                RebalanceScheduleConfig(frequency="daily"),
+                RebalanceScheduleConfig(frequency="daily"),
+            ),
+        )
+        assert source == "not_required"
+        called.assert_not_called()
+
     def test_check_rebalance_without_scheduler_raises(self) -> None:
         """未解析日历却走到调仓判断时显式报错（防止静默改为每日调仓）。"""
         svc = _service()
@@ -252,3 +321,4 @@ class TestCalendarWarning:
         svc._run_backtest_loop("bt-cal", ctx["row"], _config("weekly"))
         codes = [w["code"] for w in svc._backtest_repo.mark_success.call_args.kwargs["warnings"]]
         assert "CALENDAR_SOURCE_DATABASE" not in codes
+

@@ -26,7 +26,8 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.time import today_cn
 
-from quant_etf_api.engine.config import StrategyConfig
+from quant_etf_api.domain.strategies.rebalance import select_active_legs
+from quant_etf_api.engine.config import RebalanceScheduleConfig, StrategyConfig
 from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.orchestrator import StrategyEngine
 from quant_etf_api.factors.base import MissingReason
@@ -483,26 +484,30 @@ class StrategyDecisionService:
                     continue
 
                 actual_date = allocation.data_date
-                if config.rebalance is not None:
-                    is_rebalance_day = scheduler.should_rebalance(
-                        config.rebalance, actual_date, None
-                    )
-                else:
-                    # 无调仓配置默认视为每日调仓
-                    is_rebalance_day = True
-
+                # 两腿口径与回测共用领域实现，避免"回测按双腿、实时按单腿"的口径分叉
+                legs = select_active_legs(
+                    scheduler, config.rebalance, actual_date, None, None
+                )
                 rebalance_cfg = config.rebalance
+                selection_schedule = (
+                    rebalance_cfg.selection if rebalance_cfg is not None else RebalanceScheduleConfig()
+                )
+                risk_schedule = (
+                    rebalance_cfg.risk if rebalance_cfg is not None else RebalanceScheduleConfig()
+                )
                 items.append(
                     StarredStrategyItem(
                         strategy_id=row.strategy_id,
                         display_name=row.display_name,
                         frequency=row.frequency,
-                        is_rebalance_day=is_rebalance_day,
-                        rebalance_frequency=rebalance_cfg.frequency if rebalance_cfg else "daily",
-                        rebalance_day_of_week=rebalance_cfg.day_of_week if rebalance_cfg else None,
-                        rebalance_day_of_month=rebalance_cfg.day_of_month
-                        if rebalance_cfg
-                        else None,
+                        is_rebalance_day=legs.selection or legs.risk,
+                        is_selection_rebalance_day=legs.selection,
+                        is_risk_rebalance_day=legs.risk,
+                        rebalance_frequency=selection_schedule.frequency,
+                        rebalance_day_of_week=selection_schedule.day_of_week,
+                        rebalance_day_of_month=selection_schedule.day_of_month,
+                        selection_rebalance_schedule=selection_schedule.model_dump(),
+                        risk_rebalance_schedule=risk_schedule.model_dump(),
                         timing=allocation.timing,
                         rankings=allocation.rankings,
                         plan=allocation.plan,

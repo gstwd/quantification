@@ -144,9 +144,13 @@ class StarredStrategyItem(BaseModel):
     display_name: str
     frequency: str
     is_rebalance_day: bool
+    is_selection_rebalance_day: bool = False
+    is_risk_rebalance_day: bool = False
     rebalance_frequency: str | None = None
     rebalance_day_of_week: int | None = None
     rebalance_day_of_month: int | None = None
+    selection_rebalance_schedule: dict[str, Any] | None = None
+    risk_rebalance_schedule: dict[str, Any] | None = None
     timing: dict[str, Any] | None = None
     rankings: list[dict[str, Any]] = Field(default_factory=list)
     plan: dict[str, Any] = Field(default_factory=dict)

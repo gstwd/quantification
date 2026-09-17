@@ -552,20 +552,24 @@
         <span :class="['arrow', expanded.rebalance ? 'open' : '']">▾</span>
       </div>
       <div v-show="rebalanceEnabled && expanded.rebalance" class="module-body">
-        <div class="module-desc">控制策略调仓频率。周度/月度可指定具体调仓日。回测中非调仓日沿用上次持仓。</div>
+        <div class="module-desc">
+          启用调仓模块时两条腿同时生效：<b>选股腿</b>重建成分，<b>风险腿</b>只把现有成分等比缩放到择时目标仓位。
+          两腿日程一致时等价于"每个调仓日重建成分 + 应用择时仓位"（与旧配置行为一致）。
+        </div>
 
         <div class="sub-field">
-          <label class="sub-label">调仓频率</label>
-          <select v-model="rebalanceFrequency" class="fp-select">
+          <label class="sub-label">选股腿频率</label>
+          <select v-model="selectionFrequency" class="fp-select">
             <option value="daily">每日</option>
             <option value="weekly">每周</option>
+            <option value="biweekly">双周</option>
             <option value="monthly">每月</option>
           </select>
         </div>
 
-        <div v-if="rebalanceFrequency === 'weekly'" class="sub-field">
-          <label class="sub-label">周调仓日</label>
-          <select v-model.number="rebalanceDayOfWeek" class="fp-select">
+        <div v-if="selectionFrequency === 'weekly' || selectionFrequency === 'biweekly'" class="sub-field">
+          <label class="sub-label">选股腿周调仓日</label>
+          <select v-model.number="selectionDayOfWeek" class="fp-select">
             <option :value="0">周一</option>
             <option :value="1">周二</option>
             <option :value="2">周三</option>
@@ -574,10 +578,19 @@
           </select>
         </div>
 
-        <div v-if="rebalanceFrequency === 'monthly'" class="sub-field">
-          <label class="sub-label">月调仓日</label>
+        <div v-if="selectionFrequency === 'biweekly'" class="sub-field">
+          <label class="sub-label">选股腿周次</label>
+          <select v-model="selectionWeekParity" class="fp-select">
+            <option value="odd">奇数周（ISO 周序）</option>
+            <option value="even">偶数周（ISO 周序）</option>
+          </select>
+          <span class="threshold-hint">双周必须指定奇/偶周：按 ISO 周序的奇偶决定哪一周调仓（第 1 周起算）。</span>
+        </div>
+
+        <div v-if="selectionFrequency === 'monthly'" class="sub-field">
+          <label class="sub-label">选股腿月调仓日</label>
           <input
-            v-model.number="rebalanceDayOfMonth"
+            v-model.number="selectionDayOfMonth"
             type="number"
             min="1"
             max="28"
@@ -585,6 +598,54 @@
             placeholder="1-28"
           />
           <span class="threshold-hint">每月第几日调仓（1-28；遇非交易日顺延至其后第一个交易日，日期超出当月天数时按当月最后一日处理）</span>
+        </div>
+
+        <div class="sub-field">
+          <label class="sub-label">
+            <input type="checkbox" v-model="riskSameAsSelection" />
+            风险腿与选股腿同频
+          </label>
+          <span class="threshold-hint">勾选时两腿日程一致（推荐，等价改造前的单腿口径）；取消勾选可让仓位与成分按不同频率调整。</span>
+        </div>
+
+        <template v-if="!riskSameAsSelection">
+          <div class="sub-field">
+            <label class="sub-label">风险腿频率</label>
+            <select v-model="riskFrequency" class="fp-select">
+              <option value="daily">每日</option>
+              <option value="weekly">每周</option>
+              <option value="biweekly">双周</option>
+              <option value="monthly">每月</option>
+            </select>
+          </div>
+          <div v-if="riskFrequency === 'weekly' || riskFrequency === 'biweekly'" class="sub-field">
+            <label class="sub-label">风险腿周调仓日</label>
+            <select v-model.number="riskDayOfWeek" class="fp-select">
+              <option :value="0">周一</option>
+              <option :value="1">周二</option>
+              <option :value="2">周三</option>
+              <option :value="3">周四</option>
+              <option :value="4">周五</option>
+            </select>
+          </div>
+          <div v-if="riskFrequency === 'biweekly'" class="sub-field">
+            <label class="sub-label">风险腿周次</label>
+            <select v-model="riskWeekParity" class="fp-select">
+              <option value="odd">奇数周（ISO 周序）</option>
+              <option value="even">偶数周（ISO 周序）</option>
+            </select>
+          </div>
+          <div v-if="riskFrequency === 'monthly'" class="sub-field">
+            <label class="sub-label">风险腿月调仓日</label>
+            <input v-model.number="riskDayOfMonth" type="number" min="1" max="28" class="fp-input" placeholder="1-28" />
+          </div>
+          <div class="threshold-hint">
+            提示：两腿日程不同时，选股腿日只替换成分、维持当前总仓位；总仓位仅在风险腿日按择时目标调整。
+          </div>
+        </template>
+
+        <div v-if="!timingEnabled" class="threshold-hint">
+          提示：未启用择时模块时风险腿只会把总仓位缩放到组合模块的默认仓位（default_exposure），不会随市场状态变化。
         </div>
       </div>
     </div>
@@ -905,18 +966,39 @@ function initRisk(): void {
 }
 
 // ── 调仓模块 ──────────────────────────────────────────────────────
+// 启用调仓模块时两腿同时生效（风险腿 + 选股腿），两腿日程默认一致
 const rebalanceEnabled = ref(false)
-const rebalanceFrequency = ref('daily')
-const rebalanceDayOfWeek = ref<number | null>(null)
-const rebalanceDayOfMonth = ref<number | null>(null)
+const selectionFrequency = ref('daily')
+const selectionDayOfWeek = ref<number | null>(null)
+const selectionWeekParity = ref('even')
+const selectionDayOfMonth = ref<number | null>(null)
+const riskSameAsSelection = ref(true)
+const riskFrequency = ref('daily')
+const riskDayOfWeek = ref<number | null>(null)
+const riskWeekParity = ref('even')
+const riskDayOfMonth = ref<number | null>(null)
+
+/** 判断两条腿的日程是否等价（用于回显"同频"开关） */
+function schedulesEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  const keys = ['frequency', 'day_of_week', 'week_parity', 'day_of_month']
+  return keys.every(k => (a[k] ?? null) === (b[k] ?? null))
+}
 
 function initRebalance(): void {
   const rebalance = props.modelValue.rebalance as Record<string, unknown> | undefined
   if (!rebalance) { rebalanceEnabled.value = false; return }
   rebalanceEnabled.value = true
-  rebalanceFrequency.value = (rebalance.frequency as string) || 'daily'
-  rebalanceDayOfWeek.value = (rebalance.day_of_week as number) ?? null
-  rebalanceDayOfMonth.value = (rebalance.day_of_month as number) ?? null
+  const selection = (rebalance.selection as Record<string, unknown> | undefined) || rebalance
+  const risk = (rebalance.risk as Record<string, unknown> | undefined) || selection
+  selectionFrequency.value = (selection.frequency as string) || 'daily'
+  selectionDayOfWeek.value = (selection.day_of_week as number) ?? null
+  selectionWeekParity.value = (selection.week_parity as string) || 'even'
+  selectionDayOfMonth.value = (selection.day_of_month as number) ?? null
+  riskSameAsSelection.value = schedulesEqual(selection, risk)
+  riskFrequency.value = (risk.frequency as string) || 'daily'
+  riskDayOfWeek.value = (risk.day_of_week as number) ?? null
+  riskWeekParity.value = (risk.week_parity as string) || 'even'
+  riskDayOfMonth.value = (risk.day_of_month as number) ?? null
 }
 
 // ── 校验 ──────────────────────────────────────────────────────────
@@ -1051,16 +1133,30 @@ function buildConfig(): Record<string, unknown> {
     }
   }
 
-  // 调仓
+  // 调仓：两条腿同时输出（两腿必选）；勾选同频时风险腿复用选股腿日程
   if (rebalanceEnabled.value) {
-    const rebalance: Record<string, unknown> = { frequency: rebalanceFrequency.value }
-    if (rebalanceFrequency.value === 'weekly' && rebalanceDayOfWeek.value != null) {
-      rebalance.day_of_week = rebalanceDayOfWeek.value
+    const buildSchedule = (
+      frequency: string,
+      dayOfWeek: number | null,
+      weekParity: string,
+      dayOfMonth: number | null,
+    ): Record<string, unknown> => {
+      const schedule: Record<string, unknown> = { frequency }
+      if ((frequency === 'weekly' || frequency === 'biweekly') && dayOfWeek != null) schedule.day_of_week = dayOfWeek
+      if (frequency === 'biweekly') schedule.week_parity = weekParity
+      if (frequency === 'monthly' && dayOfMonth != null) schedule.day_of_month = dayOfMonth
+      return schedule
     }
-    if (rebalanceFrequency.value === 'monthly' && rebalanceDayOfMonth.value != null) {
-      rebalance.day_of_month = rebalanceDayOfMonth.value
-    }
-    config.rebalance = rebalance
+    const selection = buildSchedule(
+      selectionFrequency.value,
+      selectionDayOfWeek.value,
+      selectionWeekParity.value,
+      selectionDayOfMonth.value,
+    )
+    const risk = riskSameAsSelection.value
+      ? { ...selection }
+      : buildSchedule(riskFrequency.value, riskDayOfWeek.value, riskWeekParity.value, riskDayOfMonth.value)
+    config.rebalance = { selection, risk }
   }
 
   return config
@@ -1083,7 +1179,8 @@ watch(
     rankSortBy, rankOrder, rankTopN, rankBottomN,
     portfolioMethod, portfolioDefaultExposure, exposureOffensive, exposureNeutral, exposureDefensive,
     riskEnabled, riskMaxAssetWeight, riskMaxPortfolioExposure, riskMinCashRatio,
-    rebalanceEnabled, rebalanceFrequency, rebalanceDayOfWeek, rebalanceDayOfMonth,
+    rebalanceEnabled, selectionFrequency, selectionDayOfWeek, selectionWeekParity, selectionDayOfMonth,
+    riskSameAsSelection, riskFrequency, riskDayOfWeek, riskWeekParity, riskDayOfMonth,
   ],
   () => emitConfig(),
   { deep: true },

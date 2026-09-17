@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # 引擎配置 schema 版本：配置模型演进时递增并做兼容迁移检测（7.4#3）
 SUPPORTED_SCHEMA_VERSIONS = {"1"}
@@ -145,24 +145,106 @@ class RiskConfig(BaseModel):
     min_cash_ratio: float = Field(default=0.0, ge=0.0, lt=1.0)
 
 
-class RebalanceConfig(BaseModel):
-    """调仓配置（可选模块）。
+class RebalanceScheduleConfig(BaseModel):
+    """单个调仓腿的频率配置。
 
     严格校验（避免静默失效）：
-    - ``frequency`` 只接受 daily / weekly / monthly——历史上未知频率会在调度器
-      末尾 ``return True``，静默退化为每日调仓（换手与成本最大）；
-    - ``day_of_week`` 0-4（周一至周五）；``day_of_month`` 1-31，超出当月天数时
-      按当月最后一日处理（不再整月不调仓）。
+    - ``frequency`` 只接受 daily / weekly / biweekly / monthly——历史上未知频率会在
+      调度器末尾 ``return True``，静默退化为每日调仓（换手与成本最大）；
+    - ``day_of_week`` 0-4（周一至周五）；``day_of_month`` 1-31，超出当月天数时按
+      当月最后一日处理（不再整月不调仓）；
+    - ``biweekly`` 必须显式声明 ``week_parity``：ISO 周序的奇偶决定"哪一周调仓"，
+      不提供默认值以免"以为配了双周、实际按另一个奇偶周执行"。
 
     Attributes:
-        frequency: 调仓频率，daily / weekly / monthly。
-        day_of_week: 周度调仓日（0=周一, 4=周五）。
-        day_of_month: 月度调仓日（1-31，建议 ≤28）。
+        frequency: 调仓频率，daily / weekly / biweekly / monthly。
+        day_of_week: 周度/双周调仓日（0=周一, 4=周五），默认 4。
+        week_parity: 双周频率的周次奇偶（odd=奇数周, even=偶数周），仅 biweekly 生效。
+        day_of_month: 月度调仓日（1-31，建议 ≤28），默认 1。
     """
 
-    frequency: Literal["daily", "weekly", "monthly"] = "daily"
+    frequency: Literal["daily", "weekly", "biweekly", "monthly"] = "daily"
     day_of_week: int | None = Field(default=None, ge=0, le=4)
+    week_parity: Literal["odd", "even"] | None = None
     day_of_month: int | None = Field(default=None, ge=1, le=31)
+
+    @model_validator(mode="after")
+    def _validate_biweekly_parity(self) -> "RebalanceScheduleConfig":
+        """双周频率必须显式声明 odd/even 周次。
+
+        Returns:
+            校验通过的原对象。
+
+        Raises:
+            ValueError: 频率为 biweekly 但未指定 week_parity 时抛出。
+        """
+        if self.frequency == "biweekly" and self.week_parity is None:
+            raise ValueError("biweekly 频率必须指定 week_parity 为 odd 或 even")
+        return self
+
+
+class RebalanceConfig(BaseModel):
+    """双腿调仓配置（可选模块）。
+
+    启用本模块时**两条腿必选**（都有默认值，因此 JSON 中可只给一条腿，另一条腿
+    按"与已给出的那条一致"归一化）：
+
+    - ``selection`` 选股腿：重建组合成分与权重；
+    - ``risk`` 风险腿：只把**现有成分**等比缩放到择时目标总仓位，不引入新成分。
+
+    两腿频率一致时（旧配置升级后即如此）行为与改造前完全一致：每个调仓日都按
+    "新成分 + 择时目标仓位"重建；只有两腿频率不同时才会出现"仅换成分保持仓位"
+    或"仅缩放仓位"的差异化日程。
+
+    旧平铺配置（``frequency`` / ``day_of_week`` / ``day_of_month`` 直接挂在
+    ``rebalance`` 下）会被升级为**两腿同频**，从而保持历史回测口径不变。
+    """
+
+    selection: RebalanceScheduleConfig = Field(default_factory=RebalanceScheduleConfig)
+    risk: RebalanceScheduleConfig = Field(default_factory=RebalanceScheduleConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy_config(cls, value: Any) -> Any:
+        """把旧平铺配置升级为双腿配置，并让缺省的一条腿与另一条保持一致。
+
+        Args:
+            value: 待解析的 ``rebalance`` 原始值（dict 或已是模型实例）。
+
+        Returns:
+            归一化后的原始值：显式的 selection/risk 保持不变，仅有一条腿时另一条
+            复制该腿，旧平铺字段则同时作为两条腿的频率。
+        """
+        if not isinstance(value, dict):
+            return value
+        # 旧平铺口径：frequency/day_of_week/... 直接写在 rebalance 下
+        if "frequency" in value:
+            legacy = {
+                key: value[key]
+                for key in ("frequency", "day_of_week", "week_parity", "day_of_month")
+                if key in value
+            }
+            return {"selection": legacy, "risk": dict(legacy)}
+        normalized = dict(value)
+        # 双腿必选：只给出其中一条腿时，另一条按相同日程补齐（不改变单腿语义）
+        if "selection" not in normalized and "risk" in normalized:
+            normalized["selection"] = normalized["risk"]
+        if "risk" not in normalized and "selection" in normalized:
+            normalized["risk"] = normalized["selection"]
+        return normalized
+
+    # 兼容旧的服务调用与外部代码；新代码应使用 selection / risk。
+    @property
+    def frequency(self) -> str:
+        return self.selection.frequency
+
+    @property
+    def day_of_week(self) -> int | None:
+        return self.selection.day_of_week
+
+    @property
+    def day_of_month(self) -> int | None:
+        return self.selection.day_of_month
 
 
 class RegimeRuleConfig(BaseModel):
@@ -194,7 +276,7 @@ class StrategyConfig(BaseModel):
         schema_version: 引擎配置 schema 版本，用于配置模型演进时的兼容检测。
         description: 策略描述。
         frequency: 策略标注频率（元数据，**不控制调仓**；实际调仓频率见
-            ``rebalance.frequency``）。保留该字段是为了列表/标签展示的兼容。
+            ``rebalance.selection.frequency``）。保留该字段是为了列表/标签展示的兼容。
         timing: 择时配置，None 表示无择时。
         score: 评分配置（必填）。
         filters: 过滤配置，None 表示无过滤。

@@ -556,10 +556,29 @@ class StrategyConfigService:
 
         # 调仓配置校验（warning 级）：不阻塞历史配置，但显式提示口径歧义
         if config.rebalance:
-            if config.rebalance.day_of_month is not None and config.rebalance.day_of_month > 28:
+            for leg_name, schedule in (
+                ("selection", config.rebalance.selection),
+                ("risk", config.rebalance.risk),
+            ):
+                if (
+                    schedule is not None
+                    and schedule.day_of_month is not None
+                    and schedule.day_of_month > 28
+                ):
+                    warnings.append(
+                        f"rebalance.{leg_name}.day_of_month={schedule.day_of_month} 超出 28："
+                        "月末日期随月份变化，系统按'当月最后一日'处理，建议改用 ≤28 的日期"
+                    )
+            if config.rebalance.risk is not None and config.timing is None:
                 warnings.append(
-                    f"rebalance.day_of_month={config.rebalance.day_of_month} 超出 28："
-                    "月末日期随月份变化，系统按'当月最后一日'处理，建议改用 ≤28 的日期"
+                    "已启用风险腿但未配置择时（timing）：风险腿只会把总仓位缩放到 "
+                    "portfolio.default_exposure，不会随市场 regime 变化；"
+                    "如需择时降仓请在择时模块配置因子与阈值"
+                )
+            if config.rebalance.selection != config.rebalance.risk:
+                warnings.append(
+                    "选股腿与风险腿日程不同：选股腿日只替换成分、维持当前总仓位，"
+                    "总仓位仅在风险腿日按择时目标调整"
                 )
 
         return errors, warnings

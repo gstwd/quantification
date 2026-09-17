@@ -1,6 +1,6 @@
 """调仓规则（纯领域逻辑）。
 
-支持 daily / weekly / monthly 频率，并支持交易日历对齐：
+支持 daily / weekly / biweekly / monthly 频率，并支持交易日历对齐：
 调仓目标日如遇非交易日，自动顺延至该目标日之后（含）的第一个交易日，
 可跨自然周、跨自然月，不受固定天数窗口限制。
 领域层仅依赖 TradingCalendarLike 协议，不依赖任何 infra 实现。
@@ -14,13 +14,47 @@ from __future__ import annotations
 
 import logging
 from calendar import monthrange
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Protocol
 
 from quant_etf_api.domain.common.trading_calendar import TradingCalendarLike
-from quant_etf_api.engine.config import RebalanceConfig
+from quant_etf_api.engine.config import (
+    RebalanceConfig,
+    RebalanceScheduleConfig,
+)
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RebalanceLegs:
+    """当日到期的调仓腿。
+
+    Attributes:
+        selection: 选股腿是否到期（重建组合成分与权重）。
+        risk: 风险腿是否到期（只按择时等比缩放现有成分的总仓位）。
+    """
+
+    selection: bool
+    risk: bool
+
+
+def _matches_week_parity(day: date, week_parity: str | None) -> bool:
+    """判断某个自然日所属的 ISO 周是否命中给定奇偶周。
+
+    以 ISO 周序号跨年稳定锚定：``odd`` 命中奇数周、``even`` 命中偶数周，
+    其余取值按 ``even`` 处理（配置层已做枚举校验，此处为防守）。
+
+    Args:
+        day: 待判定的自然日。
+        week_parity: ``odd`` / ``even`` / None。
+
+    Returns:
+        该自然日所属 ISO 周是否命中。
+    """
+    expected = 1 if week_parity == "odd" else 0
+    return day.isocalendar().week % 2 == expected
 
 
 class RebalanceScheduler(Protocol):
@@ -28,14 +62,14 @@ class RebalanceScheduler(Protocol):
 
     def should_rebalance(
         self,
-        config: RebalanceConfig,
+        config: RebalanceScheduleConfig,
         current_date: date,
         last_rebalance_date: date | None = None,
     ) -> bool:
-        """判断是否应该调仓。
+        """判断某条腿是否应该在当前交易日调仓。
 
         Args:
-            config: 调仓配置。
+            config: 单条调仓腿的频率配置。
             current_date: 当前日期。
             last_rebalance_date: 上次调仓日期。
 
@@ -70,49 +104,64 @@ class DefaultRebalanceScheduler:
 
     def should_rebalance(
         self,
-        config: RebalanceConfig,
+        config: RebalanceScheduleConfig,
         current_date: date,
         last_rebalance_date: date | None = None,
     ) -> bool:
-        """判断是否应该调仓。
+        """判断某一条腿是否应该在当前交易日调仓。
 
         对齐语义为"目标日（含）之后的第一个交易日"：
         - daily：每个交易日都调仓。
         - weekly：目标 weekday（默认 4=周五）取 current_date 所在自然周内不晚于
           current_date 的那一天，若该周尚未到目标 weekday，则取上一自然周的目标日；
           再判断 current_date 是否为目标日之后（含）的第一个交易日。
+        - biweekly：先按 ISO 周序奇偶判断目标周是否命中（``week_parity``），命中时与
+          weekly 同样顺延；未命中则整体前移一个周期（14 天）后再判定，因此**跳过的
+          周期里休市的目标日不会在下一个周期被补触发**。
         - monthly：目标 day_of_month（默认 1）同上；目标日超出当月天数时按当月
           最后一日处理。
 
         由此，目标日休市时会顺延到下一个开市日，且既支持同周顺延（周三休市 →
           周四开市）、也支持跨周（周五休市 → 下周一）与跨月（1 月 28 日休市 →
-          2 月首个交易日）顺延；同一自然周/月内至多触发一次。
+          2 月首个交易日）顺延；同一自然周/周期/月内至多触发一次。
 
         Args:
-            config: 调仓配置。
+            config: 单条调仓腿的频率配置（旧式 ``RebalanceConfig`` 亦被兼容，
+                按其中的选股腿解析）。
             current_date: 当前日期（调用方应只传交易日）。
             last_rebalance_date: 上次调仓日期。本实现**不使用**该参数：同一自然
-                周/月内"目标日之后的第一个交易日"唯一，无需额外状态即可判定。
+                周/周期/月内"目标日之后的第一个交易日"唯一，无需额外状态即可判定。
 
         Returns:
             是否应该调仓。
 
         Raises:
             TradingCalendarUnavailableError: 交易日历不可用时抛出。
-            ValueError: 调仓频率不在 daily/weekly/monthly 之内时抛出
+            ValueError: 调仓频率不在 daily/weekly/biweekly/monthly 之内时抛出
                 （配置层已做枚举校验，此处为防守，避免静默退化为每日调仓）。
         """
-        if config.frequency == "daily":
+        # 旧调用点可能传入整个 RebalanceConfig；此处取其选股腿，保持向后兼容。
+        schedule = config.selection if isinstance(config, RebalanceConfig) else config
+        if schedule.frequency == "daily":
             return True
 
-        if config.frequency == "weekly":
-            target_day = config.day_of_week if config.day_of_week is not None else 4
+        if schedule.frequency == "weekly":
+            target_day = schedule.day_of_week if schedule.day_of_week is not None else 4
             # 距最近一次目标 weekday 的天数（0 表示今天就是目标日）
             delta = (current_date.weekday() - target_day) % 7
             return self._is_carried_target(current_date, current_date - timedelta(days=delta))
 
-        if config.frequency == "monthly":
-            target = config.day_of_month if config.day_of_month is not None else 1
+        if schedule.frequency == "biweekly":
+            target_day = schedule.day_of_week if schedule.day_of_week is not None else 4
+            delta = (current_date.weekday() - target_day) % 7
+            target_date = current_date - timedelta(days=delta)
+            if not _matches_week_parity(target_date, schedule.week_parity):
+                # 非命中周期：整体前移一个双周周期，避免在"空周期"里误触发
+                target_date -= timedelta(days=14)
+            return self._is_carried_target(current_date, target_date)
+
+        if schedule.frequency == "monthly":
+            target = schedule.day_of_month if schedule.day_of_month is not None else 1
             this_month_last = monthrange(current_date.year, current_date.month)[1]
             this_month_target = min(target, this_month_last)
             if current_date.day >= this_month_target:
@@ -126,7 +175,7 @@ class DefaultRebalanceScheduler:
             return self._is_carried_target(current_date, target_date)
 
         raise ValueError(
-            f"未知的调仓频率 {config.frequency!r}：可选 daily / weekly / monthly"
+            f"未知的调仓频率 {schedule.frequency!r}：可选 daily / weekly / biweekly / monthly"
         )
 
     def _is_carried_target(self, current_date: date, target_date: date) -> bool:
@@ -160,3 +209,36 @@ class DefaultRebalanceScheduler:
                 return False
             check += timedelta(days=1)
         return True
+
+
+def select_active_legs(
+    scheduler: RebalanceScheduler,
+    rebalance: RebalanceConfig | None,
+    current_date: date,
+    last_selection_date: date | None = None,
+    last_risk_date: date | None = None,
+) -> RebalanceLegs:
+    """判定当日到期的调仓腿。
+
+    口径（与回测/实时两侧共用）：
+
+    - ``rebalance`` 为 None（未配置调仓模块）→ 两腿都视为"每日"，即每日重建；
+    - 两腿频率一致（旧配置升级后的默认形态）→ 与改造前的单腿口径完全一致；
+    - 两腿频率不同 → 只在各自到期的交易日生效，未到期的腿返回 False。
+
+    Args:
+        scheduler: 调仓调度器（交易日历必填的严格实现）。
+        rebalance: 双腿调仓配置，None 表示未配置。
+        current_date: 当前交易日。
+        last_selection_date: 上次选股腿调仓日（当前实现不参与判定，保留签名）。
+        last_risk_date: 上次风险腿调仓日（当前实现不参与判定，保留签名）。
+
+    Returns:
+        两腿到期情况。
+    """
+    if rebalance is None:
+        return RebalanceLegs(selection=True, risk=True)
+    return RebalanceLegs(
+        selection=scheduler.should_rebalance(rebalance.selection, current_date, last_selection_date),
+        risk=scheduler.should_rebalance(rebalance.risk, current_date, last_risk_date),
+    )

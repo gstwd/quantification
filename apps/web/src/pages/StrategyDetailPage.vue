@@ -251,19 +251,23 @@
           <div class="config-body">
             <div v-if="rebalanceConfig" class="config-section">
               <div class="config-row">
-                <span class="config-key">频率</span>
-                <span class="config-val">{{ rebalanceConfig.frequency || 'daily' }}</span>
+                <span class="config-key">选股腿（重建成分）</span>
+                <span class="config-val">{{ formatRebalanceSchedule(rebalanceConfig.selection || rebalanceConfig) }}</span>
               </div>
-              <div v-if="rebalanceConfig.day_of_week != null" class="config-row">
-                <span class="config-key">周调仓日</span>
-                <span class="config-val">周{{ ['一','二','三','四','五'][rebalanceConfig.day_of_week] }}</span>
+              <div class="config-row">
+                <span class="config-key">风险腿（等比调仓位）</span>
+                <span class="config-val">{{ formatRebalanceSchedule(rebalanceConfig.risk || rebalanceConfig.selection || rebalanceConfig) }}</span>
               </div>
-              <div v-if="rebalanceConfig.day_of_month != null" class="config-row">
-                <span class="config-key">月调仓日</span>
-                <span class="config-val">每月 {{ rebalanceConfig.day_of_month }} 日（遇非交易日顺延）</span>
+              <div v-if="legsAreIdentical" class="config-row">
+                <span class="config-key">口径</span>
+                <span class="config-val">两腿同频：每个调仓日重建成分并应用择时目标仓位（等价改造前的单腿口径）</span>
+              </div>
+              <div v-else class="config-row">
+                <span class="config-key">口径</span>
+                <span class="config-val">两腿异频：选股腿日只换成分、维持当前总仓位；总仓位仅在风险腿日按择时目标调整</span>
               </div>
             </div>
-            <div v-else class="config-empty">未配置（默认每日调仓）</div>
+            <div v-else class="config-empty">未配置（默认每日调仓，两腿同频）</div>
           </div>
         </div>
 
@@ -926,7 +930,26 @@ const portfolioConfig = computed(() => (
   configJson.value.portfolio ?? { method: 'equal_weight', default_exposure: 0.5 }
 ) as { method?: string; timing_exposure?: Record<string, number>; default_exposure?: number })
 const riskConfig = computed(() => configJson.value.risk as { max_asset_weight?: number; max_portfolio_exposure?: number; min_cash_ratio?: number } | undefined)
-const rebalanceConfig = computed(() => configJson.value.rebalance as { frequency?: string; day_of_week?: number; day_of_month?: number } | undefined)
+type RebalanceSchedule = { frequency?: string; day_of_week?: number; week_parity?: string; day_of_month?: number }
+const rebalanceConfig = computed(() => configJson.value.rebalance as (RebalanceSchedule & { selection?: RebalanceSchedule; risk?: RebalanceSchedule }) | undefined)
+
+/** 两条腿的日程是否等价（等价时展示为改造前的单腿口径） */
+const legsAreIdentical = computed((): boolean => {
+  const rebalance = rebalanceConfig.value
+  if (!rebalance) return true
+  const selection = rebalance.selection || rebalance
+  const risk = rebalance.risk || selection
+  return (['frequency', 'day_of_week', 'week_parity', 'day_of_month'] as const).every(
+    key => (selection[key] ?? null) === (risk[key] ?? null),
+  )
+})
+function formatRebalanceSchedule(schedule: RebalanceSchedule): string {
+  const weekdays = ['周一', '周二', '周三', '周四', '周五']
+  if (schedule.frequency === 'biweekly') return `每两周${schedule.week_parity === 'odd' ? '奇' : '偶'}周 ${weekdays[schedule.day_of_week ?? 4]}`
+  if (schedule.frequency === 'weekly') return `每周 ${weekdays[schedule.day_of_week ?? 4]}`
+  if (schedule.frequency === 'monthly') return `每月 ${schedule.day_of_month ?? 1} 日`
+  return '每日'
+}
 
 /** 格式化 JSON 用于展示 */
 const formattedJson = computed(() => {

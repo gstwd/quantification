@@ -14,6 +14,7 @@ from quant_etf_api.domain.portfolio.returns import (
     count_missing_rebalance_assets,
     get_index_return,
 )
+from quant_etf_api.domain.portfolio.scaling import scale_to_exposure
 from quant_etf_api.domain.portfolio.turnover import (
     TURNOVER_MODEL_DELTA_W,
     TURNOVER_MODEL_LEGACY,
@@ -38,4 +39,5 @@ __all__ = [
     "compute_turnover",
     "filter_universe_rows",
     "get_index_return",
+    "scale_to_exposure",
 ]

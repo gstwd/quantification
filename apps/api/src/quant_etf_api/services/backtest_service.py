@@ -43,6 +43,7 @@ from quant_etf_api.domain.portfolio.returns import (
     count_missing_rebalance_assets,
     get_index_return,
 )
+from quant_etf_api.domain.portfolio.scaling import compose_two_leg_positions
 from quant_etf_api.domain.portfolio.turnover import (
     TURNOVER_MODEL_DELTA_W,
     TURNOVER_MODEL_LEGACY,
@@ -67,7 +68,11 @@ from quant_etf_api.domain.research.stability import (
     compute_cost_ladder,
     compute_stability_metrics,
 )
-from quant_etf_api.engine.config import StrategyConfig
+from quant_etf_api.domain.strategies.rebalance import (
+    RebalanceLegs,
+    select_active_legs,
+)
+from quant_etf_api.engine.config import RebalanceScheduleConfig, StrategyConfig
 from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.orchestrator import StrategyEngine
@@ -1363,7 +1368,8 @@ class BacktestService:
         accumulator = BacktestDayAccumulator()
         prev_positions: dict[str, float] = {}
         pending_positions: dict[str, float] | None = None
-        last_rebalance_date: date | None = None
+        last_selection_rebalance_date: date | None = None
+        last_risk_rebalance_date: date | None = None
         # 数据缺口天数：至少一个持仓资产当日收益受缺失行情影响的交易日数（B10）
         data_gap_days = 0
         # 数据缺口剔除记录：两种数据质量口径共用同一候选池，因此剔除集合一致，
@@ -1426,13 +1432,30 @@ class BacktestService:
                 cached_metadata=day_metadata,
             )
 
-            # 检查调仓日
-            should_rebalance = self._check_rebalance(config, trade_date, last_rebalance_date)
+            # 两条腿独立到期：选股腿改成分，风险腿仅按择时等比缩放总仓位。
+            # 两腿同频（旧配置升级后的默认形态）时，两腿同日命中，合成为改造前的
+            # "新成分 + 择时目标仓位"，历史回测口径不变。
+            legs = self._select_legs(
+                config,
+                trade_date,
+                last_selection_rebalance_date,
+                last_risk_rebalance_date,
+            )
+            should_select = legs.selection
+            should_scale_risk = legs.risk
+            should_rebalance = should_select or should_scale_risk
 
             # 执行引擎（回测模式跳过详细的 StrategyResult 构建以提升性能）
             result = self._engine.run(config, context, include_details=False)
 
             target_positions = dict(result.positions) if result.positions else {}
+            new_positions = compose_two_leg_positions(
+                previous=prev_positions,
+                selection_target=target_positions,
+                timing_target_exposure=result.total_exposure,
+                should_select=should_select,
+                should_scale_risk=should_scale_risk,
+            )
             executed_positions = dict(prev_positions)
             next_positions = dict(prev_positions)
 
@@ -1459,14 +1482,16 @@ class BacktestService:
                     turnover = compute_turnover(prev_positions, pending_positions)
                 else:
                     turnover = 0.0
-                last_rebalance_date = trade_date if should_rebalance else last_rebalance_date
-                pending_positions = target_positions if should_rebalance else None
+                if should_select:
+                    last_selection_rebalance_date = trade_date
+                if should_scale_risk:
+                    last_risk_rebalance_date = trade_date
+                pending_positions = new_positions if should_rebalance else None
                 day_total_exposure = round(sum(executed_positions.values()), 4)
                 day_cash_ratio = round(1.0 - day_total_exposure, 4)
             elif should_rebalance:
                 # 调仓日：旧仓位持有至 T+1 开盘（隔夜段），新仓位自 T+1 开盘买入（日内段），
                 # 当日收益 = 旧仓位 × [close_T, open_{T+1}] + 新仓位 × [open_{T+1}, close_{T+1}]
-                new_positions = target_positions
                 portfolio_return = compute_rebalance_day_return(
                     prev_positions, new_positions, trade_date, next_date, all_bars
                 )
@@ -1478,7 +1503,10 @@ class BacktestService:
                 # 换手率基于新旧目标仓位计算（C2）：统一按 Σ|Δw|/2，
                 # 不再在 prev/new 为空时跳过——清仓腿与建仓腿同样是真实成本
                 turnover = compute_turnover(prev_positions, new_positions)
-                last_rebalance_date = trade_date
+                if should_select:
+                    last_selection_rebalance_date = trade_date
+                if should_scale_risk:
+                    last_risk_rebalance_date = trade_date
             else:
                 # 非调仓日：沿用上次持仓，按收盘对收盘计算收益
                 positions = dict(prev_positions)
@@ -2257,10 +2285,16 @@ class BacktestService:
         Raises:
             TradingCalendarUnavailableError: 需要日历但无法解析出有效日历时抛出。
         """
-        frequency = config.rebalance.frequency if config.rebalance is not None else None
-        needs_calendar = frequency in ("weekly", "monthly")
+        schedules = (
+            (config.rebalance.selection, config.rebalance.risk)
+            if config.rebalance is not None
+            else ()
+        )
+        frequencies = [schedule.frequency for schedule in schedules]
+        needs_calendar = any(frequency in ("weekly", "biweekly", "monthly") for frequency in frequencies)
 
         if not needs_calendar:
+            self._rebalance_scheduler = None
             self._set_param(row, "_calendar_source", "not_required", commit=True)
             return "not_required"
 
@@ -2271,9 +2305,9 @@ class BacktestService:
         # 立即提交：即使回测随后失败，口径指纹也应落库以便审计
         self._set_param(row, "_calendar_source", source, commit=True)
         logger.info(
-            "[backtest] 调仓日历已解析: backtest_id=%s frequency=%s source=%s",
+            "[backtest] 调仓日历已解析: backtest_id=%s frequencies=%s source=%s",
             row.backtest_id,
-            frequency,
+            frequencies,
             source,
         )
         return source
@@ -2295,16 +2329,42 @@ class BacktestService:
         if commit:
             self._db.commit()
 
-    def _check_rebalance(
+    def _check_rebalance_schedule(
         self,
-        config: StrategyConfig,
+        schedule: RebalanceScheduleConfig | None,
         trade_date: date,
         last_rebalance_date: date | None,
     ) -> bool:
-        """检查当日是否为调仓日。
+        """检查某条腿当日是否到期。
 
         委托给 DefaultRebalanceScheduler，与实盘模式使用相同的交易日历对齐逻辑。
-        无 rebalance 配置时默认为每日调仓。
+        未传腿配置（或配置未启用调仓模块）时默认为每日调仓。
+
+        Args:
+            schedule: 单条腿的频率配置，None 表示每日调仓。
+            trade_date: 当前交易日。
+            last_rebalance_date: 上次调仓日期。
+
+        Returns:
+            是否应该调仓。
+
+        Raises:
+            ValueError: 需要交易日历但未解析出调度器时抛出。
+        """
+        if schedule is None:
+            return True
+        if schedule.frequency == "daily":
+            return True
+        if self._rebalance_scheduler is None:
+            raise ValueError("调仓调度器未初始化：周度/月度/双周调仓前必须先解析交易日历（C1）")
+        return self._rebalance_scheduler.should_rebalance(
+            schedule, trade_date, last_rebalance_date
+        )
+
+    def _check_rebalance(
+        self, config: StrategyConfig, trade_date: date, last_rebalance_date: date | None
+    ) -> bool:
+        """兼容旧内部调用：按选股腿判断当日是否调仓。
 
         Args:
             config: 策略配置。
@@ -2312,14 +2372,53 @@ class BacktestService:
             last_rebalance_date: 上次调仓日期。
 
         Returns:
-            是否应该调仓。
+            选股腿当日是否到期。
         """
-        if config.rebalance is None:
-            return True
-        if self._rebalance_scheduler is None:
-            raise ValueError("调仓调度器未初始化：周度/月度调仓前必须先解析交易日历（C1）")
-        return self._rebalance_scheduler.should_rebalance(
-            config.rebalance, trade_date, last_rebalance_date
+        return self._check_rebalance_schedule(
+            config.rebalance.selection if config.rebalance else None,
+            trade_date,
+            last_rebalance_date,
+        )
+
+    def _select_legs(
+        self,
+        config: StrategyConfig,
+        trade_date: date,
+        last_selection_date: date | None,
+        last_risk_date: date | None,
+    ) -> RebalanceLegs:
+        """判定当日到期的调仓腿（回测主循环与口径指纹共用）。
+
+        Args:
+            config: 策略配置。
+            trade_date: 当前交易日。
+            last_selection_date: 上次选股腿调仓日。
+            last_risk_date: 上次风险腿调仓日。
+
+        Returns:
+            两腿到期情况；未配置调仓模块时为每日调仓。
+
+        Raises:
+            ValueError: 需要交易日历但未解析出调度器时抛出。
+        """
+        rebalance = config.rebalance
+        if rebalance is not None and self._rebalance_scheduler is None:
+            needed = {
+                rebalance.selection.frequency,
+                rebalance.risk.frequency,
+            } & {"weekly", "biweekly", "monthly"}
+            if needed:
+                raise ValueError(
+                    "调仓调度器未初始化：周度/月度/双周调仓前必须先解析交易日历（C1）"
+                )
+            # 两腿均为每日调仓：无需日历，直接短路避免构造调度器
+            return RebalanceLegs(selection=True, risk=True)
+        return select_active_legs(
+            self._rebalance_scheduler,
+            rebalance,
+            trade_date,
+            last_selection_date,
+            last_risk_date,
         )
 
     # ── 汇总指标 ───────────────────────────────────────────────────────────

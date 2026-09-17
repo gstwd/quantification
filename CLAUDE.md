@@ -136,7 +136,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 - **Rank**: 排序 + TopN/BottomN
 - **Portfolio**: 权重分配（equal_weight / score_weight / winner_take_all），择时 regime 控制总仓位。`default_exposure` 控制无择时时的默认仓位（替代硬编码 0.50）
 - **Risk**: 单资产上限、组合上限、最低现金比例
-- **Rebalance**: 调仓频率控制（daily/weekly/monthly），回测中非调仓日沿用上次持仓
+- **Rebalance**: 双腿调仓控制（daily/weekly/biweekly/monthly）。`selection` 腿重建成分，`risk` 腿只把现有成分等比缩放到择时目标总仓位；两腿同频（旧配置升级后的默认形态）时等价于改造前的单腿口径，非到期日沿用上次持仓
 
 有 `portfolio` 配置 → 输出仓位（回测要求策略必须配置 portfolio 模块）。
 
@@ -259,9 +259,10 @@ Key rules (details in the doc):
 - **volume_ratio_20d 返回值变更**: 数据不足时返回 `None`（原为 1.0），区分"无数据"与"量比恰好为 1"。`calc_volume_ratio_20d()` 返回 `float | None`，`calc_5d_return()` 仍返回 `float`（默认 0.0）。
 - **BenchmarkIndexModel.is_active**: `ContextBuilder._build_live()` 只查询 `is_active=True` 的指数（实时只能用当日活跃集合）；`BacktestService._resolve_index_universe()` 用 point-in-time 口径（见下条）。新增指数默认 `is_active=True`。
 - **TradingCalendar 缓存**: 首次调用时从 AkShare 加载（`tool_trade_date_hist_sina()`），TTL=1 天。`IngestService._drop_non_trading_bars`（剔除假期伪行情）与 `DataManagementService` 的缺口检查（`_latest_trading_day`）已接入，不再用 `weekday()>=5`。
-- **rebalance.py 交易日历对齐**: `DefaultRebalanceScheduler` 接受 `TradingCalendar` 实例，周度/月度调仓的对齐语义是"**目标日（含）之后的第一个交易日**"：同周顺延、跨周顺延（目标周五休市 → 下周一）、跨月顺延（月末休市 → 下月首个交易日）都成立；`day_of_month` 超出当月天数时按当月最后一日处理；传入非交易日一律返回 False；日历不可用时异常上抛（不降级为按星期比较）。`last_rebalance_date` 参数当前不参与判定。
-- **RebalanceConfig 强校验**: `frequency` 为 `Literal[daily|weekly|monthly]`，`day_of_week ∈ [0,4]`，`day_of_month ∈ [1,31]`（>28 时结构校验给 warning）。历史行为是未知频率静默退化为每日调仓，新增频率分支时必须同步更新 `should_rebalance` 与该枚举。
-- **`StrategyConfig.frequency` 只是标注字段**: 不控制调仓（实际频率见 `rebalance.frequency`），前端 chip 有 title 说明。
+- **rebalance.py 交易日历对齐**: `DefaultRebalanceScheduler` 接受 `TradingCalendar` 实例，weekly/biweekly/monthly 调仓的对齐语义是"**目标日（含）之后的第一个交易日**"：同周顺延、跨周顺延（目标周五休市 → 下周一）、跨月顺延（月末休市 → 下月首个交易日）都成立；`day_of_month` 超出当月天数时按当月最后一日处理；传入非交易日一律返回 False；日历不可用时异常上抛（不降级为按星期比较）。双周按 ISO 周序奇偶（`week_parity`）判定命中周期，未命中周期的目标日即使休市也不会在下一个周期补触发。`last_rebalance_date` 参数当前不参与判定。
+- **RebalanceConfig 双腿语义**: `rebalance.selection`（重建成分）与 `rebalance.risk`（只把现有成分等比缩放到择时目标仓位）**两条腿必选**，JSON 中只给一条腿时另一条按相同日程归一化；旧平铺写法（`rebalance.frequency` 等）自动升级为**两腿同频**。两腿同频 = 每个调仓日按"新成分 + 择时目标仓位"重建（与改造前口径一致）；两腿异频 = 选股腿日只换成分、维持当前总仓位，总仓位只在风险腿日调整。腿判定统一走 `domain/strategies/rebalance.py::select_active_legs()`，回测与实时摘要共用；持仓合成走 `domain/portfolio/scaling.py::compose_two_leg_positions()`。空仓时风险腿不建仓（建仓由选股腿负责）。
+- **RebalanceScheduleConfig 强校验**: `frequency` 为 `Literal[daily|weekly|biweekly|monthly]`，`day_of_week ∈ [0,4]`，`day_of_month ∈ [1,31]`（>28 时结构校验给 warning），`biweekly` 必须显式声明 `week_parity`（odd/even，无默认值）。历史行为是未知频率静默退化为每日调仓，新增频率分支时必须同步更新 `should_rebalance`、`_resolve_rebalance_calendar` 的"是否需要日历"判定与该枚举。
+- **`StrategyConfig.frequency` 只是标注字段**: 不控制调仓（实际频率见 `rebalance.selection.frequency`），前端 chip 有 title 说明。
 - **回测标的池是 point-in-time 口径**: `BacktestService._resolve_index_universe()` 用 `BenchmarkIndexRepository.find_for_period(start_date)`，即 `is_active OR delisting_date IS NULL OR delisting_date >= 区间起点`——退市日晚于区间起点的指数必须纳入（否则是幸存者偏差）；`IndexService.remove_index()` 会记录退市日（API 支持可选 `delisting_date`），重新激活时清空该列。`_ensure_market_scope_bars()` 用同一口径。
 - **`t_plus_1_close` 执行模型**: T 日信号在 T+1 收盘成交，逐日收益必须用 `pending_positions`（今日收盘成交后的仓位），`positions`/`total_exposure` 同步反映实际持仓；用 `prev_positions` 会让新仓位首个收益区间被旧仓位吃掉（等价 T+2）。
 - **验收清单默认强制**: `OptimizationService.finish(strict=True)` 是默认值（CLI `--no-strict` 才跳过）；"参数邻域"项的证据必须匹配当前配置（`robustness_run.baseline_config_hash` = 会话基线或候选哈希，或批次跑在候选策略上），promote 之后旧批次不再复用。
