@@ -129,8 +129,28 @@
             <div><span class="k">上线日期</span><span class="v">{{ detail.live_at }}</span></div>
             <div><span class="k">监控天数</span><span class="v">{{ detail.live_days }}</span></div>
             <div><span class="k">冻结配置哈希</span><span class="v mono">{{ shortHash(detail.frozen_config_hash) }}</span></div>
-            <div><span class="k">研究期基线回测</span><span class="v mono">{{ backtestRefLabel(detail.research_backtest_id) }}</span></div>
-            <div><span class="k">验证期回测</span><span class="v mono">{{ backtestRefLabel(detail.validation_backtest_id) }}</span></div>
+            <div>
+              <span class="k">研究期基线回测</span>
+              <RouterLink
+                v-if="detail.research_backtest_id"
+                class="v mono backtest-link"
+                :to="`/backtests/${detail.research_backtest_id}`"
+              >
+                {{ detail.research_backtest_id }}
+              </RouterLink>
+              <span v-else class="v mono">{{ backtestRefLabel(detail.research_backtest_id) }}</span>
+            </div>
+            <div>
+              <span class="k">验证期回测</span>
+              <RouterLink
+                v-if="detail.validation_backtest_id"
+                class="v mono backtest-link"
+                :to="`/backtests/${detail.validation_backtest_id}`"
+              >
+                {{ detail.validation_backtest_id }}
+              </RouterLink>
+              <span v-else class="v mono">{{ backtestRefLabel(detail.validation_backtest_id) }}</span>
+            </div>
             <div v-if="detail.note" class="wide">
               <span class="k">上线备注</span><span class="v">{{ detail.note }}</span>
             </div>
@@ -642,6 +662,8 @@ onMounted(async () => {
 .kv-grid .wide { grid-column: 1 / -1; }
 .k { display: block; font-size: 12px; color: var(--text-muted); }
 .v { font-size: 14px; }
+.backtest-link { color: var(--accent); text-decoration: none; }
+.backtest-link:hover { text-decoration: underline; }
 .diagnosis { display: flex; gap: 32px; margin-bottom: 8px; }
 .reasons { margin: 0; padding-left: 18px; color: var(--text-muted); font-size: 13px; }
 .hint { margin-top: 10px; font-size: 12px; color: var(--text-muted); }
