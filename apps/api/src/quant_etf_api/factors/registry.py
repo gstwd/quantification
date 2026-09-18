@@ -76,6 +76,7 @@ def build_default_factor_registry() -> FactorRegistry:
     )
     from quant_etf_api.factors.builtins.momentum import (
         DaysDownUpComputer,
+        LowAmplitudeMomentumComputer,
         PricePositionIrComputer,
         Return120dComputer,
         Return17dComputer,
@@ -130,6 +131,8 @@ def build_default_factor_registry() -> FactorRegistry:
     registry.register(Return20dComputer())
     registry.register(Return60dComputer())
     registry.register(Return120dComputer())
+    # 低振幅条件动量：指数 OHLC 适配版，默认 160 日、最低振幅 70% 交易日。
+    registry.register(LowAmplitudeMomentumComputer())
     # 风险调整动量（夏普式比率）
     registry.register(Sharpe60dComputer())
     # 动量 — RSRS 阻力支撑相对强度（高低价 OLS 斜率 × R² 的滚动标准分）

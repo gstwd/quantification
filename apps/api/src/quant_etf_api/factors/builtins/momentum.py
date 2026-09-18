@@ -1,4 +1,4 @@
-"""动量类因子：5 日、17 日、20 日、60 日、120 日收益率与风险调整动量（基于指数数据）。
+"""动量类因子：收益率、低振幅条件动量与风险调整动量（基于指数数据）。
 
 不复用 domain.common.bar_metrics.calc_5d_return（数据不足时返回 0.0，语义模糊），
 改用内部 _calc_nd_return：数据不足时明确返回 None，区分"零涨跌"与"无数据"。
@@ -32,6 +32,11 @@ _RSRS_LOOKBACK_DAYS = 400
 
 # 日内位置信息比率的最小有效样本数
 _POSITION_IR_MIN_SAMPLES = 20
+
+# 开源证券《A股市场中如何构造动量因子？》的默认研究口径：
+# 最近 160 个交易日中，保留日振幅最低的 70% 交易日的收益率之和。
+_LOW_AMPLITUDE_MOMENTUM_PERIOD = 160
+_LOW_AMPLITUDE_MOMENTUM_RATIO = 0.70
 
 
 def _calc_nd_return(
@@ -562,6 +567,123 @@ class Sharpe60dComputer:
                 payload={"return_60d": ret, "volatility_20d": vol},
             )
         return result
+
+
+class LowAmplitudeMomentumComputer:
+    """低振幅条件动量因子计算器。
+
+    对每个指数，在最近 N 个交易日中以日振幅 ``high / low - 1`` 排序，
+    仅累加振幅最低的 λ 比例交易日的收盘价日收益率。该口径将普通涨跌幅中
+    更容易伴随过度反应的高振幅日剔除，保留相对平稳日的趋势收益。
+
+    默认参数 N=160、λ=70% 来自开源证券《A股市场中如何构造动量因子？》；
+    这是基于指数 OHLC 的资产级适配版，不等同于原研究的个股选股因子。
+    """
+
+    def __init__(
+        self,
+        period: int = _LOW_AMPLITUDE_MOMENTUM_PERIOD,
+        low_amplitude_ratio: float = _LOW_AMPLITUDE_MOMENTUM_RATIO,
+    ) -> None:
+        if period < 2:
+            raise ValueError("period 必须至少为 2 个交易日")
+        if not 0 < low_amplitude_ratio <= 1:
+            raise ValueError("low_amplitude_ratio 必须在 (0, 1] 内")
+        self._period = period
+        self._ratio = low_amplitude_ratio
+        self._selected_days = max(1, round(period * low_amplitude_ratio))
+
+    @property
+    def spec(self) -> FactorSpec:
+        ratio_pct = int(self._ratio * 100)
+        return FactorSpec(
+            factor_id=f"low_amplitude_momentum_{self._period}d_{ratio_pct}pct",
+            name=f"{self._period}日低振幅动量（{ratio_pct}%）",
+            category="momentum",
+            version="1.0.0",
+            description=(
+                f"最近 {self._period} 个交易日按日振幅(high/low−1)从低到高排序，"
+                f"累加最低振幅 {ratio_pct}% 交易日的收盘价日收益率（%）。"
+            ),
+            required_data=["index_bars"],
+            lookback_days=max(15, int(self._period * 1.5) + 10),
+            default_params={
+                "period": self._period,
+                "low_amplitude_ratio": self._ratio,
+            },
+        )
+
+    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
+        """计算单个交易日的低振幅条件动量。"""
+        return self.compute_batch(index_code, [trade_date], ctx)[trade_date]
+
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext
+    ) -> dict[date, FactorValue]:
+        """批量计算低振幅条件动量，逐日口径与 ``compute`` 完全一致。"""
+        bars = sorted(
+            [
+                (dt, v.high_price, v.low_price, v.close_price)
+                for (code, dt), v in ctx.index_bars.items()
+                if code == index_code
+                and v.high_price is not None
+                and v.low_price is not None
+                and v.close_price is not None
+                and v.low_price > 0
+            ],
+            key=lambda x: x[0],
+        )
+        bar_dates = [bar[0] for bar in bars]
+        result: dict[date, FactorValue] = {}
+
+        for trade_date in dates:
+            idx = bisect.bisect_right(bar_dates, trade_date) - 1
+            # N 个日收益率需要 N+1 个连续有效收盘价；首日只作收益率基准。
+            if idx < self._period or idx < 0 or bar_dates[idx] != trade_date:
+                result[trade_date] = self._missing("OHLC 数据不足或当日无完整行情")
+                continue
+
+            window = bars[idx - self._period : idx + 1]
+            candidates: list[tuple[float, float]] = []
+            valid = True
+            for previous, current in zip(window, window[1:]):
+                _, _, _, previous_close = previous
+                _, high, low, close = current
+                if previous_close <= 0 or low <= 0 or high < low:
+                    valid = False
+                    break
+                amplitude = high / low - 1
+                daily_return = (close / previous_close - 1) * 100
+                candidates.append((amplitude, daily_return))
+            if not valid or len(candidates) != self._period:
+                result[trade_date] = self._missing("OHLC 数据存在无效价格")
+                continue
+
+            selected = sorted(candidates, key=lambda item: item[0])[: self._selected_days]
+            value = sum(daily_return for _, daily_return in selected)
+            result[trade_date] = FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=round(value, 4),
+                payload={
+                    "period": self._period,
+                    "low_amplitude_ratio": self._ratio,
+                    "selected_days": len(selected),
+                    "amplitude_cutoff": round(selected[-1][0] * 100, 4),
+                    "selected_return_sum": round(value, 4),
+                },
+            )
+        return result
+
+    def _missing(self, reason: str) -> FactorValue:
+        return FactorValue(
+            factor_id=self.spec.factor_id,
+            numeric=None,
+            payload={
+                "reason": reason,
+                "period": self._period,
+                "low_amplitude_ratio": self._ratio,
+            },
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════

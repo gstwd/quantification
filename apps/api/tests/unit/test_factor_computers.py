@@ -18,6 +18,7 @@ from quant_etf_api.factors.builtins.breadth import BreadthMA20Computer
 from quant_etf_api.factors.builtins.macro import PMIMomentumComputer
 from quant_etf_api.factors.builtins.momentum import (
     DaysDownUpComputer,
+    LowAmplitudeMomentumComputer,
     PricePositionIrComputer,
     Return20dComputer,
     Return5dComputer,
@@ -445,7 +446,7 @@ class TestFactorRegistry:
     def test_default_registry_has_all_factors(self) -> None:
         """默认注册表应包含全部内置因子。"""
         registry = build_default_factor_registry()
-        assert len(registry.all()) == 47
+        assert len(registry.all()) == 48
 
     def test_default_registry_factor_ids(self) -> None:
         """默认注册表的 factor_id 集合应包含核心因子。"""
@@ -461,6 +462,7 @@ class TestFactorRegistry:
             "return_20d",
             "return_60d",
             "return_120d",
+            "low_amplitude_momentum_160d_70pct",
             "sharpe_60d",
             "volatility_17d",
             "volatility_20d",
@@ -504,6 +506,55 @@ class TestFactorRegistry:
         """specs() 应返回与 all() 等量的 FactorSpec 列表。"""
         registry = build_default_factor_registry()
         assert len(registry.specs()) == len(registry.all())
+
+
+# ─── LowAmplitudeMomentumComputer（低振幅条件动量）──────────────────────────────
+
+
+class TestLowAmplitudeMomentumComputer:
+    _computer = LowAmplitudeMomentumComputer()
+
+    def test_spec(self) -> None:
+        spec = self._computer.spec
+        assert spec.factor_id == "low_amplitude_momentum_160d_70pct"
+        assert spec.default_params == {"period": 160, "low_amplitude_ratio": 0.7}
+
+    def test_keeps_only_low_amplitude_days(self) -> None:
+        """低振幅正收益日应保留，高振幅负收益日应被剔除。"""
+        trade_date = date(2024, 6, 1)
+        bars = {}
+        close = 100.0
+        # 第 0 日仅为第一笔日收益率提供前收盘基准。
+        for day in range(161):
+            if day:
+                daily_return = 0.01 if day <= 112 else -0.01
+                close *= 1 + daily_return
+            amplitude = 0.01 if day <= 112 else 0.05
+            half_range = (1 + amplitude) ** 0.5
+            bars[("000300", trade_date - timedelta(days=160 - day))] = MockBar(
+                close_price=close,
+                high_price=close * half_range,
+                low_price=close / half_range,
+            )
+
+        result = self._computer.compute("000300", trade_date, FactorContext(index_bars=bars))
+        assert result.numeric == pytest.approx(112.0)
+        assert result.payload["selected_days"] == 112
+        assert result.payload["amplitude_cutoff"] == pytest.approx(1.0)
+
+    def test_none_when_ohlc_history_is_insufficient(self) -> None:
+        trade_date = date(2024, 6, 1)
+        bars = _build_ohlc_bars("000300", trade_date, n_days=160)
+        result = self._computer.compute("000300", trade_date, FactorContext(index_bars=bars))
+        assert result.numeric is None
+
+    def test_batch_matches_point(self) -> None:
+        trade_date = date(2024, 6, 1)
+        bars = _build_ohlc_bars("000300", trade_date, n_days=190)
+        ctx = FactorContext(index_bars=bars)
+        assert self._computer.compute_batch("000300", [trade_date], ctx)[trade_date] == self._computer.compute(
+            "000300", trade_date, ctx
+        )
 
 
 # ─── Sharpe60dComputer（风险调整动量）─────────────────────────────────────────────
