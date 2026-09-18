@@ -606,7 +606,12 @@ class LowAmplitudeMomentumComputer:
                 f"累加最低振幅 {ratio_pct}% 交易日的收盘价日收益率（%）。"
             ),
             required_data=["index_bars"],
-            lookback_days=max(15, int(self._period * 1.5) + 10),
+            # 161 根有 OHLC 的 bar 在 A 股日历（春节+国庆叠加）上最多跨越 251 个自然日
+            # （实测 2017–2026 全部指数）。通用的 period×1.5 系数在大周期下余量被摊薄
+            # （160×1.5=240 < 251），故按 1.75 倍留出余量，兼容节假日分布差异与窗口内
+            # 少量缺 bar 的指数。按需计算（compute_and_store 只传本因子）时用的就是这个
+            # 值，窗口不足会直接返回 None。
+            lookback_days=max(15, int(self._period * 1.75) + 10),
             default_params={
                 "period": self._period,
                 "low_amplitude_ratio": self._ratio,

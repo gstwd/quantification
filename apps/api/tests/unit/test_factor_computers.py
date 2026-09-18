@@ -519,6 +519,17 @@ class TestLowAmplitudeMomentumComputer:
         assert spec.factor_id == "low_amplitude_momentum_160d_70pct"
         assert spec.default_params == {"period": 160, "low_amplitude_ratio": 0.7}
 
+    def test_lookback_covers_required_bars(self) -> None:
+        """回望自然日必须容纳 period+1 根 bar：实测 161 根最多跨越 251 个自然日。
+
+        按需计算（``compute_and_store`` 只传本因子）时回望窗口就是本因子的
+        ``lookback_days``，不足会直接返回 None，因此这里做回归保护。
+        """
+        spec = self._computer.spec
+        assert spec.lookback_days >= 251
+        # 不应无谓放大：注册表最大回望仍应由估值因子的 730 决定
+        assert spec.lookback_days < 730
+
     def test_keeps_only_low_amplitude_days(self) -> None:
         """低振幅正收益日应保留，高振幅负收益日应被剔除。"""
         trade_date = date(2024, 6, 1)
