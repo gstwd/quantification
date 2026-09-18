@@ -14,6 +14,8 @@ from quant_etf_api.factors.service import FactorService
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
 from quant_etf_api.infra.time import today_cn
 from quant_etf_api.factors.evaluation import (
+    MIN_CROSS_SECTION_N,
+    analyze_ic,
     calc_factor_correlation_matrix,
 )
 from quant_etf_api.schemas.factor import (
@@ -198,45 +200,50 @@ def factor_ic_analysis(
     start_date: date = Query(..., description="IC 分析起始日期（含）"),
     end_date: date = Query(..., description="IC 分析截止日期（含）"),
     forward_days: int = Query(1, ge=1, le=20, description="前瞻天数，用于计算下期收益率"),
+    min_cross_section_n: int = Query(
+        MIN_CROSS_SECTION_N,
+        ge=5,
+        le=200,
+        description="有效 Rank IC 所需的最小横截面指数数量",
+    ),
     db: Session = Depends(get_db),
 ) -> ICResponse:
     """查询因子的 IC（Information Coefficient）分析。
 
-    计算因子值与下期收益率的 Rank IC 时间序列及汇总统计。
-    IC 均值 > 0 表示因子有正向预测力，IC_IR > 0.5 表示因子较稳定。
+    计算因子值与下期收益率的 Rank IC 时间序列及汇总统计。横截面指数数量少于
+    ``min_cross_section_n`` 的交易日不产出有效 IC（n=3 时 Spearman 只能取
+    ±1/±0.5），这些日期会被排除并计入 ``summary.excluded_low_n_days``，
+    未产出有效 IC 时 ``summary.insufficient_reason`` 给出原因。
+
+    判读提示：显著性看 ``summary.t_stat``（|t| > 2 才算显著），横截面规模看
+    ``summary.cross_section_n_avg``；``forward_days > 1`` 时相邻观测的前瞻窗口
+    重叠，应参考 ``effective_n`` 而非 ``count``。
     """
     try:
-        from quant_etf_api.factors.evaluation import calc_ic_series
-
-        series_data = calc_ic_series(db, factor_id, start_date, end_date, forward_days)
-        # 从 IC 序列直接计算汇总统计，避免 calc_ic_summary 内部重复调用 calc_ic_series
-        if series_data:
-            ic_values = [s["ic"] for s in series_data]
-            n = len(ic_values)
-            mean = sum(ic_values) / n
-            variance = sum((x - mean) ** 2 for x in ic_values) / (n - 1) if n > 1 else 0.0
-            std = variance**0.5
-            ic_ir = round(mean / std, 4) if std > 0 else None
-            positive_count = sum(1 for x in ic_values if x > 0)
-            summary = ICSummary(
-                ic_mean=round(mean, 4),
-                ic_std=round(std, 4),
-                ic_ir=ic_ir,
-                ic_positive_ratio=round(positive_count / n, 4),
-                count=n,
-            )
-        else:
-            summary = ICSummary(
-                ic_mean=None, ic_std=None, ic_ir=None, ic_positive_ratio=None, count=0
-            )
+        result = analyze_ic(
+            db,
+            factor_id,
+            start_date,
+            end_date,
+            forward_days,
+            min_cross_section_n,
+        )
     except Exception:
         logger.warning("IC 分析失败: factor_id=%s", factor_id, exc_info=True)
         raise HTTPException(status_code=500, detail="IC 分析计算失败") from None
 
+    summary = result["summary"]
     return ICResponse(
         factor_id=factor_id,
-        summary=summary,
-        series=[{"trade_date": s["trade_date"], "ic": s["ic"]} for s in series_data],
+        summary=ICSummary(**summary),
+        series=[
+            {
+                "trade_date": item["trade_date"],
+                "ic": item["ic"],
+                "cross_section_n": item["cross_section_n"],
+            }
+            for item in result["series"]
+        ],
     )
 
 
@@ -244,15 +251,25 @@ def factor_ic_analysis(
 def factor_correlation(
     trade_date: date = Query(..., description="交易日"),
     factor_ids: list[str] | None = Query(None, description="因子列表，不传时计算所有有数据的因子"),
+    min_cross_section_n: int = Query(
+        MIN_CROSS_SECTION_N,
+        ge=5,
+        le=200,
+        description="计算相关系数所需的最小成对样本数",
+    ),
     db: Session = Depends(get_db),
 ) -> CorrelationResponse:
     """查询因子间截面 Rank 相关性矩阵。
 
-    对指定交易日的所有指数，计算各因子值之间的 Spearman 秩相关系数。
-    可用于判断因子冗余度，相关性高的因子可考虑正交化或二选一。
+    对指定交易日的所有指数，按**成对交集**计算各因子值之间的 Spearman 相关系数
+    （因子覆盖不一致时不再要求全局交集，避免交集塌缩甚至为空）。可用于判断因子
+    冗余度，相关性高的因子可考虑正交化或二选一。每对实际使用的指数数量见
+    ``pair_counts``；样本不足或相关未定义的格子为 ``null``（不伪造为 0）。
     """
     try:
-        result = calc_factor_correlation_matrix(db, trade_date, factor_ids)
+        result = calc_factor_correlation_matrix(
+            db, trade_date, factor_ids, min_cross_section_n
+        )
     except Exception:
         logger.warning("因子相关性计算失败: trade_date=%s", trade_date, exc_info=True)
         raise HTTPException(status_code=500, detail="相关性计算失败") from None
@@ -260,6 +277,8 @@ def factor_correlation(
     return CorrelationResponse(
         factor_ids=result["factor_ids"],
         matrix=result["matrix"],
+        pair_counts=result.get("pair_counts", []),
         index_count=result.get("index_count", 0),
+        undetermined_pair_count=result.get("undetermined_pair_count", 0),
         trade_date=result.get("trade_date", str(trade_date)),
     )

@@ -89,10 +89,12 @@ class ICPoint(BaseModel):
     Attributes:
         trade_date: 交易日。
         ic: Rank IC 值。
+        cross_section_n: 该日参与计算的横截面指数数量。
     """
 
     trade_date: str
     ic: float
+    cross_section_n: int = 0
 
 
 class ICSummary(BaseModel):
@@ -101,16 +103,36 @@ class ICSummary(BaseModel):
     Attributes:
         ic_mean: IC 均值。
         ic_std: IC 标准差。
-        ic_ir: IC_IR（IC 均值 / IC 标准差）。
+        ic_ir: IC_IR（IC 均值 / IC 标准差，未年化）。
+        t_stat: t 统计量（ic_ir × sqrt(effective_n)），|t| > 2 才算显著。
         ic_positive_ratio: IC>0 的比例。
         count: 有效 IC 数据点数量。
+        effective_n: 折算重叠窗口后的有效样本数（count // forward_days）。
+        overlap: 前瞻窗口是否重叠（forward_days > 1 时为 True，ic_std 会低估）。
+        cross_section_n_avg: 有效观测的平均横截面指数数量。
+        cross_section_n_min: 有效观测的最小横截面指数数量。
+        cross_section_n_max: 有效观测的最大横截面指数数量。
+        cross_section_n_required: 有效 IC 所需的最小横截面指数数量。
+        excluded_low_n_days: 因横截面不足被排除的交易日数量。
+        dropped_no_forward_days: 因缺少前瞻行情被丢弃的交易日数量。
+        insufficient_reason: 未产出有效 IC 时的中文原因说明。
     """
 
     ic_mean: float | None = None
     ic_std: float | None = None
     ic_ir: float | None = None
+    t_stat: float | None = None
     ic_positive_ratio: float | None = None
     count: int = 0
+    effective_n: int = 0
+    overlap: bool = False
+    cross_section_n_avg: float | None = None
+    cross_section_n_min: int | None = None
+    cross_section_n_max: int | None = None
+    cross_section_n_required: int = 0
+    excluded_low_n_days: int = 0
+    dropped_no_forward_days: int = 0
+    insufficient_reason: str | None = None
 
 
 class ICResponse(BaseModel):
@@ -132,12 +154,18 @@ class CorrelationResponse(BaseModel):
 
     Attributes:
         factor_ids: 因子标识列表（矩阵行列顺序）。
-        matrix: 相关系数二维矩阵。
-        index_count: 参与计算的指数数量。
+        matrix: 相关系数二维矩阵；样本不足或相关未定义（常数输入）的格子为
+            None，不再伪造为 0；对角线恒为 1.0。
+        pair_counts: 与 matrix 同形的成对样本数矩阵，标识每个格子实际用了
+            多少指数计算。
+        index_count: 当日有任一因子值的指数数量（原始横截面规模）。
+        undetermined_pair_count: 未能定值的因子对数量（成对样本不足或常数输入）。
         trade_date: 数据日期。
     """
 
     factor_ids: list[str]
-    matrix: list[list[float]]
+    matrix: list[list[float | None]]
+    pair_counts: list[list[int]] = Field(default_factory=list)
     index_count: int
+    undetermined_pair_count: int = 0
     trade_date: str

@@ -22,6 +22,7 @@ from quant_etf_api.domain.research.lifecycle import (
     assess_health,
     build_baseline_distribution,
     evaluate_against_baseline,
+    ic_decay_evidence,
 )
 from quant_etf_api.domain.research.periods import (
     PURPOSE_MONITOR,
@@ -222,3 +223,75 @@ class TestHealthAssessment:
         assert result.recommended_action == ACTION_KEEP
         # "没算出问题" ≠ "没有问题"：等级必须是 UNKNOWN
         assert result.health_level == HEALTH_UNKNOWN
+
+
+class TestIcDecayEvidence:
+    """测试 IC 衰减的显著性判定（服务层据此外推 confirmed）。"""
+
+    def test_significant_decay_is_confirmed(self) -> None:
+        """前半段明显高于后半段（差值远超 2 倍标准误）时确认衰减。"""
+        values = [0.10, 0.12, 0.08, 0.11, 0.09] * 8 + [0.01, 0.00, 0.02, -0.01, 0.01] * 8
+        evidence = ic_decay_evidence(values)
+        assert evidence["confirmed"] is True
+        assert evidence["delta"] > 0
+        assert evidence["first_half_n"] == 40
+        assert evidence["second_half_n"] == 40
+
+    def test_noise_difference_is_not_confirmed(self) -> None:
+        """前后半段均值差远小于标准误时不能判为衰减。"""
+        values = [0.02, -0.30, 0.35, -0.25, 0.30, -0.32, 0.28, 0.01] * 10
+        evidence = ic_decay_evidence(values)
+        assert evidence["confirmed"] is False
+
+    def test_improving_ic_is_not_confirmed(self) -> None:
+        """后半段更高时明确不确认衰减。"""
+        values = [0.01, 0.00, 0.02, -0.01, 0.01] * 8 + [0.10, 0.12, 0.08, 0.11, 0.09] * 8
+        evidence = ic_decay_evidence(values)
+        assert evidence["confirmed"] is False
+        assert evidence["delta"] < 0
+
+    def test_too_few_observations_returns_no_evidence(self) -> None:
+        """半段观测不足时不给均值也不确认衰减。"""
+        evidence = ic_decay_evidence([0.05] * 20)
+        assert evidence["confirmed"] is False
+        assert evidence["first_half_mean"] is None
+        assert evidence["second_half_mean"] is None
+        assert evidence["delta"] is None
+
+    def test_empty_series_is_safe(self) -> None:
+        """空序列不抛异常。"""
+        evidence = ic_decay_evidence([])
+        assert evidence["confirmed"] is False
+        assert evidence["first_half_n"] == 0
+
+
+class TestConfirmedFlagIsAuthoritative:
+    """测试 assess_health 对 confirmed 标记的采纳优先级。"""
+
+    def test_confirmed_false_overrides_lower_second_half(self) -> None:
+        """服务层判定不显著时，即使后半段均值更低也不得升级为告警。"""
+        result = assess_health(
+            30.0,
+            {"3m": 2.0, "6m": 20.0, "12m": 60.0},
+            ic_decay={
+                "first_half_mean": 0.04,
+                "second_half_mean": 0.01,
+                "confirmed": False,
+            },
+        )
+        assert result.health_level == HEALTH_WATCH
+        assert result.diagnosis == DIAGNOSIS_ALPHA_DECAY
+
+    def test_confirmed_true_overrides_higher_second_half(self) -> None:
+        """confirmed 为真时以其为准（服务层已做过显著性检验）。"""
+        result = assess_health(
+            99.0,
+            {"3m": 2.0, "6m": 20.0, "12m": 60.0},
+            ic_decay={
+                "first_half_mean": 0.01,
+                "second_half_mean": 0.03,
+                "confirmed": True,
+            },
+        )
+        assert result.health_level == HEALTH_CRITICAL
+        assert result.diagnosis == DIAGNOSIS_ALPHA_DECAY

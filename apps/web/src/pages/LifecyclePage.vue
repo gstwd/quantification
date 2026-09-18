@@ -234,19 +234,25 @@
               <span class="k">IC 衰减（前半段 → 后半段）</span>
               <span class="v" :class="{ warn: icDecaying }">
                 {{ num(icDecay.first_half_mean) }} → {{ num(icDecay.second_half_mean) }}
-                <template v-if="icDecaying">（衰减中）</template>
+                <template v-if="icDecaying">（显著衰减）</template>
+                <template v-else-if="icDecayDetail">（未确认衰减）</template>
+                <span v-if="icDecayDetail" class="ic-decay-detail">{{ icDecayDetail }}</span>
               </span>
             </div>
             <table v-if="factorRows.length" class="table">
               <thead>
-                <tr><th>因子</th><th>观测数</th><th>IC 均值</th><th>ICIR</th><th>IC&gt;0 占比</th></tr>
+                <tr><th>因子</th><th>观测数</th><th>IC 均值</th><th>ICIR</th><th>t 值</th><th>IC&gt;0 占比</th></tr>
               </thead>
               <tbody>
                 <tr v-for="row in factorRows" :key="row.factorId">
                   <td class="mono">{{ row.factorId }}</td>
-                  <td>{{ row.count }}</td>
+                  <td>
+                    {{ row.count }}
+                    <span v-if="row.reason" class="ic-row-hint" :title="row.reason">样本不足</span>
+                  </td>
                   <td>{{ num(row.ic_mean) }}</td>
                   <td>{{ num(row.ic_ir) }}</td>
+                  <td>{{ num(row.t_stat) }}</td>
                   <td>{{ row.ic_positive_ratio != null ? pct(row.ic_positive_ratio * 100) : '—' }}</td>
                 </tr>
               </tbody>
@@ -382,7 +388,16 @@ interface FactorIcEntry {
   count?: number
   ic_mean?: number | null
   ic_ir?: number | null
+  t_stat?: number | null
   ic_positive_ratio?: number | null
+  cross_section_n_avg?: number | null
+  excluded_low_n_days?: number
+  insufficient_reason?: string | null
+  ic_decay?: {
+    first_half_mean?: number | null
+    second_half_mean?: number | null
+    confirmed?: boolean
+  } | null
 }
 
 /** 体检指标结构（后端 JSONB，字段全部可选） */
@@ -402,7 +417,13 @@ interface SnapshotMetrics {
   factors?: {
     per_factor?: Record<string, FactorIcEntry>
     ic_mean?: number | null
-    ic_decay?: { first_half_mean?: number | null; second_half_mean?: number | null } | null
+    ic_decay?: {
+      first_half_mean?: number | null
+      second_half_mean?: number | null
+      confirmed?: boolean
+      confirmed_factor_count?: number
+      factor_count?: number
+    } | null
   }
 }
 
@@ -424,18 +445,30 @@ const factorRows = computed(() => {
     count: value.count ?? 0,
     ic_mean: value.ic_mean ?? null,
     ic_ir: value.ic_ir ?? null,
+    t_stat: value.t_stat ?? null,
     ic_positive_ratio: value.ic_positive_ratio ?? null,
+    reason: value.count === 0 ? (value.insufficient_reason ?? null) : null,
   }))
 })
 
 // IC 前后半段均值：上线初期唯一能积累出统计量的衰减证据
 const icDecay = computed(() => metrics.value.factors?.ic_decay ?? null)
 
-// 后半段 IC 低于前半段时标记为衰减中
+// 衰减中：服务层已做显著性检验（confirmed），历史快照缺少该字段时回退为均值比较
 const icDecaying = computed(() => {
-  const first = icDecay.value?.first_half_mean
-  const second = icDecay.value?.second_half_mean
+  const decay = icDecay.value
+  if (!decay) return false
+  if (typeof decay.confirmed === 'boolean') return decay.confirmed
+  const first = decay.first_half_mean
+  const second = decay.second_half_mean
   return typeof first === 'number' && typeof second === 'number' && second < first
+})
+
+// 各因子显著衰减的计数文案
+const icDecayDetail = computed(() => {
+  const decay = icDecay.value
+  if (!decay || typeof decay.factor_count !== 'number' || decay.factor_count === 0) return ''
+  return `${decay.confirmed_factor_count ?? 0}/${decay.factor_count} 个因子显著衰减`
 })
 
 /**
@@ -669,6 +702,16 @@ onMounted(async () => {
 .hint { margin-top: 10px; font-size: 12px; color: var(--text-muted); }
 .ic-decay { display: flex; gap: 10px; align-items: baseline; margin-bottom: 10px; font-size: 13px; }
 .ic-decay .warn { color: var(--warning); }
+.ic-decay-detail { margin-left: 8px; font-size: 12px; color: var(--text-muted); }
+.ic-row-hint {
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--warning);
+  border: 1px solid var(--warning);
+  border-radius: 8px;
+  cursor: help;
+}
 
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .table th, .table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }

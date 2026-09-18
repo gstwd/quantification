@@ -122,6 +122,69 @@ class IndexFactorValueRepository(BaseRepository):
             query = query.filter(IndexFactorValueModel.params_hash == params_hash)
         return query.order_by(IndexFactorValueModel.trade_date.asc()).all()
 
+    def find_factor_series_range(
+        self, factor_id: str, start_date: date, end_date: date
+    ) -> list[tuple[date, str, float]]:
+        """查询单因子在日期区间内的全部横截面数值（一次查询，供 IC 分析批量使用）。
+
+        不按 ``benchmark_index.is_active`` 过滤：IC 研究需要 point-in-time 口径，
+        已退市指数的历史因子值仍应参与历史横截面。
+
+        Args:
+            factor_id: 因子标识。
+            start_date: 起始日期（含）。
+            end_date: 截止日期（含）。
+
+        Returns:
+            (trade_date, index_code, factor_value_numeric) 元组列表，按日期升序。
+        """
+        rows = (
+            self._db.query(
+                IndexFactorValueModel.trade_date,
+                IndexFactorValueModel.index_code,
+                IndexFactorValueModel.factor_value_numeric,
+            )
+            .filter(
+                IndexFactorValueModel.factor_id == factor_id,
+                IndexFactorValueModel.trade_date >= start_date,
+                IndexFactorValueModel.trade_date <= end_date,
+                IndexFactorValueModel.strategy_id.is_(None),
+                IndexFactorValueModel.factor_value_numeric.isnot(None),
+            )
+            .order_by(IndexFactorValueModel.trade_date.asc())
+            .all()
+        )
+        return [(r[0], r[1], float(r[2])) for r in rows]
+
+    def find_cross_section_values(
+        self, trade_date: date, factor_ids: list[str] | None = None
+    ) -> list[tuple[str, str, float]]:
+        """查询指定交易日全部因子的横截面数值（不做全局交集约束）。
+
+        IC 相关性矩阵改为按因子对各自求交集，因此这里返回"窄表"原始行，
+        由调用方决定每一对因子的交集范围。
+
+        Args:
+            trade_date: 交易日。
+            factor_ids: 因子列表，None 表示当日所有有值的因子。
+
+        Returns:
+            (index_code, factor_id, factor_value_numeric) 元组列表。
+        """
+        query = self._db.query(
+            IndexFactorValueModel.index_code,
+            IndexFactorValueModel.factor_id,
+            IndexFactorValueModel.factor_value_numeric,
+        ).filter(
+            IndexFactorValueModel.trade_date == trade_date,
+            IndexFactorValueModel.strategy_id.is_(None),
+            IndexFactorValueModel.factor_value_numeric.isnot(None),
+        )
+        if factor_ids:
+            query = query.filter(IndexFactorValueModel.factor_id.in_(factor_ids))
+        rows = query.all()
+        return [(r[0], r[1], float(r[2])) for r in rows]
+
     def find_missing_dates(
         self,
         factor_id: str,

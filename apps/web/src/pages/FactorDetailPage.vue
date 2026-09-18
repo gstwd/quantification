@@ -142,18 +142,23 @@
         <details class="info-block">
           <summary>查看说明</summary>
           <p><strong>Rank IC（Information Coefficient）</strong>是因子值与下期收益率的 Spearman 秩相关系数，衡量因子的预测能力。取值范围 [-1, 1]。</p>
-          <p><strong>计算流程：</strong>取当日所有指数的因子值 → 计算 N 天后的收益率 → 对两个序列做 Spearman 相关。</p>
+          <p><strong>计算流程：</strong>取当日所有指数的因子值 → 按交易日历取 N 个交易日后的收盘价 → 对两个序列做 Spearman 相关。</p>
+          <p><strong>横截面规模决定可信度：</strong>IC 是在"当日有因子值的指数"之间做排序相关，指数越少结果越粗（只有 3 个指数时相关系数只能取 ±1 / ±0.5）。因此横截面少于 {{ icSummary?.cross_section_n_required ?? 20 }} 个指数的交易日不产出有效 IC，会被排除并在下方提示。</p>
           <div class="info-table">
-            <div class="info-row"><span class="info-label">IC 均值</span><span class="info-desc">所有交易日 IC 的平均值。<strong>> 0</strong> 表示因子有正向预测力，绝对值 > 0.03 算有效。</span></div>
-            <div class="info-row"><span class="info-label">IC 标准差</span><span class="info-desc">IC 的波动程度，<strong>越小越稳定</strong>。</span></div>
-            <div class="info-row"><span class="info-label">IC_IR</span><span class="info-desc">IC 均值 / IC 标准差，类似夏普比率。<strong>> 0.5 较稳定，> 1.0 优秀</strong>，是衡量因子质量的核心指标。</span></div>
-            <div class="info-row"><span class="info-label">IC>0 占比</span><span class="info-desc">IC 为正的交易日占比。<strong>> 50%</strong> 说明多数时候方向正确，> 60% 较好。</span></div>
+            <div class="info-row"><span class="info-label">IC 均值</span><span class="info-desc">所有有效交易日 IC 的平均值。<strong>> 0</strong> 表示因子有正向预测力，但必须结合 t 统计量与横截面指数数量判读，不能只看绝对值大小。</span></div>
+            <div class="info-row"><span class="info-label">IC 标准差</span><span class="info-desc">IC 的波动程度，<strong>越小越稳定</strong>。横截面指数越少，噪声导致的标准差天然越大。</span></div>
+            <div class="info-row"><span class="info-label">IC_IR</span><span class="info-desc">IC 均值 / IC 标准差（<strong>未年化</strong>），类似夏普比率。是衡量因子稳定性的核心指标，但同样需要结合 t 统计量看是否显著。</span></div>
+            <div class="info-row"><span class="info-label">t 统计量</span><span class="info-desc">IC_IR × √有效样本数。<strong>|t| &gt; 2</strong> 才认为 IC 均值显著非零；|t| 很小说明观察到的 IC 与噪声无法区分。</span></div>
+            <div class="info-row"><span class="info-label">IC>0 占比</span><span class="info-desc">IC 为正的交易日占比。<strong>> 50%</strong> 说明多数时候方向正确；接近 50% 说明预测近乎随机。</span></div>
+            <div class="info-row"><span class="info-label">横截面指数数</span><span class="info-desc">有效观测的平均横截面指数数量（悬浮可见最小~最大）。该数值越大，IC 的取值粒度越细、结论越可靠。</span></div>
             <div class="info-row"><span class="info-label">数据点</span><span class="info-desc">有效 IC 计算天数，<strong>< 30 天</strong>时统计意义不足。</span></div>
           </div>
-          <p><strong>柱状图解读：</strong>绿色柱 = IC > 0（因子预测方向正确），红色柱 = IC < 0（方向相反）。柱子越高预测力越强。大面积绿色且柱高说明因子有效且稳定。</p>
+          <p><strong>柱状图解读：</strong>绿色柱 = IC > 0（因子预测方向正确），红色柱 = IC < 0（方向相反）。悬浮可看到该日的横截面指数数量，柱子高但指数少时属于小样本噪声。</p>
         </details>
         <div v-if="icLoading" class="empty">加载中...</div>
         <template v-else>
+          <div v-if="icInsufficientReason" class="ic-notice">{{ icInsufficientReason }}</div>
+          <div v-else-if="icExcludedNotice" class="ic-notice">{{ icExcludedNotice }}</div>
           <div v-if="icSummary && icSummary.count > 0" class="ic-summary-row">
             <div class="stat-card">
               <span class="stat-label">IC 均值 <HelpTip :text="faHelp('ic_mean')" /></span>
@@ -172,12 +177,29 @@
               </span>
             </div>
             <div class="stat-card">
+              <span class="stat-label">t 统计量 <HelpTip :text="faHelp('t_stat')" /></span>
+              <span class="stat-value" :class="icSignificant ? 'positive' : 'negative'">
+                {{ icSummary.t_stat?.toFixed(2) ?? '—' }}
+                <span class="stat-hint">{{ icSignificant ? '显著' : '不显著' }}</span>
+              </span>
+            </div>
+            <div class="stat-card">
               <span class="stat-label">IC>0 占比 <HelpTip :text="faHelp('ic_positive_ratio')" /></span>
               <span class="stat-value">{{ icSummary.ic_positive_ratio != null ? (icSummary.ic_positive_ratio * 100).toFixed(1) + '%' : '—' }}</span>
             </div>
             <div class="stat-card">
+              <span class="stat-label">横截面指数数 <HelpTip :text="faHelp('cross_section_n')" /></span>
+              <span class="stat-value">
+                {{ icSummary.cross_section_n_avg?.toFixed(1) ?? '—' }}
+                <span class="stat-hint" v-if="icCrossSectionRange">{{ icCrossSectionRange }}</span>
+              </span>
+            </div>
+            <div class="stat-card">
               <span class="stat-label">数据点 <HelpTip :text="faHelp('rank_ic')" /></span>
-              <span class="stat-value">{{ icSummary.count }}</span>
+              <span class="stat-value">
+                {{ icSummary.count }}
+                <span class="stat-hint" v-if="icSummary.overlap">有效 {{ icSummary.effective_n }}</span>
+              </span>
             </div>
           </div>
           <div v-if="icSeries.length === 0" class="empty">暂无 IC 数据，请调整日期范围</div>
@@ -189,7 +211,10 @@
       <div v-show="tab === 'correlation'" class="card">
         <div class="card-header">
           <span class="card-title">因子相关性矩阵</span>
-          <span v-if="corrData" class="card-subtitle">指数数量：{{ corrData.index_count }}</span>
+          <span v-if="corrData" class="card-subtitle">
+            指数数量：{{ corrData.index_count }}
+            <template v-if="corrPairRange">（每对 {{ corrPairRange }}）</template>
+          </span>
           <div class="controls">
             <input type="date" class="date-input" v-model="corrDate" />
             <button class="query-btn" @click="loadCorrelation">查询</button>
@@ -198,9 +223,10 @@
         <details class="info-block">
           <summary>查看说明</summary>
           <p><strong>因子相关性矩阵</strong>衡量同一天各因子之间的 Spearman 秩相关系数，用于判断因子冗余度。对角线恒为 1.0（自身完全相关）。</p>
+          <p><strong>每一对因子使用各自共同覆盖的指数</strong>（不是"所有因子都有的指数"），因此不同格子的样本数可能不同；悬浮可看到该对实际使用的指数数量。成对样本不足或相关未定义（因子值恒定）的格子显示为空，表示无法判断，而不是"不相关"。</p>
           <p><strong>热力图颜色：</strong>绿色 = 正相关（两个因子同向变化），红色 = 负相关（反向变化），深色/黑色 = 接近 0（相互独立）。</p>
           <div class="info-table">
-            <div class="info-row"><span class="info-label">|r| > 0.7</span><span class="info-desc">高度冗余，两个因子捕捉的信息高度重叠，建议只保留一个或做正交化处理。</span></div>
+            <div class="info-row"><span class="info-label">|r| > 0.7</span><span class="info-desc">高度冗余，两个因子捕捉的信息高度重叠，建议只保留一个或做正交化处理（需该对样本数足够才有意义）。</span></div>
             <div class="info-row"><span class="info-label">|r| < 0.3</span><span class="info-desc">低相关，互补性好，组合使用可提升策略覆盖面。</span></div>
             <div class="info-row"><span class="info-label">负相关</span><span class="info-desc">两个因子可能捕捉市场的不同维度（如量能 vs 波动率），组合时注意对冲效应。</span></div>
           </div>
@@ -208,8 +234,15 @@
         </details>
         <div v-if="corrLoading" class="empty">加载中...</div>
         <template v-else>
-          <div v-if="!corrData || corrData.matrix.length === 0" class="empty">暂无相关性数据，请确认当日有多个因子的计算结果</div>
-          <div v-else ref="corrChartEl" class="chart-container corr-chart"></div>
+          <div v-if="!corrData || corrData.matrix.length === 0 || !corrHasDeterminedPair" class="empty">
+            {{ corrEmptyHint }}
+          </div>
+          <template v-else>
+            <div v-if="corrData.undetermined_pair_count > 0" class="ic-notice">
+              {{ corrData.undetermined_pair_count }} 对因子因成对样本不足或数值恒定未能计算相关系数（对应格显示为空）。
+            </div>
+            <div ref="corrChartEl" class="chart-container corr-chart"></div>
+          </template>
         </template>
       </div>
     </template>
@@ -433,6 +466,69 @@ watch([seriesRows, chartEl], () => {
   if (!seriesLoading.value) renderChart()
 }, { flush: 'post' })
 
+/** IC 前后半段均值：上线初期唯一能积累出统计量的衰减证据 */
+const icSignificant = computed(() => Math.abs(icSummary.value?.t_stat ?? 0) >= 2)
+
+/** 有效观测的横截面指数数量区间文案 */
+const icCrossSectionRange = computed(() => {
+  const summary = icSummary.value
+  if (!summary || summary.cross_section_n_min == null || summary.cross_section_n_max == null) {
+    return ''
+  }
+  return `${summary.cross_section_n_min}~${summary.cross_section_n_max}`
+})
+
+/** 完全没有有效 IC 时的原因提示（含横截面不足的说明） */
+const icInsufficientReason = computed(() => {
+  const summary = icSummary.value
+  if (!summary || summary.count > 0) return ''
+  return summary.insufficient_reason || '该区间内没有可用的 IC 观测，请调整日期范围'
+})
+
+/** 有有效 IC 但排除了部分横截面不足的交易日时的提示 */
+const icExcludedNotice = computed(() => {
+  const summary = icSummary.value
+  if (!summary || summary.count === 0 || summary.excluded_low_n_days === 0) return ''
+  return `${summary.excluded_low_n_days} 个交易日因横截面不足 ${summary.cross_section_n_required} 个指数被排除，未计入统计。`
+})
+
+/** 相关性矩阵中成对样本数区间文案（只看非对角线） */
+const corrPairRange = computed(() => {
+  const data = corrData.value
+  if (!data || data.pair_counts.length === 0) return ''
+  const values: number[] = []
+  for (let i = 0; i < data.pair_counts.length; i++) {
+    for (let j = 0; j < data.pair_counts[i].length; j++) {
+      if (i !== j && data.pair_counts[i][j] > 0) values.push(data.pair_counts[i][j])
+    }
+  }
+  if (values.length === 0) return ''
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  return min === max ? `${min}` : `${min}~${max}`
+})
+
+/** 是否存在至少一对可定值的因子（否则热力图只剩对角线，应当提示而非渲染） */
+const corrHasDeterminedPair = computed(() => {
+  const data = corrData.value
+  if (!data) return false
+  for (let i = 0; i < data.matrix.length; i++) {
+    for (let j = 0; j < data.matrix[i].length; j++) {
+      if (i !== j && data.matrix[i][j] != null) return true
+    }
+  }
+  return false
+})
+
+/** 相关性矩阵无法展示时的提示文案 */
+const corrEmptyHint = computed(() => {
+  const data = corrData.value
+  if (!data || data.matrix.length === 0) {
+    return '暂无相关性数据，请确认当日有多个因子的计算结果'
+  }
+  return `当日横截面只有 ${data.index_count} 个指数，所有因子对的共同样本都不足以计算相关系数，无法判断冗余度。`
+})
+
 /** 加载 IC 分析数据 */
 async function loadIC() {
   if (!icStart.value || !icEnd.value) return
@@ -455,8 +551,9 @@ async function renderICChart() {
   const echarts = await import('echarts')
   icChartInstance?.dispose()
   icChartInstance = echarts.init(icChartEl.value, null, { renderer: 'canvas' })
-  const dates = icSeries.value.map(r => r.trade_date)
-  const values = icSeries.value.map(r => r.ic)
+  const points = icSeries.value
+  const dates = points.map(r => r.trade_date)
+  const values = points.map(r => r.ic)
   icChartInstance.setOption({
     backgroundColor: 'transparent',
     tooltip: {
@@ -464,9 +561,11 @@ async function renderICChart() {
       backgroundColor: '#1e293b',
       borderColor: '#334155',
       textStyle: { color: '#f1f5f9', fontSize: 12 },
-      formatter: (params: { name: string; value: number }[]) => {
-        const p = params[0]
-        return `${p.name}<br/>Rank IC: <b>${p.value?.toFixed(4) ?? '—'}</b>`
+      formatter: (params: { dataIndex: number }[]) => {
+        const index = params[0]?.dataIndex ?? 0
+        const point = points[index]
+        if (!point) return ''
+        return `${point.trade_date}<br/>Rank IC: <b>${point.ic.toFixed(4)}</b><br/>横截面指数: ${point.cross_section_n}`
       },
     },
     grid: { left: 64, right: 20, top: 24, bottom: 36 },
@@ -510,17 +609,19 @@ async function loadCorrelation() {
   }
 }
 
-/** 渲录相关性热力图 */
+/** 渲染相关性热力图 */
 async function renderCorrChart() {
   if (!corrChartEl.value || !corrData.value || corrData.value.matrix.length === 0) return
   const echarts = await import('echarts')
   corrChartInstance?.dispose()
   corrChartInstance = echarts.init(corrChartEl.value, null, { renderer: 'canvas' })
-  const { factor_ids: fids, matrix } = corrData.value
-  const data: [number, number, number][] = []
+  const { factor_ids: fids, matrix, pair_counts: pairCounts } = corrData.value
+  // null 表示样本不足或相关未定义：以空值渲染，不伪装成 0
+  const data: [number, number, number | string][] = []
   for (let i = 0; i < fids.length; i++) {
     for (let j = 0; j < fids.length; j++) {
-      data.push([j, i, matrix[i][j]])
+      const value = matrix[i][j]
+      data.push([j, i, value == null ? '-' : value])
     }
   }
   corrChartInstance.setOption({
@@ -529,9 +630,16 @@ async function renderCorrChart() {
       backgroundColor: '#1e293b',
       borderColor: '#334155',
       textStyle: { color: '#f1f5f9', fontSize: 12 },
-      formatter: (p: { data: [number, number, number] }) => {
+      formatter: (p: { data: [number, number, number | string] }) => {
         const d = p.data
-        return `${fids[d[1]]} × ${fids[d[0]]}<br/>相关系数: <b>${d[2].toFixed(4)}</b>`
+        const row = d[1]
+        const column = d[0]
+        const pairN = pairCounts?.[row]?.[column]
+        const head = `${fids[row]} × ${fids[column]}`
+        if (d[2] === '-') {
+          return `${head}<br/>相关系数: <b>样本不足</b><br/>成对指数: ${pairN ?? '—'}`
+        }
+        return `${head}<br/>相关系数: <b>${Number(d[2]).toFixed(4)}</b><br/>成对指数: ${pairN ?? '—'}`
       },
     },
     grid: { left: 100, right: 40, top: 20, bottom: 80 },
@@ -802,6 +910,19 @@ onUnmounted(() => {
 .stat-value { font-size: 16px; font-weight: 600; font-family: monospace; }
 .stat-value.positive { color: #4ade80; }
 .stat-value.negative { color: #f87171; }
+.stat-hint { font-size: 11px; font-weight: 400; color: var(--text-muted); margin-left: 4px; }
+
+/* 样本不足/排除提示条 */
+.ic-notice {
+  margin: 0 20px 12px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  background: var(--surface-2, rgba(255,255,255,0.04));
+  border-left: 3px solid #f59e0b;
+  border-radius: var(--radius-sm);
+}
 
 /* 说明折叠块 */
 .info-block {

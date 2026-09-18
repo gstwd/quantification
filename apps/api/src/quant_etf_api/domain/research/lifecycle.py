@@ -17,8 +17,10 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Any
 
 from quant_etf_api.domain.research.stability import clean_returns_series
 
@@ -51,6 +53,11 @@ ACTION_KEEP = "KEEP"
 ACTION_WATCH = "WATCH"
 ACTION_REDUCE_RISK = "REDUCE_RISK"
 ACTION_RESEARCH = "RESEARCH"
+# IC 衰减判定：每个半段所需的最小观测数，以及确认衰减所需的显著性倍数。
+# 单因子 IC 序列通常噪声主导，仅比较前后半段均值（second < first）会有一半
+# 概率把噪声判成衰减，因此要求差值超过 2 倍标准误。
+IC_DECAY_MIN_HALF_N = 20
+IC_DECAY_SIGMA = 2.0
 
 
 @dataclass
@@ -182,7 +189,7 @@ def assess_health(
     drawdown_percentile_pct: float | None,
     window_percentiles: dict[str, float | None],
     trailing_alpha_percentiles: list[float | None] | None = None,
-    ic_decay: dict[str, float | None] | None = None,
+    ic_decay: dict[str, Any] | None = None,
     drawdown_warning_percentile: float = 95.0,
     alpha_warning_percentile: float = 5.0,
     consecutive_windows: int = 2,
@@ -205,8 +212,10 @@ def assess_health(
         window_percentiles: 各窗口超额收益分位，键为窗口标签（如 "3m"）。
         trailing_alpha_percentiles: 历次快照的 3M 超额分位（最近在前），
             用于判断"连续多次低于阈值"。
-        ic_decay: 因子 IC 的前后半段均值（``first_half_mean`` / ``second_half_mean``），
-            用于确认衰减方向；不可用时传 None，此时不做否决。
+        ic_decay: 因子 IC 前后半段的衰减证据，含 ``first_half_mean`` /
+            ``second_half_mean``，以及服务层按标准误算出的 ``confirmed``。
+            ``confirmed`` 存在时以其为准；不存在时回退为"后半段均值更低"。
+            不可用时传 None，此时不做否决。
         drawdown_warning_percentile: 回撤告警分位阈值，默认 95。
         alpha_warning_percentile: 超额告警分位阈值，默认 5。
         consecutive_windows: 连续低于阈值的次数要求，默认 2。
@@ -278,10 +287,83 @@ def _has_monotonic_performance_decay(window_percentiles: dict[str, float | None]
     return p3 < p6 < p12
 
 
-def _has_ic_decay(ic_decay: dict[str, float | None] | None) -> bool:
-    """只有前后半段 IC 都可用且后半段更低时才确认 IC 衰减。"""
+def ic_decay_evidence(ic_values: Sequence[float]) -> dict[str, Any]:
+    """由单个因子的 IC 序列给出前后半段均值与衰减显著性。
+
+    IC 序列通常噪声主导，仅凭"后半段均值更低"无法区分衰减与噪声，因此用
+    两个半段均值差与标准误比较：差值超过 ``IC_DECAY_SIGMA`` 倍标准误才算确认。
+
+    Args:
+        ic_values: 按日期升序的 IC 观测值（同一因子）。
+
+    Returns:
+        含 first_half_mean / second_half_mean / delta / se / first_half_n /
+        second_half_n / confirmed 的字典；半段观测不足时均值为 None 且
+        ``confirmed`` 为 False。
+    """
+    total = len(ic_values)
+    result: dict[str, Any] = {
+        "first_half_mean": None,
+        "second_half_mean": None,
+        "delta": None,
+        "se": None,
+        "first_half_n": total // 2,
+        "second_half_n": total - total // 2,
+        "confirmed": False,
+    }
+    if total < IC_DECAY_MIN_HALF_N * 2:
+        return result
+    middle = total // 2
+    first = list(ic_values[:middle])
+    second = list(ic_values[middle:])
+    if len(first) < IC_DECAY_MIN_HALF_N or len(second) < IC_DECAY_MIN_HALF_N:
+        return result
+
+    first_mean = sum(first) / len(first)
+    second_mean = sum(second) / len(second)
+    first_se = _standard_error(first)
+    second_se = _standard_error(second)
+    se = math.sqrt(first_se**2 + second_se**2)
+    delta = first_mean - second_mean
+    result.update(
+        {
+            "first_half_mean": round(first_mean, 4),
+            "second_half_mean": round(second_mean, 4),
+            "delta": round(delta, 4),
+            "se": round(se, 4),
+            "confirmed": bool(se > 0 and delta > IC_DECAY_SIGMA * se),
+        }
+    )
+    return result
+
+
+def _standard_error(values: Sequence[float]) -> float:
+    """计算样本均值的标准误（样本标准差 / sqrt(n)）。"""
+    n = len(values)
+    if n < 2:
+        return 0.0
+    mean = sum(values) / n
+    variance = sum((x - mean) ** 2 for x in values) / (n - 1)
+    return math.sqrt(variance / n)
+
+
+def _has_ic_decay(ic_decay: dict[str, Any] | None) -> bool:
+    """判断是否确认因子 IC 衰减。
+
+    ``ic_decay["confirmed"]`` 存在时以其为准（服务层已按标准误做显著性判定）；
+    缺失时回退为"后半段均值低于前半段"的旧口径，以兼容外部或历史快照数据。
+
+    Args:
+        ic_decay: 含前后半段均值（可选 ``confirmed``）的字典。
+
+    Returns:
+        是否确认 IC 衰减。
+    """
     if not ic_decay:
         return False
+    confirmed = ic_decay.get("confirmed")
+    if confirmed is not None:
+        return bool(confirmed)
     first = ic_decay.get("first_half_mean")
     second = ic_decay.get("second_half_mean")
     if first is None or second is None:

@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import logging
-import warnings
 from datetime import date
 from typing import Any
 
@@ -24,6 +23,7 @@ from quant_etf_api.domain.research.lifecycle import (
     assess_health,
     build_baseline_distribution,
     evaluate_against_baseline,
+    ic_decay_evidence,
 )
 from quant_etf_api.domain.research.periods import (
     PURPOSE_MONITOR,
@@ -31,7 +31,7 @@ from quant_etf_api.domain.research.periods import (
     PeriodBoundaries,
 )
 from quant_etf_api.domain.research.stability import compute_stability_metrics
-from quant_etf_api.factors.evaluation import calc_ic_series
+from quant_etf_api.factors.evaluation import analyze_ic
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import (
     BacktestRunModel,
@@ -537,14 +537,20 @@ class StrategyLifecycleService:
         因此与收益类指标一起进入体检报告。IC 存在前瞻窗口，末端
         ``forward_days`` 个交易日自然缺失，不影响趋势判读。
 
+        衰减判定**按因子分别计算并做显著性检验**（前后半段差值 > 2 倍标准误），
+        再由"过半引用因子显著衰减"给出顶层 ``confirmed``。不做跨因子池化：
+        不同因子的符号与量级不同，池化均值的"衰减"没有因子级含义。
+
         Args:
             strategy_id: 策略 ID。
             start: 监控区间起始日。
             end: 监控区间截止日。
             as_of: 计算时点（用于记录，不参与计算）。
+            config_snapshot: 冻结的配置快照，None 时读取当前配置。
 
         Returns:
-            含 factor_ids / per_factor / ic_mean / ic_ir / window_ic 的字典。
+            含 factor_ids / per_factor / ic_mean / ic_decay 的字典；
+            ``ic_mean`` 为各因子 IC 均值的简单平均（仅供参考，非组合 IC）。
         """
         config = (
             self._config_svc.parse_snapshot(config_snapshot)
@@ -567,47 +573,33 @@ class StrategyLifecycleService:
             "per_factor": {},
             "as_of": as_of.isoformat(),
         }
-        values: list[float] = []
-        # 按日期顺序保留 IC 观测，用于计算"前半段 vs 后半段"的 IC 衰减
-        observations: list[tuple[str, float]] = []
+        decay_entries: list[dict[str, Any]] = []
+        ic_means: list[float] = []
         for factor_id in factor_ids:
             try:
-                # 横截面因子值恒定（例如区间内只有少数资产）时 spearman 会给出
-                # 未定义的相关系数并发出警告；这属于预期情况，不污染日志
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    series = calc_ic_series(self._db, factor_id, start, end, forward_days=1)
+                analysis = analyze_ic(self._db, factor_id, start, end, forward_days=1)
             except Exception:
                 logger.warning("计算因子 %s 的 IC 失败", factor_id, exc_info=True)
                 continue
-            ic_values = [item["ic"] for item in series]
-            observations.extend((str(item["trade_date"]), item["ic"]) for item in series)
-            if not ic_values:
-                result["per_factor"][factor_id] = {"count": 0}
-                continue
-            mean_ic = sum(ic_values) / len(ic_values)
-            variance = (
-                sum((x - mean_ic) ** 2 for x in ic_values) / (len(ic_values) - 1)
-                if len(ic_values) > 1
-                else 0.0
-            )
-            std = variance**0.5
+            summary = analysis["summary"]
+            decay = ic_decay_evidence([item["ic"] for item in analysis["series"]])
             result["per_factor"][factor_id] = {
-                "count": len(ic_values),
-                "ic_mean": round(mean_ic, 4),
-                "ic_ir": round(mean_ic / std, 4) if std > 0 else None,
-                "ic_positive_ratio": round(
-                    sum(1 for x in ic_values if x > 0) / len(ic_values), 4
-                ),
+                "count": summary["count"],
+                "ic_mean": summary["ic_mean"],
+                "ic_ir": summary["ic_ir"],
+                "t_stat": summary["t_stat"],
+                "ic_positive_ratio": summary["ic_positive_ratio"],
+                "cross_section_n_avg": summary["cross_section_n_avg"],
+                "excluded_low_n_days": summary["excluded_low_n_days"],
+                "insufficient_reason": summary["insufficient_reason"],
+                "ic_decay": decay,
             }
-            values.extend(ic_values)
-        if values:
-            mean_ic = sum(values) / len(values)
-            result["ic_mean"] = round(mean_ic, 4)
-            result["ic_decay"] = _split_half_ic(observations)
-        else:
-            result["ic_mean"] = None
-            result["ic_decay"] = {"first_half_mean": None, "second_half_mean": None}
+            if decay["first_half_mean"] is not None:
+                decay_entries.append(decay)
+            if summary["ic_mean"] is not None:
+                ic_means.append(summary["ic_mean"])
+        result["ic_mean"] = round(sum(ic_means) / len(ic_means), 4) if ic_means else None
+        result["ic_decay"] = _aggregate_ic_decay(decay_entries)
         return result
 
     def _to_summary(self, row: StrategyLifecycleModel) -> LifecycleSummary:
@@ -659,27 +651,36 @@ def _period_boundaries() -> PeriodBoundaries:
     )
 
 
-def _split_half_ic(observations: list[tuple[str, float]]) -> dict[str, float | None]:
-    """把 IC 观测按日期顺序切成前后两半，比较均值以判断 IC 是否衰减。
+def _aggregate_ic_decay(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """把各因子的 IC 衰减证据聚合为顶层结论。
 
-    监控区间通常短于 12M/24M 窗口，无法逐窗口计算 IC；用"前半段 vs 后半段"
-    代替，是上线初期能得到的、方向明确的 IC 衰减证据。
+    只有**过半**引用因子显著衰减才确认策略层 IC 衰减，避免单个因子的噪声
+    波动把"超额衰减"从观察升级为告警。
 
     Args:
-        observations: (交易日, IC) 列表，按日期升序（可能来自多个因子的拼接）。
+        entries: ``ic_decay_evidence`` 的输出列表（仅含前后半段均值可用的因子）。
 
     Returns:
-        含 first_half_mean / second_half_mean 的字典；观测不足时两者为 None。
+        含 first_half_mean / second_half_mean / confirmed /
+        confirmed_factor_count / factor_count 的字典；无证据时均值为 None。
     """
-    points = sorted(observations, key=lambda item: item[0])
-    if len(points) < 4:
-        return {"first_half_mean": None, "second_half_mean": None}
-    middle = len(points) // 2
-    first = [ic for _, ic in points[:middle]]
-    second = [ic for _, ic in points[middle:]]
+    if not entries:
+        return {
+            "first_half_mean": None,
+            "second_half_mean": None,
+            "confirmed": False,
+            "confirmed_factor_count": 0,
+            "factor_count": 0,
+        }
+    first_mean = sum(float(entry["first_half_mean"]) for entry in entries) / len(entries)
+    second_mean = sum(float(entry["second_half_mean"]) for entry in entries) / len(entries)
+    confirmed_count = sum(1 for entry in entries if entry.get("confirmed"))
     return {
-        "first_half_mean": round(sum(first) / len(first), 4),
-        "second_half_mean": round(sum(second) / len(second), 4),
+        "first_half_mean": round(first_mean, 4),
+        "second_half_mean": round(second_mean, 4),
+        "confirmed": confirmed_count * 2 > len(entries),
+        "confirmed_factor_count": confirmed_count,
+        "factor_count": len(entries),
     }
 
 

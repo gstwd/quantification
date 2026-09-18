@@ -772,15 +772,35 @@ export interface FactorUpdatePayload {
 export interface ICPoint {
   trade_date: string
   ic: number
+  /** 该日参与计算的横截面指数数量 */
+  cross_section_n: number
 }
 
 /** IC 汇总统计 */
 export interface ICSummary {
   ic_mean: number | null
   ic_std: number | null
+  /** IC 均值 / IC 标准差（未年化） */
   ic_ir: number | null
+  /** t 统计量（ic_ir × sqrt(effective_n)），|t| > 2 才算显著 */
+  t_stat: number | null
   ic_positive_ratio: number | null
   count: number
+  /** 折算重叠窗口后的有效样本数（count // forward_days） */
+  effective_n: number
+  /** 前瞻窗口是否重叠（forward_days > 1 时 ic_std 会低估） */
+  overlap: boolean
+  cross_section_n_avg: number | null
+  cross_section_n_min: number | null
+  cross_section_n_max: number | null
+  /** 有效 IC 所需的最小横截面指数数量 */
+  cross_section_n_required: number
+  /** 因横截面不足被排除的交易日数量 */
+  excluded_low_n_days: number
+  /** 因缺少前瞻行情被丢弃的交易日数量 */
+  dropped_no_forward_days: number
+  /** 未产出有效 IC 时的原因说明 */
+  insufficient_reason: string | null
 }
 
 /** 因子 IC 分析响应 */
@@ -793,8 +813,14 @@ export interface ICResponse {
 /** 因子相关性矩阵响应 */
 export interface CorrelationResponse {
   factor_ids: string[]
-  matrix: number[][]
+  /** 样本不足或相关未定义的格子为 null（不伪造为 0），对角线恒为 1.0 */
+  matrix: (number | null)[][]
+  /** 与 matrix 同形的成对样本数矩阵 */
+  pair_counts: number[][]
+  /** 当日有任一因子值的指数数量（原始横截面规模） */
   index_count: number
+  /** 未能定值的因子对数量 */
+  undetermined_pair_count: number
   trade_date: string
 }
 

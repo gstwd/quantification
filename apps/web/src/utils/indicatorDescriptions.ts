@@ -319,32 +319,42 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
   factor_analysis: {
     ic_mean: {
       label: 'IC 均值',
-      description: '所有交易日 Rank IC 的平均值。<br>IC > 0 表示因子有正向预测力（因子值高 → 未来收益高）。<br>|IC 均值| > 0.03 被视为有效因子。<br>正值且显著的代表该因子对收益有正向预测能力。',
+      description: '所有有效交易日 Rank IC 的平均值。<br>IC > 0 表示因子有正向预测力（因子值高 → 未来收益高）。<br>绝对值大小必须结合 t 统计量与横截面指数数量判读：<br>横截面只有几个指数时，±0.03 量级的 IC 完全落在噪声范围内，不能据此判定因子有效。',
       formula: 'avg(Rank IC 序列)',
     },
     ic_std: {
       label: 'IC 标准差',
-      description: 'Rank IC 的波动程度。<br>标准差越小说明因子预测能力越稳定。<br>标准差过大意味着因子在某些时段有效、某些时段失效，稳定性差。',
+      description: 'Rank IC 的波动程度。<br>标准差越小说明因子预测能力越稳定。<br>标准差过大意味着因子在某些时段有效、某些时段失效，稳定性差。<br>注意：横截面指数越少，噪声导致的标准差天然越大，跨期比较需先对齐横截面规模。',
       formula: 'std(Rank IC 序列)',
     },
     ic_ir: {
       label: 'IC_IR',
-      description: '信息比率（Information Ratio）= IC 均值 / IC 标准差。<br>类似夏普比率的概念，衡量因子预测能力的稳定性。<br>> 0.5 表示因子较稳定，> 1.0 表示因子非常稳定和优秀。<br>这是衡量因子质量的最核心指标。',
+      description: '信息比率（Information Ratio）= IC 均值 / IC 标准差（<b>未年化</b>）。<br>类似夏普比率的概念，衡量因子预测能力的稳定性。<br>与夏普比率一样，它衡量"稳定性"而不衡量"是否显著"：<br>是否显著要看 t 统计量（|t| &gt; 2），是否可信还要看横截面指数数量。',
       formula: 'IC 均值 / IC 标准差',
+    },
+    t_stat: {
+      label: 't 统计量',
+      description: 'IC_IR × √有效样本数，用于判断 IC 均值是否显著非零。<br>|t| &gt; 2 约对应 95% 置信水平，可以认为因子有稳定的预测方向。<br>|t| 很小说明观察到的 IC 与纯噪声无法区分，不应据此调参或上线。<br>前瞻窗口重叠（N &gt; 1 天）时有效样本数按 count / forward_days 折算，避免高估显著性。',
+      formula: 'IC_IR × sqrt(有效样本数)',
     },
     ic_positive_ratio: {
       label: 'IC>0 占比',
-      description: 'Rank IC 为正的交易日占比。<br>IC > 0 表示当日因子预测方向正确（因子值高 → 实际收益高）。<br>> 50% 说明多数时候方向正确，> 60% 较好。<br>如果接近 50%，说明因子预测近乎随机。',
+      description: 'Rank IC 为正的交易日占比。<br>IC > 0 表示当日因子预测方向正确（因子值高 → 实际收益高）。<br>> 50% 说明多数时候方向正确。<br>如果接近 50%，说明因子预测近乎随机。',
       formula: 'IC > 0 的天数 / 总天数 × 100',
+    },
+    cross_section_n: {
+      label: '横截面指数数',
+      description: '每个有效观测实际参与排序的指数数量（图中最多/最少见悬浮提示）。<br>Rank IC 是在"当日有因子值的指数"之间做排序相关，样本越少取值粒度越粗：<br>只有 3 个指数时相关系数只能取 ±1 / ±0.5。<br>横截面低于门槛的交易日不产出有效 IC，会被排除并单独提示。',
+      formula: 'count(当日有因子值的指数)',
     },
     rank_ic: {
       label: 'Rank IC',
-      description: 'Rank Information Coefficient，因子值与下期收益率的 Spearman 秩相关系数。<br>取值范围 [-1, 1]，正值表示正向预测（因子值越高，未来收益越高）。<br>不依赖线性假设，比 Pearson IC 更稳健。<br>计算流程：取当日所有指数因子值 → 计算 N 天后收益率 → Spearman 秩相关。',
+      description: 'Rank Information Coefficient，因子值与下期收益率的 Spearman 秩相关系数。<br>取值范围 [-1, 1]，正值表示正向预测（因子值越高，未来收益越高）。<br>不依赖线性假设，比 Pearson IC 更稳健。<br>计算流程：取当日所有指数因子值 → 按交易日历取 N 个交易日后的收盘价 → Spearman 秩相关。<br>缺失前瞻日行情的指数会被剔除，不会顺延到更晚的行情。',
       formula: 'SpearmanRankCorr(因子值, 未来收益)',
     },
     correlation: {
       label: '因子相关性',
-      description: '同一天各因子横截面值的 Spearman 秩相关系数矩阵。<br>衡量因子之间的信息重叠度。<br>|r| > 0.7：高度冗余，建议只保留一个或正交化。<br>|r| < 0.3：低相关，互补性好。<br>选择相关性低的因子组合可降低单一因子依赖。',
+      description: '同一天各因子横截面值的 Spearman 秩相关系数矩阵。<br>衡量因子之间的信息重叠度。<br>每一对因子使用各自共同覆盖的指数，悬浮可看成对样本数。<br>|r| &gt; 0.7：高度冗余，建议只保留一个或正交化。<br>|r| &lt; 0.3：低相关，互补性好。<br>样本不足或因子值恒定的格子显示为空，表示无法判断（不是"不相关"）。',
       formula: 'SpearmanRankCorr(因子A 截面值, 因子B 截面值)',
     },
     cross_section: {

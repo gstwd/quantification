@@ -69,14 +69,17 @@ export async function fetchFactorIC(
   startDate: string,
   endDate: string,
   forwardDays = 1,
+  minCrossSectionN?: number,
 ): Promise<ICResponse> {
-  const { data } = await apiClient.get<ICResponse>(`/factors/${factorId}/ic`, {
-    params: {
-      start_date: startDate,
-      end_date: endDate,
-      forward_days: forwardDays,
-    },
-  })
+  const params: Record<string, string | number> = {
+    start_date: startDate,
+    end_date: endDate,
+    forward_days: forwardDays,
+  }
+  if (minCrossSectionN !== undefined) {
+    params.min_cross_section_n = minCrossSectionN
+  }
+  const { data } = await apiClient.get<ICResponse>(`/factors/${factorId}/ic`, { params })
   return data
 }
 
@@ -84,10 +87,14 @@ export async function fetchFactorIC(
 export async function fetchFactorCorrelation(
   tradeDate: string,
   factorIds?: string[],
+  minCrossSectionN?: number,
 ): Promise<CorrelationResponse> {
-  const params: Record<string, string | string[]> = { trade_date: tradeDate }
+  const params: Record<string, string | string[] | number> = { trade_date: tradeDate }
   if (factorIds && factorIds.length > 0) {
     params.factor_ids = factorIds
+  }
+  if (minCrossSectionN !== undefined) {
+    params.min_cross_section_n = minCrossSectionN
   }
   const { data } = await apiClient.get<CorrelationResponse>('/factors/correlation', { params })
   return data
