@@ -13,6 +13,10 @@ from typing import Any
 
 from quant_etf_api.config.logging_config import setup_logging
 from quant_etf_api.config.settings import get_settings
+from quant_etf_api.domain.common.enums import (
+    DEFAULT_EXECUTION_MODEL,
+    EXECUTION_MODELS,
+)
 from quant_etf_api.factors.registry import build_default_factor_registry
 from quant_etf_api.infra.clients.akshare_index import _PE_PB_NAME_MAP, _calc_percentile
 from quant_etf_api.infra.db.base import SessionLocal
@@ -343,6 +347,13 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
     )
     p.add_argument("--purpose-reason", help="用途说明，写入留痕记录")
     p.add_argument("--cost-bps", type=float, help="净口径指标的单边成本（基点），默认 10")
+    p.add_argument(
+        "--execution-model",
+        choices=EXECUTION_MODELS,
+        default=DEFAULT_EXECUTION_MODEL,
+        help="回测执行模型（默认 t_plus_1_open）：t_plus_1_open=T 日信号 T+1 开盘成交，"
+        "t_plus_1_close=T 日信号 T+1 收盘成交；两种口径的逐日收益归属不同，指标不可互比",
+    )
     p.add_argument("--async", dest="async_mode", action="store_true", help="入队后台执行")
     p.add_argument(
         "--priority",
@@ -516,6 +527,12 @@ def _build_robustness_group(subparsers: argparse._SubParsersAction) -> None:
             default=0,
             help="队列优先级（越大越先执行），仅入队模式生效",
         )
+        p.add_argument(
+            "--execution-model",
+            choices=EXECUTION_MODELS,
+            default=DEFAULT_EXECUTION_MODEL,
+            help="本批次回测执行模型（默认 t_plus_1_open）；验收的邻域证据须与会话同口径",
+        )
         _add_json_flag(p)
 
     p = sub.add_parser("collect", help="等待并汇总批次结果")
@@ -599,6 +616,13 @@ def _build_research_group(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="只输出「变体 × 指标」排名表（避免几十个变体的完整 JSON 刷屏）",
     )
+    p.add_argument(
+        "--execution-model",
+        choices=EXECUTION_MODELS,
+        default=DEFAULT_EXECUTION_MODEL,
+        help="探索口径的执行模型（默认 t_plus_1_open）；须与后续正式回测/优化会话同口径，"
+        "否则探索结论无法迁移",
+    )
     _add_json_flag(p)
 
 
@@ -643,6 +667,13 @@ def _build_optimization_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--folds", type=int, default=4, help="验证窗口数量，默认 4")
     p.add_argument("--candidate-id", dest="candidate_strategy_id", help="候选策略 ID")
     p.add_argument("--version", dest="candidate_version", help="候选版本，默认继承基线")
+    p.add_argument(
+        "--execution-model",
+        choices=EXECUTION_MODELS,
+        default=DEFAULT_EXECUTION_MODEL,
+        help="本次会话的回测执行模型（默认 t_plus_1_open）；写入会话后 evaluate 复用，"
+        "基线与候选两侧必然同口径",
+    )
     _add_json_flag(p)
 
     p = sub.add_parser("evaluate", help="运行全区间与逐折回测并汇总指标")
@@ -1041,6 +1072,7 @@ def _run_backtest(args: argparse.Namespace) -> None:
                 purpose=purpose,
                 purpose_reason=getattr(args, "purpose_reason", None),
                 cost_bps=getattr(args, "cost_bps", None),
+                execution_model=getattr(args, "execution_model", DEFAULT_EXECUTION_MODEL),
             )
             summary = svc.create_backtest(req)
             if args.async_mode:
@@ -1222,6 +1254,7 @@ def _run_research(args: argparse.Namespace) -> None:
             cost_bps=args.cost_bps,
             cost_ladder=_parse_cost_ladder(args.cost_ladder),
             include_baseline=not args.no_baseline,
+            execution_model=args.execution_model,
         )
         if args.summary:
             # 摘要视图是"给人/agent 看的表"，不走 JSON 序列化
@@ -1251,6 +1284,7 @@ def _run_robustness(args: argparse.Namespace) -> None:
                 knobs=_resolve_knobs(args),
                 preset=getattr(args, "preset", None),
                 parallel=getattr(args, "parallel", 1),
+                execution_model=getattr(args, "execution_model", DEFAULT_EXECUTION_MODEL),
             )
             _emit(result, not args.no_json)
         elif args.subcommand == "collect":
@@ -1321,6 +1355,7 @@ def _run_optimization(args: argparse.Namespace) -> None:
                 folds=args.folds,
                 candidate_strategy_id=args.candidate_strategy_id,
                 candidate_version=args.candidate_version,
+                execution_model=getattr(args, "execution_model", DEFAULT_EXECUTION_MODEL),
             )
             _emit(result, not args.no_json)
         elif args.subcommand == "evaluate":

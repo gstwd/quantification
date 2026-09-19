@@ -29,6 +29,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from quant_etf_api.config.settings import get_settings
+from quant_etf_api.domain.common.enums import DEFAULT_EXECUTION_MODEL, ExecutionModel
 from quant_etf_api.domain.portfolio.turnover import TURNOVER_MODEL_DELTA_W
 from quant_etf_api.domain.research.periods import PeriodBoundaries
 from quant_etf_api.engine.config import StrategyConfig
@@ -264,6 +265,7 @@ class ResearchBatchService:
         cost_bps: float | None = None,
         cost_ladder: list[float] | None = None,
         include_baseline: bool = True,
+        execution_model: ExecutionModel = DEFAULT_EXECUTION_MODEL,
     ) -> ResearchBatchResult:
         """在研究期窗口上评估全部变体（不落库）。
 
@@ -275,6 +277,7 @@ class ResearchBatchService:
             cost_bps: 净口径成本覆盖（基点），None 时取系统默认值。
             cost_ladder: 多档成本并列的档位覆盖。
             include_baseline: 是否把基线配置作为第一个对照变体一起评估。
+            execution_model: 回测执行模型（探索与正式验收必须同口径）。
 
         Returns:
             ResearchBatchResult。
@@ -317,6 +320,7 @@ class ResearchBatchService:
                     config=config,
                     window=window,
                     cost_bps=effective_cost,
+                    execution_model=execution_model,
                 )
                 params = dict(row.params or {})
                 outcome = self._backtest_svc._run_backtest_loop(  # noqa: SLF001
@@ -444,6 +448,7 @@ class ResearchBatchService:
         config: StrategyConfig,
         window: dict[str, str],
         cost_bps: float,
+        execution_model: ExecutionModel = DEFAULT_EXECUTION_MODEL,
     ) -> BacktestRunModel:
         """构造未加入 session 的临时回测行（与 ``create_backtest`` 的同名字段一致）。
 
@@ -452,6 +457,7 @@ class ResearchBatchService:
             config: 策略配置（用于确定标的范围）。
             window: 评估窗口。
             cost_bps: 净口径成本（基点）。
+            execution_model: 回测执行模型（探索与验收必须同口径，否则不可比较）。
 
         Returns:
             临时 ``BacktestRunModel``（不落库，也不进入 session）。
@@ -468,7 +474,7 @@ class ResearchBatchService:
             end_date=date.fromisoformat(window["end"]),
             universe_filter=universe_filter,
             params={
-                "_execution_model": "t_plus_1_open",
+                "_execution_model": execution_model,
                 "_data_quality_mode": "warn",
                 "_cost_bps": cost_bps,
                 "_enable_benchmark": True,

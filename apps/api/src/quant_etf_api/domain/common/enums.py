@@ -3,6 +3,33 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal, get_args
+
+# 回测执行模型取值（单一口径来源）：T 日信号在 T+1 开盘成交 / T+1 收盘成交。
+# CLI 的 --execution-model、API 请求体与回测落库的 params["_execution_model"]
+# 必须解析到同一组取值，否则同一条策略会在不同执行口径下产出不可比较的指标。
+ExecutionModel = Literal["t_plus_1_open", "t_plus_1_close"]
+DEFAULT_EXECUTION_MODEL: ExecutionModel = "t_plus_1_open"
+EXECUTION_MODELS: tuple[str, ...] = get_args(ExecutionModel)
+
+
+def parse_execution_model(value: str) -> ExecutionModel:
+    """校验并归一化执行模型取值。
+
+    Args:
+        value: 执行模型字符串（CLI 参数或 API 透传值）。
+
+    Returns:
+        合法的执行模型字面量。
+
+    Raises:
+        ValueError: 取值不在 ``EXECUTION_MODELS`` 内时抛出（附带可选值说明）。
+    """
+    if value not in EXECUTION_MODELS:
+        raise ValueError(
+            f"不支持的执行模型：{value}，可选值为 {', '.join(EXECUTION_MODELS)}"
+        )
+    return value  # type: ignore[return-value]
 
 
 class SignalLevel(StrEnum):

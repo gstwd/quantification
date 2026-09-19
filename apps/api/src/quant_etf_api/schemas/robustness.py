@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from quant_etf_api.domain.common.enums import DEFAULT_EXECUTION_MODEL
 from quant_etf_api.schemas.types import UtcDatetime
 
 
@@ -43,6 +44,7 @@ class RobustnessSummary(BaseModel):
         robustness_id: 批次唯一 ID。
         strategy_id: 基线策略 ID。
         strategy_version: 基线策略版本。
+        execution_model: 本批次回测的执行模型（口径指纹，不可跨模型比较指标）。
         kind: 验证类型（scan/ablate/pool）。
         status: 批次状态（running/success/failed/partial/cancelled）。
         start_date: 验证区间起始日期。
@@ -58,6 +60,7 @@ class RobustnessSummary(BaseModel):
     robustness_id: str
     strategy_id: str
     strategy_version: str = ""
+    execution_model: str = DEFAULT_EXECUTION_MODEL
     kind: str
     status: str
     start_date: date

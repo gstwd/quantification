@@ -1,7 +1,8 @@
 """验收清单"参数邻域"证据匹配单元测试。
 
 防止复用过期证据：scan 批次必须与**本次会话的基线或候选配置**对应，
-否则 promote 之后旧批次的邻域结论仍会让清单通过。
+且执行口径（execution_model）相同，否则 promote 之后旧批次的邻域结论、
+或另一执行口径下的邻域结论，仍会让清单通过。
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ _BASE_HASH = "hash-base"
 _CAND_HASH = "hash-cand"
 
 
-def _session() -> StrategyOptimizationModel:
+def _session(execution_model: str = "t_plus_1_close") -> StrategyOptimizationModel:
     """构造测试用优化会话行。"""
     return StrategyOptimizationModel(
         optimization_id="opt1",
@@ -27,19 +28,25 @@ def _session() -> StrategyOptimizationModel:
         candidate_version="1.0.1",
         candidate_config_hash=_CAND_HASH,
         hypothesis="测试假设",
+        execution_model=execution_model,
         status="evaluated",
         start_date=date(2016, 1, 1),
         end_date=date(2025, 12, 31),
     )
 
 
-def _scan_row(baseline_config_hash: str, strategy_id: str = "base") -> RobustnessRunModel:
+def _scan_row(
+    baseline_config_hash: str,
+    strategy_id: str = "base",
+    execution_model: str = "t_plus_1_close",
+) -> RobustnessRunModel:
     """构造测试用 scan 批次行。"""
     return RobustnessRunModel(
         robustness_id="rb-1",
         strategy_id=strategy_id,
         strategy_version="1.0.0",
         baseline_config_hash=baseline_config_hash,
+        execution_model=execution_model,
         kind="scan",
         status="success",
         start_date=date(2016, 1, 1),
@@ -75,18 +82,27 @@ class TestNeighborhoodEvidence:
     """证据匹配与清单项内容。"""
 
     def test_filter_covers_baseline_candidate_and_candidate_strategy(self) -> None:
-        """查询条件覆盖"基线哈希 / 候选哈希 / 候选策略 ID"三种匹配方式。"""
+        """查询条件覆盖"执行口径 + 基线哈希 / 候选哈希 / 候选策略 ID"。"""
         svc = _service(None)
         svc._check_neighborhood(_session())
 
         args = svc._db.query.return_value.filter.call_args.args
-        assert len(args) == 3
+        assert len(args) == 4
         assert "kind" in str(args[0])
         assert "status" in str(args[1])
-        or_group = args[2]
+        assert "execution_model" in str(args[2])
+        or_group = args[3]
         assert len(or_group.clauses) == 3
         assert "baseline_config_hash" in str(or_group)
         assert "strategy_id" in str(or_group)
+
+    def test_execution_model_mismatch_fails(self) -> None:
+        """另一执行口径下的邻域平台不能为本次会话背书。"""
+        svc = _service(None)
+        item = svc._check_neighborhood(_session(execution_model="t_plus_1_close"))
+
+        assert item["pass"] is False
+        assert "t_plus_1_close" in item["description"]
 
     def test_baseline_hash_match_passes_with_evidence(self) -> None:
         """匹配会话基线哈希的 scan 通过，并带出可审计证据。"""
@@ -99,6 +115,7 @@ class TestNeighborhoodEvidence:
         assert item["evidence"]["preset"] == "standard"
         assert item["evidence"]["windows"] == 4
         assert item["evidence"]["tolerance"] == 0.1
+        assert item["evidence"]["execution_model"] == "t_plus_1_close"
 
     def test_candidate_hash_match_marks_candidate(self) -> None:
         """scan 的基线哈希等于候选配置哈希时，标记为对候选做过扫描。"""

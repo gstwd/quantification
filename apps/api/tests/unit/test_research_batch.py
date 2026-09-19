@@ -70,6 +70,39 @@ class TestParseVariants:
         # 深拷贝：不得污染基线
         assert _baseline_config()["filters"]["rules"][1]["value"] == -5
 
+    def test_patch_appends_list_item(self) -> None:
+        """``rules[+]`` 追加一条规则（结构改动不必提供整份 config）。"""
+        variants = ResearchBatchService.parse_variants(
+            _baseline_config(),
+            {
+                "variants": [
+                    {
+                        "label": "add_breadth",
+                        "patch": {
+                            "filters.rules[+]": {
+                                "factor": "breadth_ma20_pct",
+                                "op": "gt",
+                                "value": 30,
+                            }
+                        },
+                    }
+                ]
+            },
+        )
+        rules = variants[0].config["filters"]["rules"]
+        assert len(rules) == 3
+        assert rules[2]["factor"] == "breadth_ma20_pct"
+        # 其余模块保持基线内容（config 整体替换会丢掉 score/portfolio 等）
+        assert variants[0].config["score"] == _baseline_config()["score"]
+        assert len(_baseline_config()["filters"]["rules"]) == 2
+
+    def test_patch_append_to_non_list_rejected(self) -> None:
+        """对非列表字段使用 ``[+]`` 直接报错。"""
+        with pytest.raises(ValueError, match="无法写入"):
+            ResearchBatchService.parse_variants(
+                _baseline_config(), [{"label": "bad", "patch": {"rank[+]": 1}}]
+            )
+
     def test_full_config_variant(self) -> None:
         """直接给完整 config 时按原样使用。"""
         custom = _baseline_config()

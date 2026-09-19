@@ -24,6 +24,11 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from quant_etf_api.config.settings import get_settings
+from quant_etf_api.domain.common.enums import (
+    DEFAULT_EXECUTION_MODEL,
+    ExecutionModel,
+    parse_execution_model,
+)
 from quant_etf_api.domain.research.periods import PURPOSE_RESEARCH, PeriodBoundaries
 from quant_etf_api.domain.research.robustness import (
     block_bootstrap_sharpe_ci,
@@ -237,6 +242,7 @@ class RobustnessService:
         knobs: list[str] | None = None,
         preset: str | None = None,
         parallel: int = 1,
+        execution_model: ExecutionModel = DEFAULT_EXECUTION_MODEL,
     ) -> dict[str, Any]:
         """创建一次稳健性验证批次：派生变体并批量提交回测。
 
@@ -256,6 +262,8 @@ class RobustnessService:
             parallel: 本地并发执行的回测进程数（仅 async_mode=False 时生效，默认 1）。
                 回测是 CPU + 数据库混合任务，线程并发会被 GIL 限制，因此这里用
                 独立进程；进程数与远端数据库连接预算要一起考虑。
+            execution_model: 本批次全部变体回测共用的执行模型，写入批次后
+                验收清单的"参数邻域"项据此要求证据口径一致。
 
         Returns:
             批次摘要字典（含 robustness_id、变体数量与 scan_params 口径）。
@@ -267,6 +275,7 @@ class RobustnessService:
         """
         if kind not in ("scan", "ablate", "pool"):
             raise ValueError(f"不支持的验证类型：{kind}")
+        execution_model = parse_execution_model(execution_model)
         if kind != "scan" and (knobs or preset):
             raise ValueError("--knobs / --preset 仅对 scan 类型生效")
         if async_mode and parallel != 1:
@@ -293,6 +302,7 @@ class RobustnessService:
             for i, (fs, fe) in enumerate(folds)
         ]
         scan_params["windows"] = len(window_list)
+        scan_params["execution_model"] = execution_model
 
         robustness_id = uuid4().hex
         # 深拷贝：变体派生会在嵌套字典上就地改写，浅拷贝会让基线与其他变体
@@ -350,6 +360,7 @@ class RobustnessService:
             strategy_id=strategy_id,
             strategy_version=baseline.version,
             baseline_config_hash=compute_config_hash(config),
+            execution_model=execution_model,
             kind=kind,
             status="running",
             start_date=boundaries.research_start,
@@ -383,6 +394,7 @@ class RobustnessService:
                     date.fromisoformat(window["end"]),
                     robustness_id,
                     variant["label"],
+                    execution_model,
                 )
                 if backtest_id is None:
                     continue
@@ -411,6 +423,7 @@ class RobustnessService:
             "async_mode": async_mode,
             "parallel": parallel if not async_mode else 0,
             "status": "running",
+            "execution_model": execution_model,
             "scan_params": scan_params,
         }
 
@@ -1013,6 +1026,7 @@ class RobustnessService:
         end: date,
         robustness_id: str,
         label: str,
+        execution_model: ExecutionModel = DEFAULT_EXECUTION_MODEL,
     ) -> str | None:
         """只为单个变体窗口创建回测行（不执行）。
 
@@ -1025,6 +1039,7 @@ class RobustnessService:
             end: 截止日期。
             robustness_id: 批次 ID（写入用途说明用于留痕，并作为队列批次号）。
             label: 变体标签。
+            execution_model: 本批次共用的执行模型（全部变体必须同口径）。
 
         Returns:
             回测 ID；创建失败时返回 None。
@@ -1037,6 +1052,7 @@ class RobustnessService:
                     end_date=end,
                     purpose=PURPOSE_RESEARCH,
                     purpose_reason=f"robustness {robustness_id} ({label})",
+                    execution_model=execution_model,
                 )
             )
         except Exception:
@@ -1344,6 +1360,9 @@ class RobustnessService:
             robustness_id=row.robustness_id,
             strategy_id=row.strategy_id,
             strategy_version=row.strategy_version,
+            execution_model=(
+                getattr(row, "execution_model", None) or DEFAULT_EXECUTION_MODEL
+            ),
             kind=row.kind,
             status=row.status,
             start_date=row.start_date,
@@ -1598,13 +1617,18 @@ def _is_ratio_like(path: str) -> bool:
     )
 
 
-def _set_leaf(config: dict[str, Any], path: str, value: int | float) -> None:
-    """按点号路径写入配置叶子（就地修改，支持 ``name[下标]`` 列表定位）。
+def _set_leaf(config: dict[str, Any], path: str, value: Any) -> None:
+    """按点号路径写入配置叶子（就地修改，支持 ``name[下标]`` 与 ``name[+]`` 追加）。
+
+    ``name[+]`` 用于**结构改动**：给列表追加一项（如给 ``filters.rules`` 增加一条规则），
+    这样"加一条过滤规则"不必提供整份 config（变体给的 ``config`` 是整体替换，
+    只写 filters 会丢掉 score/portfolio 等其余模块，最终解析失败）。
 
     Args:
         config: 配置字典。
-        path: 点号分隔的路径。
-        value: 目标值。
+        path: 点号分隔的路径；列表下标写作 ``rules[1]``（``rules.1`` 会被当成字典键），
+            追加写作 ``rules[+]``。
+        value: 目标值（数值、字符串或追加用的对象/数组）。
 
     Raises:
         KeyError: 路径不存在时抛出。
@@ -1614,27 +1638,41 @@ def _set_leaf(config: dict[str, Any], path: str, value: int | float) -> None:
     parts = path.split(".")
     node: Any = config
     for part in parts[:-1]:
+        if part.endswith("[+]"):
+            raise ValueError(f"路径 {path} 的列表追加只能出现在最后一段")
         name, index = _split_index(part)
         if index is None:
             node = node[name]
             continue
         node = node[name][index]
     name, index = _split_index(parts[-1])
-    if index is None:
+    if index is not None:
         if not isinstance(node, dict):
             raise TypeError(f"路径 {path} 的父节点不是字典")
-        node[name] = value
+        node[name][index] = value
+        return
+    if name.endswith("[+]"):
+        target = name[:-3]
+        if not isinstance(node, dict):
+            raise TypeError(f"路径 {path} 的父节点不是字典")
+        target_list = node[target]
+        if not isinstance(target_list, list):
+            raise TypeError(f"路径 {path} 的 {target} 不是列表，无法追加")
+        if isinstance(value, list):
+            target_list.extend(value)
+        else:
+            target_list.append(value)
         return
     if not isinstance(node, dict):
         raise TypeError(f"路径 {path} 的父节点不是字典")
-    node[name][index] = value
+    node[name] = value
 
 
 def _split_index(part: str) -> tuple[str, int | None]:
-    """拆分 ``name[下标]`` 形式的路径段。
+    """拆分 ``name[下标]`` 形式的路径段（``name[+]`` 原样返回，由调用方处理追加）。
 
     Args:
-        part: 路径段，如 ``rules[2]`` 或 ``top_n``。
+        part: 路径段，如 ``rules[2]``、``rules[+]`` 或 ``top_n``。
 
     Returns:
         (名称, 下标或 None)。

@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from quant_etf_api.domain.common.enums import DEFAULT_EXECUTION_MODEL, ExecutionModel
 from quant_etf_api.schemas.types import UtcDatetime
 
 
@@ -58,7 +59,7 @@ class BacktestCreateRequest(BaseModel):
     params: dict[str, Any] | None = None
     enable_benchmark: bool = True
     benchmark_index_code: str = "000300"
-    execution_model: Literal["t_plus_1_open", "t_plus_1_close"] = "t_plus_1_open"
+    execution_model: ExecutionModel = DEFAULT_EXECUTION_MODEL
     data_quality_mode: Literal["warn", "strict"] = "warn"
     purpose: Literal["research", "validation", "monitor"] = "research"
     purpose_reason: str | None = None
@@ -558,7 +559,7 @@ class BacktestComparisonCreateRequest(BaseModel):
     b_index_codes: list[str] = []
     enable_benchmark: bool = True
     benchmark_index_code: str = "000300"
-    execution_model: Literal["t_plus_1_open", "t_plus_1_close"] = "t_plus_1_open"
+    execution_model: ExecutionModel = DEFAULT_EXECUTION_MODEL
     data_quality_mode: Literal["warn", "strict"] = "warn"
     name: str | None = None
 

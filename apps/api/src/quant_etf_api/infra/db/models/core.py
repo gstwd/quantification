@@ -21,6 +21,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
+from quant_etf_api.domain.common.enums import DEFAULT_EXECUTION_MODEL
 from quant_etf_api.infra.db.base import Base, utcnow
 from quant_etf_api.infra.time import utcnow_aware
 
@@ -792,6 +793,13 @@ class StrategyOptimizationModel(Base):
     hypothesis: Mapped[str] = mapped_column(
         Text, nullable=False, comment="本轮优化的假设与改动意图"
     )
+    execution_model: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=DEFAULT_EXECUTION_MODEL,
+        server_default=sa.text("'t_plus_1_open'"),
+        comment="本次会话的回测执行模型（t_plus_1_open / t_plus_1_close），evaluate 复用",
+    )
     status: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
@@ -1279,6 +1287,13 @@ class RobustnessRunModel(Base):
     )
     baseline_config_hash: Mapped[str] = mapped_column(
         String(64), nullable=False, default="", comment="基线配置哈希"
+    )
+    execution_model: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=DEFAULT_EXECUTION_MODEL,
+        server_default=sa.text("'t_plus_1_open'"),
+        comment="本批次回测的执行模型，全部变体共用（口径不可与另一模型混比）",
     )
     kind: Mapped[str] = mapped_column(
         String(16),

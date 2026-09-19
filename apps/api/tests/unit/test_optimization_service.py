@@ -87,6 +87,51 @@ class TestStart:
         assert model.baseline_config_hash == compute_config_hash(_BASELINE_CONFIG)
         assert result["optimization_id"] == model.optimization_id
 
+    def test_execution_model_persisted_on_session(self) -> None:
+        """start 把执行模型写入会话行，供 evaluate/finish 复用。"""
+        svc = _make_service()
+        svc._repo = MagicMock()
+        svc._config_svc = MagicMock()
+        svc._config_svc.get_config.side_effect = [
+            SimpleNamespace(
+                strategy_id="base",
+                display_name="基线策略",
+                version="1.0.0",
+                frequency="daily",
+                config_json=dict(_BASELINE_CONFIG),
+            ),
+            None,
+        ]
+        svc._config_svc.get_parsed_config.return_value = MagicMock(portfolio=MagicMock())
+        svc._config_svc.validate_config.return_value = StrategyValidationResult(
+            valid=True, errors=[]
+        )
+
+        svc.start(
+            strategy_id="base",
+            candidate_config=dict(_CANDIDATE_CONFIG),
+            hypothesis="收盘口径评估",
+            start_date=date(2024, 1, 1),
+            end_date=date(2025, 1, 1),
+            execution_model="t_plus_1_close",
+        )
+
+        model = svc._repo.create.call_args.args[0]
+        assert model.execution_model == "t_plus_1_close"
+
+    def test_unknown_execution_model_raises(self) -> None:
+        """执行模型取值非法时直接报错，不静默退化为默认口径。"""
+        svc = _make_service()
+        with pytest.raises(ValueError, match="执行模型"):
+            svc.start(
+                "base",
+                dict(_CANDIDATE_CONFIG),
+                "假设",
+                date(2024, 1, 1),
+                date(2025, 1, 1),
+                execution_model="t_plus_2_close",  # type: ignore[arg-type]
+            )
+
     def test_missing_hypothesis_raises(self) -> None:
         """缺少假设时报错。"""
         svc = _make_service()
@@ -157,7 +202,9 @@ class TestEvaluate:
             end: date,
             optimization_id: str,
             async_mode: bool,
+            execution_model: str = "t_plus_1_open",
         ) -> str:
+            assert execution_model == "t_plus_1_open"
             return next(ids)
 
         svc._run_backtest = MagicMock(side_effect=_fake_run)
@@ -186,6 +233,23 @@ class TestEvaluate:
         summary = result["fold_summary"]
         assert summary["total_folds"] == 2
         assert summary["metrics"]["sharpe_ratio"]["candidate_wins"] == 0
+
+    def test_evaluate_reuses_session_execution_model(self) -> None:
+        """异步收口进程重新读会话时也能拿到同一执行口径（不靠重复传参）。"""
+        svc = _make_service()
+        session = _make_session(status="running", execution_model="t_plus_1_close")
+        svc._repo = MagicMock()
+        svc._repo.find_by_id.return_value = session
+        svc._index_bar_repo = MagicMock()
+        svc._index_bar_repo.find_all_trading_dates.return_value = [
+            date(2024, 1, i + 1) for i in range(8)
+        ]
+        svc._run_backtest = MagicMock(return_value="bt_x")
+
+        svc.evaluate("opt1", folds=2, async_mode=True)
+
+        used = {call.args[5] for call in svc._run_backtest.call_args_list}
+        assert used == {"t_plus_1_close"}
 
     def test_async_mode_enqueues_without_summary(self) -> None:
         """异步评估只登记回测 ID，不计算汇总。"""

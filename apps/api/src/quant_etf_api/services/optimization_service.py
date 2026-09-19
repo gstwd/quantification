@@ -20,6 +20,11 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from quant_etf_api.config.settings import get_settings
+from quant_etf_api.domain.common.enums import (
+    DEFAULT_EXECUTION_MODEL,
+    ExecutionModel,
+    parse_execution_model,
+)
 from quant_etf_api.domain.research.periods import (
     PURPOSE_RESEARCH,
     PeriodBoundaries,
@@ -107,6 +112,7 @@ class OptimizationService:
         folds: int = 4,
         candidate_strategy_id: str | None = None,
         candidate_version: str | None = None,
+        execution_model: ExecutionModel = DEFAULT_EXECUTION_MODEL,
     ) -> dict[str, Any]:
         """开始一次优化会话：创建草稿候选策略并登记会话记录。
 
@@ -119,6 +125,9 @@ class OptimizationService:
             folds: 验证窗口数量，默认 4。
             candidate_strategy_id: 候选策略 ID，缺省按基线 ID + 会话短 ID 生成。
             candidate_version: 候选版本，缺省继承基线版本。
+            execution_model: 本次会话的回测执行模型，写入会话后在
+                ``evaluate`` / ``finish`` 中复用。基线与候选两侧必须同口径，
+                否则逐折对比比较的是两种执行假设而非两个配置。
 
         Returns:
             会话摘要字典。
@@ -129,6 +138,7 @@ class OptimizationService:
         hypothesis = (hypothesis or "").strip()
         if not hypothesis:
             raise ValueError("hypothesis 不能为空")
+        execution_model = parse_execution_model(execution_model)
         if start_date > end_date:
             raise ValueError("start_date 不能晚于 end_date")
         if folds < 1:
@@ -183,6 +193,7 @@ class OptimizationService:
             candidate_version=cand_version,
             candidate_config_hash=compute_config_hash(candidate_config),
             hypothesis=hypothesis,
+            execution_model=execution_model,
             status="running",
             start_date=start_date,
             end_date=end_date,
@@ -223,6 +234,11 @@ class OptimizationService:
         if session.status not in ("running", "evaluated"):
             raise ValueError(f"会话已结束（{session.status}），无法再次评估")
 
+        # 执行模型以会话记录为准：异步评估常常"入队"与"收口"分处两个进程，
+        # 靠调用方重复传参一旦遗漏就会让基线与候选跑在不同口径上。
+        execution_model = parse_execution_model(
+            getattr(session, "execution_model", None) or DEFAULT_EXECUTION_MODEL
+        )
         k = folds if folds is not None else (len(session.folds) if session.folds else 4)
         trade_dates = self._index_bar_repo.find_all_trading_dates(
             session.start_date, session.end_date
@@ -235,7 +251,12 @@ class OptimizationService:
         ]
 
         baseline_full = self._run_backtest(
-            session.strategy_id, session.start_date, session.end_date, optimization_id, async_mode
+            session.strategy_id,
+            session.start_date,
+            session.end_date,
+            optimization_id,
+            async_mode,
+            execution_model,
         )
         candidate_full = self._run_backtest(
             session.candidate_strategy_id,
@@ -243,15 +264,23 @@ class OptimizationService:
             session.end_date,
             optimization_id,
             async_mode,
+            execution_model,
         )
 
         fold_backtests: list[dict[str, Any]] = []
         for i, fold in enumerate(fold_list):
             fs = date.fromisoformat(fold["start"])
             fe = date.fromisoformat(fold["end"])
-            b_id = self._run_backtest(session.strategy_id, fs, fe, optimization_id, async_mode)
+            b_id = self._run_backtest(
+                session.strategy_id, fs, fe, optimization_id, async_mode, execution_model
+            )
             c_id = self._run_backtest(
-                session.candidate_strategy_id, fs, fe, optimization_id, async_mode
+                session.candidate_strategy_id,
+                fs,
+                fe,
+                optimization_id,
+                async_mode,
+                execution_model,
             )
             fold_backtests.append(
                 {
@@ -554,6 +583,7 @@ class OptimizationService:
         end: date,
         optimization_id: str,
         async_mode: bool,
+        execution_model: ExecutionModel = DEFAULT_EXECUTION_MODEL,
     ) -> str:
         """创建并（同步）执行单个回测，或异步入队。
 
@@ -563,6 +593,7 @@ class OptimizationService:
             end: 回测截止日期。
             optimization_id: 关联的优化会话 ID。
             async_mode: True 时仅入队。
+            execution_model: 回测执行模型（基线与候选必须一致）。
 
         Returns:
             回测 ID。
@@ -576,6 +607,7 @@ class OptimizationService:
                 strategy_id=strategy_id,
                 start_date=start,
                 end_date=end,
+                execution_model=execution_model,
             ),
             optimization_id=optimization_id,
         )
@@ -808,6 +840,10 @@ class OptimizationService:
         - ``baseline_config_hash`` 与会话候选配置一致（等价于已对候选做过扫描）；
         - 扫描对象就是候选策略（``strategy_id == candidate_strategy_id``）。
 
+        同样要求**执行口径一致**（``execution_model`` 与会话相同）：开盘口径下的
+        邻域平台不能为收盘口径的会话背书——两种执行的逐日收益归属不同，
+        邻域稳定度不是同一个量。
+
         历史缺陷：只按 ``strategy_id`` 取最近批次，promote 之后基线配置已变，
         上一轮的扫描结果仍会让本项通过（过期证据）。
 
@@ -820,12 +856,16 @@ class OptimizationService:
         Returns:
             单条验收清单项；未通过时 ``evidence`` 为空。
         """
+        session_model = parse_execution_model(
+            getattr(session, "execution_model", None) or DEFAULT_EXECUTION_MODEL
+        )
         try:
             row = (
                 self._db.query(RobustnessRunModel)
                 .filter(
                     RobustnessRunModel.kind == "scan",
                     RobustnessRunModel.status == "success",
+                    RobustnessRunModel.execution_model == session_model,
                     or_(
                         (
                             (RobustnessRunModel.strategy_id == session.strategy_id)
@@ -849,7 +889,8 @@ class OptimizationService:
                 "neighborhood_no_reversal",
                 (
                     "参数邻域无方向反转（需对当前配置执行 robustness scan："
-                    f"{session.strategy_id} 或候选 {session.candidate_strategy_id}）"
+                    f"{session.strategy_id} 或候选 {session.candidate_strategy_id}，"
+                    f"且执行口径同为 {session_model}）"
                 ),
                 False,
             )
@@ -872,6 +913,7 @@ class OptimizationService:
                 "matched_config": matched_config,
                 "preset": scan_params.get("preset"),
                 "windows": scan_params.get("windows"),
+                "execution_model": getattr(row, "execution_model", None),
                 "n_variants": neighborhood.get("n_variants"),
                 "is_plateau": neighborhood.get("is_plateau"),
                 "reversal": neighborhood.get("reversal"),

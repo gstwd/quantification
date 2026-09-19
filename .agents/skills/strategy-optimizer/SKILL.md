@@ -37,8 +37,12 @@ description: >
      ]}
      ```
 
-     `patch` 只能改写成已有字段的数值；**删因子 / 删过滤条件属于结构改动**，
+     `patch` 只能改写成已有字段；**删因子 / 删过滤条件属于结构改动**，
      要么给完整 `config`，要么直接走 `robustness ablate`（那才是消融的正式口径）。
+     列表下标必须写成 `rules[1]`（`rules.1` 会被当作字典键而报错），**追加**一条规则写
+     `rules[+]`；值可以是数值、字符串或对象（如整条过滤规则）。
+     ⚠️ 变体给的 `config` 是**整体替换**而非合并：只写 `{"filters": ...}` 会因缺 `score` 等
+     必填模块而解析失败——改单个模块请用 `patch`。
 
      输出含逐窗口毛/净口径、多档成本、`vs_baseline`（Δ净年化/Δ净夏普/劣化窗口占比）与口径指纹。
      **`caliber.persisted=false` 的结果只能用来决定"值不值得走正式回测"，不能写进验收结论。**
@@ -91,8 +95,14 @@ description: >
   `optimization start` 的默认 `--end` 即研究期末端。**禁止读验证期结果来调参**：
   一旦看过，那段数据就不再是样本外。
 - **回测区间下限（用户约定）**：所有回测、对比与优化评估的 `--start` 一律取 2016-01-01，不使用 2016 年之前的数据；滚动分段的第一段即 2016-01-01 起。
+- **执行模型是口径，必须两侧一致**：`--execution-model t_plus_1_open|t_plus_1_close`
+  （`backtest run` / `optimization start` / `robustness scan|ablate|pool` / `research batch` 均支持，
+  缺省 `t_plus_1_open`）。会话与批次会把该值落库，`evaluate` / `finish` 一律复用会话值，
+  探索（`research batch`）、验收（`backtest run`）与邻域证据（`robustness scan`）必须同口径，
+  否则比较的是两种执行假设而不是两个配置。**切换执行模型会改变可交易资产域**：
+  缺历史开盘价的指数在 `t_plus_1_open` 下按 `EXECUTION_PRICE_MISSING` 被剔出候选池。
 - **净口径成本**：回测汇总为毛收益口径，验收必须同时看净口径指标
-  （默认 10bp 单边，`backtest run --cost-bps` 可覆盖）。
+  （成本默认取系统配置 `default_cost_bps`，`backtest run --cost-bps` 可覆盖）。
   净收益 = 毛收益 − 单边换手 × 成本；换手越高，成本对结论的影响越大。
 - **验收清单默认阈值**（`finish` 默认强制 accept，共 7 项；`--no-strict` 可显式跳过）：
   1. 验证窗平均夏普 ≥ 基线；
@@ -101,8 +111,9 @@ description: >
   4. 验证窗平均累计收益 ≥ 基线；
   5. **净成本口径**验证窗平均夏普 ≥ 基线；
   6. **参数邻域**无方向反转且处于平台（需先跑 `robustness scan`，且批次的
-     `baseline_config_hash` 必须等于**本次会话的基线或候选配置哈希**——
-     promote 之后上一轮的旧批次不再被复用；未提供匹配证据直接判不通过）；
+     `baseline_config_hash` 必须等于**本次会话的基线或候选配置哈希**、`execution_model`
+     与会话相同——promote 之后上一轮的旧批次、或另一执行口径下的批次都不再被复用；
+     未提供匹配证据直接判不通过）；
   7. **分段一致性**：剔除最好折后候选夏普仍不低于基线。
 - **试验次数台账**：`robustness stats --n-trials` 缺省取"该策略历史所有稳健性批次的
   变体总数 + 已评估的优化会话数"（`statistics.n_trials_breakdown` 给出拆分）；

@@ -25,7 +25,12 @@
 
 | 命令 | 说明 |
 | --- | --- |
-| `backtest run --strategy <id> [--start] [--end] [--universe all\|subset] [--index-codes a,b] [--benchmark 000300] [--no-benchmark] [--purpose research\|validation\|monitor] [--purpose-reason] [--cost-bps] [--async] [--priority N]` | 创建并执行回测；默认同步；`purpose=research` 时 `--end` 缺省为研究期末端（2025-12-31），其他用途缺省为今天；`--start` 缺省为 end 往前 2 年且不早于 2016-01-01；**研究期内任意跨度（1 个月~10 年）都可单次执行，不存在跨度上限，也不再要求分段** |
+| `backtest run --strategy <id> [--start] [--end] [--universe all\|subset] [--index-codes a,b] [--benchmark 000300] [--no-benchmark] [--purpose research\|validation\|monitor] [--purpose-reason] [--cost-bps] [--execution-model t_plus_1_open\|t_plus_1_close] [--async] [--priority N]` | 创建并执行回测；默认同步；`purpose=research` 时 `--end` 缺省为研究期末端（2025-12-31），其他用途缺省为今天；`--start` 缺省为 end 往前 2 年且不早于 2016-01-01；**研究期内任意跨度（1 个月~10 年）都可单次执行，不存在跨度上限，也不再要求分段**；`--execution-model` 缺省 `t_plus_1_open`（T 日信号 T+1 开盘成交），`t_plus_1_close` 为 T 日信号 T+1 收盘成交 |
+
+> **执行模型是口径，不是参数**：两种模型的逐日收益归属不同（收盘口径下信号日不持仓），
+> 指标不可互比；口径指纹见 `backtest show` 的 `stability.execution_model`。缺历史开盘价的指数
+> 在 `t_plus_1_open` 下会被剔出候选池（表现为 `EXECUTION_PRICE_MISSING` 警告与更小的候选池），
+> 因此切换执行模型会同时改变**可交易资产域**，不只是成交时点。
 | `backtest status <id> [--wait] [--timeout 600]` | 状态与指标；`--wait` 轮询至终态（failed 退出码 1，超时 2） |
 | `backtest show <id> [--cost-bps N] [--cost-ladder 0,10,20,30,50]` | 详情（含 config_snapshot / config_hash / data_cutoff_date / warnings / 口径指纹 / 多档成本） |
 | `backtest list [--status] [--purpose] [--calendar-source] [--order-by] [--asc] [--limit]` | 回测列表过滤（状态/用途/日历来源/排序） |
@@ -69,7 +74,10 @@
 | `research batch --strategy <id> --variants v.json [--windows 5] [--cost-bps 10] [--cost-ladder 0,10,20,30,50] [--no-baseline] [--summary]` | 同一批变体 × 窗口的离线评估：复用平台执行路径但**不落库**，按窗口共享行情与因子缓存；`--summary` 输出「变体 × 指标」排名表（否则是完整 JSON，几十个变体会超输出上限） |
 
 变体文件格式：`{"variants": [{"label": "x", "patch": {"rank.top_n": 4}}, {"label": "y", "config": {...}}]}`。
-`patch` 的路径支持列表下标（`filters.rules[1].value`）；路径不存在或字段拼错都会直接报错。
+`patch` 的路径支持列表下标（`filters.rules[1].value`）与列表追加（`filters.rules[+]` 追加一条规则）；
+路径不存在或字段拼错都会直接报错。**变体给的 `config` 是整体替换而非合并**，
+所以"只加一条过滤规则"要用 `patch`（`rules[+]`），只写 `{"filters": ...}` 的 config 会因缺
+`score` 等必填模块而解析失败。
 输出中的 `caliber.persisted=false` 表示结果不可审计：**只能用来决定"值不值得走正式回测"**。
 
 ## queue（任务队列可观测性）
