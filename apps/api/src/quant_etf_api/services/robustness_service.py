@@ -259,9 +259,11 @@ class RobustnessService:
             priority: 入队优先级（越大越先执行），仅 async_mode=True 时生效。
             knobs: 关键旋钮路径清单（kind=scan 时生效），只扫描清单内的数值字段。
             preset: 扫描预设（quick=2 窗口/8 旋钮的轻量体检，standard=4 窗口/30 旋钮）。
-            parallel: 本地并发执行的回测进程数（仅 async_mode=False 时生效，默认 1）。
+            parallel: 本地并行执行的回测进程数（仅 async_mode=False 时生效）。
+                0 表示按 CPU 与内存自动推导；1 表示串行。
                 回测是 CPU + 数据库混合任务，线程并发会被 GIL 限制，因此这里用
-                独立进程；进程数与远端数据库连接预算要一起考虑。
+                独立 CLI 子进程（见 :func:`quant_etf_api.cli_pool.run_parallel`）；
+                进程数与远端数据库连接预算要一起考虑。
             execution_model: 本批次全部变体回测共用的执行模型，写入批次后
                 验收清单的"参数邻域"项据此要求证据口径一致。
 
@@ -1081,34 +1083,40 @@ class RobustnessService:
         )
 
     def _run_backtests_parallel(self, backtest_ids: list[str], workers: int) -> None:
-        """在独立进程里并行执行多条回测（F-13）。
+        """本地多进程并行执行多条回测（F-13）：只用 CLI 子进程 + 数据库。
 
-        回测是 CPU + 数据库混合任务，单进程内多线程会受 GIL 限制
-        （B-1 已实测线程并发反而更慢），因此这里用进程池。子进程各自
-        建 Session，不与父进程共享连接；Windows 下 ``spawn`` 会重新
-        导入模块，不会继承父进程的连接池。
+        回测是 CPU + 数据库混合任务，单进程内多线程受 GIL 限制
+        （B-1 已实测线程并发反而更慢），因此用进程级并发。
+
+        实现走 :func:`quant_etf_api.cli_pool.run_parallel`（派生独立 CLI 子进程、
+        无管道通信），而不是 ``ProcessPoolExecutor``：后者依赖管道做进程间通信，
+        在受限沙箱里会被拒绝（实测 ``WinError 5``）并导致整批任务一条都不执行。
+        子进程各自连库写自己的回测行，父进程只做派生与等待。
 
         Args:
             backtest_ids: 待执行的回测 ID 列表。
-            workers: 并发进程数上限。
+            workers: 并发进程数上限（0 表示按 CPU 与内存自动推导）。
         """
         if not backtest_ids:
             return
-        from concurrent.futures import ProcessPoolExecutor
+        from quant_etf_api.cli_pool import resolve_workers, run_parallel
 
-        worker_count = max(1, min(workers, len(backtest_ids)))
+        worker_count = resolve_workers(workers if workers > 0 else None, len(backtest_ids))
         logger.info(
             "稳健性批次本地并行执行: 回测=%d 并发进程=%d", len(backtest_ids), worker_count
         )
-        failures: list[str] = []
-        with ProcessPoolExecutor(max_workers=worker_count) as pool:
-            for backtest_id, error in pool.map(_run_backtest_in_subprocess, backtest_ids):
-                if error:
-                    failures.append(f"{backtest_id}: {error}")
-        if failures:
+        outcome = run_parallel(
+            ((backtest_id, ["backtest", "execute", backtest_id]) for backtest_id in backtest_ids),
+            workers=worker_count,
+        )
+        if outcome.failed:
             # 失败的回测行自身会落 failed 状态，collect 汇总时按失败窗口暴露；
             # 这里只把信息带回日志，不吞掉失败
-            logger.warning("本地并行执行有 %d 条回测失败：%s", len(failures), failures[:3])
+            logger.warning(
+                "本地并行执行有 %d 条回测失败：%s",
+                len(outcome.failed),
+                outcome.failed[:3],
+            )
 
     # ── 汇总与统计辅助 ────────────────────────────────────────────────────
 
@@ -1398,31 +1406,6 @@ def _is_stale(row: RobustnessRunModel) -> bool:
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     return (now - updated) > timedelta(hours=STALE_AFTER_HOURS)
-
-
-def _run_backtest_in_subprocess(backtest_id: str) -> tuple[str, str | None]:
-    """在独立进程里执行一条回测（F-13 本地并行用）。
-
-    必须是模块级函数才能被 ``ProcessPoolExecutor`` 序列化；子进程自己
-    创建 Session（Windows 下 ``spawn`` 会重新导入模块），因此不会与
-    父进程共享数据库连接池。
-
-    Args:
-        backtest_id: 回测 ID。
-
-    Returns:
-        ``(backtest_id, 错误信息)``；成功时错误信息为 None。
-    """
-    from quant_etf_api.infra.db.base import SessionLocal
-
-    db = SessionLocal()
-    try:
-        BacktestService(db).run_backtest(backtest_id)
-        return backtest_id, None
-    except Exception as exc:  # noqa: BLE001 - 子进程异常必须带回父进程，避免静默丢失
-        return backtest_id, f"{type(exc).__name__}: {exc}"
-    finally:
-        db.close()
 
 
 def build_knob_variants(

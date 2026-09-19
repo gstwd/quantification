@@ -12,6 +12,7 @@ import difflib
 import json
 import logging
 import statistics
+from collections.abc import Callable
 from datetime import date
 from typing import Any
 from uuid import uuid4
@@ -214,13 +215,22 @@ class OptimizationService:
         optimization_id: str,
         folds: int | None = None,
         async_mode: bool = False,
+        on_backtests_created: Callable[[list[str]], None] | None = None,
     ) -> dict[str, Any]:
         """评估会话：运行全区间与逐折回测并汇总滚动样本外指标。
+
+        回测的**创建**与**执行**分成两个阶段：先把 2+2K 条回测行全部落库并写回
+        会话，再逐条执行。这样调用方可以在两个阶段之间接管执行环节——
+        CLI 的 ``evaluate --workers N`` 就此把整批回测交给本地多进程池并行跑，
+        而不需要 uvicorn 或独立 worker 进程（见 ``cli_pool.run_parallel``）。
 
         Args:
             optimization_id: 优化会话 ID。
             folds: 验证窗口数量，缺省复用会话已有折数，否则默认 4。
             async_mode: True 时仅入队回测任务，由服务端 worker 执行。
+            on_backtests_created: 全部回测行创建完成后的回调，入参为回测 ID 列表
+                （全区间 2 条 + 逐折 2K 条，顺序为 baseline/candidate 交错）。
+                回调返回后再进入执行阶段；仅同步模式生效。
 
         Returns:
             会话摘要字典。
@@ -250,38 +260,36 @@ class OptimizationService:
             for fs, fe in compute_folds(trade_dates, k)
         ]
 
-        baseline_full = self._run_backtest(
+        # ── 阶段一：只创建回测行（不执行） ──
+        created: list[str] = []
+        baseline_full = self._create_backtest(
             session.strategy_id,
             session.start_date,
             session.end_date,
             optimization_id,
-            async_mode,
             execution_model,
         )
-        candidate_full = self._run_backtest(
+        created.append(baseline_full)
+        candidate_full = self._create_backtest(
             session.candidate_strategy_id,
             session.start_date,
             session.end_date,
             optimization_id,
-            async_mode,
             execution_model,
         )
+        created.append(candidate_full)
 
         fold_backtests: list[dict[str, Any]] = []
         for i, fold in enumerate(fold_list):
             fs = date.fromisoformat(fold["start"])
             fe = date.fromisoformat(fold["end"])
-            b_id = self._run_backtest(
-                session.strategy_id, fs, fe, optimization_id, async_mode, execution_model
+            b_id = self._create_backtest(
+                session.strategy_id, fs, fe, optimization_id, execution_model
             )
-            c_id = self._run_backtest(
-                session.candidate_strategy_id,
-                fs,
-                fe,
-                optimization_id,
-                async_mode,
-                execution_model,
+            c_id = self._create_backtest(
+                session.candidate_strategy_id, fs, fe, optimization_id, execution_model
             )
+            created.extend([b_id, c_id])
             fold_backtests.append(
                 {
                     "fold": i,
@@ -302,8 +310,17 @@ class OptimizationService:
         )
 
         if async_mode:
+            for backtest_id in created:
+                self._enqueue_backtest(backtest_id, optimization_id)
             logger.info("优化会话 %s 已入队 %d 个回测任务", optimization_id, 2 + 2 * len(fold_list))
             return self._to_dict(self._repo.find_by_id(optimization_id))
+
+        # ── 阶段二：执行（回调可接管，用于本地多进程并行） ──
+        if on_backtests_created is not None:
+            on_backtests_created(created)
+        else:
+            for backtest_id in created:
+                self._execute_backtest(backtest_id)
 
         self._finalize(session)
         return self._to_dict(self._repo.find_by_id(optimization_id))
@@ -576,30 +593,32 @@ class OptimizationService:
 
     # ── 内部辅助 ──────────────────────────────────────────────────────────
 
-    def _run_backtest(
+    def _create_backtest(
         self,
         strategy_id: str,
         start: date,
         end: date,
         optimization_id: str,
-        async_mode: bool,
         execution_model: ExecutionModel = DEFAULT_EXECUTION_MODEL,
     ) -> str:
-        """创建并（同步）执行单个回测，或异步入队。
+        """创建（但不执行）单条回测行。
+
+        创建与执行分离是本地并行执行的前提：先落库拿到全部回测 ID，
+        再交给并行池执行（见 :meth:`evaluate` 的 ``on_backtests_created``）。
+        一条回测的创建只是一次插入，成本可忽略。
 
         Args:
             strategy_id: 策略 ID。
             start: 回测起始日期。
             end: 回测截止日期。
             optimization_id: 关联的优化会话 ID。
-            async_mode: True 时仅入队。
             execution_model: 回测执行模型（基线与候选必须一致）。
 
         Returns:
             回测 ID。
 
         Raises:
-            ValueError: 回测创建或同步执行失败。
+            ValueError: 回测创建失败。
         """
         svc = BacktestService(self._db)
         summary = svc.create_backtest(
@@ -611,26 +630,38 @@ class OptimizationService:
             ),
             optimization_id=optimization_id,
         )
-        if async_mode:
-            from quant_etf_api.infra.job_queue.queue import (
-                backtest_job_key,
-                get_job_queue,
-            )
+        return summary.backtest_id
 
-            get_job_queue().enqueue(
-                "backtest",
-                {"backtest_id": summary.backtest_id},
-                job_key=backtest_job_key(summary.backtest_id),
-                # 优化会话作为批次号，支持整批取消/暂停（B2）
-                batch_id=optimization_id,
-            )
-            return summary.backtest_id
-        svc.run_backtest(summary.backtest_id)
-        row = self._backtest_repo.find_by_id(summary.backtest_id)
+    def _execute_backtest(self, backtest_id: str) -> None:
+        """同步执行单条已创建的回测，失败即抛错（串行路径用）。
+
+        Args:
+            backtest_id: 回测 ID。
+
+        Raises:
+            ValueError: 回测未成功完成。
+        """
+        BacktestService(self._db).run_backtest(backtest_id)
+        row = self._backtest_repo.find_by_id(backtest_id)
         if row is None or row.status != "success":
             message = row.error_message if row is not None else "回测记录不存在"
-            raise ValueError(f"回测 {summary.backtest_id} 执行失败: {message}")
-        return summary.backtest_id
+            raise ValueError(f"回测 {backtest_id} 执行失败: {message}")
+
+    def _enqueue_backtest(self, backtest_id: str, optimization_id: str) -> None:
+        """把回测任务入队，由服务端 worker 执行。
+
+        Args:
+            backtest_id: 回测 ID。
+            optimization_id: 优化会话 ID（作为队列批次号，支持整批取消/暂停，B2）。
+        """
+        from quant_etf_api.infra.job_queue.queue import backtest_job_key, get_job_queue
+
+        get_job_queue().enqueue(
+            "backtest",
+            {"backtest_id": backtest_id},
+            job_key=backtest_job_key(backtest_id),
+            batch_id=optimization_id,
+        )
 
     def _finalize(self, session: StrategyOptimizationModel) -> None:
         """同步评估后汇总全区间与逐折指标并落库。"""

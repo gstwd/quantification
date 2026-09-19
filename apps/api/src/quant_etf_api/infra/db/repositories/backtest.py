@@ -305,6 +305,31 @@ class BacktestRepository(BaseRepository):
         run.started_at = utcnow_aware()
         self._db.commit()
 
+    def try_mark_running(self, backtest_id: str) -> bool:
+        """条件占用回测：仅当当前状态为 pending 时置为 running。
+
+        并行执行池里同一个回测可能被派发多次（人工重跑、父进程重启后补跑），
+        无条件置 running 会让两条进程同时写同一回测的结果。这里用一个带条件的
+        ``UPDATE ... WHERE status = 'pending'`` 做原子占用，由数据库保证只有一个
+        执行者能拿到这条回测。
+
+        Args:
+            backtest_id: 回测标识。
+
+        Returns:
+            True 表示本进程成功占用；False 表示回测不存在或已被别人占用/已执行过。
+        """
+        result = self._db.execute(
+            sa.update(BacktestRunModel)
+            .where(
+                BacktestRunModel.backtest_id == backtest_id,
+                BacktestRunModel.status == "pending",
+            )
+            .values(status="running", started_at=utcnow_aware())
+        )
+        self._db.commit()
+        return bool(result.rowcount)
+
     def add_daily_result(self, row: BacktestDailyResultModel) -> None:
         """登记一条每日组合结果（不提交，由主循环 checkpoint 统一提交）。
 

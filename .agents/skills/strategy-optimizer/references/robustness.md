@@ -1,25 +1,32 @@
 # 稳健性验证 CLI 与口径（strategy-optimizer 参考）
 
+> **只跑 CLI**：稳健性验证只需要 CLI + 数据库。**用 `--sync --workers N` 走本地多进程**，
+> 不要用默认的入队模式（那需要服务端 worker 消费）。
+> `--workers`：`1`=串行、`N`=并发 N 条、`0`=按 CPU 与内存自动推导（上限 8）。
+> 实测（20 核 / 远端库）：`scan --preset quick`（18 条回测）串行 ≈ 32 分钟、
+> `--workers 6` ≈ 15 分钟。并发过高会先撞内存与数据库连接预算，6~8 是常见甜点区。
+> 并行命令的输出**不要接管道**（会被缓冲到结束），要进度就 `*> run.log` 后 tail。
+
 ## 命令
 
 ```bash
 # 1) 单旋钮邻域扰动：检查参数是否处于平台而非尖峰
-#    --preset quick    = 轻量体检（2 窗口 / 8 旋钮），写进验收清单第 6 项
+#    --preset quick    = 轻量体检（2 窗口 / 8 旋钮 / 18 条回测），写进验收清单第 6 项
 #    --preset standard = 完整（4 窗口 / 30 旋钮，等同旧默认）
 #    --knobs a,b       = 只扫指定的关键旋钮；--knobs-file knobs.json 同上
-#    --sync --parallel N = 本地多进程并行（回测是 CPU+DB 混合任务，线程会被 GIL 限制）
+#    --sync --workers N = 本地多进程并行（回测是 CPU+DB 混合任务，线程会被 GIL 限制）
 python -m quant_etf_api.cli robustness scan --strategy <id> [--preset quick|standard] \
     [--windows 4] [--max-knobs 30] [--knobs timing.thresholds.offensive_score] [--knobs-file k.json] \
-    [--sync --parallel 4]
+    --sync --workers 6 [--execution-model t_plus_1_close]
 
 # 2) 因子消融：逐个移除评分因子与过滤条件，看边际贡献
-python -m quant_etf_api.cli robustness ablate --strategy <id> --windows 4
+python -m quant_etf_api.cli robustness ablate --strategy <id> --windows 4 --sync --workers 6
 
 # 3) 资产池扰动：随机 80% 子池 + 剔除常持指数 + 剔除后上市指数
-python -m quant_etf_api.cli robustness pool --strategy <id> --windows 4 --samples 8
+python -m quant_etf_api.cli robustness pool --strategy <id> --windows 4 --samples 6 --sync --workers 6
 
-# 4) 等待并汇总（默认入队异步执行；--wait 轮询至终态）
-python -m quant_etf_api.cli robustness collect <robustness_id> --wait
+# 4) 汇总（本地并行执行时批次已是终态，直接 collect 即可；--wait 仅用于入队模式）
+python -m quant_etf_api.cli robustness collect <robustness_id>
 
 # 5) 统计显著性：CSCV-PBO / Deflated Sharpe / 块自助法置信区间
 python -m quant_etf_api.cli robustness stats <robustness_id> [--n-trials N] [--cost-bps 10]
@@ -35,6 +42,8 @@ python -m quant_etf_api.cli robustness abandon <robustness_id> --reason "回测�
 
 批次创建时行先落库（早于执行），所以执行期就能在 `robustness list` 里看到并取消；
 `robustness list/show` 的 `is_stale=true` 表示"还是 running 但长时间没有进展"。
+本地并行执行跑完后批次状态即终态；若父进程被中断，用
+`backtest batch --pending` 续跑该批次剩余的回测（已 success 的不会重复执行）。
 
 ## 扫哪些旋钮（D2）
 

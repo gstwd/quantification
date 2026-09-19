@@ -196,18 +196,19 @@ class TestEvaluate:
 
         ids = iter(["bt_1", "bt_2", "bt_3", "bt_4", "bt_5", "bt_6"])
 
-        def _fake_run(
+        def _fake_create(
             strategy_id: str,
             start: date,
             end: date,
             optimization_id: str,
-            async_mode: bool,
             execution_model: str = "t_plus_1_open",
         ) -> str:
             assert execution_model == "t_plus_1_open"
             return next(ids)
 
-        svc._run_backtest = MagicMock(side_effect=_fake_run)
+        svc._create_backtest = MagicMock(side_effect=_fake_create)
+        executed: list[str] = []
+        svc._execute_backtest = MagicMock(side_effect=executed.append)
 
         metrics = {
             "annualized_return_pct": 10.0,
@@ -230,9 +231,39 @@ class TestEvaluate:
             {"start": "2024-01-05", "end": "2024-01-08"},
         ]
         assert len(result["fold_backtests"]) == 2
+        # 创建与执行分离：6 条回测（2 全区间 + 2 折 × 2）全部创建后逐条执行
+        assert executed == ["bt_1", "bt_2", "bt_3", "bt_4", "bt_5", "bt_6"]
         summary = result["fold_summary"]
         assert summary["total_folds"] == 2
         assert summary["metrics"]["sharpe_ratio"]["candidate_wins"] == 0
+
+    def test_on_backtests_created_accepts_execution(self) -> None:
+        """回调接管执行阶段时，服务层不再自己跑回测（本地并行池的接入点）。"""
+        svc = _make_service()
+        session = _make_session(status="running")
+        svc._repo = MagicMock()
+        svc._repo.find_by_id.return_value = session
+
+        def _apply_update(optimization_id: str, **fields: object) -> bool:
+            for key, value in fields.items():
+                setattr(session, key, value)
+            return True
+
+        svc._repo.update.side_effect = _apply_update
+        svc._index_bar_repo = MagicMock()
+        svc._index_bar_repo.find_all_trading_dates.return_value = [
+            date(2024, 1, i + 1) for i in range(8)
+        ]
+        created_iter = iter([f"bt_{i}" for i in range(6)])
+        svc._create_backtest = MagicMock(side_effect=lambda *a, **k: next(created_iter))
+        svc._execute_backtest = MagicMock()
+        seen: list[list[str]] = []
+
+        result = svc.evaluate("opt1", folds=2, on_backtests_created=seen.append)
+
+        assert seen == [["bt_0", "bt_1", "bt_2", "bt_3", "bt_4", "bt_5"]]
+        svc._execute_backtest.assert_not_called()
+        assert result["status"] == "evaluated"
 
     def test_evaluate_reuses_session_execution_model(self) -> None:
         """异步收口进程重新读会话时也能拿到同一执行口径（不靠重复传参）。"""
@@ -244,11 +275,11 @@ class TestEvaluate:
         svc._index_bar_repo.find_all_trading_dates.return_value = [
             date(2024, 1, i + 1) for i in range(8)
         ]
-        svc._run_backtest = MagicMock(return_value="bt_x")
+        svc._create_backtest = MagicMock(return_value="bt_x")
 
         svc.evaluate("opt1", folds=2, async_mode=True)
 
-        used = {call.args[5] for call in svc._run_backtest.call_args_list}
+        used = {call.args[4] for call in svc._create_backtest.call_args_list}
         assert used == {"t_plus_1_close"}
 
     def test_async_mode_enqueues_without_summary(self) -> None:
@@ -268,15 +299,18 @@ class TestEvaluate:
         svc._index_bar_repo.find_all_trading_dates.return_value = [
             date(2024, 1, i + 1) for i in range(8)
         ]
-        svc._run_backtest = MagicMock(
-            side_effect=lambda *a, **k: f"bt_{len(svc._run_backtest.call_args_list)}"
+        svc._create_backtest = MagicMock(
+            side_effect=lambda *a, **k: f"bt_{len(svc._create_backtest.call_args_list)}"
         )
+        svc._enqueue_backtest = MagicMock()
 
         result = svc.evaluate("opt1", folds=2, async_mode=True)
 
         assert result["status"] == "running"
         assert result["fold_summary"] is None
         assert result["baseline_backtest_id"].startswith("bt_")
+        # 异步模式把创建出来的 6 条回测全部入队
+        assert svc._enqueue_backtest.call_count == 6
 
 
 class TestFoldSummary:

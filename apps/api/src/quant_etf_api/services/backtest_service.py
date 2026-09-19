@@ -1103,16 +1103,34 @@ class BacktestService:
             logger.warning("get_index_results DB query failed", exc_info=True)
             return []
 
-    def run_backtest(self, backtest_id: str) -> None:
-        """回测执行入口，统一使用 _run_backtest_loop。"""
+    def run_backtest(self, backtest_id: str, require_pending: bool = False) -> None:
+        """回测执行入口，统一使用 _run_backtest_loop。
+
+        Args:
+            backtest_id: 回测标识。
+            require_pending: True 时用带条件的原子占用取代无条件置 running——
+                仅当回测仍是 pending 才执行，已被占用或已执行过则直接返回。
+                并行执行池（同一回测可能被派发多次）必须传 True。
+        """
         try:
             row = self._backtest_repo.find_by_id(backtest_id)
             if row is None:
                 logger.error("run_backtest: backtest_id %s not found", backtest_id)
                 return
 
-            # 状态流转统一走仓库（与 RunService 模式一致，避免绕过 repository）
-            self._backtest_repo.mark_running(backtest_id)
+            # 状态流转统一走仓库（与 RunService 模式一致，避免绕过 repository）；
+            # require_pending 走条件更新，避免多条进程同时写同一回测的结果
+            if require_pending:
+                if not self._backtest_repo.try_mark_running(backtest_id):
+                    logger.info(
+                        "回测 %s 已被占用或已执行过，跳过（require_pending）", backtest_id
+                    )
+                    return
+                row = self._backtest_repo.find_by_id(backtest_id)
+                if row is None:
+                    return
+            else:
+                self._backtest_repo.mark_running(backtest_id)
 
             # 加载策略配置：优先使用创建时的快照，保证结果可复现；
             # 旧回测行无快照时回退到实时配置

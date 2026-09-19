@@ -393,6 +393,51 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("backtest_id")
     _add_json_flag(p)
 
+    p = sub.add_parser(
+        "execute",
+        help="执行一条已落库的回测（本地子进程入口，并行池按此命令派生）",
+    )
+    p.add_argument("backtest_id")
+    p.add_argument(
+        "--only-pending",
+        action="store_true",
+        help="仅当回测仍是 pending 时执行；已是终态则跳过（并行池防重复执行的保护）",
+    )
+    _add_json_flag(p)
+
+    p = sub.add_parser(
+        "batch",
+        help="本地多进程并行执行一批已落库回测（只用 CLI + 数据库，无需后端服务）",
+    )
+    p.add_argument(
+        "--ids",
+        action="append",
+        default=None,
+        help="回测 ID，可重复传入或用逗号分隔（与 --pending 二选一）",
+    )
+    p.add_argument(
+        "--pending",
+        action="store_true",
+        help="自动挑选全部 pending 回测（可配合 --strategy / --created-from 收窄）",
+    )
+    p.add_argument("--strategy", dest="strategy_id", help="按策略 ID 过滤（配合 --pending）")
+    p.add_argument(
+        "--created-from",
+        type=date.fromisoformat,
+        help="按创建日期起点过滤（含，配合 --pending）",
+    )
+    p.add_argument("--purpose", choices=["research", "validation", "monitor"], help="按用途过滤")
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="并发进程数；留空按 CPU 与内存自动推导（上限 8，可用环境变量 "
+        "QUANT_ETF_CLI_WORKERS 覆盖）",
+    )
+    p.add_argument("--retries", type=int, default=0, help="失败任务的重试轮数")
+    p.add_argument("--log-dir", help="把每个子进程输出写入该目录下的独立日志文件")
+    _add_json_flag(p)
+
     p = sub.add_parser("status", help="查看回测状态")
     p.add_argument("backtest_id")
     p.add_argument("--wait", action="store_true", help="轮询等待至终态")
@@ -514,12 +559,19 @@ def _build_robustness_group(subparsers: argparse._SubParsersAction) -> None:
             )
         if name == "pool":
             p.add_argument("--samples", type=int, default=8, help="随机子池抽样次数")
-        p.add_argument("--sync", dest="sync_mode", action="store_true", help="同步执行（默认入队）")
         p.add_argument(
-            "--parallel",
+            "--sync",
+            dest="sync_mode",
+            action="store_true",
+            help="同步执行（默认入队，需要服务端 worker 消费；只跑 CLI 时请用 --workers）",
+        )
+        p.add_argument(
+            "--workers",
             type=int,
             default=1,
-            help="同步模式下的本地并发进程数（默认 1；回测是 CPU+DB 混合任务，用进程而非线程）",
+            help="本地多进程并行执行（只用 CLI + 数据库，不依赖后台队列与 API 服务）："
+            "1=串行（默认）；N=并发 N 条回测（上限受 CPU/内存约束，可用环境变量 "
+            "QUANT_ETF_CLI_WORKERS 覆盖）；0=按 CPU 与内存自动推导",
         )
         p.add_argument(
             "--priority",
@@ -680,6 +732,14 @@ def _build_optimization_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("optimization_id")
     p.add_argument("--folds", type=int, help="验证窗口数量，缺省复用会话配置")
     p.add_argument("--async", dest="async_mode", action="store_true", help="入队后台执行")
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="本地多进程并行执行 2+2K 条回测（只用 CLI + 数据库，不依赖后台队列）："
+        "1=串行（默认）；N=并发 N 条；0=按 CPU 与内存自动推导",
+    )
+    p.add_argument("--log-dir", help="并发模式下把每个子进程输出写入该目录下的独立日志文件")
     _add_json_flag(p)
 
     p = sub.add_parser("report", help="生成优化报告 Markdown 骨架")
@@ -1040,6 +1100,106 @@ def _run_strategy(args: argparse.Namespace) -> None:
         db.close()
 
 
+def _parallel_backtest_runner(workers: int, log_dir: str | None) -> Any:
+    """构造"并行执行一批回测"的回调（优化评估用）。
+
+    返回的回调接收回测 ID 列表，用本地多进程池（CLI 子进程 + 数据库）执行完再返回。
+    这样优化评估的 2+2K 条回测不再依赖 uvicorn / 独立 queue worker。
+
+    Args:
+        workers: 并发进程数；0 表示按 CPU 与内存自动推导。
+        log_dir: 子进程日志目录；None 时输出直通当前终端。
+
+    Returns:
+        形如 ``f(backtest_ids: list[str]) -> PoolOutcome`` 的回调。
+    """
+    from quant_etf_api.cli_pool import PoolOutcome, run_parallel
+
+    def _runner(backtest_ids: list[str]) -> PoolOutcome:
+        """并行执行给定回测，失败的条目留在库里由 collect 暴露。"""
+        return run_parallel(
+            (
+                (bid, ["backtest", "execute", bid, "--only-pending"])
+                for bid in backtest_ids
+            ),
+            workers=workers,
+            log_dir=log_dir,
+        )
+
+    return _runner
+
+
+def _run_backtest_batch(args: argparse.Namespace) -> None:
+    """并行执行一批已落库回测（``backtest batch``）。
+
+    这是"只用 CLI + 数据库"的批量执行入口：先按 ``--ids`` 或 ``--pending`` 选出
+    回测，再交给本地多进程池（``cli_pool.run_parallel``）执行；失败的条目按
+    ``--retries`` 轮次重试。所有进度与结果都落在数据库，父进程中断后重跑
+    ``--pending`` 即可续跑，不会重复执行已完成的回测（子进程带 ``--only-pending``）。
+
+    Args:
+        args: 已解析的命令行参数。
+    """
+    from quant_etf_api.cli_pool import resolve_workers, run_parallel
+
+    db = SessionLocal()
+    try:
+        svc = BacktestService(db)
+        ids: list[str] = []
+        if args.ids:
+            for chunk in args.ids:
+                ids.extend(part.strip() for part in chunk.split(",") if part.strip())
+        if args.pending:
+            items, _ = svc.list_backtests(
+                offset=0,
+                limit=200,
+                strategy_id=getattr(args, "strategy_id", None),
+                created_from=getattr(args, "created_from", None),
+                status="pending",
+                purpose=getattr(args, "purpose", None),
+                order_by="created_at",
+                descending=False,
+                include_net=False,
+            )
+            ids.extend(item.backtest_id for item in items)
+        # 保序去重
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            _fail("没有可执行的回测：请用 --ids 指定，或确认 --pending 过滤条件下确实有 pending 回测")
+        workers = resolve_workers(args.workers if args.workers > 0 else None, len(ids))
+        pending = ids
+        outcome = None
+        for attempt in range(max(0, args.retries) + 1):
+            outcome = run_parallel(
+                ((bid, ["backtest", "execute", bid, "--only-pending"]) for bid in pending),
+                workers=workers,
+                log_dir=args.log_dir,
+            )
+            failed_ids = [bid for bid, _ in outcome.failed]
+            if not failed_ids:
+                break
+            print(
+                f"# 第 {attempt + 1} 轮：{len(failed_ids)} 条回测失败，"
+                f"剩余重试轮数 {max(0, args.retries) - attempt}",
+                file=sys.stderr,
+            )
+            pending = failed_ids
+        assert outcome is not None  # 循环至少执行一次
+        result = {
+            "requested": len(ids),
+            "succeeded": outcome.succeeded,
+            "failed": [{"backtest_id": bid, "exit_code": code} for bid, code in outcome.failed],
+            "workers": workers,
+        }
+        _emit(result, not args.no_json)
+        if outcome.failed:
+            sys.exit(1)
+    except ValueError as exc:
+        _fail(str(exc))
+    finally:
+        db.close()
+
+
 def _run_backtest(args: argparse.Namespace) -> None:
     """执行 backtest 命令组。"""
     db = SessionLocal()
@@ -1118,6 +1278,39 @@ def _run_backtest(args: argparse.Namespace) -> None:
             )
         elif args.subcommand == "cancel":
             _emit(svc.cancel_backtest(args.backtest_id), not args.no_json)
+        elif args.subcommand == "execute":
+            detail = svc.get_backtest(args.backtest_id)
+            if detail is None:
+                _fail(f"回测 {args.backtest_id} 不存在")
+            if args.only_pending and detail.status != "pending":
+                # 并行池的重复执行保护：已是终态就跳过（幂等重跑）
+                _emit(
+                    {
+                        "backtest_id": args.backtest_id,
+                        "status": detail.status,
+                        "executed": False,
+                        "reason": "回测不是 pending，按 --only-pending 跳过",
+                    },
+                    not args.no_json,
+                )
+                return
+            svc.run_backtest(args.backtest_id, require_pending=args.only_pending)
+            detail = svc.get_backtest(args.backtest_id)
+            if detail is None:
+                _fail("回测执行后详情不可用")
+            _emit(
+                {
+                    "backtest_id": args.backtest_id,
+                    "status": detail.status,
+                    "executed": True,
+                    "metrics": detail.metrics.model_dump() if detail.metrics else None,
+                },
+                not args.no_json,
+            )
+            if detail.status != "success":
+                sys.exit(1)
+        elif args.subcommand == "batch":
+            _run_backtest_batch(args)
         elif args.subcommand == "status":
             detail = svc.get_backtest(args.backtest_id)
             if detail is None:
@@ -1283,7 +1476,7 @@ def _run_robustness(args: argparse.Namespace) -> None:
                 priority=getattr(args, "priority", 0),
                 knobs=_resolve_knobs(args),
                 preset=getattr(args, "preset", None),
-                parallel=getattr(args, "parallel", 1),
+                parallel=getattr(args, "workers", 1),
                 execution_model=getattr(args, "execution_model", DEFAULT_EXECUTION_MODEL),
             )
             _emit(result, not args.no_json)
@@ -1359,10 +1552,15 @@ def _run_optimization(args: argparse.Namespace) -> None:
             )
             _emit(result, not args.no_json)
         elif args.subcommand == "evaluate":
+            workers = getattr(args, "workers", 1)
+            parallel = workers != 1 and not args.async_mode
             result = svc.evaluate(
                 args.optimization_id,
                 folds=args.folds,
                 async_mode=args.async_mode,
+                on_backtests_created=(
+                    _parallel_backtest_runner(workers, args.log_dir) if parallel else None
+                ),
             )
             _emit(result, not args.no_json)
         elif args.subcommand == "report":
