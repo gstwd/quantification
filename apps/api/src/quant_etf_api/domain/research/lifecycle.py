@@ -57,7 +57,14 @@ ACTION_RESEARCH = "RESEARCH"
 # 单因子 IC 序列通常噪声主导，仅比较前后半段均值（second < first）会有一半
 # 概率把噪声判成衰减，因此要求差值超过 2 倍标准误。
 IC_DECAY_MIN_HALF_N = 20
+# 组合分数 IC 的观测是"实际选股调仓日"，相邻观测本身已相隔一个调仓周期。
+# 沿用单因子的 20（合计 40 个观测）会让周频策略要攒约 9 个月、月频要攒约 3.3 年
+# 才够，IC 这条腿在非日频策略上长期失效；取 12（合计 24）让周频约 5.5 个月可判，
+# 真正的噪声防线仍是下面的 2 倍标准误检验，观测数门槛只负责拦住极端短序列。
+SCORE_IC_DECAY_MIN_HALF_N = 12
 IC_DECAY_SIGMA = 2.0
+# 用于把"还差几个调仓日"折算成日历月数
+TRADING_DAYS_PER_MONTH = 21
 
 
 @dataclass
@@ -189,7 +196,7 @@ def assess_health(
     drawdown_percentile_pct: float | None,
     window_percentiles: dict[str, float | None],
     trailing_alpha_percentiles: list[float | None] | None = None,
-    ic_decay: dict[str, Any] | None = None,
+    composite_ic_decay: dict[str, Any] | None = None,
     drawdown_warning_percentile: float = 95.0,
     alpha_warning_percentile: float = 5.0,
     consecutive_windows: int = 2,
@@ -200,7 +207,8 @@ def assess_health(
     1. 回撤极端（分位 > ``drawdown_warning_percentile``）且存在单调衰减
        → CRITICAL / ALPHA_DECAY；
     2. 回撤极端 → WARNING / DRAWDOWN_EXTREME / REDUCE_RISK；
-    3. 超额随窗口单调衰减且 IC 同向衰减 → WARNING / ALPHA_DECAY / RESEARCH；
+    3. 超额随窗口单调衰减且组合分数 IC 同向衰减 → WARNING / ALPHA_DECAY / RESEARCH；
+       若 IC 证据本身不可用，则降为 WATCH 并在 reasons 中说明未采用 IC 证据；
     4. 3M 超额分位连续 ``consecutive_windows`` 次低于 ``alpha_warning_percentile``
        → WATCH / ALPHA_DECAY；
     5. 所有监控窗口样本不足 → UNKNOWN / INSUFFICIENT_DATA / KEEP
@@ -212,10 +220,11 @@ def assess_health(
         window_percentiles: 各窗口超额收益分位，键为窗口标签（如 "3m"）。
         trailing_alpha_percentiles: 历次快照的 3M 超额分位（最近在前），
             用于判断"连续多次低于阈值"。
-        ic_decay: 因子 IC 前后半段的衰减证据，含 ``first_half_mean`` /
-            ``second_half_mean``，以及服务层按标准误算出的 ``confirmed``。
+        composite_ic_decay: 策略综合分数 IC 前后半段的衰减证据，含
+            ``first_half_mean`` / ``second_half_mean``，以及服务层按标准误
+            算出的 ``confirmed``。单因子 IC 只作诊断，不能传入此处。
             ``confirmed`` 存在时以其为准；不存在时回退为"后半段均值更低"。
-            不可用时传 None，此时不做否决。
+            不可用时传 None，此时不做否决，但第 3 档会明确记录"未采用 IC 证据"。
         drawdown_warning_percentile: 回撤告警分位阈值，默认 95。
         alpha_warning_percentile: 超额告警分位阈值，默认 5。
         consecutive_windows: 连续低于阈值的次数要求，默认 2。
@@ -225,7 +234,8 @@ def assess_health(
     """
     reasons: list[str] = []
     performance_decay = _has_monotonic_performance_decay(window_percentiles)
-    confirmed_decay = performance_decay and _has_ic_decay(ic_decay)
+    confirmed_decay = performance_decay and _has_ic_decay(composite_ic_decay)
+    ic_evidence_available = has_ic_decay_evidence(composite_ic_decay)
     drawdown_extreme = (
         drawdown_percentile_pct is not None
         and drawdown_percentile_pct > drawdown_warning_percentile
@@ -233,7 +243,7 @@ def assess_health(
 
     if drawdown_extreme and confirmed_decay:
         reasons.append(
-            f"当前回撤处于研究期 {drawdown_percentile_pct:.1f} 分位，且超额与 IC 同步衰减"
+            f"当前回撤处于研究期 {drawdown_percentile_pct:.1f} 分位，且超额与组合分数 IC 同步衰减"
         )
         return HealthAssessment(
             HEALTH_CRITICAL, DIAGNOSIS_ALPHA_DECAY, ACTION_RESEARCH, reasons
@@ -244,12 +254,20 @@ def assess_health(
             HEALTH_WARNING, DIAGNOSIS_DRAWDOWN_EXTREME, ACTION_REDUCE_RISK, reasons
         )
     if confirmed_decay:
-        reasons.append("超额收益随监控窗口单调衰减，且因子 IC 同向衰减")
+        reasons.append("超额收益随监控窗口单调衰减，且组合分数 IC 同向衰减")
         return HealthAssessment(
             HEALTH_WARNING, DIAGNOSIS_ALPHA_DECAY, ACTION_RESEARCH, reasons
         )
     if performance_decay:
-        reasons.append("超额收益随监控窗口单调衰减，但 IC 衰减证据不足")
+        # "未确认衰减"与"没有证据"必须分开说：后者是监控能力缺失，
+        # 不能让报告读起来像一次正常的阴性结论
+        if ic_evidence_available:
+            reasons.append("超额收益随监控窗口单调衰减，但组合分数 IC 衰减证据不足")
+        else:
+            reasons.append(
+                "超额收益随监控窗口单调衰减，但组合分数 IC 的选股调仓日观测不足门槛，"
+                "本次未采用 IC 证据"
+            )
         return HealthAssessment(HEALTH_WATCH, DIAGNOSIS_ALPHA_DECAY, ACTION_WATCH, reasons)
 
     recent = [p for p in (trailing_alpha_percentiles or []) if p is not None]
@@ -287,21 +305,40 @@ def _has_monotonic_performance_decay(window_percentiles: dict[str, float | None]
     return p3 < p6 < p12
 
 
-def ic_decay_evidence(ic_values: Sequence[float]) -> dict[str, Any]:
-    """由单个因子的 IC 序列给出前后半段均值与衰减显著性。
+def ic_decay_evidence(
+    ic_values: Sequence[float],
+    overlap_step: int = 1,
+    min_half_n: int = IC_DECAY_MIN_HALF_N,
+) -> dict[str, Any]:
+    """由 IC 序列给出前后半段均值与衰减显著性。
 
     IC 序列通常噪声主导，仅凭"后半段均值更低"无法区分衰减与噪声，因此用
     两个半段均值差与标准误比较：差值超过 ``IC_DECAY_SIGMA`` 倍标准误才算确认。
 
+    前瞻期大于 1 个交易日时，相邻 IC 观测的前瞻窗口互相重叠，**不能当独立样本
+    使用**：直接用整条序列会让标准误被低估约 sqrt(overlap_step) 倍，同时绕过
+    样本量门槛（实测一处周频策略原始序列 169 个观测轻松过门槛，非重叠观测却
+    只有 34 个）。因此先按 ``overlap_step`` 抽成非重叠子样本，样本量门槛与标准误
+    都只作用在非重叠观测上。
+
+    组合分数 IC 虽只取实际选股调仓日，但仍须先由实际交易日历确认前瞻窗口是否
+    不重叠；确认后才调用 ``overlap_step=1``，否则也按前瞻期保守抽样。
+
     Args:
-        ic_values: 按日期升序的 IC 观测值（同一因子）。
+        ic_values: 按日期升序的 IC 观测值（同一因子或同一组合分数）。
+        overlap_step: 前瞻期对应的交易日数；等于 1 时序列本身即非重叠。
+        min_half_n: 每个半段所需的最小非重叠观测数，默认单因子口径。
 
     Returns:
         含 first_half_mean / second_half_mean / delta / se / first_half_n /
-        second_half_n / confirmed 的字典；半段观测不足时均值为 None 且
-        ``confirmed`` 为 False。
+        second_half_n / confirmed，以及 observed_n（原始观测数）、
+        effective_n（非重叠观测数）、overlap_step / min_required_n 的字典；
+        非重叠观测不足 ``min_half_n × 2`` 时均值为 None 且 ``confirmed`` 为 False。
     """
-    total = len(ic_values)
+    observed = list(ic_values)
+    step = max(1, int(overlap_step))
+    sampled = observed[::step] if step > 1 else observed
+    total = len(sampled)
     result: dict[str, Any] = {
         "first_half_mean": None,
         "second_half_mean": None,
@@ -310,13 +347,17 @@ def ic_decay_evidence(ic_values: Sequence[float]) -> dict[str, Any]:
         "first_half_n": total // 2,
         "second_half_n": total - total // 2,
         "confirmed": False,
+        "observed_n": len(observed),
+        "effective_n": total,
+        "overlap_step": step,
+        "min_required_n": min_half_n * 2,
     }
-    if total < IC_DECAY_MIN_HALF_N * 2:
+    if total < min_half_n * 2:
         return result
     middle = total // 2
-    first = list(ic_values[:middle])
-    second = list(ic_values[middle:])
-    if len(first) < IC_DECAY_MIN_HALF_N or len(second) < IC_DECAY_MIN_HALF_N:
+    first = sampled[:middle]
+    second = sampled[middle:]
+    if len(first) < min_half_n or len(second) < min_half_n:
         return result
 
     first_mean = sum(first) / len(first)
@@ -335,6 +376,61 @@ def ic_decay_evidence(ic_values: Sequence[float]) -> dict[str, Any]:
         }
     )
     return result
+
+
+def has_ic_decay_evidence(ic_decay: dict[str, Any] | None) -> bool:
+    """判断 IC 衰减证据是否**可用**（与"是否确认衰减"是两回事）。
+
+    非重叠观测不足门槛时 ``ic_decay_evidence`` 只返回 None 均值：此时
+    "未确认衰减"并不等于"没有衰减"，体检报告必须把这一点讲出来，而不是让
+    缺失的证据静默退化成"没问题"。
+
+    Args:
+        ic_decay: ``ic_decay_evidence`` 的输出；None 表示未计算。
+
+    Returns:
+        前后半段均值是否可用。
+    """
+    if not ic_decay:
+        return False
+    return (
+        ic_decay.get("first_half_mean") is not None
+        and ic_decay.get("second_half_mean") is not None
+    )
+
+
+def ic_evidence_shortfall(
+    effective_n: int,
+    min_half_n: int = SCORE_IC_DECAY_MIN_HALF_N,
+    forward_days: int = 1,
+    trading_days_per_month: int = TRADING_DAYS_PER_MONTH,
+) -> dict[str, int]:
+    """估算 IC 衰减证据还差多少观测、约需多少日历时间。
+
+    非日频策略的 IC 观测数等于监控窗口内的选股调仓次数，因此"没有证据"往往是
+    时间问题而不是策略问题。把差距与预计月数显式报出来，使用者才知道要等多久，
+    而不是看到一个静默的"未确认衰减"。
+
+    Args:
+        effective_n: 当前非重叠观测数。
+        min_half_n: 判定所需的最小半段观测数。
+        forward_days: 相邻观测相隔的交易日数（等于选股调仓周期）。
+        trading_days_per_month: 每月交易日数，用于折算月数。
+
+    Returns:
+        含 required_n（判定所需观测总数）、shortfall_n（还差几个观测）、
+        shortfall_months（按调仓周期折算的日历月数，向上取整）的字典。
+    """
+    required_n = min_half_n * 2
+    shortfall_n = max(0, required_n - max(0, effective_n))
+    step = max(1, int(forward_days))
+    per_month = max(1, int(trading_days_per_month))
+    shortfall_months = math.ceil(shortfall_n * step / per_month) if shortfall_n else 0
+    return {
+        "required_n": required_n,
+        "shortfall_n": shortfall_n,
+        "shortfall_months": shortfall_months,
+    }
 
 
 def _standard_error(values: Sequence[float]) -> float:

@@ -1080,6 +1080,7 @@ class BacktestService:
         """返回回测每日每指数信号与收益。
 
         口径与实时信号保持一致：signal_score 为综合得分，target_weight 为信号目标仓位权重。
+        scored=False 的行未参与评分，signal_score 为占位 0.0。
         """
         try:
             rows = self._backtest_repo.find_index_results(backtest_id, index_code)
@@ -1088,6 +1089,9 @@ class BacktestService:
                     trade_date=r.trade_date,
                     index_code=r.index_code,
                     signal_score=r.signal_score,
+                    # 迁移 0053 之前的历史行没有该列，按"已评分"回退保持旧口径
+                    scored=getattr(r, "scored", True),
+                    selection_rebalanced=getattr(r, "selection_rebalanced", True),
                     signal_level=r.signal_level,
                     in_portfolio=r.in_portfolio,
                     index_return=r.index_return,
@@ -1578,6 +1582,7 @@ class BacktestService:
                 result.positions if result.positions else {},
                 timing_regime=result.timing.regime if result.timing else None,
                 scoring_mode=config.score.scoring_mode,
+                selection_rebalanced=should_select,
                 persist=persist,
             )
             total_in_pos_count += day_pos_count
@@ -2085,6 +2090,7 @@ class BacktestService:
         signal_positions: dict[str, float],
         timing_regime: str | None = None,
         scoring_mode: str = "absolute",
+        selection_rebalanced: bool = True,
         persist: bool = True,
     ) -> tuple[int, int]:
         """写入每日每指数的回测结果，使用与实时一致的信号等级判定逻辑。
@@ -2092,6 +2098,11 @@ class BacktestService:
         与实时 `_build_strategy_results` 共用同一 `determine_signal_level` 输入：
         score=当日综合得分、target_weight=当日目标权重（result.positions）、
         timing_regime=当日择时 regime、scoring_mode=策略评分模式。
+
+        落库范围是当日 universe 全量标的，而 `result.scores` 只含通过候选池与
+        过滤规则的资产（过滤器会从 scores 中删除未通过的资产）。两者的差集用
+        `scored=False` 标记，其 `signal_score` 是占位 0.0——消费该列的横截面
+        统计（组合分数 IC）必须跳过这些行，否则占位 0 会占据固定底部名次。
 
         Args:
             backtest_id: 回测标识。
@@ -2103,6 +2114,7 @@ class BacktestService:
             signal_positions: 当日目标权重。
             timing_regime: 当日择时 regime。
             scoring_mode: 策略评分模式。
+            selection_rebalanced: 当日是否执行选股调仓；组合分数 IC 只评估这类日期。
             persist: False 时只统计持仓命中数（信号准确率），不写指数结果行
                 （D-1 研究批量评估路径）。
 
@@ -2116,6 +2128,8 @@ class BacktestService:
         for item in universe:
             code = item["index_code"]
             target_weight = signal_positions.get(code, 0.0)
+            # 未进入 scores 的资产当日没有得分：记录 scored=False，得分落占位 0.0
+            scored = code in score_map
             score = score_map.get(code, 0.0)
 
             level, _ = determine_signal_level(
@@ -2141,6 +2155,8 @@ class BacktestService:
                         trade_date=trade_date,
                         index_code=code,
                         signal_score=signal_score,
+                        scored=scored,
+                        selection_rebalanced=selection_rebalanced,
                         signal_level=level,
                         in_portfolio=in_portfolio,
                         index_return=idx_ret,

@@ -229,16 +229,58 @@
           </div>
 
           <div class="card">
-            <div class="card-head"><span class="card-title">因子 IC（Rank IC 均值）</span></div>
-            <div v-if="icDecay" class="ic-decay">
-              <span class="k">IC 衰减（前半段 → 后半段）</span>
-              <span class="v" :class="{ warn: icDecaying }">
-                {{ num(icDecay.first_half_mean) }} → {{ num(icDecay.second_half_mean) }}
-                <template v-if="icDecaying">（显著衰减）</template>
-                <template v-else-if="icDecayDetail">（未确认衰减）</template>
-                <span v-if="icDecayDetail" class="ic-decay-detail">{{ icDecayDetail }}</span>
-              </span>
-            </div>
+            <div class="card-head"><span class="card-title">组合分数 Rank IC（健康判定依据）</span></div>
+            <template v-if="compositeIc">
+              <div class="kv-grid">
+                <div><span class="k">IC 均值</span><span class="v">{{ num(compositeIc.ic_mean) }}</span></div>
+                <div><span class="k">ICIR</span><span class="v">{{ num(compositeIc.ic_ir) }}</span></div>
+                <div><span class="k">t 值</span><span class="v">{{ num(compositeIc.t_stat) }}</span></div>
+                <div>
+                  <span class="k">选股调仓日观测</span>
+                  <span class="v">{{ compositeIc.count ?? 0 }} 个</span>
+                </div>
+                <div><span class="k">前瞻期</span><span class="v">{{ compositeIc.forward_days ?? '—' }} 个交易日</span></div>
+                <div>
+                  <span class="k">平均横截面</span>
+                  <span class="v">
+                    评分 {{ num(compositeIc.cross_section_n_avg) }}
+                    <template v-if="compositeIc.universe_n_avg != null">
+                      / 标的 {{ num(compositeIc.universe_n_avg) }}
+                    </template>
+                  </span>
+                </div>
+                <div v-if="compositeIc.coverage_ratio != null">
+                  <span class="k">评分覆盖率</span>
+                  <span class="v">{{ pct(compositeIc.coverage_ratio * 100) }}</span>
+                </div>
+              </div>
+              <div v-if="compositeIc.ic_decay" class="ic-decay">
+                <span class="k">IC 衰减（前半段 → 后半段）</span>
+                <span class="v" :class="{ warn: compositeIcDecaying }">
+                  {{ num(compositeIc.ic_decay.first_half_mean) }} → {{ num(compositeIc.ic_decay.second_half_mean) }}
+                  <template v-if="compositeIcDecaying">（显著衰减）</template>
+                  <template v-else-if="compositeIcHasEvidence">
+                    （未确认衰减，调仓日观测 {{ compositeIc.ic_decay.effective_n ?? '—' }} 个）
+                  </template>
+                  <template v-else>（调仓日观测不足，无法判断）</template>
+                </span>
+              </div>
+              <p v-if="compositeIc.insufficient_reason" class="hint">{{ compositeIc.insufficient_reason }}</p>
+              <p v-else-if="compositeIc.decay_evidence_sufficient === false" class="hint">
+                选股调仓日观测 {{ compositeIc.ic_decay?.effective_n ?? 0 }} 个，未达判定门槛
+                {{ compositeIc.decay_min_required_n ?? 24 }} 个
+                <template v-if="compositeIc.decay_shortfall_n">
+                  ，还需约 {{ compositeIc.decay_shortfall_n }} 个调仓日（约
+                  {{ compositeIc.decay_shortfall_months ?? '—' }} 个月）
+                </template>
+                。本次体检未采用 IC 证据，"未确认衰减"不等于"没有衰减"，请不要据此认为信号仍然有效。
+              </p>
+            </template>
+            <p v-else class="hint">历史快照未计算组合分数 IC，不能用单因子 IC 替代其结论。</p>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><span class="card-title">评分因子 IC 诊断</span></div>
             <table v-if="factorRows.length" class="table">
               <thead>
                 <tr><th>因子</th><th>观测数</th><th>IC 均值</th><th>ICIR</th><th>t 值</th><th>IC&gt;0 占比</th></tr>
@@ -257,7 +299,8 @@
                 </tr>
               </tbody>
             </table>
-            <p v-else class="hint">该策略未引用资产级因子，或监控区间内因子值不足。</p>
+            <p class="hint">仅展示评分模块因子，供解释组合信号变化；它们不参与健康等级判定。过滤和择时因子不按横截面 Alpha 因子评估。单因子诊断取全交易日，与上方只取选股调仓日的组合分数 IC 日期集不同，两者数值不可直接比较。</p>
+            <p v-if="!factorRows.length" class="hint">该策略未引用评分因子，或监控区间内因子值不足。</p>
           </div>
         </template>
 
@@ -400,6 +443,30 @@ interface FactorIcEntry {
   } | null
 }
 
+interface CompositeRankIc {
+  ic_mean?: number | null
+  ic_ir?: number | null
+  t_stat?: number | null
+  count?: number
+  effective_n?: number
+  forward_days?: number
+  cross_section_n_avg?: number | null
+  universe_n_avg?: number | null
+  coverage_ratio?: number | null
+  insufficient_reason?: string | null
+  decay_evidence_sufficient?: boolean
+  decay_min_required_n?: number
+  decay_shortfall_n?: number
+  decay_shortfall_months?: number
+  selection_dates_only?: boolean
+  ic_decay?: {
+    first_half_mean?: number | null
+    second_half_mean?: number | null
+    confirmed?: boolean
+    effective_n?: number
+  } | null
+}
+
 /** 体检指标结构（后端 JSONB，字段全部可选） */
 interface SnapshotMetrics {
   cost_bps?: number
@@ -414,16 +481,9 @@ interface SnapshotMetrics {
     drawdown?: { current_pct?: number; max_pct?: number; percentile_pct?: number | null }
     windows?: Record<string, WindowEntry>
   }
+  signals?: { composite_rank_ic?: CompositeRankIc }
   factors?: {
     per_factor?: Record<string, FactorIcEntry>
-    ic_mean?: number | null
-    ic_decay?: {
-      first_half_mean?: number | null
-      second_half_mean?: number | null
-      confirmed?: boolean
-      confirmed_factor_count?: number
-      factor_count?: number
-    } | null
   }
 }
 
@@ -451,12 +511,11 @@ const factorRows = computed(() => {
   }))
 })
 
-// IC 前后半段均值：上线初期唯一能积累出统计量的衰减证据
-const icDecay = computed(() => metrics.value.factors?.ic_decay ?? null)
+const compositeIc = computed(() => metrics.value.signals?.composite_rank_ic ?? null)
 
-// 衰减中：服务层已做显著性检验（confirmed），历史快照缺少该字段时回退为均值比较
-const icDecaying = computed(() => {
-  const decay = icDecay.value
+// 组合分数 IC 是健康等级唯一采用的 IC 证据；历史快照没有该字段时不回退到单因子。
+const compositeIcDecaying = computed(() => {
+  const decay = compositeIc.value?.ic_decay
   if (!decay) return false
   if (typeof decay.confirmed === 'boolean') return decay.confirmed
   const first = decay.first_half_mean
@@ -464,11 +523,14 @@ const icDecaying = computed(() => {
   return typeof first === 'number' && typeof second === 'number' && second < first
 })
 
-// 各因子显著衰减的计数文案
-const icDecayDetail = computed(() => {
-  const decay = icDecay.value
-  if (!decay || typeof decay.factor_count !== 'number' || decay.factor_count === 0) return ''
-  return `${decay.confirmed_factor_count ?? 0}/${decay.factor_count} 个因子显著衰减`
+// 衰减证据是否可用：非重叠观测不足时"未确认衰减"只是没证据，不能读成"没问题"
+const compositeIcHasEvidence = computed(() => {
+  const decay = compositeIc.value?.ic_decay
+  if (!decay) return false
+  if (typeof compositeIc.value?.decay_evidence_sufficient === 'boolean') {
+    return compositeIc.value.decay_evidence_sufficient
+  }
+  return typeof decay.first_half_mean === 'number' && typeof decay.second_half_mean === 'number'
 })
 
 /**

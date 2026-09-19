@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,10 +20,13 @@ from quant_etf_api.domain.research.lifecycle import (
     HEALTH_UNKNOWN,
     HEALTH_WARNING,
     HEALTH_WATCH,
+    SCORE_IC_DECAY_MIN_HALF_N,
     assess_health,
     build_baseline_distribution,
     evaluate_against_baseline,
+    has_ic_decay_evidence,
     ic_decay_evidence,
+    ic_evidence_shortfall,
 )
 from quant_etf_api.domain.research.periods import (
     PURPOSE_MONITOR,
@@ -31,6 +35,7 @@ from quant_etf_api.domain.research.periods import (
     PeriodBoundaries,
     validate_backtest_period,
 )
+from quant_etf_api.services.strategy_lifecycle_service import _selection_forward_days
 
 _BOUNDARIES = PeriodBoundaries(
     research_start=date(2016, 1, 1),
@@ -170,7 +175,7 @@ class TestHealthAssessment:
         result = assess_health(
             30.0,
             {"3m": 2.0, "6m": 20.0, "12m": 60.0},
-            ic_decay={"first_half_mean": 0.01, "second_half_mean": 0.03},
+            composite_ic_decay={"first_half_mean": 0.01, "second_half_mean": 0.03},
         )
         assert result.health_level == HEALTH_WATCH
         assert result.diagnosis == DIAGNOSIS_ALPHA_DECAY
@@ -180,7 +185,7 @@ class TestHealthAssessment:
         result = assess_health(
             30.0,
             {"3m": 2.0, "6m": 20.0, "12m": 60.0},
-            ic_decay={"first_half_mean": 0.04, "second_half_mean": 0.01},
+            composite_ic_decay={"first_half_mean": 0.04, "second_half_mean": 0.01},
         )
         assert result.diagnosis == DIAGNOSIS_ALPHA_DECAY
 
@@ -189,7 +194,7 @@ class TestHealthAssessment:
         result = assess_health(
             30.0,
             {"3m": 2.0, "6m": 20.0, "12m": 60.0},
-            ic_decay={"first_half_mean": None, "second_half_mean": None},
+            composite_ic_decay={"first_half_mean": None, "second_half_mean": None},
         )
         assert result.health_level == HEALTH_WATCH
 
@@ -198,7 +203,7 @@ class TestHealthAssessment:
         result = assess_health(
             99.0,
             {"3m": 2.0, "6m": 20.0, "12m": 60.0},
-            ic_decay={"first_half_mean": 0.04, "second_half_mean": 0.01},
+            composite_ic_decay={"first_half_mean": 0.04, "second_half_mean": 0.01},
         )
         assert result.health_level == HEALTH_CRITICAL
         assert result.diagnosis == DIAGNOSIS_ALPHA_DECAY
@@ -265,6 +270,117 @@ class TestIcDecayEvidence:
         assert evidence["first_half_n"] == 0
 
 
+class TestIcDecayOverlapHandling:
+    """前瞻窗口重叠时必须抽非重叠子样本，否则门槛与标准误同时失真。"""
+
+    @staticmethod
+    def _decaying(n: int) -> list[float]:
+        """构造前高后低的 IC 序列（带微小波动，避免半段方差为 0）。
+
+        周期长度取 7（与 overlap_step=5 互质），保证抽样后两个半段仍保留波动，
+        否则标准误恒为 0，"显著衰减"的判定会被退化掉。
+        """
+        high = (0.10, 0.12, 0.08, 0.11, 0.09, 0.13, 0.07)
+        low = (0.01, -0.01, 0.02, 0.00, 0.03, -0.02, 0.01)
+        half = n // 2
+        return [high[i % len(high)] for i in range(half)] + [
+            low[i % len(low)] for i in range(n - half)
+        ]
+
+    def test_overlap_step_reduces_effective_sample(self) -> None:
+        """周频策略的原始 169 个观测量不足以支撑判定：非重叠只有 34 个。"""
+        evidence = ic_decay_evidence(self._decaying(169), overlap_step=5)
+        assert evidence["observed_n"] == 169
+        assert evidence["effective_n"] == 34
+        # 低于 IC_DECAY_MIN_HALF_N × 2 = 40，必须承认没有证据
+        assert evidence["first_half_mean"] is None
+        assert evidence["confirmed"] is False
+
+    def test_overlap_step_at_threshold_still_usable(self) -> None:
+        """非重叠观测恰好达到门槛时正常给出证据。"""
+        evidence = ic_decay_evidence(self._decaying(200), overlap_step=5)
+        assert evidence["effective_n"] == 40
+        assert evidence["first_half_mean"] == pytest.approx(0.10, abs=0.005)
+        assert evidence["second_half_mean"] == pytest.approx(0.006, abs=0.01)
+        assert evidence["confirmed"] is True
+
+    def test_step_one_matches_legacy_behaviour(self) -> None:
+        """前瞻期为 1 天（日频）时序列本身非重叠，结果与改造前一致。"""
+        values = self._decaying(80)
+        assert ic_decay_evidence(values) == ic_decay_evidence(values, overlap_step=1)
+
+    def test_invalid_step_falls_back_to_one(self) -> None:
+        """非法步长按 1 处理，不能除零或越界切片。"""
+        evidence = ic_decay_evidence(self._decaying(80), overlap_step=0)
+        assert evidence["overlap_step"] == 1
+        assert evidence["effective_n"] == 80
+
+    def test_score_level_threshold_allows_shorter_rebalance_series(self) -> None:
+        """组合序列用更低的门槛，否则周频策略要攒 40 个调仓日才可能出证据。"""
+        values = self._decaying(24)
+        strict = ic_decay_evidence(values)
+        assert strict["min_required_n"] == 40
+        assert strict["first_half_mean"] is None
+
+        score_level = ic_decay_evidence(values, min_half_n=SCORE_IC_DECAY_MIN_HALF_N)
+        assert score_level["min_required_n"] == 24
+        assert score_level["effective_n"] == 24
+        assert score_level["first_half_mean"] == pytest.approx(0.10, abs=0.005)
+        assert score_level["confirmed"] is True
+
+    def test_score_level_threshold_still_blocks_tiny_series(self) -> None:
+        """门槛降低不等于没有门槛：12 个观测依然拿不到证据。"""
+        evidence = ic_decay_evidence(
+            self._decaying(12), min_half_n=SCORE_IC_DECAY_MIN_HALF_N
+        )
+        assert evidence["min_required_n"] == 24
+        assert evidence["first_half_mean"] is None
+        assert evidence["confirmed"] is False
+
+
+class TestIcEvidenceShortfall:
+    """把"还差多少证据"折算成可预期的时间表。"""
+
+    def test_weekly_series_reports_remaining_observations_and_months(self) -> None:
+        """周频策略 34 个调仓日离 24 个门槛已达标，不应再报缺口。"""
+        shortfall = ic_evidence_shortfall(34, forward_days=5)
+        assert shortfall == {"required_n": 24, "shortfall_n": 0, "shortfall_months": 0}
+
+    def test_monthly_series_reports_multi_year_gap(self) -> None:
+        """月频策略 8 个调仓日还差 16 个，约 16 个月。"""
+        shortfall = ic_evidence_shortfall(8, forward_days=21)
+        assert shortfall["required_n"] == 24
+        assert shortfall["shortfall_n"] == 16
+        assert shortfall["shortfall_months"] == 16
+
+    def test_zero_observations_reports_full_gap(self) -> None:
+        """一个观测都没有时要报出完整缺口而不是 0。"""
+        shortfall = ic_evidence_shortfall(0, forward_days=1)
+        assert shortfall["shortfall_n"] == 24
+        assert shortfall["shortfall_months"] == 2
+
+    def test_negative_or_invalid_inputs_are_safe(self) -> None:
+        """负观测数与 0 交易日步长都不能产生负数或除零。"""
+        shortfall = ic_evidence_shortfall(-5, forward_days=0)
+        assert shortfall["shortfall_n"] == 24
+        assert shortfall["shortfall_months"] == 2
+
+
+class TestHasIcDecayEvidence:
+    """证据可用性与"是否确认衰减"必须区分开。"""
+
+    def test_missing_evidence_is_not_usable(self) -> None:
+        assert has_ic_decay_evidence(None) is False
+        assert has_ic_decay_evidence({}) is False
+        assert has_ic_decay_evidence({"first_half_mean": None, "second_half_mean": None}) is False
+
+    def test_negative_conclusion_still_counts_as_evidence(self) -> None:
+        """算出了均值但未确认衰减，仍属于"有证据的阴性结论"。"""
+        evidence = ic_decay_evidence([0.02, -0.30, 0.35, -0.25, 0.30, -0.32, 0.28, 0.01] * 10)
+        assert evidence["confirmed"] is False
+        assert has_ic_decay_evidence(evidence) is True
+
+
 class TestConfirmedFlagIsAuthoritative:
     """测试 assess_health 对 confirmed 标记的采纳优先级。"""
 
@@ -273,7 +389,7 @@ class TestConfirmedFlagIsAuthoritative:
         result = assess_health(
             30.0,
             {"3m": 2.0, "6m": 20.0, "12m": 60.0},
-            ic_decay={
+            composite_ic_decay={
                 "first_half_mean": 0.04,
                 "second_half_mean": 0.01,
                 "confirmed": False,
@@ -287,7 +403,7 @@ class TestConfirmedFlagIsAuthoritative:
         result = assess_health(
             99.0,
             {"3m": 2.0, "6m": 20.0, "12m": 60.0},
-            ic_decay={
+            composite_ic_decay={
                 "first_half_mean": 0.01,
                 "second_half_mean": 0.03,
                 "confirmed": True,
@@ -295,3 +411,59 @@ class TestConfirmedFlagIsAuthoritative:
         )
         assert result.health_level == HEALTH_CRITICAL
         assert result.diagnosis == DIAGNOSIS_ALPHA_DECAY
+
+
+class TestSelectionForwardDays:
+    """组合分数 IC 必须对齐实际选股调仓频率。"""
+
+    @staticmethod
+    def _config(frequency: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            rebalance=SimpleNamespace(selection=SimpleNamespace(frequency=frequency))
+        )
+
+    def test_daily_weekly_monthly_mapping(self) -> None:
+        assert _selection_forward_days(self._config("daily")) == 1
+        assert _selection_forward_days(self._config("weekly")) == 5
+        assert _selection_forward_days(self._config("monthly")) == 21
+
+    def test_biweekly_and_missing_config_are_safe(self) -> None:
+        assert _selection_forward_days(self._config("biweekly")) == 10
+        assert _selection_forward_days(None) == 1
+
+
+class TestHealthAssessmentIcEvidenceReporting:
+    """IC 证据缺失必须在 reasons 中说明，不能被读成一次正常的阴性结论。"""
+
+    _DECAY_WINDOWS = {"3m": 2.0, "6m": 20.0, "12m": 60.0}
+
+    def test_absent_ic_evidence_is_reported(self) -> None:
+        """完全没传 IC 证据时说明未采用，而不是默认"没问题"。"""
+        result = assess_health(30.0, self._DECAY_WINDOWS)
+        assert result.health_level == HEALTH_WATCH
+        assert any("未采用 IC 证据" in reason for reason in result.reasons)
+
+    def test_insufficient_ic_evidence_is_reported(self) -> None:
+        """非重叠观测不足时均值为 None，同样要说明未采用。"""
+        result = assess_health(
+            30.0,
+            self._DECAY_WINDOWS,
+            composite_ic_decay={"first_half_mean": None, "second_half_mean": None},
+        )
+        assert result.health_level == HEALTH_WATCH
+        assert any("未采用 IC 证据" in reason for reason in result.reasons)
+
+    def test_available_evidence_uses_distinct_wording(self) -> None:
+        """算出了均值但未确认衰减时，措辞必须是"证据不足"而非"未采用证据"。"""
+        result = assess_health(
+            30.0,
+            self._DECAY_WINDOWS,
+            composite_ic_decay={
+                "first_half_mean": 0.04,
+                "second_half_mean": 0.01,
+                "confirmed": False,
+            },
+        )
+        assert result.health_level == HEALTH_WATCH
+        assert any("衰减证据不足" in reason for reason in result.reasons)
+        assert not any("未采用 IC 证据" in reason for reason in result.reasons)

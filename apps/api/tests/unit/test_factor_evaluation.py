@@ -9,7 +9,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,10 +25,12 @@ from quant_etf_api.factors.evaluation import (
     STATUS_OK,
     build_forward_returns,
     build_ic_observation,
+    analyze_backtest_score_ic,
     calc_rank_ic_from_values,
     pairwise_rank_correlation,
     summarize_ic,
 )
+import quant_etf_api.factors.evaluation as evaluation_module
 
 
 # ─── 测试辅助：轻量 mock 数据行 ─────────────────────────────────────────────────
@@ -267,6 +270,374 @@ class TestBuildIcObservation:
         assert obs["cross_section_n"] == 2
         assert obs["ic"] is None
 
+
+class TestAnalyzeBacktestScoreIc:
+    """组合分数 IC 只使用真正参与评分的资产，前瞻收益取全横截面日线。"""
+
+    _D1 = date(2024, 1, 2)
+    _D2 = date(2024, 1, 3)
+    _DAY = date(2024, 1, 1)
+
+    def _install_repositories(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        count: int,
+        constant: bool = False,
+        unscored: int = 0,
+        include_bars: bool = True,
+        non_finite: int = 0,
+        selection_rebalanced: bool = True,
+        recorded: list[dict[str, object]] | None = None,
+    ) -> None:
+        """装配假仓库：``unscored`` 个 scored=False 的占位 0 分资产。"""
+        d1, d2 = self._D1, self._D2
+        codes = [f"I{index:02d}" for index in range(count)]
+        score_rows = [
+            SimpleNamespace(
+                trade_date=d1,
+                index_code=code,
+                signal_score=1.0 if constant else float(index + 1),
+                scored=True,
+                selection_rebalanced=selection_rebalanced,
+            )
+            for index, code in enumerate(codes)
+        ]
+        # 未评分资产：得分为占位 0.0，但前瞻收益刻意做得最高——
+        # 一旦被算进横截面，秩相关会被系统性拉低
+        filler_codes = [f"U{index:02d}" for index in range(unscored)]
+        score_rows.extend(
+            SimpleNamespace(
+                trade_date=d1,
+                index_code=code,
+                signal_score=0.0,
+                scored=False,
+                selection_rebalanced=selection_rebalanced,
+            )
+            for code in filler_codes
+        )
+        score_rows.extend(
+            SimpleNamespace(
+                trade_date=d1,
+                index_code=f"N{index:02d}",
+                signal_score=float("nan"),
+                scored=True,
+                selection_rebalanced=selection_rebalanced,
+            )
+            for index in range(non_finite)
+        )
+
+        all_codes = codes + filler_codes
+        bars: dict[tuple[str, date], SimpleNamespace] = {}
+        if include_bars:
+            bars.update({(code, d1): SimpleNamespace(close_price=100.0) for code in all_codes})
+            bars.update(
+                {
+                    (code, d2): SimpleNamespace(close_price=100.0 + index + 1)
+                    for index, code in enumerate(codes)
+                }
+            )
+            # 未评分资产次日大涨：若被纳入横截面会把 IC 压成负值
+            bars.update(
+                {
+                    (code, d2): SimpleNamespace(close_price=300.0 + index)
+                    for index, code in enumerate(filler_codes)
+                }
+            )
+
+        captured = recorded if recorded is not None else []
+
+        class FakeBacktestRepository:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def find_index_results(
+                self, _backtest_id: str, **kwargs: object
+            ) -> list[SimpleNamespace]:
+                captured.append(dict(kwargs))
+                return score_rows
+
+        class FakeBarRepository:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def find_all_trading_dates(self, _start: date, _end: date) -> list[date]:
+                return [d1, d2] if include_bars else []
+
+            def find_all_date_range(
+                self, _start: date, _end: date, _codes: list[str]
+            ) -> dict[tuple[str, date], SimpleNamespace]:
+                return bars
+
+        monkeypatch.setattr(evaluation_module, "BacktestRepository", FakeBacktestRepository)
+        monkeypatch.setattr(evaluation_module, "IndexDailyBarRepository", FakeBarRepository)
+
+    def test_uses_complete_score_cross_section(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._install_repositories(monkeypatch, count=20)
+        result = analyze_backtest_score_ic(object(), "monitor-1", self._D1, self._D1)
+        assert result["summary"]["count"] == 1
+        assert result["summary"]["cross_section_n_avg"] == 20
+        assert result["series"][0]["ic"] == pytest.approx(1.0)
+
+    def test_unscored_rows_do_not_enter_cross_section(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """占位 0 分（scored=False）必须排除，否则固定底部名次会扭曲 IC 与 t 值。"""
+        self._install_repositories(monkeypatch, count=20, unscored=20)
+        result = analyze_backtest_score_ic(object(), "monitor-1", self._D1, self._D1)
+        summary = result["summary"]
+        assert summary["count"] == 1
+        assert summary["cross_section_n_avg"] == 20
+        assert result["series"][0]["ic"] == pytest.approx(1.0)
+        # 覆盖度诊断如实反映 20/40 的评分覆盖，而不是把 40 当证据基数
+        assert summary["scored_n_avg"] == 20.0
+        assert summary["universe_n_avg"] == 40.0
+        assert summary["coverage_ratio"] == pytest.approx(0.5)
+        assert summary["unscored_rows"] == 20
+
+    def test_non_finite_score_is_not_evidence(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """得分非有限值的行按未评分处理，不进入横截面。"""
+        self._install_repositories(monkeypatch, count=6, non_finite=3)
+        result = analyze_backtest_score_ic(object(), "monitor-1", self._D1, self._D1)
+        assert result["summary"]["cross_section_n_avg"] == 6
+        assert result["summary"]["unscored_rows"] == 3
+
+    def test_default_min_n_allows_narrow_candidate_pool(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """策略级横截面门槛是 5：窄池策略不该因为指数池小而永久没有 IC。"""
+        self._install_repositories(monkeypatch, count=5)
+        narrow = analyze_backtest_score_ic(object(), "monitor-1", self._D1, self._D1)
+        assert narrow["summary"]["count"] == 1
+        assert narrow["summary"]["cross_section_n_required"] == 5
+
+        self._install_repositories(monkeypatch, count=4)
+        too_narrow = analyze_backtest_score_ic(object(), "monitor-1", self._D1, self._D1)
+        assert too_narrow["summary"]["count"] == 0
+        assert too_narrow["summary"]["excluded_low_n_days"] == 1
+
+    def test_single_factor_threshold_still_available(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """显式传入单因子门槛 20 时，19 个评分资产仍不算有效证据。"""
+        self._install_repositories(monkeypatch, count=19)
+        low_n = analyze_backtest_score_ic(object(), "monitor-1", self._D1, self._D1, min_n=20)
+        assert low_n["summary"]["count"] == 0
+        assert low_n["summary"]["excluded_low_n_days"] == 1
+
+        self._install_repositories(monkeypatch, count=20, constant=True)
+        constant = analyze_backtest_score_ic(
+            object(), "monitor-1", self._D1, self._D1, min_n=20
+        )
+        assert constant["summary"]["count"] == 0
+        assert constant["summary"]["excluded_low_n_days"] == 1
+
+    def test_missing_forward_bars_are_counted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """没有任何日线时全部观测记为缺少前瞻行情，而不是静默无观测。"""
+        self._install_repositories(monkeypatch, count=20, include_bars=False)
+        result = analyze_backtest_score_ic(object(), "monitor-1", self._D1, self._D1)
+        assert result["series"] == []
+        assert result["summary"]["count"] == 0
+        assert result["summary"]["dropped_no_forward_days"] == 1
+        assert "缺少前瞻行情" in (result["summary"]["insufficient_reason"] or "")
+
+    def test_date_range_is_pushed_down_to_repository(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """监控区间下推到 SQL，避免把整段回测取回内存后再筛。"""
+        recorded: list[dict[str, object]] = []
+        self._install_repositories(monkeypatch, count=20, recorded=recorded)
+        analyze_backtest_score_ic(object(), "monitor-1", self._D1, self._D2)
+        assert recorded == [{"start_date": self._D1, "end_date": self._D2}]
+
+    def test_non_selection_dates_are_excluded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """每天计算的潜在分数不能替代实际执行选股调仓日的信号。"""
+        self._install_repositories(monkeypatch, count=20, selection_rebalanced=False)
+        result = analyze_backtest_score_ic(object(), "monitor-1", self._D1, self._D1)
+        assert result["series"] == []
+        assert result["summary"]["count"] == 0
+
+    def test_mixed_dates_keep_only_selection_days(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """同一区间内选股日与非选股日混合时，只保留选股日的观测。
+
+        选股日构造正 IC、非选股日构造负 IC：一旦把后者算进来，均值会被抹平，
+        测试就能区分"按标记过滤"与"照单全收"。
+        """
+        selection_day = date(2024, 1, 2)
+        idle_day = date(2024, 1, 3)
+        forward_day = date(2024, 1, 4)
+        codes = [f"I{index:02d}" for index in range(20)]
+        rows = [
+            SimpleNamespace(
+                trade_date=day,
+                index_code=code,
+                signal_score=float(index + 1),
+                scored=True,
+                selection_rebalanced=is_selection,
+            )
+            for day, is_selection in ((selection_day, True), (idle_day, False))
+            for index, code in enumerate(codes)
+        ]
+        bars: dict[tuple[str, date], SimpleNamespace] = {}
+        for index, code in enumerate(codes):
+            # 选股日：价格横截面恒定，前瞻日按得分递增 → 正 IC
+            bars[(code, selection_day)] = SimpleNamespace(close_price=100.0)
+            # 非选股日：起点按得分递增、终点递减 → 负 IC（若被算入会拉低均值）
+            bars[(code, idle_day)] = SimpleNamespace(close_price=100.0 + index)
+            bars[(code, forward_day)] = SimpleNamespace(close_price=200.0 - index)
+
+        class FakeBacktestRepository:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def find_index_results(self, _backtest_id: str, **_kwargs: object):
+                return rows
+
+        class FakeBarRepository:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def find_all_trading_dates(self, _start: date, _end: date) -> list[date]:
+                return [selection_day, idle_day, forward_day]
+
+            def find_all_date_range(self, _start: date, _end: date, _codes: list[str]):
+                return bars
+
+        monkeypatch.setattr(evaluation_module, "BacktestRepository", FakeBacktestRepository)
+        monkeypatch.setattr(evaluation_module, "IndexDailyBarRepository", FakeBarRepository)
+
+        result = analyze_backtest_score_ic(
+            object(), "monitor-1", selection_day, forward_day
+        )
+        assert result["summary"]["count"] == 1
+        assert result["series"][0]["trade_date"] == str(selection_day)
+        assert result["series"][0]["ic"] == pytest.approx(1.0)
+
+    def test_effective_n_equals_count_for_rebalance_days(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """组合序列的观测就是调仓日：前瞻期为 5 天时 effective_n 也不得再打折。
+
+        构造 3 个相隔 5 个交易日的选股调仓日（中间夹非选股日），前瞻期 5 天。
+        观测之间已经首尾相接，按重叠窗口再折算会把 3 个观测折成 0 个。
+        """
+        codes = [f"I{index:02d}" for index in range(20)]
+        trading_dates = [date(2024, 1, 1) + timedelta(days=index) for index in range(21)]
+        selection_days = {trading_dates[0], trading_dates[5], trading_dates[10]}
+        rows = [
+            SimpleNamespace(
+                trade_date=day,
+                index_code=code,
+                signal_score=float(index + 1),
+                scored=True,
+                selection_rebalanced=day in selection_days,
+            )
+            for day in trading_dates
+            for index, code in enumerate(codes)
+        ]
+        bars: dict[tuple[str, date], SimpleNamespace] = {}
+        for day_index, day in enumerate(trading_dates):
+            for index, code in enumerate(codes):
+                # 价格 = 100 + 日序号 × 资产序号：任意 5 日窗口的收益都随得分递增，
+                # 于是每个调仓日的 IC 都是 +1；非选股日本可算出 IC 但必须被排除
+                bars[(code, day)] = SimpleNamespace(
+                    close_price=100.0 + day_index * index,
+                )
+
+        class FakeBacktestRepository:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def find_index_results(self, _backtest_id: str, **_kwargs: object):
+                return rows
+
+        class FakeBarRepository:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def find_all_trading_dates(self, _start: date, _end: date) -> list[date]:
+                return trading_dates
+
+            def find_all_date_range(self, _start: date, _end: date, _codes: list[str]):
+                return bars
+
+        monkeypatch.setattr(evaluation_module, "BacktestRepository", FakeBacktestRepository)
+        monkeypatch.setattr(evaluation_module, "IndexDailyBarRepository", FakeBarRepository)
+
+        result = analyze_backtest_score_ic(
+            object(), "monitor-1", trading_dates[0], trading_dates[-1], forward_days=5
+        )
+        summary = result["summary"]
+        assert summary["count"] == 3
+        assert summary["effective_n"] == 3
+        assert summary["overlap"] is False
+        assert [item["ic"] for item in result["series"]] == pytest.approx([1.0, 1.0, 1.0])
+        # 对照：同一批观测按重叠窗口折算会被压成 0，这正是需要避免的口径
+        assert summarize_ic(result["series"], forward_days=5)["effective_n"] == 0
+
+    def test_overlapping_actual_rebalance_windows_keep_conservative_discount(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """实际调仓日间隔不足前瞻期时，不能假定组合 IC 观测相互独立。"""
+        codes = [f"I{index:02d}" for index in range(20)]
+        trading_dates = [date(2024, 1, 1) + timedelta(days=index) for index in range(21)]
+        # 第 0 与第 4 个交易日之间不足 5 日，两个 5 日前瞻收益窗口重叠。
+        selection_days = {trading_dates[0], trading_dates[4], trading_dates[10]}
+        rows = [
+            SimpleNamespace(
+                trade_date=day,
+                index_code=code,
+                signal_score=float(index + 1),
+                scored=True,
+                selection_rebalanced=day in selection_days,
+            )
+            for day in trading_dates
+            for index, code in enumerate(codes)
+        ]
+        bars = {
+            (code, day): SimpleNamespace(close_price=100.0 + day_index * index)
+            for day_index, day in enumerate(trading_dates)
+            for index, code in enumerate(codes)
+        }
+
+        class FakeBacktestRepository:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def find_index_results(self, _backtest_id: str, **_kwargs: object):
+                return rows
+
+        class FakeBarRepository:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def find_all_trading_dates(self, _start: date, _end: date) -> list[date]:
+                return trading_dates
+
+            def find_all_date_range(self, _start: date, _end: date, _codes: list[str]):
+                return bars
+
+        monkeypatch.setattr(evaluation_module, "BacktestRepository", FakeBacktestRepository)
+        monkeypatch.setattr(evaluation_module, "IndexDailyBarRepository", FakeBarRepository)
+
+        result = analyze_backtest_score_ic(
+            object(), "monitor-1", trading_dates[0], trading_dates[-1], forward_days=5
+        )
+        summary = result["summary"]
+        assert summary["count"] == 3
+        assert summary["selection_windows_non_overlapping"] is False
+        assert summary["overlap"] is True
+        assert summary["effective_n"] == 0
+
+    def test_inverted_range_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """区间反向或前瞻期非法时直接返回空结果，不做无意义查询。"""
+        recorded: list[dict[str, object]] = []
+        self._install_repositories(monkeypatch, count=20, recorded=recorded)
+        result = analyze_backtest_score_ic(object(), "monitor-1", self._D2, self._D1)
+        assert result["series"] == []
+        assert recorded == []
+
     def test_single_pair_never_ok(self) -> None:
         """只有 1 个配对样本时不可能算出相关系数。"""
         obs = build_ic_observation(
@@ -280,9 +651,9 @@ class TestSummarizeIc:
 
     @staticmethod
     def _ok(ic: float, n: int, day: int = 1) -> dict[str, object]:
-        """构造一个有效观测。"""
+        """构造一个有效观测（``day`` 为相对 2024-01-01 的天偏移，可超过 31）。"""
         return {
-            "trade_date": date(2024, 1, day),
+            "trade_date": date(2024, 1, 1) + timedelta(days=day - 1),
             "ic": ic,
             "cross_section_n": n,
             "status": STATUS_OK,
@@ -330,6 +701,31 @@ class TestSummarizeIc:
         assert summary["count"] == 11
         assert summary["effective_n"] == 2
         assert summary["overlap"] is True
+
+    def test_already_non_overlapping_skips_discount(self) -> None:
+        """观测本身已按调仓周期间隔时不得二次折算，否则 t 值被系统性低估。"""
+        observations = [self._ok(0.05, 25, day=index + 1) for index in range(34)]
+        summary = summarize_ic(
+            observations, forward_days=5, min_n=20, already_non_overlapping=True
+        )
+        assert summary["count"] == 34
+        assert summary["effective_n"] == 34
+        assert summary["overlap"] is False
+        # t = ICIR × √34，而不是 × √(34//5)
+        assert summary["t_stat"] == pytest.approx(
+            summary["ic_ir"] * (34**0.5), abs=1e-4
+        )
+
+    def test_already_non_overlapping_keeps_horizon_reporting(self) -> None:
+        """折算是取消的，但前瞻期本身仍要如实回显给调用方。"""
+        observations = [self._ok(0.05, 25, day=index + 1) for index in range(11)]
+        disjoint = summarize_ic(
+            observations, forward_days=5, min_n=20, already_non_overlapping=True
+        )
+        overlapping = summarize_ic(observations, forward_days=5, min_n=20)
+        assert disjoint["count"] == overlapping["count"] == 11
+        assert disjoint["effective_n"] == 11
+        assert overlapping["effective_n"] == 2
 
     def test_empty_gives_reason(self) -> None:
         """没有任何候选观测时给出"无因子值"的原因。"""

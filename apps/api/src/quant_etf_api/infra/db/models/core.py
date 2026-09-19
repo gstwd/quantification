@@ -556,7 +556,23 @@ class BacktestIndexResultModel(Base):
     signal_score: Mapped[float] = mapped_column(
         Float,
         nullable=False,
-        comment="信号综合得分，0-100（与实时 index_signal.signal_score 同义）",
+        comment="信号综合得分，0-100（与实时 index_signal.signal_score 同义）；"
+        "scored=False 时该值为占位 0.0，不代表真实得分",
+    )
+    scored: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=sa.text("TRUE"),
+        nullable=False,
+        comment="该资产当日是否真正参与评分（False=被候选池剔除或被过滤规则拒绝，"
+        "signal_score 为占位 0.0；组合分数 IC 必须跳过这些行）",
+    )
+    selection_rebalanced: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=sa.text("TRUE"),
+        nullable=False,
+        comment="该交易日是否执行选股调仓；组合分数 IC 仅使用 True 的交易日",
     )
     signal_level: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="信号等级：HIGH/MID/LOW"

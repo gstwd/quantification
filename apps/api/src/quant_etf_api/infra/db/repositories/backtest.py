@@ -188,13 +188,19 @@ class BacktestRepository(BaseRepository):
         return result
 
     def find_index_results(
-        self, backtest_id: str, index_code: str | None = None
+        self,
+        backtest_id: str,
+        index_code: str | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
     ) -> list[BacktestIndexResultModel]:
         """查询回测的每日指数信号与收益（按日期和指数代码升序）。
 
         Args:
             backtest_id: 回测标识。
             index_code: 可选的指数代码过滤，None 时返回所有指数。
+            start_date: 可选起始交易日（含），None 时不限下界。
+            end_date: 可选截止交易日（含），None 时不限上界。
 
         Returns:
             BacktestIndexResultModel 列表。
@@ -204,6 +210,11 @@ class BacktestRepository(BaseRepository):
         )
         if index_code is not None:
             q = q.filter(BacktestIndexResultModel.index_code == index_code)
+        # 区间过滤下推到 SQL：长回测的行数远大于监控窗口，避免全量取回后再筛
+        if start_date is not None:
+            q = q.filter(BacktestIndexResultModel.trade_date >= start_date)
+        if end_date is not None:
+            q = q.filter(BacktestIndexResultModel.trade_date <= end_date)
         return q.order_by(
             BacktestIndexResultModel.trade_date.asc(),
             BacktestIndexResultModel.index_code.asc(),

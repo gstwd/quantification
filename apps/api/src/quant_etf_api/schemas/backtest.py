@@ -513,11 +513,15 @@ class BacktestIndexResult(BaseModel):
     """回测单日单指数信号与实际收益。
 
     口径与实时信号一致：signal_score 为综合得分，target_weight 为信号目标仓位权重。
+    落库范围是当日 universe 全量标的，未参与评分的资产（被候选池剔除或被过滤规则
+    拒绝）以 scored=False 标记，其 signal_score 是占位 0.0 而非真实得分。
     """
 
     trade_date: date
     index_code: str
     signal_score: float
+    scored: bool = True
+    selection_rebalanced: bool = True
     signal_level: str
     in_portfolio: bool
     index_return: float | None = None

@@ -20,10 +20,13 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.domain.research.lifecycle import (
+    SCORE_IC_DECAY_MIN_HALF_N,
     assess_health,
     build_baseline_distribution,
     evaluate_against_baseline,
+    has_ic_decay_evidence,
     ic_decay_evidence,
+    ic_evidence_shortfall,
 )
 from quant_etf_api.domain.research.periods import (
     PURPOSE_MONITOR,
@@ -31,7 +34,7 @@ from quant_etf_api.domain.research.periods import (
     PeriodBoundaries,
 )
 from quant_etf_api.domain.research.stability import compute_stability_metrics
-from quant_etf_api.factors.evaluation import analyze_ic
+from quant_etf_api.factors.evaluation import analyze_backtest_score_ic, analyze_ic
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import (
     BacktestRunModel,
@@ -348,14 +351,21 @@ class StrategyLifecycleService:
             for label, entry in (evaluation.get("windows") or {}).items()
         }
         drawdown_percentile = (evaluation.get("drawdown") or {}).get("percentile_pct")
-        ic_metrics = self._compute_factor_ic(
-            strategy_id, live_start, live_end, live_end, row.frozen_config_snapshot
+        signal_diagnostics = self._compute_signal_diagnostics(
+            strategy_id,
+            created.backtest_id,
+            live_start,
+            live_end,
+            live_end,
+            row.frozen_config_snapshot,
         )
         assessment = assess_health(
             drawdown_percentile,
             window_percentiles,
             trailing_alpha_percentiles=self._trailing_alpha_percentiles(strategy_id, live_end),
-            ic_decay=ic_metrics.get("ic_decay"),
+            composite_ic_decay=signal_diagnostics["signals"]["composite_rank_ic"].get(
+                "ic_decay"
+            ),
         )
 
         metrics = {
@@ -393,7 +403,8 @@ class StrategyLifecycleService:
                 }
                 for label, entry in (evaluation.get("windows") or {}).items()
             },
-            "factors": ic_metrics,
+            "signals": signal_diagnostics["signals"],
+            "factors": signal_diagnostics["factors"],
             "validation_backtest_id": created.backtest_id,
         }
         snapshot = StrategyHealthSnapshotModel(
@@ -523,67 +534,101 @@ class StrategyLifecycleService:
                 break
         return result
 
-    def _compute_factor_ic(
+    def _compute_signal_diagnostics(
         self,
         strategy_id: str,
+        backtest_id: str,
         start: date,
         end: date,
         as_of: date,
         config_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """计算策略引用因子在监控区间的 Rank IC 与 ICIR。
+        """计算组合分数 IC 与评分因子的解释性 IC 诊断。
 
-        IC 每天产生一个横截面观测，是上线初期唯一具备统计功效的证据，
-        因此与收益类指标一起进入体检报告。IC 存在前瞻窗口，末端
-        ``forward_days`` 个交易日自然缺失，不影响趋势判读。
+        组合分数 IC 是健康判定的唯一 IC 证据。评分因子的单独 IC 仅用于解释
+        组合信号变化，过滤与择时因子不是横截面 Alpha 预测器，不纳入此处。
 
-        衰减判定**按因子分别计算并做显著性检验**（前后半段差值 > 2 倍标准误），
-        再由"过半引用因子显著衰减"给出顶层 ``confirmed``。不做跨因子池化：
-        不同因子的符号与量级不同，池化均值的"衰减"没有因子级含义。
+        组合 IC 只覆盖实际选股调仓日中**真正参与评分**的资产（``scored=True``）。
+        因此周/月策略不从每日分数任意抽样；是否取消前瞻窗口重叠折算则由实际交易
+        日历验证。单因子诊断仍按前瞻跨度处理重叠窗口（两者的日期集不同，不可直接
+        比较）。
+
+        检测门槛用策略级口径 ``SCORE_IC_DECAY_MIN_HALF_N``（低于单因子），因为
+        调仓日观测数天然只有日频的 1/5~1/21；同时把"还差几个调仓日、约需几个月"
+        一并算出，避免非日频策略长期只看到一句静默的"未确认衰减"。
 
         Args:
             strategy_id: 策略 ID。
+            backtest_id: 监控回测 ID（须由迁移 0053/0054 之后写入，才有
+                scored 与 selection_rebalanced 标记）。
             start: 监控区间起始日。
             end: 监控区间截止日。
             as_of: 计算时点（用于记录，不参与计算）。
             config_snapshot: 冻结的配置快照，None 时读取当前配置。
 
         Returns:
-            含 factor_ids / per_factor / ic_mean / ic_decay 的字典；
-            ``ic_mean`` 为各因子 IC 均值的简单平均（仅供参考，非组合 IC）。
+            含 ``signals.composite_rank_ic`` 和 ``factors.per_factor`` 的字典；
+            ``composite_rank_ic`` 额外带 ``decay_evidence_sufficient`` /
+            ``decay_min_required_n`` / ``decay_shortfall_n`` /
+            ``decay_shortfall_months``，供前端区分"未确认衰减"与"没有证据"，
+            并给出还需要积累多久。
         """
         config = (
             self._config_svc.parse_snapshot(config_snapshot)
             if config_snapshot is not None
             else self._config_svc.get_parsed_config(strategy_id)
         )
-        factor_ids: list[str] = []
-        if config is not None:
-            score = getattr(config, "score", None)
-            if score is not None and getattr(score, "factors", None):
-                factor_ids.extend(score.factors.keys())
-            filters = getattr(config, "filters", None)
-            rules = getattr(filters, "rules", None) if filters is not None else None
-            for rule in rules or []:
-                factor_id = getattr(rule, "factor", None)
-                if factor_id and factor_id not in factor_ids:
-                    factor_ids.append(factor_id)
+        factor_ids = list(config.score.factors) if config is not None else []
+        forward_days = _selection_forward_days(config)
+        composite = analyze_backtest_score_ic(
+            self._db, backtest_id, start, end, forward_days=forward_days
+        )
+        # 只有实际交易日历验证前瞻窗口互不重叠时，才不再折算半段样本数。
+        # 月度策略在节假日、月初/月末切换时也可能出现重叠窗口。
+        composite_windows_non_overlapping = bool(
+            composite["summary"].get("selection_windows_non_overlapping", False)
+        )
+        composite_decay = ic_decay_evidence(
+            [item["ic"] for item in composite["series"]],
+            overlap_step=1 if composite_windows_non_overlapping else forward_days,
+            min_half_n=SCORE_IC_DECAY_MIN_HALF_N,
+        )
+        shortfall = ic_evidence_shortfall(
+            int(composite_decay["effective_n"]),
+            min_half_n=SCORE_IC_DECAY_MIN_HALF_N,
+            forward_days=forward_days,
+        )
         result: dict[str, Any] = {
-            "factor_ids": factor_ids,
-            "per_factor": {},
-            "as_of": as_of.isoformat(),
+            "signals": {
+                "composite_rank_ic": {
+                    **composite["summary"],
+                    "ic_decay": composite_decay,
+                    "decay_evidence_sufficient": has_ic_decay_evidence(composite_decay),
+                    "decay_min_required_n": shortfall["required_n"],
+                    "decay_shortfall_n": shortfall["shortfall_n"],
+                    "decay_shortfall_months": shortfall["shortfall_months"],
+                    "forward_days": forward_days,
+                    "selection_dates_only": True,
+                    "source_backtest_id": backtest_id,
+                    "as_of": as_of.isoformat(),
+                }
+            },
+            "factors": {"score_factor_ids": factor_ids, "per_factor": {}},
         }
-        decay_entries: list[dict[str, Any]] = []
-        ic_means: list[float] = []
         for factor_id in factor_ids:
             try:
-                analysis = analyze_ic(self._db, factor_id, start, end, forward_days=1)
+                analysis = analyze_ic(
+                    self._db, factor_id, start, end, forward_days=forward_days
+                )
             except Exception:
                 logger.warning("计算因子 %s 的 IC 失败", factor_id, exc_info=True)
                 continue
             summary = analysis["summary"]
-            decay = ic_decay_evidence([item["ic"] for item in analysis["series"]])
-            result["per_factor"][factor_id] = {
+            decay = ic_decay_evidence(
+                [item["ic"] for item in analysis["series"]], overlap_step=forward_days
+            )
+            result["factors"]["per_factor"][factor_id] = {
+                "role": "score_diagnostic",
                 "count": summary["count"],
                 "ic_mean": summary["ic_mean"],
                 "ic_ir": summary["ic_ir"],
@@ -594,12 +639,6 @@ class StrategyLifecycleService:
                 "insufficient_reason": summary["insufficient_reason"],
                 "ic_decay": decay,
             }
-            if decay["first_half_mean"] is not None:
-                decay_entries.append(decay)
-            if summary["ic_mean"] is not None:
-                ic_means.append(summary["ic_mean"])
-        result["ic_mean"] = round(sum(ic_means) / len(ic_means), 4) if ic_means else None
-        result["ic_decay"] = _aggregate_ic_decay(decay_entries)
         return result
 
     def _to_summary(self, row: StrategyLifecycleModel) -> LifecycleSummary:
@@ -651,37 +690,11 @@ def _period_boundaries() -> PeriodBoundaries:
     )
 
 
-def _aggregate_ic_decay(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    """把各因子的 IC 衰减证据聚合为顶层结论。
-
-    只有**过半**引用因子显著衰减才确认策略层 IC 衰减，避免单个因子的噪声
-    波动把"超额衰减"从观察升级为告警。
-
-    Args:
-        entries: ``ic_decay_evidence`` 的输出列表（仅含前后半段均值可用的因子）。
-
-    Returns:
-        含 first_half_mean / second_half_mean / confirmed /
-        confirmed_factor_count / factor_count 的字典；无证据时均值为 None。
-    """
-    if not entries:
-        return {
-            "first_half_mean": None,
-            "second_half_mean": None,
-            "confirmed": False,
-            "confirmed_factor_count": 0,
-            "factor_count": 0,
-        }
-    first_mean = sum(float(entry["first_half_mean"]) for entry in entries) / len(entries)
-    second_mean = sum(float(entry["second_half_mean"]) for entry in entries) / len(entries)
-    confirmed_count = sum(1 for entry in entries if entry.get("confirmed"))
-    return {
-        "first_half_mean": round(first_mean, 4),
-        "second_half_mean": round(second_mean, 4),
-        "confirmed": confirmed_count * 2 > len(entries),
-        "confirmed_factor_count": confirmed_count,
-        "factor_count": len(entries),
-    }
+def _selection_forward_days(config: Any) -> int:
+    """把冻结策略的选股调仓频率映射为组合 IC 前瞻交易日数。"""
+    selection = getattr(getattr(config, "rebalance", None), "selection", None)
+    frequency = getattr(selection, "frequency", "daily")
+    return {"daily": 1, "weekly": 5, "biweekly": 10, "monthly": 21}.get(frequency, 1)
 
 
 def _compound(daily_returns: list[float]) -> float:

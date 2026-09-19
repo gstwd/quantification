@@ -237,6 +237,12 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 - **index_signal 表** (migration 0010): 存储策略引擎对指数的信号计算结果，以 `index_code` 关联指数。
 - **信号等级判定常量**: 定义在 `domain/common/constants.py`（`SIGNAL_THRESHOLD_HIGH=70`、`SIGNAL_THRESHOLD_MID=50`），引擎和回测服务统一引用，避免硬编码散落。
 - **`backtest_index_result.original_score`** (migration 0012): 配置模式下保留原始综合得分，避免被权重值覆盖，便于分析策略评分与仓位的对应关系。
+- **`backtest_index_result.scored`** (migration 0053): `backtest_index_result` 按当日 universe 全量标的落库，而引擎只对通过候选池与过滤规则的资产产出得分（`DefaultFilterEngine.filter` 会从 scores 中**删除**未通过项），`_write_index_results` 用 `score_map.get(code, 0.0)` 兜底 → 未参与评分的资产 `signal_score` 是**占位 0.0**。`scored=False` 标记这些行。**任何读 `signal_score` 做横截面统计的代码都必须跳过 `scored=False`**，否则占位 0 会固定占据底部名次、压缩日间波动并虚高 t 值。迁移不回填历史行（千万行级，且 zscore 模式的合法得分经 clamp 后可以恰好为 0，`signal_score <> 0` 回填会误伤），历史回测需重跑才有标记；生命周期体检每次新建监控回测，不受影响。
+- **`backtest_index_result.selection_rebalanced`** (migration 0054): 标记当日是否执行**选股腿**调仓（取 `legs.selection`，风险腿只缩放总仓位、不算决策日）。周/月策略非调仓日的 `signal_score` 是引擎每天算出的潜在分数但并未被执行，组合分数 IC 只取 `TRUE` 的日期。历史行一律 `TRUE`（旧结果未记录实际选股日期）。
+- **组合分数 IC 的横截面门槛是 5 而非 20**: 单因子 IC 用 `MIN_CROSS_SECTION_N=20`（横截面是指数池），组合分数 IC 用 `MIN_SCORE_CROSS_SECTION_N=5`（横截面是"当日评分集合"，规模由策略标的范围与过滤设计决定）。沿用 20 会让窄池策略永久拿不到 IC 证据。
+- **`summarize_ic` 的 `already_non_overlapping`**: 组合分数 IC 的观测只取选股调仓日，相邻观测本身已相隔一个调仓周期，汇总时必须传 `already_non_overlapping=True`，否则 `effective_n` 被二次折算（实测 34 个非重叠观测折成 6 个、t 值低估约 2.4 倍）。单因子诊断取全交易日、仍是重叠窗口，保持默认 `False` 并配 `ic_decay_evidence(..., overlap_step=forward_days)`；两者日期集不同，不可直接比较。
+- **IC 衰减门槛分两档**: 单因子 `IC_DECAY_MIN_HALF_N=20`（合计 40），组合序列 `SCORE_IC_DECAY_MIN_HALF_N=12`（合计 24）。非日频策略的观测数受调仓频率限制（174 个交易日下日频约 173、周频约 34、月频约 8），沿用单因子门槛会让 IC 腿在周/月策略上长期失效。`ic_evidence_shortfall()` 把缺口折算成"还需约 N 个调仓日 / X 个月"，由 `decay_shortfall_n` / `decay_shortfall_months` 透出前端。
+- **IC 证据缺失要显式说**: `has_ic_decay_evidence()` 为 False 时 `assess_health()` 只降为 WATCH 但会在 `reasons` 写明"选股调仓日观测不足门槛，本次未采用 IC 证据"，快照带 `decay_evidence_sufficient` 透出前端——"未确认衰减"不能被读成"信号仍然有效"。
 - **FilterRule.compare_to**: 过滤器支持跨因子比较（如 `ma_5d > ma_20d`）。`compare_to` 与 `value` 二选一，不能同时设置。`between` 操作符不支持 `compare_to`。
 - **FactorProvider.collect_required_factor_ids() 必须收集 compare_to**: 遍历 filter rules 时不仅要收集 `rule.factor`，还要收集 `rule.compare_to`（若存在）。遗漏会导致被比较的因子值未加载，filter 始终失败 → 空仓。
 - **FilterRuleValue 前端接口**: 定义在 `StrategyConfigForm.vue`（非共享 types 文件）。修改 FilterRule schema 时需同步更新：接口定义、表单模板、`initFilter()`、`buildConfig()`、校验逻辑，以及 `StrategyDetailPage.vue` 的只读展示。

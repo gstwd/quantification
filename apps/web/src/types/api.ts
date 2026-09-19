@@ -554,6 +554,10 @@ export interface BacktestIndexResult {
   trade_date: string
   index_code: string
   signal_score: number
+  /** 该资产当日是否真正参与评分；false 时 signal_score 是占位 0 而非真实得分 */
+  scored?: boolean
+  /** 该交易日是否实际执行选股调仓；组合分数 IC 仅使用这类日期 */
+  selection_rebalanced?: boolean
   signal_level: string
   in_portfolio: boolean
   index_return: number | null

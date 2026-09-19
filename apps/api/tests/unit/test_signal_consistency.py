@@ -63,6 +63,7 @@ def _run_backtest_write(
     config: StrategyConfig,
     trade_date: date,
     codes: list[str],
+    selection_rebalanced: bool = True,
 ) -> list[object]:
     """模拟回测 _write_index_results 写入并捕获生成的 ORM 行。"""
     mock_add = MagicMock()
@@ -78,6 +79,7 @@ def _run_backtest_write(
         signal_positions=result.positions if result.positions else {},
         timing_regime=result.timing.regime if result.timing else None,
         scoring_mode=config.score.scoring_mode,
+        selection_rebalanced=selection_rebalanced,
     )
     return [call.args[0] for call in mock_add.call_args_list]
 
@@ -154,3 +156,58 @@ class TestSignalConsistency:
 
         for row in rows:
             assert row.signal_level == realtime_levels[row.index_code] == "LOW"
+
+
+class TestScoredFlag:
+    """落库必须区分"未参与评分"与"得分为 0"，否则组合分数 IC 会被占位 0 污染。"""
+
+    def test_assets_outside_engine_scores_are_marked_unscored(self) -> None:
+        """universe 比引擎评分集合多出的资产记为 scored=False、得分占位 0.0。"""
+        engine = StrategyEngine()
+        config = _make_config()
+        context = _make_context(
+            asset_factors={
+                ("000300", "momentum"): 80.0,
+                ("000300", "valuation"): 60.0,
+                ("000905", "momentum"): 70.0,
+                ("000905", "valuation"): 50.0,
+                ("000016", "momentum"): 60.0,
+                ("000016", "valuation"): 40.0,
+            },
+        )
+        result = engine.run(config, context, include_details=True)
+        svc = BacktestService(db=MagicMock())
+        # 399001 不在上下文中：等价于被候选池剔除或被过滤规则拒绝的资产
+        codes = ["000300", "000905", "000016", "399001"]
+        rows = _run_backtest_write(svc, result, config, context.trade_date, codes)
+
+        flags = {row.index_code: (row.scored, row.signal_score) for row in rows}
+        assert flags["399001"] == (False, 0.0)
+        for code in ("000300", "000905", "000016"):
+            assert flags[code][0] is True, f"{code} 应参与评分"
+            assert flags[code][1] > 0
+
+    def test_selection_rebalance_flag_is_persisted(self) -> None:
+        """周/月策略的非选股调仓日不得作为组合分数 IC 观测。"""
+        engine = StrategyEngine()
+        config = _make_config()
+        context = _make_context(
+            asset_factors={
+                ("000300", "momentum"): 80.0,
+                ("000300", "valuation"): 60.0,
+                ("000905", "momentum"): 70.0,
+                ("000905", "valuation"): 50.0,
+                ("000016", "momentum"): 60.0,
+                ("000016", "valuation"): 40.0,
+            }
+        )
+        result = engine.run(config, context, include_details=True)
+        rows = _run_backtest_write(
+            BacktestService(db=MagicMock()),
+            result,
+            config,
+            context.trade_date,
+            ["000300", "000905", "000016"],
+            selection_rebalanced=False,
+        )
+        assert all(row.selection_rebalanced is False for row in rows)
