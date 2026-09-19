@@ -22,6 +22,7 @@ from quant_etf_api.schemas.strategy import (
     StrategyConfigCreate,
     StrategyConfigUpdate,
     StrategyDetail,
+    StrategyResearchDataCleanupResponse,
     StrategySummary,
     StrategyValidationResult,
 )
@@ -141,6 +142,20 @@ def unstar_strategy(strategy_id: str, db: Session = Depends(get_db)) -> None:
     """取消星标关注。"""
     if not StrategyService(db).star_strategy(strategy_id, False):
         raise HTTPException(status_code=404, detail="策略不存在")
+
+
+@router.delete(
+    "/strategies/{strategy_id}/research-data",
+    response_model=StrategyResearchDataCleanupResponse,
+)
+def clear_strategy_research_data(
+    strategy_id: str, db: Session = Depends(get_db)
+) -> StrategyResearchDataCleanupResponse:
+    """清理某策略及关联 draft 策略的研究数据，保留基线策略配置。"""
+    deleted = StrategyService(db).clear_research_data(strategy_id)
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="策略不存在")
+    return StrategyResearchDataCleanupResponse(strategy_id=strategy_id, deleted=deleted)
 
 
 # ── 策略生命周期（上线后监控与诊断）────────────────────────────────────

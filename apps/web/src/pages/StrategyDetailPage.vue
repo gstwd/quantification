@@ -46,6 +46,9 @@
             {{ allocating ? '计算中...' : '执行决策' }}
           </button>
           <button class="btn-secondary" @click="showEdit = true">编辑</button>
+          <button class="btn-danger" @click="handleClearResearchData" :disabled="clearingResearchData">
+            {{ clearingResearchData ? '清理中...' : '清理研究数据' }}
+          </button>
           <button class="btn-danger" @click="handleDelete">删除</button>
         </div>
       </div>
@@ -865,7 +868,7 @@ import {
   fetchRobustnessDetail,
   fetchRobustnessRuns,
 } from '../api/robustness'
-import { runAllocation } from '../api/strategies'
+import { clearStrategyResearchData, runAllocation } from '../api/strategies'
 import StrategyConfigForm from '../components/StrategyConfigForm.vue'
 import { useStrategyStore } from '../stores/strategies'
 import { toast } from '../stores/toast'
@@ -887,6 +890,7 @@ const todayStr = todayCn()
 /** 用户选择的交易日，默认今天 */
 const selectedDate = ref(todayStr)
 const allocating = ref(false)
+const clearingResearchData = ref(false)
 const runError = ref('')
 const allocation = ref<AllocationResponse | null>(null)
 
@@ -1352,6 +1356,22 @@ async function handleDelete(): Promise<void> {
   const success = await store.remove(props.strategyId)
   if (success) {
     router.push('/strategies')
+  }
+}
+
+/** 清理本策略的回测、对比、稳健性与优化研究数据，保留策略配置。 */
+async function handleClearResearchData(): Promise<void> {
+  if (!confirm('确定清理此策略及关联 draft 策略的全部研究数据？将删除回测、对比、稳健性验证、优化记录和 draft 策略，且不可撤销。')) return
+  clearingResearchData.value = true
+  try {
+    const result = await clearStrategyResearchData(props.strategyId)
+    const total = Object.values(result.deleted).reduce((sum, count) => sum + count, 0)
+    toast.info(`研究数据已清理（共 ${total} 条记录）`)
+    robustnessRuns.value = []
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : '清理研究数据失败')
+  } finally {
+    clearingResearchData.value = false
   }
 }
 

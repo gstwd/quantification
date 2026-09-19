@@ -153,6 +153,12 @@ class StrategyService:
             return False
         return self._config_svc().delete_config(strategy_id)
 
+    def clear_research_data(self, strategy_id: str) -> dict[str, int] | None:
+        """清理策略研究数据，保留策略配置。"""
+        if self._db is None:
+            return None
+        return self._config_svc().clear_research_data(strategy_id)
+
     def validate_config(self, config_json: dict[str, Any]) -> StrategyValidationResult:
         """校验策略配置（含因子 ID 与变换函数校验）。
 

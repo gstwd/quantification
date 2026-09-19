@@ -5,6 +5,7 @@ import type {
   StrategyConfigCreate,
   StrategyConfigUpdate,
   StrategyDetail,
+  StrategyResearchDataCleanupResponse,
   StrategySummary,
   StrategyValidationResult,
 } from '../types/api'
@@ -39,6 +40,16 @@ export async function updateStrategy(
 /** 删除策略配置 */
 export async function deleteStrategy(strategyId: string): Promise<void> {
   await apiClient.delete(`/strategies/${strategyId}`)
+}
+
+/** 清理策略及关联 draft 策略的研究数据，保留基线策略配置。 */
+export async function clearStrategyResearchData(
+  strategyId: string,
+): Promise<StrategyResearchDataCleanupResponse> {
+  const { data } = await apiClient.delete<StrategyResearchDataCleanupResponse>(
+    `/strategies/${strategyId}/research-data`,
+  )
+  return data
 }
 
 /** 校验策略配置 JSON */

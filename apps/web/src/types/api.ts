@@ -25,6 +25,12 @@ export interface StrategyDetail extends StrategySummary {
   updated_at: string | null
 }
 
+/** 策略研究数据清理的各表删除数量。 */
+export interface StrategyResearchDataCleanupResponse {
+  strategy_id: string
+  deleted: Record<string, number>
+}
+
 export interface StrategyConfigCreate {
   strategy_id: string
   display_name: string

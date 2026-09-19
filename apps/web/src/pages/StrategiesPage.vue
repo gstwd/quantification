@@ -42,7 +42,7 @@
             </span>
           </div>
         </div>
-        <p class="strategy-desc">{{ item.description || '暂无描述' }}</p>
+        <p class="strategy-desc" :title="item.description || '暂无描述'">{{ item.description || '暂无描述' }}</p>
         <div class="card-footer">
           <span class="strategy-id mono">{{ item.strategy_id }}</span>
           <RouterLink :to="`/strategies/${item.strategy_id}`" class="detail-btn">查看详情 →</RouterLink>
@@ -398,7 +398,16 @@ onMounted(() => {
 .chip-disabled { background: rgba(239,68,68,0.12); color: #f87171; }
 .chip-lifecycle { background: rgba(59,130,246,0.12); color: #60a5fa; }
 
-.strategy-desc { font-size: 13px; color: var(--text-muted); line-height: 1.6; flex: 1; }
+.strategy-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  flex: 1;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
 
 .card-footer { display: flex; align-items: center; justify-content: space-between; margin-top: auto; }
 .strategy-id { font-size: 12px; color: var(--text-muted); }

@@ -57,6 +57,13 @@ class StrategyDetail(StrategySummary):
     updated_at: UtcDatetime | None = None
 
 
+class StrategyResearchDataCleanupResponse(BaseModel):
+    """策略研究数据清理结果。"""
+
+    strategy_id: str
+    deleted: dict[str, int] = Field(default_factory=dict)
+
+
 class StrategyConfigCreate(BaseModel):
     """创建策略配置请求。
 

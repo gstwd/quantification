@@ -15,6 +15,7 @@ from quant_etf_api.factors.registry import get_default_factor_registry
 from quant_etf_api.infra.db.models.core import StrategyConfigModel, StrategyLifecycleModel
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
 from quant_etf_api.infra.db.repositories.strategy_config import StrategyConfigRepository
+from quant_etf_api.infra.db.repositories.strategy_research import StrategyResearchRepository
 from quant_etf_api.infra.time import utcnow_aware
 from quant_etf_api.schemas.strategy import (
     StrategyConfigCreate,
@@ -59,6 +60,7 @@ class StrategyConfigService:
         """
         self._db = db
         self._repo = StrategyConfigRepository(db)
+        self._research_repo = StrategyResearchRepository(db)
 
     def list_configs(self) -> list[StrategySummary]:
         """返回所有启用的策略配置摘要。"""
@@ -226,6 +228,31 @@ class StrategyConfigService:
             self._db.commit()
         return result
 
+    def clear_research_data(self, strategy_id: str) -> dict[str, int] | None:
+        """原子地清理策略及关联 draft 策略的研究数据，保留基线策略配置。"""
+        if self._repo.find_by_id(strategy_id) is None:
+            return None
+        try:
+            strategy_ids = {strategy_id}
+            draft_strategy_ids: set[str] = set()
+            while True:
+                discovered = self._research_repo.find_related_draft_strategy_ids(strategy_ids)
+                new_drafts = discovered - strategy_ids
+                if not new_drafts:
+                    break
+                strategy_ids.update(new_drafts)
+                draft_strategy_ids.update(new_drafts)
+
+            deleted = self._research_repo.delete_by_strategies(strategy_ids)
+            deleted["draft_strategy_config"] = self._research_repo.delete_draft_strategy_configs(
+                draft_strategy_ids
+            )
+            self._db.commit()
+            return deleted
+        except Exception:
+            self._db.rollback()
+            raise
+
     # ── 变体策略清理（D-4） ────────────────────────────────────────────────
 
     def list_variants(self, batch_id: str) -> list[StrategySummary]:
@@ -279,9 +306,7 @@ class StrategyConfigService:
             )
             return result
 
-        backtest_ids_by_strategy = self._backtest_ids_by_strategy(
-            [row.strategy_id for row in rows]
-        )
+        backtest_ids_by_strategy = self._backtest_ids_by_strategy([row.strategy_id for row in rows])
         for row in rows:
             backtest_ids = backtest_ids_by_strategy.get(row.strategy_id, [])
             if backtest_ids and not force:
@@ -479,7 +504,10 @@ class StrategyConfigService:
         # 择时代理指数校验
         if config.timing and not config.timing.proxy_index_codes:
             errors.append("timing.proxy_index_codes 不能为空")
-        if config.timing and config.timing.thresholds.defensive > config.timing.thresholds.offensive:
+        if (
+            config.timing
+            and config.timing.thresholds.defensive > config.timing.thresholds.offensive
+        ):
             errors.append("timing.thresholds.defensive 不能大于 offensive")
         portfolio_configs = [("portfolio", config.portfolio)]
         portfolio_configs.extend(
@@ -494,14 +522,11 @@ class StrategyConfigService:
             unknown_regimes = set(portfolio.timing_exposure) - valid_regimes
             if unknown_regimes:
                 errors.append(
-                    f"{path}.timing_exposure 包含未知 regime: "
-                    + ", ".join(sorted(unknown_regimes))
+                    f"{path}.timing_exposure 包含未知 regime: " + ", ".join(sorted(unknown_regimes))
                 )
             for regime, exposure in portfolio.timing_exposure.items():
                 if not 0.0 <= exposure <= 1.0:
-                    errors.append(
-                        f"{path}.timing_exposure.{regime} 必须在 [0, 1] 范围内"
-                    )
+                    errors.append(f"{path}.timing_exposure.{regime} 必须在 [0, 1] 范围内")
 
         # 评分权重校验
         for factor_id, weight in config.score.factors.items():
@@ -541,9 +566,7 @@ class StrategyConfigService:
         # 组合配置校验
         valid_methods = {"equal_weight", "score_weight", "winner_take_all"}
         if config.portfolio.method not in valid_methods:
-            errors.append(
-                f"权重分配方法 '{config.portfolio.method}' 不合法，可用: {valid_methods}"
-            )
+            errors.append(f"权重分配方法 '{config.portfolio.method}' 不合法，可用: {valid_methods}")
 
         # 风控配置校验
         if config.risk:
@@ -614,9 +637,7 @@ class StrategyConfigService:
         )
         for regime_rule in config.regime_rules.values():
             if regime_rule.score:
-                module_refs.append(
-                    ("score", "regime 评分", list(regime_rule.score.factors.keys()))
-                )
+                module_refs.append(("score", "regime 评分", list(regime_rule.score.factors.keys())))
             if regime_rule.filters:
                 regime_ids: list[str] = []
                 for rule in regime_rule.filters.rules:
@@ -675,9 +696,7 @@ class StrategyConfigService:
                 # 未知因子的具体错误由 _factor_reference_errors 给出，避免重复
                 continue
             if not spec.default_params:
-                errors.append(
-                    f"因子 '{factor_id}' 非参数化因子，不允许配置 factor_params"
-                )
+                errors.append(f"因子 '{factor_id}' 非参数化因子，不允许配置 factor_params")
                 continue
             unknown = sorted(set(params.keys()) - set(spec.default_params.keys()))
             if unknown:
