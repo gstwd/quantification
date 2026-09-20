@@ -20,7 +20,7 @@ def _make_config() -> StrategyConfig:
     return StrategyConfig(
         strategy_id="s1",
         display_name="市场宽度策略",
-        score=ScoreConfig(factors={"breadth_ma20_pct": 1.0}),
+        score=ScoreConfig(factors={"breadth_ma_pct": 1.0}),
     )
 
 
@@ -28,7 +28,7 @@ class TestEnsureMarketScopeBars:
     """回测引用市场级因子时补充加载全市场行情。"""
 
     def test_loads_market_bars_when_market_scope_factor_used(self, monkeypatch) -> None:
-        """策略引用 breadth_ma20_pct 时应加载全市场 point-in-time 指数行情。"""
+        """策略引用 breadth_ma_pct 时应加载全市场 point-in-time 指数行情。"""
         svc = _make_service()
         config = _make_config()
         trading_dates = [date(2024, 1, 2), date(2024, 1, 3)]

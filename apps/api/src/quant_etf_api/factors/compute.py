@@ -332,6 +332,7 @@ class FactorComputeService:
         target_dates = sorted(set(dates))
         if not instance_list or not index_codes or not target_dates:
             return FactorMatrix()
+        _assert_unique_instance_ids(instance_list)
         matrix = FactorMatrix(values={day: {} for day in target_dates})
 
         context = ctx or self.build_context(
@@ -574,6 +575,31 @@ class FactorComputeService:
             .all()
         )
         return {row[0]: row[1] for row in rows}
+
+
+def _assert_unique_instance_ids(instances: Sequence[FactorInstance]) -> None:
+    """校验实例 ID 唯一，避免不同参数的同名实例互相覆盖结果。
+
+    矩阵以 ``(交易日, 指数, 实例 ID)`` 为键，实例 ID 就是策略里的引用名；别名
+    解析天然保证唯一，但直接用 ``resolve_params`` 取多个同模板不同参数的实例时
+    都会得到模板 ID 作为实例 ID，后者会静默覆盖前者。这里在计算前快速失败。
+
+    Args:
+        instances: 本次计算的因子实例。
+
+    Raises:
+        ValueError: 同一实例 ID 对应了不同的「模板 + 参数」。
+    """
+    seen: dict[str, tuple[str, str]] = {}
+    for instance in instances:
+        key = instance.dedup_key
+        existing = seen.get(instance.instance_id)
+        if existing is not None and existing != key:
+            raise ValueError(
+                f"因子实例 ID {instance.instance_id} 对应了多个参数组合："
+                f"{existing} 与 {key}；同一模板的不同参数必须用不同别名区分"
+            )
+        seen[instance.instance_id] = key
 
 
 def _needs_panels(instances: Sequence[FactorInstance], instance_ids: Sequence[str]) -> bool:

@@ -2272,7 +2272,7 @@ class BacktestService:
         # 这些模板依赖 high/low 价格：缺失时因子无法计算，需在候选池阶段剔除
         needs_high_low = any(
             template_id.startswith(
-                ("atr", "donchian_", "monthly_", "rsrs", "price_position_ir_")
+                ("atr", "donchian_", "monthly_", "rsrs", "price_position_ir")
             )
             for template_id in required_template_ids
         )
@@ -2642,9 +2642,10 @@ class BacktestService:
         """按因子模板注册表推导回测回望自然日数，与实时模式口径一致。
 
         回望窗口取注册表全部模板在默认参数下的 lookback 最大值（730 天，
-        由估值百分位与 ERP 百分位决定），避免长周期因子在回测前段因回望
-        不足而全部为 None，导致前段结果失真；该值为任一合法参数的模板
-        回望上界（周期类模板最大 380 天）。
+        由估值百分位与 ERP 百分位决定）。模板参数取值范围受同一不变量约束：
+        任一合法参数组合推导出的回望都不超过它（最大为 rsrs 的 722 天），
+        因此固定窗口足以覆盖任意配置，长周期因子不会在回测前段因回望不足
+        而全部为 None。该不变量由单元测试守住。
 
         Returns:
             最大回望自然日数。

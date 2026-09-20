@@ -42,16 +42,16 @@ def test_default_registry_has_no_industry_factors() -> None:
 
 def test_breadth_factor_usage_restricted() -> None:
     """市场宽度模板 usage 不含 score，配置校验拒绝放入评分。"""
-    breadth = build_default_registry().get("breadth_ma20_pct")
+    breadth = build_default_registry().get("breadth_ma_pct")
     assert breadth is not None
     assert list(breadth.usage) == [USAGE_TIMING, USAGE_FILTER]
     rows = [
-        _meta_row("breadth_ma20_pct", usage=[USAGE_TIMING, USAGE_FILTER]),
+        _meta_row("breadth_ma_pct", usage=[USAGE_TIMING, USAGE_FILTER]),
         _meta_row("return", usage=["score", "filter", "rank", "timing"]),
     ]
     svc = _make_service(rows)
     config = {
-        "score": {"factors": {"breadth_ma20_pct": 1.0}},
+        "score": {"factors": {"breadth_ma_pct": 1.0}},
         "portfolio": {"method": "equal_weight"},
     }
     result = svc.validate_config(config)

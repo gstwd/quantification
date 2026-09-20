@@ -146,7 +146,7 @@ class TestCollectRequiredFactorIds:
             ),
             regime_rules={
                 "offensive": RegimeRuleConfig(
-                    score=ScoreConfig(factors={"volume_ratio_20d": 1.0}),
+                    score=ScoreConfig(factors={"volume_ratio": 1.0}),
                     filters=FilterConfig(
                         rules=[FilterRule(factor="return_17d", op="gt", value=0.0)]
                     ),
@@ -165,7 +165,7 @@ class TestCollectRequiredFactorIds:
         assert "return_120d" not in ids
         assert "pb_percentile" in ids
         # regime 嵌套
-        assert "volume_ratio_20d" in ids
+        assert "volume_ratio" in ids
         assert "return_17d" in ids
 
     def test_ignores_display_only_sub_rank_factors(self) -> None:

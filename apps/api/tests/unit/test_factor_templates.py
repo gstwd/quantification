@@ -217,11 +217,28 @@ class TestFactorTemplateRegistry:
     """模板注册表与引用解析。"""
 
     def test_default_registry_shape(self) -> None:
-        """默认注册表包含 40 个模板，其中 5 个可调参。"""
+        """默认注册表包含 32 个模板，其中 22 个可调参。"""
         registry = build_default_registry()
-        assert len(registry.all()) == 40
-        assert sum(1 for template in registry.all() if template.tunable) == 5
+        assert len(registry.all()) == 32
+        assert sum(1 for template in registry.all() if template.tunable) == 22
         assert set(registry.ids()) >= {"sma", "return", "return_std", "rsi", "atr"}
+
+    def test_no_legal_params_exceed_backtest_warmup(self) -> None:
+        """任一合法参数组合的回望都不超过回测固定预热窗口（默认口径最大值）。
+
+        回测的数据加载窗口是常量（取注册表默认参数下的最大 lookback），
+        因此参数上界必须保证长窗口因子不会在回测中静默算成 None。
+        """
+        registry = build_default_registry()
+        warmup = max(template.lookback_days() for template in registry.all())
+        for template in registry.all():
+            if not template.tunable:
+                continue
+            maximal = {
+                name: parameter.maximum
+                for name, parameter in template.parameter_schema.items()
+            }
+            assert template.lookback_days(maximal) <= warmup, template.template_id
 
     def test_register_rejects_duplicate(self) -> None:
         """重复登记同一 template_id 报错。"""
@@ -284,7 +301,7 @@ class TestFactorTemplateRegistry:
     def test_lookback_of_instance(self) -> None:
         """实例回望窗口按参数推导。"""
         aliases = {"slow": FactorAliasConfig(template_id="sma", params={"period": 60})}
-        assert build_default_registry().resolve("slow", aliases).lookback_days == 95
+        assert build_default_registry().resolve("slow", aliases).lookback_days == 106
 
     def test_max_lookback_days(self) -> None:
         """批量回望取最大值，空集合回退 90。"""
@@ -299,6 +316,123 @@ class TestFactorTemplateRegistry:
         assert payload["template_id"] == "rsi"
         assert payload["template_version"] == "1.0.0"
         assert payload["params"] == {"period": 14}
+
+
+class TestMergedTemplateEquivalence:
+    """合并后的模板在同一参数下必须与拆分前的固定口径完全等价。"""
+
+    _REGISTRY = build_default_registry()
+
+    def test_parameter_ranges_are_complete(self) -> None:
+        """每个可调参模板的默认值都落在自身声明的区间内。"""
+        for template in self._REGISTRY.all():
+            if not template.tunable:
+                continue
+            for name, parameter in template.parameter_schema.items():
+                default = template.default_params[name]
+                assert parameter.minimum <= default <= parameter.maximum, (
+                    template.template_id,
+                    name,
+                )
+
+    def test_ratio_parameter_is_numeric(self) -> None:
+        """低振幅比例是浮点参数，不是整数周期。"""
+        template = self._REGISTRY.get("low_amplitude_momentum")
+        assert template is not None
+        ratio = template.parameter_schema["low_amplitude_ratio"]
+        assert ratio.type == "number"
+        assert ratio.minimum == 0.05
+        assert ratio.maximum == 1.0
+        assert template.resolve_params({"low_amplitude_ratio": 0.5})["low_amplitude_ratio"] == 0.5
+        with pytest.raises(FactorParameterError):
+            template.resolve_params({"low_amplitude_ratio": 1.5})
+
+    def test_out_of_range_rejected_for_every_tunable_template(self) -> None:
+        """每个可调参模板都拒绝超出声明范围的取值。"""
+        for template in self._REGISTRY.all():
+            if not template.tunable:
+                continue
+            for name, parameter in template.parameter_schema.items():
+                assert parameter.maximum is not None, (template.template_id, name)
+                with pytest.raises(FactorParameterError):
+                    template.resolve_params({name: parameter.maximum + 1})
+
+    def test_merged_period_templates_keep_fixed_caliber(self) -> None:
+        """合并模板在等价参数下的计算器与拆分前完全一致。"""
+        registry = self._REGISTRY
+        expected = {
+            ("volatility", "period", 17): "volatility_17d",
+            ("volatility", "period", 20): "volatility_20d",
+            ("volume_ratio", "period", 17): "volume_ratio_17d",
+            ("volume_ratio", "period", 20): "volume_ratio_20d",
+            ("amount_ratio", "period", 20): "amount_ratio_20d",
+            ("high_low", "period", 21): "high_low_21d",
+            ("high_low", "period", 63): "high_low_63d",
+            ("donchian_high", "period", 17): "donchian_17d_high",
+            ("donchian_high", "period", 20): "donchian_20d_high",
+            ("donchian_low", "period", 17): "donchian_17d_low",
+            ("donchian_low", "period", 20): "donchian_20d_low",
+            ("drawdown", "period", 60): "drawdown_60d",
+            ("drawdown", "period", 250): "drawdown_250d",
+            ("ma_deviation", "period", 60): "ma60d_deviation",
+            ("price_position_ir", "period", 60): "price_position_ir_60d",
+            ("days_beyond_upper_lower", "period", 21): "days_beyond_upper_lower_21d",
+            ("sharpe", "period", 60): "sharpe_60d",
+            ("monthly_ma", "months", 5): "monthly_ma_5m",
+            ("monthly_ma", "months", 10): "monthly_ma_10m",
+            ("monthly_return", "months", 2): "monthly_return_2m",
+            ("monthly_return", "months", 3): "monthly_return_3m",
+        }
+        for (template_id, param_name, value), legacy_label in expected.items():
+            instance = registry.resolve_params(template_id, {param_name: value})
+            assert instance.computer.spec.factor_id == legacy_label, template_id
+
+    def test_merged_month_and_rsrs_labels(self) -> None:
+        """月线模板与 RSRS 的内部标签随参数变化。"""
+        registry = self._REGISTRY
+        assert (
+            registry.resolve_params("monthly_ma", {"months": 12}).computer.spec.factor_id
+            == "monthly_ma_12m"
+        )
+        assert (
+            registry.resolve_params("rsrs", {"n": 20, "m": 100}).computer.spec.factor_id == "rsrs"
+        )
+        assert (
+            registry.resolve_params("pmi_momentum", {"months": 6}).computer.spec.factor_id
+            == "pmi_momentum_6m"
+        )
+        assert (
+            registry.resolve_params("breadth_ma_pct", {"period": 60}).computer.spec.factor_id
+            == "breadth_ma60_pct"
+        )
+
+    def test_price_position_ir_rejects_window_below_sample_floor(self) -> None:
+        """日内位置窗口不得小于有效样本门槛。"""
+        with pytest.raises(FactorParameterError):
+            self._REGISTRY.resolve_params("price_position_ir", {"period": 20})
+
+    def test_alias_to_merged_template_matches_direct_reference(self) -> None:
+        """旧引用名通过别名指向合并模板时，与直接引用模板默认参数等价。"""
+        registry = self._REGISTRY
+        alias = registry.resolve("high_low_63d", {"high_low_63d": _Alias("high_low", {"period": 63})})
+        direct = registry.resolve("high_low")
+        assert alias.dedup_key == direct.dedup_key
+        assert alias.template_id == "high_low"
+        assert alias.params["period"] == 63
+        assert alias.label == "63日区间宽度"
+
+    def test_alias_keeps_reference_name_as_instance_id(self) -> None:
+        """别名解析后实例 ID 仍是策略里的引用名（asset_factors 的键不变）。"""
+        registry = self._REGISTRY
+        aliases = {
+            "max_drawdown_60d": _Alias("drawdown", {"period": 60}),
+            "return_17d": _Alias("return", {"period": 17}),
+        }
+        instances = registry.resolve_all(["max_drawdown_60d", "return_17d"], aliases)
+        assert set(instances) == {"max_drawdown_60d", "return_17d"}
+        assert instances["max_drawdown_60d"].template_id == "drawdown"
+        assert instances["return_17d"].params == {"period": 17}
+
 
 
 class TestComputeServiceResolution:

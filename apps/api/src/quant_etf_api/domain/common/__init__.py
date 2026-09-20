@@ -6,7 +6,7 @@ __all__ = ["price_invalid", "safe_metric_diff", "sanitize_metric_value"]
 
 from quant_etf_api.domain.common.bar_metrics import (
     calc_5d_return,
-    calc_volume_ratio_20d,
+    calc_volume_ratio,
 )
 from quant_etf_api.domain.common.enums import (
     BacktestStatus,
@@ -25,5 +25,5 @@ __all__ = [
     "RunType",
     "SignalLevel",
     "calc_5d_return",
-    "calc_volume_ratio_20d",
+    "calc_volume_ratio",
 ]

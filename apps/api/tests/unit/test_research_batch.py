@@ -80,7 +80,7 @@ class TestParseVariants:
                         "label": "add_breadth",
                         "patch": {
                             "filters.rules[+]": {
-                                "factor": "breadth_ma20_pct",
+                                "factor": "breadth_ma_pct",
                                 "op": "gt",
                                 "value": 30,
                             }
@@ -91,7 +91,7 @@ class TestParseVariants:
         )
         rules = variants[0].config["filters"]["rules"]
         assert len(rules) == 3
-        assert rules[2]["factor"] == "breadth_ma20_pct"
+        assert rules[2]["factor"] == "breadth_ma_pct"
         # 其余模块保持基线内容（config 整体替换会丢掉 score/portfolio 等）
         assert variants[0].config["score"] == _baseline_config()["score"]
         assert len(_baseline_config()["filters"]["rules"]) == 2

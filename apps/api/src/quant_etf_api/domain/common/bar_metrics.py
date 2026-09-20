@@ -9,18 +9,22 @@ from datetime import date
 from typing import Any
 
 
-def calc_volume_ratio_20d(
-    code: str, trade_date: date, all_bars: dict[tuple[str, date], Any]
+def calc_volume_ratio(
+    code: str,
+    trade_date: date,
+    all_bars: dict[tuple[str, date], Any],
+    period: int = 20,
 ) -> float | None:
-    """计算 20 日量比：当日成交量 / 近 20 个交易日平均成交量。
+    """计算量比：当日成交量 / 近 N 个交易日平均成交量。
 
-    取 trade_date 之前按日期最近的 20 个有成交量的交易日作为分母；
-    可用历史不足 20 个交易日时按实际条数平均。
+    取 trade_date 之前按日期最近的 N 个有成交量的交易日作为分母；
+    可用历史不足 N 个交易日时按实际条数平均。
 
     Args:
         code: 指数代码。
         trade_date: 目标交易日。
         all_bars: (code, date) → BarRow 的映射，BarRow 需有 .volume 属性。
+        period: 回望交易日数，默认 20。
 
     Returns:
         量比，数据不足时返回 None（区分"无数据"与"量比恰好为 1"）。
@@ -35,38 +39,7 @@ def calc_volume_ratio_20d(
     )
     if not past:
         return None
-    recent = [volume for _dt, volume in past[-20:]]
-    avg = sum(recent) / len(recent)
-    return round(today_bar.volume / avg, 4) if avg > 0 else None
-
-
-def calc_volume_ratio_17d(
-    code: str, trade_date: date, all_bars: dict[tuple[str, date], Any]
-) -> float | None:
-    """计算 17 日量比：当日成交量 / 近 17 个交易日平均成交量。
-
-    取 trade_date 之前按日期最近的 17 个有成交量的交易日作为分母；
-    可用历史不足 17 个交易日时按实际条数平均。
-
-    Args:
-        code: 指数代码。
-        trade_date: 目标交易日。
-        all_bars: (code, date) → BarRow 的映射，BarRow 需有 .volume 属性。
-
-    Returns:
-        量比，数据不足时返回 None（区分"无数据"与"量比恰好为 1"）。
-    """
-    today_bar = all_bars.get((code, trade_date))
-    if today_bar is None or today_bar.volume is None:
-        return None
-    past = sorted(
-        (dt, v.volume)
-        for (c, dt), v in all_bars.items()
-        if c == code and dt < trade_date and v.volume is not None
-    )
-    if not past:
-        return None
-    recent = [volume for _dt, volume in past[-17:]]
+    recent = [volume for _dt, volume in past[-period:]]
     avg = sum(recent) / len(recent)
     return round(today_bar.volume / avg, 4) if avg > 0 else None
 

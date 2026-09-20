@@ -171,14 +171,14 @@ class TestMonthlyFactorsMissingRegression:
     def test_monthly_ma_computes(self) -> None:
         """月线均线在缺 high/low 时仍可计算且为正。"""
         ctx = self._build_ctx()
-        result = MonthlyMAComputer(period=3).compute("000300", date(2025, 5, 19), ctx)
+        result = MonthlyMAComputer(months=3).compute("000300", date(2025, 5, 19), ctx)
         assert result.numeric is not None
         assert result.numeric > 0
 
     def test_monthly_return_computes(self) -> None:
         """月线动量在缺 high/low 时仍可计算。"""
         ctx = self._build_ctx()
-        result = MonthlyReturnComputer(period=2).compute("000300", date(2025, 5, 19), ctx)
+        result = MonthlyReturnComputer(months=2).compute("000300", date(2025, 5, 19), ctx)
         assert result.numeric is not None
 
     def test_monthly_streak_computes(self) -> None:

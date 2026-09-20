@@ -809,7 +809,7 @@ class TestValuationRegistry:
 
         registry = build_default_registry()
         # 只校验下界，避免每次新增模板都要改这个数字
-        assert len(registry.all()) >= 40
+        assert len(registry.all()) >= 32
 
     def test_valuation_templates_registered(self) -> None:
         """估值模板应已登记。"""

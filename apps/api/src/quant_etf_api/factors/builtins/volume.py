@@ -1,37 +1,63 @@
-"""量能类因子：17 日、20 日量比与成交额量比（基于指数数据）。"""
+"""量能类因子：N 日量比与 N 日成交额量比（基于指数数据）。"""
 
 from __future__ import annotations
 
 import bisect
 from datetime import date
 
-from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
-from quant_etf_api.domain.common.bar_metrics import calc_volume_ratio_17d, calc_volume_ratio_20d
+from quant_etf_api.domain.common.bar_metrics import calc_volume_ratio
+from quant_etf_api.factors.base import (
+    FactorContext,
+    FactorSpec,
+    FactorValue,
+    period_lookback_days,
+)
 
 
-class VolumeRatio20dComputer:
-    """20 日量比因子计算器。
+class VolumeRatioComputer:
+    """N 日量比因子计算器。
 
-    量比 = 当日成交量 / 近 20 个交易日平均成交量。
-    直接复用 domain.common.bar_metrics.calc_volume_ratio_20d，保持计算逻辑单一来源。
+    量比 = 当日成交量 / 近 N 个交易日平均成交量。
+    直接复用 domain.common.bar_metrics.calc_volume_ratio，保持计算逻辑单一来源。
     数据不足时返回 None（区分"无数据"与"量比恰好为 1"）。
+
+    Attributes:
+        _period: 回望交易日数。
+        _lookback: 所需自然日回望窗口。
     """
+
+    def __init__(self, period: int = 20) -> None:
+        """初始化量比计算器。
+
+        Args:
+            period: 回望交易日数，如 17/20/60。
+
+        Raises:
+            ValueError: period 小于 1。
+        """
+        if period < 1:
+            raise ValueError("period 必须不小于 1")
+        self._period = int(period)
+        self._lookback = period_lookback_days(self._period)
 
     @property
     def spec(self) -> FactorSpec:
-        """返回 20 日量比的因子元数据。"""
+        """返回 N 日量比的因子元数据。"""
         return FactorSpec(
-            factor_id="volume_ratio_20d",
-            name="20日量比",
+            factor_id=f"volume_ratio_{self._period}d",
+            name=f"{self._period}日量比",
             category="volume",
             version="2.0.0",
-            description="指数当日成交量与近 20 个交易日平均成交量的比值，量比>1 表示相对放量。",
+            description=(
+                f"指数当日成交量与近 {self._period} 个交易日平均成交量的比值，"
+                "量比>1 表示相对放量。"
+            ),
             required_data=["index_bars"],
-            lookback_days=40,
+            lookback_days=self._lookback,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 20 日量比。
+        """计算 N 日量比。
 
         Args:
             index_code: 指数代码。
@@ -41,51 +67,11 @@ class VolumeRatio20dComputer:
         Returns:
             FactorValue，数据不足时 numeric 为 None。
         """
-        ratio = calc_volume_ratio_20d(index_code, trade_date, ctx.index_bars)
+        ratio = calc_volume_ratio(index_code, trade_date, ctx.index_bars, self._period)
         return FactorValue(
             factor_id=self.spec.factor_id,
             numeric=ratio,
-            payload={"lookback_days": 20},
-        )
-
-
-class VolumeRatio17dComputer:
-    """17 日量比因子计算器。
-
-    量比 = 当日成交量 / 近 17 个交易日平均成交量。
-    直接复用 domain.common.bar_metrics.calc_volume_ratio_17d，保持计算逻辑单一来源。
-    数据不足时返回 None（区分"无数据"与"量比恰好为 1"）。
-    """
-
-    @property
-    def spec(self) -> FactorSpec:
-        """返回 17 日量比的因子元数据。"""
-        return FactorSpec(
-            factor_id="volume_ratio_17d",
-            name="17日量比",
-            category="volume",
-            version="1.0.0",
-            description="指数当日成交量与近 17 个交易日平均成交量的比值，量比>1 表示相对放量。",
-            required_data=["index_bars"],
-            lookback_days=35,
-        )
-
-    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 17 日量比。
-
-        Args:
-            index_code: 指数代码。
-            trade_date: 目标交易日。
-            ctx: FactorContext。
-
-        Returns:
-            FactorValue，数据不足时 numeric 为 None。
-        """
-        ratio = calc_volume_ratio_17d(index_code, trade_date, ctx.index_bars)
-        return FactorValue(
-            factor_id=self.spec.factor_id,
-            numeric=ratio,
-            payload={"lookback_days": 17},
+            payload={"period": self._period},
         )
 
 
@@ -115,34 +101,52 @@ def _build_sorted_turnovers(
     return [d for d, _ in rows], [t for _, t in rows]
 
 
-class AmountRatio20dComputer:
-    """20 日成交额量比因子计算器。
+class AmountRatioComputer:
+    """N 日成交额量比因子计算器。
 
-    成交额量比 = 当日成交额 / 近 20 个交易日平均成交额。
-    与 volume_ratio_20d 的区别：使用 index_daily_bar 的 turnover 字段
+    成交额量比 = 当日成交额 / 近 N 个交易日平均成交额。
+    与 volume_ratio 的区别：使用 index_daily_bar 的 turnover 字段
     （成交额，单位元）而非 volume（成交量，单位手），反映资金参与度。
     数据不足时返回 None（区分"无数据"与"量比恰好为 1"）。
     实现 BatchFactorComputer 协议，支持回测批量预计算。
+
+    Attributes:
+        _period: 回望交易日数。
+        _lookback: 所需自然日回望窗口。
     """
+
+    def __init__(self, period: int = 20) -> None:
+        """初始化成交额量比计算器。
+
+        Args:
+            period: 回望交易日数，默认 20。
+
+        Raises:
+            ValueError: period 小于 1。
+        """
+        if period < 1:
+            raise ValueError("period 必须不小于 1")
+        self._period = int(period)
+        self._lookback = period_lookback_days(self._period)
 
     @property
     def spec(self) -> FactorSpec:
-        """返回 20 日成交额量比的因子元数据。"""
+        """返回 N 日成交额量比的因子元数据。"""
         return FactorSpec(
-            factor_id="amount_ratio_20d",
-            name="20日成交额量比",
+            factor_id=f"amount_ratio_{self._period}d",
+            name=f"{self._period}日成交额量比",
             category="volume",
             version="1.0.0",
             description=(
-                "指数当日成交额与近 20 个交易日平均成交额的比值，"
+                f"指数当日成交额与近 {self._period} 个交易日平均成交额的比值，"
                 "量比>1 表示相对放量，反映资金参与度变化。"
             ),
             required_data=["index_bars"],
-            lookback_days=40,
+            lookback_days=self._lookback,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 20 日成交额量比。
+        """计算 N 日成交额量比。
 
         Args:
             index_code: 指数代码。
@@ -159,7 +163,7 @@ class AmountRatio20dComputer:
                 numeric=None,
                 payload={"reason": "当日无成交额数据"},
             )
-        # 按日期升序取最近 20 个交易日成交额（与批量实现口径一致）
+        # 按日期升序取最近 period 个交易日成交额（与批量实现口径一致）
         past = sorted(
             [
                 (dt, v.turnover)
@@ -169,14 +173,14 @@ class AmountRatio20dComputer:
             key=lambda x: x[0],
         )
         past_values = [t for _, t in past]
-        recent_20 = past_values[-20:] if len(past_values) >= 20 else past_values
-        if not recent_20:
+        recent = past_values[-self._period :]
+        if not recent:
             return FactorValue(
                 factor_id=self.spec.factor_id,
                 numeric=None,
                 payload={"reason": "历史成交额数据不足"},
             )
-        avg = sum(recent_20) / len(recent_20)
+        avg = sum(recent) / len(recent)
         if avg <= 0:
             return FactorValue(
                 factor_id=self.spec.factor_id,
@@ -186,7 +190,7 @@ class AmountRatio20dComputer:
         return FactorValue(
             factor_id=self.spec.factor_id,
             numeric=round(today_bar.turnover / avg, 4),
-            payload={"lookback_days": 20, "sample_count": len(recent_20)},
+            payload={"period": self._period, "sample_count": len(recent)},
         )
 
     def compute_batch(
@@ -195,7 +199,7 @@ class AmountRatio20dComputer:
         dates: list[date],
         ctx: FactorContext,
     ) -> dict[date, FactorValue]:
-        """批量计算所有交易日的 20 日成交额量比。
+        """批量计算所有交易日的 N 日成交额量比。
 
         Args:
             index_code: 指数代码。
@@ -219,7 +223,7 @@ class AmountRatio20dComputer:
                     payload={"reason": "当日无成交额数据"},
                 )
                 continue
-            window = t_values[max(0, idx - 20) : idx]
+            window = t_values[max(0, idx - self._period) : idx]
             if not window:
                 result[trade_date] = FactorValue(
                     factor_id=self.spec.factor_id,
@@ -238,6 +242,7 @@ class AmountRatio20dComputer:
             result[trade_date] = FactorValue(
                 factor_id=self.spec.factor_id,
                 numeric=round(t_values[idx] / avg, 4),
-                payload={"lookback_days": 20, "sample_count": len(window)},
+                payload={"period": self._period, "sample_count": len(window)},
             )
         return result
+

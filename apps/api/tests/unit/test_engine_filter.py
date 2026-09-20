@@ -241,7 +241,7 @@ class TestDefaultFilterEngine:
             logic="AND",
             rules=[
                 FilterRule(factor="ma_5d", op="gt", compare_to="ma_20d"),  # 金叉
-                FilterRule(factor="volume_ratio_20d", op="gte", value=0.8),  # 量比正常
+                FilterRule(factor="volume_ratio", op="gte", value=0.8),  # 量比正常
             ],
         )
         assets = {"A": 80.0, "B": 60.0}
@@ -249,10 +249,10 @@ class TestDefaultFilterEngine:
             asset_factors={
                 ("A", "ma_5d"): 5100.0,
                 ("A", "ma_20d"): 5050.0,
-                ("A", "volume_ratio_20d"): 1.2,  # 两个都满足
+                ("A", "volume_ratio"): 1.2,  # 两个都满足
                 ("B", "ma_5d"): 5100.0,
                 ("B", "ma_20d"): 5050.0,
-                ("B", "volume_ratio_20d"): 0.5,  # 量比不满足
+                ("B", "volume_ratio"): 0.5,  # 量比不满足
             },
         )
 

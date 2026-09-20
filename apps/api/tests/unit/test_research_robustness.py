@@ -186,7 +186,7 @@ class TestVariantGeneration:
     _CONFIG = {
         "schema_version": "1",
         "index_codes": ["000300", "000905"],
-        "score": {"factors": {"return_20d": 1.0, "volatility_20d": 0.5}, "scoring_mode": "zscore"},
+        "score": {"factors": {"return_20d": 1.0, "volatility": 0.5}, "scoring_mode": "zscore"},
         "filters": {"logic": "AND", "rules": [{"factor": "return_20d", "op": "gte", "value": 0}]},
         "rank": {"top_n": 3},
         "rebalance": {"frequency": "weekly", "day_of_week": 2},
@@ -215,7 +215,7 @@ class TestVariantGeneration:
         """消融变体逐个移除评分因子与过滤条件，且保留至少一个因子。"""
         variants = build_ablation_variants(self._CONFIG)
         labels = {item["label"] for item in variants}
-        assert labels == {"ablate_score_return_20d", "ablate_score_volatility_20d"}
+        assert labels == {"ablate_score_return_20d", "ablate_score_volatility"}
         for item in variants:
             factors = item["config"]["score"]["factors"]
             assert len(factors) == 1
@@ -236,7 +236,7 @@ class TestVariantGeneration:
         汇总里出现"knob 不同但指标完全相同"的两行。
         """
         config = {
-            "score": {"factors": {"return_20d": 1.0, "volatility_20d": 0.5}},
+            "score": {"factors": {"return_20d": 1.0, "volatility": 0.5}},
             "filters": {
                 "logic": "AND",
                 "rules": [

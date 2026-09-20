@@ -236,6 +236,20 @@ class TestComputeMatrix:
             == matrix.day(DATES[0])[("000300", "fast_b")]
         )
 
+    def test_duplicate_instance_id_with_different_params_is_rejected(self) -> None:
+        """同模板不同参数直接用模板 ID 作实例 ID 时快速失败，不静默覆盖。"""
+        registry = build_default_registry()
+        service = FactorComputeService(db=object(), registry=registry)  # type: ignore[arg-type]
+        instances = [
+            registry.resolve_params("return", {"period": 5}),
+            registry.resolve_params("return", {"period": 20}),
+        ]
+
+        with pytest.raises(ValueError, match="对应了多个参数组合"):
+            service.compute_matrix(
+                instances, [CODES[0]], [DATES[0]], ctx=FactorContext(index_bars=_bars())
+            )
+
     def test_failed_instance_is_recorded(self) -> None:
         """计算抛异常的实例记入 failed，不产出数值。"""
         registry = FactorTemplateRegistry()
@@ -302,7 +316,7 @@ class TestBuildContext:
 
         service = _service()
         monkeypatch.setattr(service, "active_index_codes", lambda: ["000300", "399001"])
-        breadth = service.resolve("breadth_ma20_pct", {})
+        breadth = service.resolve("breadth_ma_pct", {})
 
         service.build_context([breadth], ["000300"], [DATES[0]])
 

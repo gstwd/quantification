@@ -19,7 +19,13 @@ import math
 from collections import deque
 from datetime import date
 
-from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
+from quant_etf_api.factors.base import (
+    FactorContext,
+    FactorSpec,
+    FactorValue,
+    period_lookback_days,
+)
+from quant_etf_api.factors.builtins.volatility import annualized_volatility
 
 # A 股全年约 252 个交易日，年化因子为 sqrt(252)，与 volatility.py 口径一致
 _ANNUALIZE_FACTOR = math.sqrt(252)
@@ -27,8 +33,6 @@ _ANNUALIZE_FACTOR = math.sqrt(252)
 # RSRS 默认口径：N=18 日 OLS 回归窗口，M=250 日修正斜率标准化窗口
 _RSRS_N = 18
 _RSRS_M = 250
-# n + m − 1 = 267 个交易日 ≈ 400 自然日，额外留出缓冲
-_RSRS_LOOKBACK_DAYS = 400
 
 # 日内位置信息比率的最小有效样本数
 _POSITION_IR_MIN_SAMPLES = 20
@@ -37,6 +41,40 @@ _POSITION_IR_MIN_SAMPLES = 20
 # 最近 160 个交易日中，保留日振幅最低的 70% 交易日的收益率之和。
 _LOW_AMPLITUDE_MOMENTUM_PERIOD = 160
 _LOW_AMPLITUDE_MOMENTUM_RATIO = 0.70
+
+
+def low_amplitude_lookback_days(period: int) -> int:
+    """按低振幅动量的长周期余量推导回望自然日数。
+
+    period+1 根有 OHLC 的 bar 在 A 股日历（春节+国庆叠加）上最多跨越
+    period×1.75 个自然日（实测 2017–2026 全部指数 161 根 bar 最多 251 天）；
+    通用的 1.6 系数在大周期下余量被摊薄（160×1.6=256 < 251 的余量不足），
+    因此本因子按 1.75 倍并留 10 天缓冲。
+
+    Args:
+        period: 回望交易日数。
+
+    Returns:
+        回望自然日数，至少 15 天。
+    """
+    return max(15, int(period * 1.75) + 10)
+
+
+def rsrs_lookback_days(n: int, m: int) -> int:
+    """按 RSRS 两个窗口推导回望自然日数。
+
+    RSRS 需要 n + m − 1 个连续高低价（先算 n 日回归斜率，再对 m 个斜率做
+    标准化），换算成自然日后额外留 20 天缓冲。
+
+    Args:
+        n: OLS 回归窗口（交易日）。
+        m: 修正斜率标准化窗口（交易日）。
+
+    Returns:
+        回望自然日数，至少 120 天。
+    """
+    bars = n + m - 1
+    return max(120, int(bars * 1.6) + 20)
 
 
 def _calc_nd_return(
@@ -152,8 +190,8 @@ def _calc_nd_annualized_vol(
 ) -> float | None:
     """计算截至 trade_date 的 n 日年化波动率（%），复用已排序收盘价序列。
 
-    与 volatility.py 的 Volatility20dComputer 使用相同口径：
-    std(近 n 个日收益率, ddof=1) × sqrt(252) × 100，需要 n+1 个连续收盘价。
+    窗口口径与 volatility.py 的年化波动率因子一致
+    （std(近 n 个日收益率, ddof=1) × sqrt(252) × 100，需 n+1 个连续收盘价）。
 
     Args:
         close_dates: 已排序的收盘价日期列表。
@@ -167,17 +205,7 @@ def _calc_nd_annualized_vol(
     idx = bisect.bisect_right(close_dates, trade_date) - 1
     if idx < 0 or close_dates[idx] != trade_date or idx < n:
         return None
-    recent = close_prices[idx - n : idx + 1]
-    daily_returns = [
-        (recent[i] - recent[i - 1]) / recent[i - 1]
-        for i in range(1, len(recent))
-        if recent[i - 1] > 0
-    ]
-    if len(daily_returns) < 2:
-        return None
-    mean = sum(daily_returns) / len(daily_returns)
-    variance = sum((r - mean) ** 2 for r in daily_returns) / (len(daily_returns) - 1)
-    return round(math.sqrt(variance) * _ANNUALIZE_FACTOR * 100, 4)
+    return annualized_volatility(close_prices[idx - n : idx + 1])
 
 
 class ReturnComputer:
@@ -211,7 +239,7 @@ class ReturnComputer:
             version="1.0.0",
             description=f"指数近 {self._period} 个交易日的价格涨跌幅（%），衡量动量。",
             required_data=["index_bars"],
-            lookback_days=max(15, int(self._period * 1.5) + 5),
+            lookback_days=period_lookback_days(self._period),
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
@@ -251,44 +279,66 @@ class ReturnComputer:
         )
 
 
-class Sharpe60dComputer:
-    """60 日风险调整动量因子计算器（夏普式比率）。
+class SharpeComputer:
+    """风险调整动量因子计算器（夏普式比率）。
 
-    计算公式：sharpe = return_60d / volatility_20d。
-    return_60d 为近 60 个交易日涨跌幅（%），volatility_20d 为近 20 个
-    交易日年化波动率（%），两者相除得到"每单位波动获得的中期收益"，
-    用于在动量轮动中同时奖励涨幅与惩罚高波动，选"涨得稳"而非"涨得猛"。
+    计算公式：sharpe = 收益窗口涨跌幅 / 波动率窗口年化波动率。
+    收益窗口为近 N 个交易日涨跌幅（%），波动率窗口为近 M 个交易日年化
+    波动率（%），两者相除得到"每单位波动获得的收益"，用于在动量轮动中
+    同时奖励涨幅与惩罚高波动，选"涨得稳"而非"涨得猛"。
     实现 BatchFactorComputer 协议，支持回测批量预计算。
+
+    Attributes:
+        _period: 收益率回望交易日数。
+        _volatility_period: 年化波动率回望交易日数。
+        _lookback: 所需自然日回望窗口。
     """
+
+    def __init__(self, period: int = 60, volatility_period: int = 20) -> None:
+        """初始化风险调整动量计算器。
+
+        Args:
+            period: 收益率回望交易日数。
+            volatility_period: 年化波动率回望交易日数。
+
+        Raises:
+            ValueError: 任一窗口小于 2。
+        """
+        if period < 2 or volatility_period < 2:
+            raise ValueError("收益窗口与波动率窗口都必须至少为 2")
+        self._period = int(period)
+        self._volatility_period = int(volatility_period)
+        self._lookback = period_lookback_days(max(self._period, self._volatility_period))
 
     @property
     def spec(self) -> FactorSpec:
-        """返回 60 日风险调整动量的因子元数据。"""
+        """返回风险调整动量的因子元数据。"""
         return FactorSpec(
-            factor_id="sharpe_60d",
-            name="60日风险调整动量",
+            factor_id=f"sharpe_{self._period}d",
+            name=f"{self._period}日风险调整动量",
             category="momentum",
             version="1.0.0",
             description=(
-                "60日风险调整动量 = 近60个交易日收益率(%) / 近20个交易日年化波动率(%)。"
-                "衡量每单位波动获得的中期收益，值越高表示动量越稳健。"
+                f"{self._period}日风险调整动量 = 近 {self._period} 个交易日收益率(%) / "
+                f"近 {self._volatility_period} 个交易日年化波动率(%)。"
+                "衡量每单位波动获得的收益，值越高表示动量越稳健。"
             ),
             required_data=["index_bars"],
-            lookback_days=90,
+            lookback_days=self._lookback,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 60 日风险调整动量。
+        """计算风险调整动量。
 
         Args:
             index_code: 指数代码。
             trade_date: 目标交易日。
-            ctx: FactorContext，需包含至少 61 条历史收盘价。
+            ctx: FactorContext。
 
         Returns:
             FactorValue，数据不足或波动率为 0 时 numeric 为 None。
         """
-        ret = _calc_nd_return(index_code, trade_date, ctx, n=60)
+        ret = _calc_nd_return(index_code, trade_date, ctx, n=self._period)
         closes = sorted(
             [
                 (dt, v.close_price)
@@ -299,23 +349,15 @@ class Sharpe60dComputer:
         )
         close_dates = [d for d, _ in closes]
         close_prices = [p for _, p in closes]
-        vol = _calc_nd_annualized_vol(close_dates, close_prices, trade_date, n=20)
-        if ret is None or vol is None or vol <= 0:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"return_60d": ret, "volatility_20d": vol},
-            )
-        return FactorValue(
-            factor_id=self.spec.factor_id,
-            numeric=round(ret / vol, 4),
-            payload={"return_60d": ret, "volatility_20d": vol},
+        vol = _calc_nd_annualized_vol(
+            close_dates, close_prices, trade_date, n=self._volatility_period
         )
+        return self._build_value(ret, vol)
 
     def compute_batch(
         self, index_code: str, dates: list[date], ctx: FactorContext
     ) -> dict[date, FactorValue]:
-        """批量计算所有交易日的 60 日风险调整动量。
+        """批量计算所有交易日的风险调整动量。
 
         Args:
             index_code: 指数代码。
@@ -330,26 +372,40 @@ class Sharpe60dComputer:
         if not close_dates:
             return {d: FactorValue(factor_id=self.spec.factor_id, numeric=None) for d in dates}
 
-        # 一次批量计算 60 日收益率，后续逐日只补充波动率与比值
+        # 一次批量计算收益率序列，后续逐日只补充波动率与比值
         returns = _calc_batch_returns(
-            close_dates, close_prices, dates, n=60, factor_id=self.spec.factor_id
+            close_dates, close_prices, dates, n=self._period, factor_id=self.spec.factor_id
         )
         for trade_date in dates:
-            ret = returns[trade_date].numeric
-            vol = _calc_nd_annualized_vol(close_dates, close_prices, trade_date, n=20)
-            if ret is None or vol is None or vol <= 0:
-                result[trade_date] = FactorValue(
-                    factor_id=self.spec.factor_id,
-                    numeric=None,
-                    payload={"return_60d": ret, "volatility_20d": vol},
-                )
-                continue
-            result[trade_date] = FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=round(ret / vol, 4),
-                payload={"return_60d": ret, "volatility_20d": vol},
+            vol = _calc_nd_annualized_vol(
+                close_dates, close_prices, trade_date, n=self._volatility_period
             )
+            result[trade_date] = self._build_value(returns[trade_date].numeric, vol)
         return result
+
+    def _build_value(self, ret: float | None, vol: float | None) -> FactorValue:
+        """由收益率与年化波动率构造因子值。
+
+        Args:
+            ret: 收益窗口涨跌幅（%），None 表示数据不足。
+            vol: 波动率窗口年化波动率（%），None 表示数据不足。
+
+        Returns:
+            FactorValue，任一分量缺失或波动率为 0 时 numeric 为 None。
+        """
+        payload = {
+            "period": self._period,
+            "volatility_period": self._volatility_period,
+            "return_pct": ret,
+            "volatility_pct": vol,
+        }
+        if ret is None or vol is None or vol <= 0:
+            return FactorValue(factor_id=self.spec.factor_id, numeric=None, payload=payload)
+        return FactorValue(
+            factor_id=self.spec.factor_id,
+            numeric=round(ret / vol, 4),
+            payload=payload,
+        )
 
 
 class LowAmplitudeMomentumComputer:
@@ -389,12 +445,7 @@ class LowAmplitudeMomentumComputer:
                 f"累加最低振幅 {ratio_pct}% 交易日的收盘价日收益率（%）。"
             ),
             required_data=["index_bars"],
-            # 161 根有 OHLC 的 bar 在 A 股日历（春节+国庆叠加）上最多跨越 251 个自然日
-            # （实测 2017–2026 全部指数）。通用的 period×1.5 系数在大周期下余量被摊薄
-            # （160×1.5=240 < 251），故按 1.75 倍留出余量，兼容节假日分布差异与窗口内
-            # 少量缺 bar 的指数。按需计算（compute_and_store 只传本因子）时用的就是这个
-            # 值，窗口不足会直接返回 None。
-            lookback_days=max(15, int(self._period * 1.75) + 10),
+            lookback_days=low_amplitude_lookback_days(self._period),
             default_params={
                 "period": self._period,
                 "low_amplitude_ratio": self._ratio,
@@ -595,9 +646,14 @@ class RsrsComputer:
         Args:
             n: OLS 回归窗口（交易日），默认 18。
             m: 标准化窗口（交易日），默认 250。
+
+        Raises:
+            ValueError: 任一窗口小于 2，回归或标准化无法成立。
         """
-        self._n = n
-        self._m = m
+        if n < 2 or m < 2:
+            raise ValueError("OLS 回归窗口与标准化窗口都必须至少为 2")
+        self._n = int(n)
+        self._m = int(m)
 
     @property
     def spec(self) -> FactorSpec:
@@ -613,7 +669,7 @@ class RsrsComputer:
                 "z-score 标准化，输出标准分。正数代表支撑强于阻力。"
             ),
             required_data=["index_bars"],
-            lookback_days=_RSRS_LOOKBACK_DAYS,
+            lookback_days=rsrs_lookback_days(self._n, self._m),
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
@@ -755,8 +811,14 @@ class PricePositionIrComputer:
 
         Args:
             period: 回望交易日数，默认 60。
+
+        Raises:
+            ValueError: period 小于有效样本门槛（横盘日会在窗口内被跳过，
+                窗口过小必然拿不到足量样本）。
         """
-        self._period = period
+        if period < _POSITION_IR_MIN_SAMPLES:
+            raise ValueError(f"period 不能小于有效样本门槛 {_POSITION_IR_MIN_SAMPLES}")
+        self._period = int(period)
 
     @property
     def spec(self) -> FactorSpec:
@@ -772,7 +834,7 @@ class PricePositionIrComputer:
                 "衡量收盘价位于当日区间上沿的强度与稳定性。"
             ),
             required_data=["index_bars"],
-            lookback_days=max(15, int(self._period * 1.5) + 5),
+            lookback_days=period_lookback_days(self._period),
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:

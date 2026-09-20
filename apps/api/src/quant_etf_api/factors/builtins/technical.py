@@ -2,7 +2,7 @@
 
 补充趋势类和通道类因子的缺失，支持双均线、海龟交易、RSI 超买超卖等经典策略。
 
-均线、ATR、Donchian 通道、RSI 均实现 BatchFactorComputer 协议，
+均线、ATR、Donchian 通道、RSI 与回撤均实现 BatchFactorComputer 协议，
 回测预计算时一次遍历全量 bar 数据覆盖所有交易日，避免逐日重复构建收盘价序列。
 """
 
@@ -12,7 +12,12 @@ import bisect
 import math
 from datetime import date
 
-from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
+from quant_etf_api.factors.base import (
+    FactorContext,
+    FactorSpec,
+    FactorValue,
+    period_lookback_days,
+)
 
 
 def _get_historical_closes(
@@ -155,8 +160,7 @@ class MAComputer:
             period: 均线周期（交易日数），如 5/10/20/60。
         """
         self._period = period
-        # 自然日 ≈ 交易日 × 1.5 加安全余量
-        self._lookback = max(15, int(period * 1.5) + 5)
+        self._lookback = period_lookback_days(period)
 
     @property
     def spec(self) -> FactorSpec:
@@ -273,7 +277,7 @@ class MADeviationComputer:
                 "正值表示价格位于均线上方。可用于趋势强度判断。"
             ),
             required_data=["index_bars"],
-            lookback_days=max(15, int(self._period * 1.5) + 5),
+            lookback_days=period_lookback_days(self._period),
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
@@ -395,7 +399,7 @@ class ATRComputer:
                 "衡量市场波动程度。TR = max(H-L, |H-prevC|, |L-prevC|)。"
             ),
             required_data=["index_bars"],
-            lookback_days=max(15, int(self._period * 1.5) + 5),
+            lookback_days=period_lookback_days(self._period),
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
@@ -511,7 +515,7 @@ class DonchianHighComputer:
             version="1.0.0",
             description=f"指数近 {self._period} 个交易日的最高价，用于突破策略。",
             required_data=["index_bars"],
-            lookback_days=max(15, int(self._period * 1.5) + 5),
+            lookback_days=period_lookback_days(self._period),
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
@@ -601,7 +605,7 @@ class DonchianLowComputer:
             version="1.0.0",
             description=f"指数近 {self._period} 个交易日的最低价，用于止损策略。",
             required_data=["index_bars"],
-            lookback_days=max(15, int(self._period * 1.5) + 5),
+            lookback_days=period_lookback_days(self._period),
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
@@ -700,7 +704,7 @@ class RSIComputer:
                 f"指数近 {self._period} 个交易日的相对强弱指标（RSI），用于判断超买超卖。"
             ),
             required_data=["index_bars"],
-            lookback_days=max(15, int(self._period * 1.5) + 5),
+            lookback_days=period_lookback_days(self._period),
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
@@ -809,98 +813,55 @@ class RSIComputer:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 最大回撤因子（60 日）
+# 回撤因子（N 交易日窗口 + 水下时间）
 # ══════════════════════════════════════════════════════════════════════
 
 
-class MaxDrawdown60dComputer:
-    """60 日最大回撤因子计算器。
+class DrawdownComputer:
+    """N 日回撤幅度因子计算器。
 
-    计算当前收盘价相对近 60 个交易日最高价的回撤幅度（%）。
-    返回值为负数或零，如 -12.5 表示当前价格比 60 日最高价低 12.5%。
-    用于沪深300波段策略中的回调幅度判断。
-    """
-
-    @property
-    def spec(self) -> FactorSpec:
-        """返回 60 日最大回撤的因子元数据。"""
-        return FactorSpec(
-            factor_id="max_drawdown_60d",
-            name="60日回撤幅度",
-            category="technical",
-            version="1.0.0",
-            description=(
-                "当前收盘价相对近 60 个交易日最高价的回撤幅度（%），"
-                "返回负数或零，如 -12.5 表示回撤 12.5%。"
-            ),
-            required_data=["index_bars"],
-            lookback_days=90,
-        )
-
-    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 60 日回撤幅度。
-
-        Returns:
-            FactorValue，数据不足时 numeric 为 None。
-        """
-        closes = _get_historical_closes(index_code, trade_date, ctx, 60)
-        if closes is None:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"reason": "收盘价数据不足 60 条"},
-            )
-        current_close = closes[-1]
-        highest = max(closes)
-        if highest <= 0:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"reason": "最高价异常"},
-            )
-        drawdown = round((current_close - highest) / highest * 100, 2)
-        return FactorValue(
-            factor_id=self.spec.factor_id,
-            numeric=drawdown,
-            payload={"highest_60d": round(highest, 2), "current_close": round(current_close, 2)},
-        )
-
-
-# ══════════════════════════════════════════════════════════════════════
-# 当前回撤因子（250 交易日窗口 + 水下时间）
-# ══════════════════════════════════════════════════════════════════════
-
-
-class DrawdownCurrentComputer:
-    """当前回撤因子计算器（250 交易日窗口）。
-
-    计算当前收盘价相对近 250 个交易日最高价的回撤幅度（%），
-    返回负数或零，如 -12.5 表示回撤 12.5%。
-    与 max_drawdown_60d 的区别：窗口更长（约一年），且 payload 附带
-    水下时间（自峰值以来的交易日数），更适合中线策略的仓位管理。
+    计算当前收盘价相对近 N 个交易日最高收盘价的回撤幅度（%），
+    返回负数或零，如 -12.5 表示当前价格比窗口最高收盘价低 12.5%。
+    payload 附带水下时间（自峰值以来经过的交易日数），适合中线策略的仓位管理。
     实现 BatchFactorComputer 协议，支持回测批量预计算。
+
+    Attributes:
+        _period: 回望交易日数。
+        _lookback: 所需自然日回望窗口。
     """
 
-    _WINDOW = 250
+    def __init__(self, period: int = 60) -> None:
+        """初始化回撤幅度计算器。
+
+        Args:
+            period: 回望交易日数，如 60/250。
+
+        Raises:
+            ValueError: period 小于 2。
+        """
+        if period < 2:
+            raise ValueError("period 必须至少为 2")
+        self._period = int(period)
+        self._lookback = period_lookback_days(self._period)
 
     @property
     def spec(self) -> FactorSpec:
-        """返回当前回撤的因子元数据。"""
+        """返回 N 日回撤幅度的因子元数据。"""
         return FactorSpec(
-            factor_id="drawdown_current",
-            name="当前回撤",
+            factor_id=f"drawdown_{self._period}d",
+            name=f"{self._period}日回撤幅度",
             category="technical",
             version="1.0.0",
             description=(
-                "当前收盘价相对近 250 个交易日最高价的回撤幅度（%），"
+                f"当前收盘价相对近 {self._period} 个交易日最高收盘价的回撤幅度（%），"
                 "返回负数或零；payload 附自峰值以来的水下交易日数。"
             ),
             required_data=["index_bars"],
-            lookback_days=380,
+            lookback_days=self._lookback,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算当前回撤幅度。
+        """计算单日回撤幅度。
 
         Args:
             index_code: 指数代码。
@@ -910,34 +871,8 @@ class DrawdownCurrentComputer:
         Returns:
             FactorValue，数据不足时 numeric 为 None。
         """
-        closes = _get_historical_closes(index_code, trade_date, ctx, self._WINDOW)
-        if closes is None:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"reason": f"收盘价数据不足 {self._WINDOW} 条"},
-            )
-        current_close = closes[-1]
-        highest = max(closes)
-        if highest <= 0:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"reason": "最高价异常"},
-            )
-        drawdown = round((current_close - highest) / highest * 100, 2)
-        # 水下时间：自峰值以来经过的交易日数（含当日）
-        underwater_days = len(closes) - 1 - closes.index(highest)
-        return FactorValue(
-            factor_id=self.spec.factor_id,
-            numeric=drawdown,
-            payload={
-                "highest_250d": round(highest, 2),
-                "current_close": round(current_close, 2),
-                "underwater_days": underwater_days,
-                "window": self._WINDOW,
-            },
-        )
+        closes = _get_historical_closes(index_code, trade_date, ctx, self._period)
+        return self._build_value(closes)
 
     def compute_batch(
         self,
@@ -945,7 +880,7 @@ class DrawdownCurrentComputer:
         dates: list[date],
         ctx: FactorContext,
     ) -> dict[date, FactorValue]:
-        """批量计算所有交易日的当前回撤。
+        """批量计算所有交易日的回撤幅度。
 
         Args:
             index_code: 指数代码。
@@ -962,36 +897,59 @@ class DrawdownCurrentComputer:
 
         for trade_date in dates:
             idx = bisect.bisect_right(close_dates, trade_date) - 1
-            if idx < 0 or close_dates[idx] != trade_date or idx < self._WINDOW - 1:
-                result[trade_date] = FactorValue(
-                    factor_id=self.spec.factor_id,
-                    numeric=None,
-                    payload={"reason": f"收盘价数据不足 {self._WINDOW} 条"},
-                )
+            if idx < 0 or close_dates[idx] != trade_date or idx < self._period - 1:
+                result[trade_date] = self._missing()
                 continue
-            window = close_prices[idx - self._WINDOW + 1 : idx + 1]
-            highest = max(window)
-            if highest <= 0:
-                result[trade_date] = FactorValue(
-                    factor_id=self.spec.factor_id,
-                    numeric=None,
-                    payload={"reason": "最高价异常"},
-                )
-                continue
-            current_close = window[-1]
-            drawdown = round((current_close - highest) / highest * 100, 2)
-            underwater_days = len(window) - 1 - window.index(highest)
-            result[trade_date] = FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=drawdown,
-                payload={
-                    "highest_250d": round(highest, 2),
-                    "current_close": round(current_close, 2),
-                    "underwater_days": underwater_days,
-                    "window": self._WINDOW,
-                },
-            )
+            window = close_prices[idx - self._period + 1 : idx + 1]
+            result[trade_date] = self._build_value(window)
         return result
+
+    def _build_value(self, window: list[float] | None) -> FactorValue:
+        """由 N 个收盘价窗口构造回撤幅度因子值。
+
+        Args:
+            window: 从旧到新的 N 个收盘价（含当日），None 表示数据不足。
+
+        Returns:
+            FactorValue，窗口最高收盘价非正时 numeric 为 None。
+        """
+        if window is None:
+            return self._missing()
+        highest = max(window)
+        if highest <= 0:
+            return FactorValue(
+                factor_id=self.spec.factor_id,
+                numeric=None,
+                payload={"reason": "窗口最高收盘价非正", "period": self._period},
+            )
+        current_close = window[-1]
+        # 水下时间：自峰值以来经过的交易日数（含当日）
+        underwater_days = len(window) - 1 - window.index(highest)
+        return FactorValue(
+            factor_id=self.spec.factor_id,
+            numeric=round((current_close - highest) / highest * 100, 2),
+            payload={
+                "period": self._period,
+                "window_high": round(highest, 2),
+                "current_close": round(current_close, 2),
+                "underwater_days": underwater_days,
+            },
+        )
+
+    def _missing(self) -> FactorValue:
+        """构造数据不足的缺失值结果。
+
+        Returns:
+            numeric 为 None 的 FactorValue。
+        """
+        return FactorValue(
+            factor_id=self.spec.factor_id,
+            numeric=None,
+            payload={
+                "reason": f"收盘价数据不足 {self._period} 条或当日无行情",
+                "period": self._period,
+            },
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1023,8 +981,7 @@ class DaysBeyondUpperLowerComputer:
             period: 回望交易日数，默认 21。
         """
         self._period = period
-        # 自然日 ≈ 交易日 × 1.5 加安全余量
-        self._lookback = max(15, int(period * 1.5) + 5)
+        self._lookback = period_lookback_days(period)
 
     @property
     def spec(self) -> FactorSpec:

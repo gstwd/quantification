@@ -14,7 +14,7 @@ from datetime import date, timedelta
 import pytest
 
 from quant_etf_api.factors.base import FactorContext
-from quant_etf_api.factors.builtins.breadth import BreadthMA20Computer
+from quant_etf_api.factors.builtins.breadth import BreadthMAComputer
 from quant_etf_api.factors.builtins.macro import PMIMomentumComputer
 from quant_etf_api.factors.builtins.momentum import (
     DaysDownUpComputer,
@@ -22,23 +22,23 @@ from quant_etf_api.factors.builtins.momentum import (
     PricePositionIrComputer,
     ReturnComputer,
     RsrsComputer,
-    Sharpe60dComputer,
+    SharpeComputer,
     _calc_nd_return,
 )
 from quant_etf_api.factors.builtins.technical import (
     ATRComputer,
     DaysBeyondUpperLowerComputer,
-    DrawdownCurrentComputer,
     DonchianHighComputer,
     DonchianLowComputer,
+    DrawdownComputer,
     MADeviationComputer,
 )
 from quant_etf_api.factors.builtins.volatility import (
     HighLowRangeComputer,
     ReturnStdComputer,
-    Volatility20dComputer,
+    VolatilityComputer,
 )
-from quant_etf_api.factors.builtins.volume import AmountRatio20dComputer, VolumeRatio20dComputer
+from quant_etf_api.factors.builtins.volume import AmountRatioComputer, VolumeRatioComputer
 from quant_etf_api.factors.catalog import FactorTemplateRegistry, build_default_registry
 
 
@@ -160,11 +160,11 @@ class TestOhlcTechnicalComputers:
         assert "日线数据不足" in result.payload["reason"]
 
 
-# ─── VolumeRatio20dComputer ───────────────────────────────────────────────────────
+# ─── VolumeRatioComputer ─────────────────────────────────────────────────────────
 
 
-class TestVolumeRatio20dComputer:
-    _computer = VolumeRatio20dComputer()
+class TestVolumeRatioComputer:
+    _computer = VolumeRatioComputer()
 
     def test_spec_factor_id(self) -> None:
         assert self._computer.spec.factor_id == "volume_ratio_20d"
@@ -196,13 +196,38 @@ class TestVolumeRatio20dComputer:
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric is None
 
-    def test_payload_contains_lookback(self) -> None:
-        """payload 中应包含 lookback_days 字段。"""
+    def test_payload_contains_period(self) -> None:
+        """payload 中应包含 period 字段。"""
         trade_date = date(2024, 6, 1)
         bars = _build_index_bars("510300", trade_date, n_days=25)
         ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
-        assert result.payload.get("lookback_days") == 20
+        assert result.payload.get("period") == 20
+
+    def test_period_changes_average_window(self) -> None:
+        """不同周期取不同的分母窗口，短窗口与长窗口结果应不同。"""
+        trade_date = date(2024, 6, 1)
+        bars = _build_index_bars("510300", trade_date, n_days=25)
+        ctx = FactorContext(index_bars=bars)
+        short = VolumeRatioComputer(period=5).compute("510300", trade_date, ctx)
+        long = VolumeRatioComputer(period=20).compute("510300", trade_date, ctx)
+        assert short.numeric is not None and long.numeric is not None
+        assert short.numeric != long.numeric
+
+    def test_matches_ratio_formula(self) -> None:
+        """默认 20 日口径等于 当日成交量 / 近 20 个交易日平均成交量。"""
+        trade_date = date(2024, 6, 1)
+        bars = {}
+        for i in range(25, 0, -1):
+            bars[("510300", trade_date - timedelta(days=i))] = MockBar(
+                close_price=100.0, volume=float(1000 + i)
+            )
+        bars[("510300", trade_date)] = MockBar(close_price=100.0, volume=5000.0)
+        ctx = FactorContext(index_bars=bars)
+        result = VolumeRatioComputer(period=20).compute("510300", trade_date, ctx)
+        previous = [float(1000 + i) for i in range(20, 0, -1)]
+        expected = round(5000.0 / (sum(previous) / len(previous)), 4)
+        assert result.numeric == expected
 
 
 # ─── _calc_nd_return 通用函数 ─────────────────────────────────────────────────────
@@ -333,8 +358,8 @@ class TestReturnComputer60d:
 # ─── Volatility20dComputer ────────────────────────────────────────────────────────
 
 
-class TestVolatility20dComputer:
-    _computer = Volatility20dComputer()
+class TestVolatilityComputer:
+    _computer = VolatilityComputer()
 
     def test_spec(self) -> None:
         assert self._computer.spec.factor_id == "volatility_20d"
@@ -347,7 +372,7 @@ class TestVolatility20dComputer:
         ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric is None
-        assert result.payload.get("required") == 20
+        assert result.payload.get("required") == 21
 
     def test_zero_return_sequence(self) -> None:
         """收益率全为 0 时（价格不变），波动率应为 0。"""
@@ -436,6 +461,38 @@ class TestVolatility20dComputer:
         result = self._computer.compute("510300", trade_date, ctx)
         assert "sample_count" in result.payload
 
+    def test_period_selects_window(self) -> None:
+        """周期参数决定纳入多少日收益率：17 日与 20 日窗口结果不同。"""
+        trade_date = date(2024, 6, 1)
+        closes = [100.0]
+        for i in range(24):
+            closes.append(closes[-1] * (1.02 if i % 3 else 0.985))
+        bars = {
+            ("510300", trade_date - timedelta(days=24 - i)): MockBar(close_price=closes[i])
+            for i in range(25)
+        }
+        ctx = FactorContext(index_bars=bars)
+        short = VolatilityComputer(period=17).compute("510300", trade_date, ctx)
+        long = VolatilityComputer(period=20).compute("510300", trade_date, ctx)
+        assert short.numeric is not None and long.numeric is not None
+        assert short.numeric != long.numeric
+
+    def test_compute_batch_matches_compute(self) -> None:
+        """批量与逐点计算结果必须一致。"""
+        trade_date = date(2024, 6, 1)
+        bars = _build_index_bars("510300", trade_date, n_days=30)
+        ctx = FactorContext(index_bars=bars)
+        dates = [trade_date - timedelta(days=i) for i in range(5)]
+        batch = self._computer.compute_batch("510300", dates, ctx)
+        for day in dates:
+            point = self._computer.compute("510300", day, ctx)
+            assert batch[day].numeric == point.numeric
+
+    def test_rejects_period_below_two(self) -> None:
+        """周期小于 2 无法构成日收益率样本，构造即报错。"""
+        with pytest.raises(ValueError):
+            VolatilityComputer(period=1)
+
 
 # ─── FactorTemplateRegistry ──────────────────────────────────────────────────────
 
@@ -444,14 +501,51 @@ class TestFactorTemplateRegistry:
     def test_default_registry_has_all_templates(self) -> None:
         """默认注册表应包含全部内置模板。"""
         registry = build_default_registry()
-        assert len(registry.all()) == 40
+        assert len(registry.all()) == 32
 
     def test_default_registry_template_ids(self) -> None:
-        """默认注册表的 template_id 集合应包含核心模板。"""
+        """默认注册表的 template_id 集合应包含全部内置模板。"""
         registry = build_default_registry()
         ids = set(registry.ids())
-        # 零参数模板沿用原因子 ID
-        assert ids >= {
+        assert ids == {
+            "sma",
+            "return",
+            "return_std",
+            "rsi",
+            "atr",
+            "volatility",
+            "volume_ratio",
+            "amount_ratio",
+            "high_low",
+            "donchian_high",
+            "donchian_low",
+            "drawdown",
+            "ma_deviation",
+            "price_position_ir",
+            "days_beyond_upper_lower",
+            "breadth_ma_pct",
+            "sharpe",
+            "low_amplitude_momentum",
+            "rsrs",
+            "monthly_ma",
+            "monthly_return",
+            "pmi_momentum",
+            "close_price",
+            "change_pct",
+            "days_down_up",
+            "monthly_up_streak",
+            "pe_percentile",
+            "pb_percentile",
+            "erp",
+            "erp_percentile",
+            "index_diffusion_ratio",
+            "rrg_industry_match_score",
+        }
+
+    def test_retired_template_ids_are_gone(self) -> None:
+        """按固定周期拆分的旧模板 ID 不再注册。"""
+        registry = build_default_registry()
+        retired = {
             "volume_ratio_17d",
             "volume_ratio_20d",
             "amount_ratio_20d",
@@ -459,43 +553,44 @@ class TestFactorTemplateRegistry:
             "sharpe_60d",
             "volatility_17d",
             "volatility_20d",
-            "pe_percentile",
-            "pb_percentile",
             "ma60d_deviation",
             "drawdown_current",
+            "max_drawdown_60d",
             "donchian_17d_high",
             "donchian_17d_low",
             "donchian_20d_high",
             "donchian_20d_low",
             "pmi_momentum_3m",
             "breadth_ma20_pct",
-            "rsrs",
             "high_low_63d",
             "high_low_21d",
             "days_beyond_upper_lower_21d",
             "price_position_ir_60d",
-            "days_down_up",
+            "monthly_ma_5m",
+            "monthly_ma_10m",
+            "monthly_return_2m",
+            "monthly_return_3m",
         }
-        # 首批可配模板
-        assert ids >= {"sma", "return", "return_std", "rsi", "atr"}
+        assert not (retired & set(registry.ids()))
 
     def test_get_returns_correct_template(self) -> None:
         """get() 按 template_id 返回正确的模板。"""
         registry = build_default_registry()
-        template = registry.get("volume_ratio_20d")
+        template = registry.get("volume_ratio")
         assert template is not None
-        assert template.template_id == "volume_ratio_20d"
+        assert template.template_id == "volume_ratio"
 
     def test_get_returns_none_for_unknown(self) -> None:
         """get() 未知 template_id 返回 None。"""
         registry = build_default_registry()
         assert registry.get("unknown_factor") is None
+        assert registry.get("volume_ratio_20d") is None
 
     def test_resolve_returns_instance(self) -> None:
         """resolve() 应按模板 ID 产出可执行实例。"""
         registry = build_default_registry()
-        instance = registry.resolve("volume_ratio_20d")
-        assert instance.instance_id == "volume_ratio_20d"
+        instance = registry.resolve("volume_ratio")
+        assert instance.instance_id == "volume_ratio"
         assert instance.computer.spec.factor_id == "volume_ratio_20d"
 
     def test_register_rejects_duplicate(self) -> None:
@@ -510,7 +605,7 @@ class TestFactorTemplateRegistry:
         """自定义注册表与默认注册表互不影响。"""
         registry = FactorTemplateRegistry()
         assert registry.all() == []
-        assert len(build_default_registry().all()) == 40
+        assert len(build_default_registry().all()) == 32
 
 
 # ─── LowAmplitudeMomentumComputer（低振幅条件动量）──────────────────────────────
@@ -573,11 +668,11 @@ class TestLowAmplitudeMomentumComputer:
         )
 
 
-# ─── Sharpe60dComputer（风险调整动量）─────────────────────────────────────────────
+# ─── SharpeComputer（风险调整动量）───────────────────────────────────────────────
 
 
-class TestSharpe60dComputer:
-    _computer = Sharpe60dComputer()
+class TestSharpeComputer:
+    _computer = SharpeComputer()
 
     def test_spec(self) -> None:
         assert self._computer.spec.factor_id == "sharpe_60d"
@@ -607,8 +702,31 @@ class TestSharpe60dComputer:
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric is not None
         assert result.numeric > 0
-        assert result.payload.get("return_60d") is not None
-        assert result.payload.get("volatility_20d") is not None
+        assert result.payload.get("return_pct") is not None
+        assert result.payload.get("volatility_pct") is not None
+
+    def test_windows_are_parameters(self) -> None:
+        """收益窗口与波动率窗口都是可调参数，改变窗口会改变结果。"""
+        trade_date = date(2024, 6, 1)
+        bars = {}
+        close = 100.0
+        for i in range(65, 0, -1):
+            dt = trade_date - timedelta(days=i)
+            daily = 0.004 if i % 3 == 0 else -0.001
+            close = close * (1 + daily)
+            bars[("510300", dt)] = MockBar(close_price=round(close, 4))
+        bars[("510300", trade_date)] = MockBar(close_price=round(close, 4))
+        ctx = FactorContext(index_bars=bars)
+        base = SharpeComputer(period=60, volatility_period=20).compute(
+            "510300", trade_date, ctx
+        )
+        other = SharpeComputer(period=40, volatility_period=20).compute(
+            "510300", trade_date, ctx
+        )
+        assert base.numeric is not None and other.numeric is not None
+        assert base.numeric != other.numeric
+        assert base.payload["period"] == 60
+        assert other.payload["period"] == 40
 
     def test_batch_matches_point(self) -> None:
         """批量计算结果应与逐点计算一致。"""
@@ -674,31 +792,64 @@ class TestMADeviationComputer:
         assert point.numeric == batch.numeric
 
 
-# ─── DrawdownCurrentComputer（当前回撤 + 水下时间）────────────────────────────────
+# ─── DrawdownComputer（N 日回撤 + 水下时间）───────────────────────────────────────
 
 
-class TestDrawdownCurrentComputer:
-    _computer = DrawdownCurrentComputer()
+class TestDrawdownComputer:
+    _computer = DrawdownComputer()
 
     def test_spec(self) -> None:
-        assert self._computer.spec.factor_id == "drawdown_current"
+        assert self._computer.spec.factor_id == "drawdown_60d"
         assert self._computer.spec.category == "technical"
 
     def test_none_when_insufficient_data(self) -> None:
-        """历史不足 250 条收盘价时应返回 None。"""
+        """历史不足 60 条收盘价时应返回 None。"""
         trade_date = date(2024, 6, 1)
-        bars = _build_index_bars("510300", trade_date, n_days=100)
+        bars = _build_index_bars("510300", trade_date, n_days=30)
         ctx = FactorContext(index_bars=bars)
         result = self._computer.compute("510300", trade_date, ctx)
         assert result.numeric is None
+        assert result.payload.get("period") == 60
+
+    def test_matches_window_formula(self) -> None:
+        """默认 60 日口径等于 (当前收盘 − 窗口最高收盘) / 最高收盘 × 100。"""
+        trade_date = date(2024, 6, 1)
+        bars = _build_index_bars("510300", trade_date, n_days=80, daily_return=0.001)
+        ctx = FactorContext(index_bars=bars)
+        result = self._computer.compute("510300", trade_date, ctx)
+        closes = sorted(
+            (dt, v.close_price)
+            for (code, dt), v in bars.items()
+            if code == "510300" and dt <= trade_date
+        )
+        window = [p for _, p in closes][-60:]
+        expected = round((window[-1] - max(window)) / max(window) * 100, 2)
+        assert result.numeric == expected
+
+    def test_period_controls_window(self) -> None:
+        """周期参数决定回撤窗口：峰值落在 60 日之外时两个窗口取值不同。"""
+        trade_date = date(2024, 6, 1)
+        bars = {}
+        # 前 200 天横盘在 150（仅落入 250 日窗口），最后 60 天从 100 涨到 120
+        for i in range(260, 0, -1):
+            dt = trade_date - timedelta(days=i)
+            close = 150.0 if i > 60 else 100.0 + (60 - i) * (20.0 / 59)
+            bars[("510300", dt)] = MockBar(close_price=close)
+        bars[("510300", trade_date)] = MockBar(close_price=120.0)
+        ctx = FactorContext(index_bars=bars)
+        short = DrawdownComputer(period=60).compute("510300", trade_date, ctx)
+        long = DrawdownComputer(period=250).compute("510300", trade_date, ctx)
+        # 60 日窗口内当前价即峰值 → 0；250 日窗口含 150 的高点 → 约 -20
+        assert short.numeric == 0.0
+        assert long.numeric == -20.0
 
     def test_drawdown_at_peak_is_zero(self) -> None:
-        """当前价处于 250 日峰值时回撤应为 0。"""
+        """当前价处于窗口峰值时回撤应为 0。"""
         trade_date = date(2024, 6, 1)
         # 单调上涨 → 当前价即峰值
         bars = _build_index_bars("510300", trade_date, n_days=260, daily_return=0.001)
         ctx = FactorContext(index_bars=bars)
-        result = self._computer.compute("510300", trade_date, ctx)
+        result = DrawdownComputer(period=250).compute("510300", trade_date, ctx)
         assert result.numeric == 0.0
         assert result.payload.get("underwater_days") == 0
 
@@ -718,7 +869,7 @@ class TestDrawdownCurrentComputer:
             bars[("510300", dt)] = MockBar(close_price=close)
         bars[("510300", trade_date)] = MockBar(close_price=110.0)
         ctx = FactorContext(index_bars=bars)
-        result = self._computer.compute("510300", trade_date, ctx)
+        result = DrawdownComputer(period=250).compute("510300", trade_date, ctx)
         assert result.numeric is not None
         assert result.numeric < 0
         assert result.payload.get("underwater_days", 0) > 0
@@ -728,16 +879,23 @@ class TestDrawdownCurrentComputer:
         trade_date = date(2024, 6, 1)
         bars = _build_index_bars("510300", trade_date, n_days=260, daily_return=0.001)
         ctx = FactorContext(index_bars=bars)
-        point = self._computer.compute("510300", trade_date, ctx)
-        batch = self._computer.compute_batch("510300", [trade_date], ctx)[trade_date]
-        assert point.numeric == batch.numeric
+        dates = [trade_date - timedelta(days=i) for i in range(5)]
+        batch = DrawdownComputer(period=250).compute_batch("510300", dates, ctx)
+        for day in dates:
+            point = DrawdownComputer(period=250).compute("510300", day, ctx)
+            assert batch[day].numeric == point.numeric
+
+    def test_rejects_period_below_two(self) -> None:
+        """周期小于 2 不构成回撤窗口，构造即报错。"""
+        with pytest.raises(ValueError):
+            DrawdownComputer(period=1)
 
 
-# ─── AmountRatio20dComputer（成交额量比）──────────────────────────────────────────
+# ─── AmountRatioComputer（成交额量比）────────────────────────────────────────────
 
 
-class TestAmountRatio20dComputer:
-    _computer = AmountRatio20dComputer()
+class TestAmountRatioComputer:
+    _computer = AmountRatioComputer()
 
     def test_spec(self) -> None:
         assert self._computer.spec.factor_id == "amount_ratio_20d"
@@ -775,8 +933,26 @@ class TestAmountRatio20dComputer:
         batch = self._computer.compute_batch("510300", [trade_date], ctx)[trade_date]
         assert point.numeric == batch.numeric
 
+    def test_period_changes_average_window(self) -> None:
+        """周期参数同时作用于逐点与批量实现。"""
+        trade_date = date(2024, 6, 1)
+        bars = {}
+        for i in range(25, 0, -1):
+            dt = trade_date - timedelta(days=i)
+            bars[("510300", dt)] = MockBar(turnover=1000.0 + i * 10)
+        bars[("510300", trade_date)] = MockBar(turnover=5000.0)
+        ctx = FactorContext(index_bars=bars)
+        short = AmountRatioComputer(period=5)
+        long = AmountRatioComputer(period=20)
+        short_point = short.compute("510300", trade_date, ctx).numeric
+        long_point = long.compute("510300", trade_date, ctx).numeric
+        assert short_point is not None and long_point is not None
+        assert short_point != long_point
+        assert short.compute_batch("510300", [trade_date], ctx)[trade_date].numeric == short_point
+        assert long.compute_batch("510300", [trade_date], ctx)[trade_date].numeric == long_point
 
-# ─── PMIMomentumComputer（PMI 三个月动量）─────────────────────────────────────────
+
+# ─── PMIMomentumComputer（PMI 动量）──────────────────────────────────────────────
 
 
 class TestPMIMomentumComputer:
@@ -811,7 +987,7 @@ class TestPMIMomentumComputer:
         assert result.numeric > 0
 
     def test_market_level_factor(self) -> None:
-        """市场级因子：不同指数返回相同值。"""
+        """同一交易日不同指数返回相同值。"""
         trade_date = date(2024, 6, 1)
         ctx = FactorContext(
             macro_indicators={
@@ -825,16 +1001,36 @@ class TestPMIMomentumComputer:
         r2 = self._computer.compute("399673", trade_date, ctx)
         assert r1.numeric == r2.numeric
 
+    def test_months_is_parameter(self) -> None:
+        """回看月数决定基准期，1 个月与 3 个月动量不同。"""
+        trade_date = date(2024, 6, 1)
+        ctx = FactorContext(
+            macro_indicators={
+                "pmi": {
+                    "2024-01-01": 48.0,
+                    "2024-02-01": 49.0,
+                    "2024-04-01": 50.0,
+                    "2024-05-01": 51.5,
+                }
+            }
+        )
+        one = PMIMomentumComputer(months=1).compute("000300", trade_date, ctx)
+        three = PMIMomentumComputer(months=3).compute("000300", trade_date, ctx)
+        # 1 个月基准 = 2024-04-01(50.0) → 1.5；3 个月基准 = 2024-02-01(49.0) → 2.5
+        assert one.numeric == 1.5
+        assert three.numeric == 2.5
 
-# ─── BreadthMA20Computer（市场宽度）────────────────────────────────────────────────
+
+# ─── BreadthMAComputer（市场宽度）─────────────────────────────────────────────────
 
 
-class TestBreadthMA20Computer:
-    _computer = BreadthMA20Computer()
+class TestBreadthMAComputer:
+    _computer = BreadthMAComputer()
 
     def test_spec(self) -> None:
         assert self._computer.spec.factor_id == "breadth_ma20_pct"
         assert self._computer.spec.market_scope is True
+        assert self._computer.spec.value_shape == "market"
 
     def test_all_above_ma20(self) -> None:
         """全部指数站上 MA20 时宽度为 100。"""
@@ -906,12 +1102,16 @@ class TestRsrsComputer:
     _TRADE_DATE = date(2024, 6, 3)
 
     def test_spec(self) -> None:
-        """元数据应为动量类指数级因子，回望窗口 400 自然日。"""
+        """元数据应为动量类指数级因子，回望窗口按 n + m − 1 个交易日推导。"""
         spec = RsrsComputer().spec
         assert spec.factor_id == "rsrs"
         assert spec.category == "momentum"
         assert spec.required_data == ["index_bars"]
-        assert spec.lookback_days == 400
+        assert spec.lookback_days == 447
+
+    def test_lookback_stays_within_backtest_warmup(self) -> None:
+        """最大合法参数组合的回望仍不超过回测固定预热窗口（730 天）。"""
+        assert RsrsComputer(n=40, m=400).spec.lookback_days <= 730
 
     def test_none_when_insufficient_history(self) -> None:
         """不足 N + M − 1 条高低价时返回 None。"""

@@ -23,6 +23,26 @@ USAGE_RANK = "rank"
 # 新因子应在 FactorSpec.usage 中按语义收敛，市场级因子只开放适用位置。
 DEFAULT_INDEX_FACTOR_USAGE = [USAGE_TIMING, USAGE_SCORE, USAGE_FILTER, USAGE_RANK]
 
+# 交易日周期折算自然日回望窗口的系数与安全余量：
+# A 股一年约 244 个交易日（≈1.5 倍自然日），叠加春节/国庆连续休市后，
+# 单周期窗口按 1.6 倍并留 10 天缓冲，避免 21 个交易日跨两个长假时窗口不足。
+_LOOKBACK_FACTOR = 1.6
+_LOOKBACK_PADDING_DAYS = 10
+_MIN_LOOKBACK_DAYS = 15
+
+
+def period_lookback_days(period: int, *, factor: float = _LOOKBACK_FACTOR) -> int:
+    """按交易日周期推导回望自然日数（技术指标通用口径）。
+
+    Args:
+        period: 交易日周期，如 5/20/63。
+        factor: 交易日 → 自然日的折算系数，长周期需要更大余量时显式放大。
+
+    Returns:
+        回望自然日数，至少 ``_MIN_LOOKBACK_DAYS`` 天。
+    """
+    return max(_MIN_LOOKBACK_DAYS, int(period * factor) + _LOOKBACK_PADDING_DAYS)
+
 
 class MissingReason(str, Enum):
     """因子值缺失原因（三态语义）。

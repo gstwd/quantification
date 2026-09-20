@@ -164,7 +164,7 @@ class TestBuildCandidatePool:
 
     def test_requires_high_low_for_rsrs_and_price_position_factors(self) -> None:
         """引用 rsrs / price_position_ir 因子时，最高/最低价缺失应报 MISSING_HIGH_LOW。"""
-        for factor_id in ("rsrs", "price_position_ir_60d"):
+        for factor_id in ("rsrs", "price_position_ir"):
             svc = _make_service(template_ids=[factor_id])
             bars = {
                 ("000300", DATES[0]): SimpleNamespace(
@@ -186,6 +186,61 @@ class TestBuildCandidatePool:
 
             assert codes == [], factor_id
             assert reasons["000300"] == {"MISSING_HIGH_LOW"}, factor_id
+
+    def test_close_only_templates_do_not_require_high_low(self) -> None:
+        """只用收盘价的模板（区间宽度/回撤/收益/收盘价）不应因缺高低价被剔除。"""
+        for template_id in ("high_low", "drawdown", "return", "close_price"):
+            svc = _make_service(template_ids=[template_id])
+            bars = {
+                ("000300", DATES[0]): SimpleNamespace(
+                    close_price=100.0, open_price=100.0, high_price=None, low_price=None
+                ),
+                ("000300", DATES[1]): _bar(101.0, 101.0),
+            }
+            factors = {("000300", template_id): 1.0}
+
+            codes, reasons = svc._build_candidate_pool(
+                _config(score_factors={template_id: 1.0}),
+                DATES[0],
+                DATES[1],
+                ["000300"],
+                bars,
+                factors,
+                "t_plus_1_close",
+            )
+
+            assert codes == ["000300"], template_id
+            assert "000300" not in reasons, template_id
+
+    def test_high_low_requiring_templates_are_complete(self) -> None:
+        """依赖高低价的模板清单必须覆盖所有需要 OHLC 的模板。"""
+        requiring = {
+            "atr",
+            "donchian_high",
+            "donchian_low",
+            "rsrs",
+            "price_position_ir",
+            "monthly_ma",
+            "monthly_return",
+        }
+        for template_id in sorted(requiring):
+            svc = _make_service(template_ids=[template_id])
+            bars = {
+                ("000300", DATES[0]): SimpleNamespace(
+                    close_price=100.0, open_price=100.0, high_price=None, low_price=None
+                ),
+                ("000300", DATES[1]): _bar(101.0, 101.0),
+            }
+            _codes, reasons = svc._build_candidate_pool(
+                _config(score_factors={template_id: 1.0}),
+                DATES[0],
+                DATES[1],
+                ["000300"],
+                bars,
+                {("000300", template_id): 1.0},
+                "t_plus_1_close",
+            )
+            assert reasons["000300"] == {"MISSING_HIGH_LOW"}, template_id
 
     def test_excludes_missing_next_bar_with_distinct_reason(self) -> None:
         """次日整根 bar 缺失记 MISSING_NEXT_BAR（与当日缺收盘 MISSING_CLOSE 区分）。"""

@@ -4,9 +4,9 @@
 天然支持实时和回测两种模式，无额外数据同步问题。
 
 策略用途：
-- monthly_ma_5m / monthly_ma_10m：牛熊状态判断（10月均线方向）
-- monthly_return_2m / monthly_return_3m：动量确认
-- monthly_up_streak：熊市反弹确认（连续2月收阳）
+- monthly_ma：牛熊状态判断（10 月均线方向）
+- monthly_return：动量确认
+- monthly_up_streak：熊市反弹确认（连续 2 月收阳）
 """
 
 from __future__ import annotations
@@ -17,6 +17,21 @@ from datetime import date
 from typing import NamedTuple
 
 from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
+
+
+def monthly_lookback_days(months: int) -> int:
+    """按月数推导回望自然日数。
+
+    月线由日线聚合，取得 months 个月线收盘价最多需要 months 个月的自然日；
+    按每月 60 天并保留 1 年下限，兼容长假期与月内缺 bar 的指数。
+
+    Args:
+        months: 回望月数。
+
+    Returns:
+        回望自然日数，至少 365 天。
+    """
+    return max(365, int(months) * 60)
 
 
 class MonthlyBar(NamedTuple):
@@ -122,31 +137,36 @@ class MonthlyMAComputer:
     """月线均线因子计算器。
 
     计算指定月数的简单移动平均（SMA），从日线实时聚合月线数据。
-    用于沪深300波段策略的牛熊状态判断（10月均线方向）。
+    用于沪深300波段策略的牛熊状态判断（10 月均线方向）。
 
     Attributes:
-        _period: 均线周期（月数）。
+        _months: 均线周期（月数）。
     """
 
-    def __init__(self, period: int = 10) -> None:
+    def __init__(self, months: int = 10) -> None:
         """初始化月线均线计算器。
 
         Args:
-            period: 均线周期（月数），如 5 或 10。
+            months: 均线周期（月数），如 5 或 10。
+
+        Raises:
+            ValueError: months 小于 2，单月均线等价于当月收盘价。
         """
-        self._period = period
+        if months < 2:
+            raise ValueError("months 必须至少为 2")
+        self._months = int(months)
 
     @property
     def spec(self) -> FactorSpec:
         """返回月线均线的因子元数据。"""
         return FactorSpec(
-            factor_id=f"monthly_ma_{self._period}m",
-            name=f"{self._period}月均线",
+            factor_id=f"monthly_ma_{self._months}m",
+            name=f"{self._months}月均线",
             category="technical",
             version="1.0.0",
-            description=f"指数近 {self._period} 个月线收盘价的简单移动平均，从日线实时聚合。",
+            description=f"指数近 {self._months} 个月线收盘价的简单移动平均，从日线实时聚合。",
             required_data=["index_bars"],
-            lookback_days=max(365, self._period * 30 * 2),
+            lookback_days=monthly_lookback_days(self._months),
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
@@ -161,24 +181,24 @@ class MonthlyMAComputer:
             FactorValue，月线数据不足时 numeric 为 None。
         """
         monthly_bars = _aggregate_monthly_bars(
-            index_code, trade_date, ctx, lookback_months=self._period + 1
+            index_code, trade_date, ctx, lookback_months=self._months + 1
         )
-        if len(monthly_bars) < self._period:
+        if len(monthly_bars) < self._months:
             return FactorValue(
                 factor_id=self.spec.factor_id,
                 numeric=None,
                 payload={
-                    "reason": f"月线数据不足 {self._period} 个月",
+                    "reason": f"月线数据不足 {self._months} 个月",
                     "available_months": len(monthly_bars),
                 },
             )
 
-        closes = [bar.close for bar in monthly_bars[-self._period :]]
+        closes = [bar.close for bar in monthly_bars[-self._months :]]
         ma = round(sum(closes) / len(closes), 4)
         return FactorValue(
             factor_id=self.spec.factor_id,
             numeric=ma,
-            payload={"period_months": self._period, "sample_count": len(closes)},
+            payload={"months": self._months, "sample_count": len(closes)},
         )
 
 
@@ -191,31 +211,36 @@ class MonthlyReturnComputer:
     """月线动量因子计算器。
 
     计算近 N 个月的收益率（%），基于月线收盘价。
-    用于沪深300波段策略的动量确认（近2月/3月收益率）。
+    用于沪深300波段策略的动量确认（近 2 月/3 月收益率）。
 
     Attributes:
-        _period: 回望月数。
+        _months: 回望月数。
     """
 
-    def __init__(self, period: int = 2) -> None:
+    def __init__(self, months: int = 2) -> None:
         """初始化月线动量计算器。
 
         Args:
-            period: 回望月数，如 2 或 3。
+            months: 回望月数，如 2 或 3。
+
+        Raises:
+            ValueError: months 小于 1。
         """
-        self._period = period
+        if months < 1:
+            raise ValueError("months 必须不小于 1")
+        self._months = int(months)
 
     @property
     def spec(self) -> FactorSpec:
         """返回月线动量的因子元数据。"""
         return FactorSpec(
-            factor_id=f"monthly_return_{self._period}m",
-            name=f"近{self._period}月收益率",
+            factor_id=f"monthly_return_{self._months}m",
+            name=f"近{self._months}月收益率",
             category="momentum",
             version="1.0.0",
-            description=f"指数近 {self._period} 个月的收益率（%），基于月线收盘价。",
+            description=f"指数近 {self._months} 个月的收益率（%），基于月线收盘价。",
             required_data=["index_bars"],
-            lookback_days=max(180, self._period * 30 * 2),
+            lookback_days=monthly_lookback_days(self._months),
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
@@ -230,20 +255,20 @@ class MonthlyReturnComputer:
             FactorValue，月线数据不足时 numeric 为 None。
         """
         monthly_bars = _aggregate_monthly_bars(
-            index_code, trade_date, ctx, lookback_months=self._period + 1
+            index_code, trade_date, ctx, lookback_months=self._months + 1
         )
-        if len(monthly_bars) < self._period + 1:
+        if len(monthly_bars) < self._months + 1:
             return FactorValue(
                 factor_id=self.spec.factor_id,
                 numeric=None,
                 payload={
-                    "reason": f"月线数据不足 {self._period + 1} 个月",
+                    "reason": f"月线数据不足 {self._months + 1} 个月",
                     "available_months": len(monthly_bars),
                 },
             )
 
         current_close = monthly_bars[-1].close
-        base_close = monthly_bars[-(self._period + 1)].close
+        base_close = monthly_bars[-(self._months + 1)].close
         if base_close <= 0:
             return FactorValue(
                 factor_id=self.spec.factor_id,
@@ -256,7 +281,7 @@ class MonthlyReturnComputer:
             factor_id=self.spec.factor_id,
             numeric=ret,
             payload={
-                "period_months": self._period,
+                "months": self._months,
                 "current_close": round(current_close, 2),
                 "base_close": round(base_close, 2),
             },

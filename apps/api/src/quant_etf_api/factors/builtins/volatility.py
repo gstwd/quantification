@@ -1,11 +1,11 @@
 """波动率类因子：年化波动率、收益率标准差与区间宽度（基于指数数据）。
 
-包含三类因子：日收益率年化标准差（17/20 日）、N 日日收益率标准差
+包含三类因子，均按周期参数化：N 日日收益率年化标准差、N 日日收益率标准差
 （%，不年化，Tushare return_std_* 口径）与 N 日区间宽度
 （%，Tushare high_low_* 口径）。
 
-收益率标准差与区间宽度均实现 BatchFactorComputer 协议，回测预计算时
-一次遍历全量 bar 数据覆盖所有交易日，避免逐日重复构建收盘价序列。
+三者均实现 BatchFactorComputer 协议，回测预计算时一次遍历全量 bar 数据
+覆盖所有交易日，避免逐日重复构建收盘价序列。
 """
 
 from __future__ import annotations
@@ -14,7 +14,12 @@ import bisect
 import math
 from datetime import date
 
-from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
+from quant_etf_api.factors.base import (
+    FactorContext,
+    FactorSpec,
+    FactorValue,
+    period_lookback_days,
+)
 
 # A 股全年约 252 个交易日，年化因子为 sqrt(252)
 _ANNUALIZE_FACTOR = math.sqrt(252)
@@ -63,6 +68,53 @@ def _sample_std(values: list[float]) -> float | None:
     return math.sqrt(variance)
 
 
+def daily_returns(window: list[float]) -> list[float]:
+    """由收盘价窗口计算日收益率序列。
+
+    以窗口内非正的前一日收盘价作为基准的收益率无法定义，直接跳过。
+
+    Args:
+        window: 从旧到新的连续收盘价。
+
+    Returns:
+        日收益率列表（小数，非百分比），长度为 len(window) - 有效基准数。
+    """
+    return [
+        (window[i] - window[i - 1]) / window[i - 1]
+        for i in range(1, len(window))
+        if window[i - 1] > 0
+    ]
+
+
+def daily_return_std(window: list[float]) -> float | None:
+    """计算收盘价窗口内日收益率的样本标准差（ddof=1）。
+
+    Args:
+        window: 从旧到新的连续收盘价。
+
+    Returns:
+        日收益率标准差（小数），有效日收益率不足 2 个时返回 None。
+    """
+    return _sample_std(daily_returns(window))
+
+
+def annualized_volatility(window: list[float]) -> float | None:
+    """计算收盘价窗口内日收益率的年化标准差（%）。
+
+    年化口径：std(日收益率, ddof=1) × sqrt(252) × 100。
+
+    Args:
+        window: 从旧到新的连续收盘价。
+
+    Returns:
+        年化波动率（%），有效日收益率不足 2 个时返回 None。
+    """
+    std_dev = daily_return_std(window)
+    if std_dev is None:
+        return None
+    return round(std_dev * _ANNUALIZE_FACTOR * 100, 4)
+
+
 def _window_bounds(
     close_dates: list[date],
     close_prices: list[float],
@@ -89,33 +141,53 @@ def _window_bounds(
     return close_prices[idx - n + 1 : idx + 1]
 
 
-class Volatility20dComputer:
-    """20 日年化波动率因子计算器。
+class VolatilityComputer:
+    """N 日年化波动率因子计算器。
 
-    计算公式：std(近 20 个日收益率序列) × sqrt(252) × 100。
+    计算公式：std(近 N 个日收益率, ddof=1) × sqrt(252) × 100。
     使用样本标准差（除以 n-1，贝塞尔修正），与金融实践一致。
-    需要至少 21 个连续收盘价才能算出 20 个日收益率。
+    需要 N+1 个连续收盘价（含当日）才能算出 N 个日收益率。
     结果单位为 %（年化标准差 × 100）。
+    实现 BatchFactorComputer 协议，支持回测批量预计算。
+
+    Attributes:
+        _period: 回望交易日数。
+        _lookback: 所需自然日回望窗口。
     """
+
+    def __init__(self, period: int = 20) -> None:
+        """初始化年化波动率计算器。
+
+        Args:
+            period: 回望交易日数，如 17/20/60。
+
+        Raises:
+            ValueError: period 小于 2，无法构成日收益率样本。
+        """
+        if period < 2:
+            raise ValueError("period 必须至少为 2")
+        self._period = int(period)
+        self._lookback = period_lookback_days(self._period)
 
     @property
     def spec(self) -> FactorSpec:
-        """返回 20 日年化波动率的因子元数据。"""
+        """返回 N 日年化波动率的因子元数据。"""
         return FactorSpec(
-            factor_id="volatility_20d",
-            name="20日年化波动率",
+            factor_id=f"volatility_{self._period}d",
+            name=f"{self._period}日年化波动率",
             category="volatility",
             version="2.0.0",
             description=(
-                "指数近 20 个交易日日收益率的年化标准差（%）。"
-                "公式：std(20 个日收益率, ddof=1) × sqrt(252) × 100。需 21 个连续收盘价。"
+                f"指数近 {self._period} 个交易日日收益率的年化标准差（%）。"
+                f"公式：std({self._period} 个日收益率, ddof=1) × sqrt(252) × 100。"
+                f"需 {self._period + 1} 个连续收盘价。"
             ),
             required_data=["index_bars"],
-            lookback_days=40,
+            lookback_days=self._lookback,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 20 日年化波动率。
+        """计算 N 日年化波动率。
 
         Args:
             index_code: 指数代码。
@@ -123,53 +195,70 @@ class Volatility20dComputer:
             ctx: FactorContext。
 
         Returns:
-            FactorValue，需 21 个收盘价，不足时 numeric 为 None。
-            payload 包含 sample_count（实际使用的日收益率数量）。
+            FactorValue，需 period+1 个收盘价，不足时 numeric 为 None；
+            payload 包含 sample_count（实际使用的日收益率数量）与 std_daily。
         """
-        # 收集含 trade_date 在内的历史收盘价，按日期升序排列
-        closes = sorted(
-            [
-                (dt, v.close_price)
-                for (code, dt), v in ctx.index_bars.items()
-                if code == index_code and dt <= trade_date and v.close_price is not None
-            ],
-            key=lambda x: x[0],
-        )
+        close_dates, close_prices = _sorted_closes_for_code(index_code, ctx)
+        window = _window_bounds(close_dates, close_prices, trade_date, self._period + 1)
+        return self._build_value(window)
 
-        # 至少需要 21 个收盘价才能算出 20 个日收益率
-        if len(closes) < 21:
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的 N 日年化波动率。
+
+        Args:
+            index_code: 指数代码。
+            dates: 需要计算的交易日列表（升序）。
+            ctx: FactorContext，包含全量回望数据。
+
+        Returns:
+            key=交易日, value=FactorValue 的字典。
+        """
+        close_dates, close_prices = _sorted_closes_for_code(index_code, ctx)
+        result: dict[date, FactorValue] = {}
+        for trade_date in dates:
+            window = _window_bounds(
+                close_dates, close_prices, trade_date, self._period + 1
+            )
+            result[trade_date] = self._build_value(window)
+        return result
+
+    def _build_value(self, window: list[float] | None) -> FactorValue:
+        """由 period+1 个收盘价窗口构造年化波动率因子值。
+
+        Args:
+            window: 从旧到新的 period+1 个收盘价，None 表示数据不足。
+
+        Returns:
+            FactorValue，日收益率样本不足 2 个时 numeric 为 None。
+        """
+        if window is None:
             return FactorValue(
                 factor_id=self.spec.factor_id,
                 numeric=None,
-                payload={"sample_count": max(0, len(closes) - 1), "required": 20},
+                payload={
+                    "reason": f"收盘价数据不足 {self._period + 1} 条或当日无行情",
+                    "period": self._period,
+                    "required": self._period + 1,
+                },
             )
-
-        # 取最近 21 个收盘价，计算 20 个日收益率
-        recent_closes = [p for _, p in closes[-21:]]
-        daily_returns = [
-            (recent_closes[i] - recent_closes[i - 1]) / recent_closes[i - 1]
-            for i in range(1, len(recent_closes))
-            if recent_closes[i - 1] > 0
-        ]
-
-        if len(daily_returns) < 2:
+        returns = daily_returns(window)
+        std_dev = _sample_std(returns)
+        if std_dev is None:
             return FactorValue(
                 factor_id=self.spec.factor_id,
                 numeric=None,
-                payload={"sample_count": len(daily_returns), "required": 2},
+                payload={"period": self._period, "sample_count": len(returns), "required": 2},
             )
-
-        n = len(daily_returns)
-        mean = sum(daily_returns) / n
-        # 样本方差（贝塞尔修正，除以 n-1）
-        variance = sum((r - mean) ** 2 for r in daily_returns) / (n - 1)
-        std_dev = math.sqrt(variance)
-        annualized_vol = round(std_dev * _ANNUALIZE_FACTOR * 100, 4)
-
         return FactorValue(
             factor_id=self.spec.factor_id,
-            numeric=annualized_vol,
-            payload={"sample_count": n, "std_daily": round(std_dev, 6)},
+            numeric=round(std_dev * _ANNUALIZE_FACTOR * 100, 4),
+            payload={
+                "period": self._period,
+                "sample_count": len(returns),
+                "std_daily": round(std_dev, 6),
+            },
         )
 
 
@@ -177,7 +266,7 @@ class ReturnStdComputer:
     """N 日日收益率标准差因子计算器（不年化）。
 
     计算公式：std(近 N 个日收益率, ddof=1) × 100。
-    与 Volatility20dComputer 的区别：不做 sqrt(252) 年化，口径对应
+    与 VolatilityComputer 的区别：不做 sqrt(252) 年化，口径对应
     Tushare 因子库的 return_std_* 系列，可直接用于横截面比较。
     需要 N+1 个连续收盘价才能算出 N 个日收益率。
     实现 BatchFactorComputer 协议，支持回测批量预计算。
@@ -194,8 +283,7 @@ class ReturnStdComputer:
             period: 回望交易日数，如 21/42/63/126/252。
         """
         self._period = period
-        # 自然日 ≈ 交易日 × 1.5 加安全余量
-        self._lookback = max(15, int(period * 1.5) + 5)
+        self._lookback = period_lookback_days(period)
 
     @property
     def spec(self) -> FactorSpec:
@@ -280,22 +368,18 @@ class ReturnStdComputer:
         Returns:
             FactorValue，日收益率样本不足 2 个时 numeric 为 None。
         """
-        daily_returns = [
-            (window[i] - window[i - 1]) / window[i - 1]
-            for i in range(1, len(window))
-            if window[i - 1] > 0
-        ]
-        std_dev = _sample_std(daily_returns)
+        returns = daily_returns(window)
+        std_dev = _sample_std(returns)
         if std_dev is None:
             return FactorValue(
                 factor_id=self.spec.factor_id,
                 numeric=None,
-                payload={"sample_count": len(daily_returns), "required": 2},
+                payload={"period": self._period, "sample_count": len(returns), "required": 2},
             )
         return FactorValue(
             factor_id=self.spec.factor_id,
             numeric=round(std_dev * 100, 4),
-            payload={"sample_count": len(daily_returns)},
+            payload={"period": self._period, "sample_count": len(returns)},
         )
 
 
@@ -319,8 +403,7 @@ class HighLowRangeComputer:
             period: 回望交易日数，如 21/42/63/126/252。
         """
         self._period = period
-        # 自然日 ≈ 交易日 × 1.5 加安全余量
-        self._lookback = max(15, int(period * 1.5) + 5)
+        self._lookback = period_lookback_days(period)
 
     @property
     def spec(self) -> FactorSpec:
@@ -421,86 +504,3 @@ class HighLowRangeComputer:
             },
         )
 
-
-class Volatility17dComputer:
-    """17 日年化波动率因子计算器。
-
-    计算公式：std(近 17 个日收益率序列) × sqrt(252) × 100。
-    使用样本标准差（除以 n-1，贝塞尔修正），与金融实践一致。
-    需要至少 18 个连续收盘价才能算出 17 个日收益率。
-    结果单位为 %（年化标准差 × 100）。
-    """
-
-    @property
-    def spec(self) -> FactorSpec:
-        """返回 17 日年化波动率的因子元数据。"""
-        return FactorSpec(
-            factor_id="volatility_17d",
-            name="17日年化波动率",
-            category="volatility",
-            version="1.0.0",
-            description=(
-                "指数近 17 个交易日日收益率的年化标准差（%）。"
-                "公式：std(17 个日收益率, ddof=1) × sqrt(252) × 100。需 18 个连续收盘价。"
-            ),
-            required_data=["index_bars"],
-            lookback_days=35,
-        )
-
-    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 17 日年化波动率。
-
-        Args:
-            index_code: 指数代码。
-            trade_date: 目标交易日。
-            ctx: FactorContext。
-
-        Returns:
-            FactorValue，需 18 个收盘价，不足时 numeric 为 None。
-            payload 包含 sample_count（实际使用的日收益率数量）。
-        """
-        # 收集含 trade_date 在内的历史收盘价，按日期升序排列
-        closes = sorted(
-            [
-                (dt, v.close_price)
-                for (code, dt), v in ctx.index_bars.items()
-                if code == index_code and dt <= trade_date and v.close_price is not None
-            ],
-            key=lambda x: x[0],
-        )
-
-        # 至少需要 18 个收盘价才能算出 17 个日收益率
-        if len(closes) < 18:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"sample_count": max(0, len(closes) - 1), "required": 17},
-            )
-
-        # 取最近 18 个收盘价，计算 17 个日收益率
-        recent_closes = [p for _, p in closes[-18:]]
-        daily_returns = [
-            (recent_closes[i] - recent_closes[i - 1]) / recent_closes[i - 1]
-            for i in range(1, len(recent_closes))
-            if recent_closes[i - 1] > 0
-        ]
-
-        if len(daily_returns) < 2:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"sample_count": len(daily_returns), "required": 2},
-            )
-
-        n = len(daily_returns)
-        mean = sum(daily_returns) / n
-        # 样本方差（贝塞尔修正，除以 n-1）
-        variance = sum((r - mean) ** 2 for r in daily_returns) / (n - 1)
-        std_dev = math.sqrt(variance)
-        annualized_vol = round(std_dev * _ANNUALIZE_FACTOR * 100, 4)
-
-        return FactorValue(
-            factor_id=self.spec.factor_id,
-            numeric=annualized_vol,
-            payload={"sample_count": n, "std_daily": round(std_dev, 6)},
-        )

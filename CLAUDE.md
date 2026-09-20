@@ -118,7 +118,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
   - `common/` — `bar_metrics.py` (BAR computation), `numeric.py`（NaN/Inf 和价格字段容错）、`enums.py` (SignalLevel, RunStatus, RunType, FactorCategory, BacktestStatus), `values.py` (DateRange), `constants.py`（信号等级阈值和标签常量）
   - `strategies/` — `models.py` (StrategyContextData, StrategyResult, TimingSignal, AssetRanking, AllocationPlan dataclasses)
   - `research/` — 研究评估领域规则（绩效指标、walk-forward 窗口切分）
-- **`factors/`** — 单因子现算层：`base.py`（FactorSpec/FactorContext/FactorValue/FactorComputer Protocol）、`templates.py`（FactorTemplate/ParameterSpec：参数模式与规范化）、`catalog.py`（FactorTemplateRegistry：模板目录与「别名 → 模板 + 参数」解析）、`compute.py`（FactorComputeService：按模板实例从原始数据现算，不读写任何因子值表）、`evaluation.py`（IC/IR 分析 + 因子相关性矩阵）、`normalization.py`（zscore/rank/minmax/winsorize/MAD 横截面标准化）、`builtins/`（39 个计算器类，登记为 40 个模板）。**所有因子基于指数数据计算**。**架构原则：因子层只使用指数数据**。
+- **`factors/`** — 单因子现算层：`base.py`（FactorSpec/FactorContext/FactorValue/FactorComputer Protocol + 交易日→自然日回望折算）、`templates.py`（FactorTemplate/ParameterSpec：参数模式与规范化）、`catalog.py`（FactorTemplateRegistry：模板目录与「别名 → 模板 + 参数」解析）、`compute.py`（FactorComputeService：按模板实例从原始数据现算，不读写任何因子值表）、`evaluation.py`（IC/IR 分析 + 因子相关性矩阵）、`normalization.py`（zscore/rank/minmax/winsorize/MAD 横截面标准化）、`builtins/`（32 个计算器类，一一对应 32 个模板）。**所有因子基于指数数据计算**。**架构原则：因子层只使用指数数据**。
 - **`config/`** — Pydantic settings loaded from `.env`
 - **`schemas/`** — 10 个 Pydantic schema 文件：`factor.py`、`market_data.py`、`pagination.py`、`run.py`、`signal.py`、`strategy.py`、`system.py`、`types.py`、`backtest.py`、`__init__.py`
 
@@ -140,7 +140,7 @@ HTTP → api/routers/ → services/ → engine/ (strategy execution pipeline)
 
 有 `portfolio` 配置 → 输出仓位（回测要求策略必须配置 portfolio 模块）。
 
-内置 transform 函数（在 `engine/score.py` 的 `_TRANSFORM_REGISTRY` 中注册）：`invert_percentile`、`momentum_score`、`volume_score`、`trend_score`、`clamp_0_100`。
+内置 transform 函数（注册在 `engine/transforms.py` 的 `_TRANSFORM_REGISTRY`，`engine/score.py` 仅转发导入）：`invert_percentile`、`momentum_score`、`volume_score`、`trend_score`、`clamp_0_100`、`erp_score`、`drawdown_score`、`rsrs_score`。
 
 新建策略只需 JSON 配置，通过 `POST /strategies` 创建，存储在 `strategy_config` 表。
 
@@ -197,7 +197,7 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 
 **Strategy Engine**: `engine/` 包实现组件化策略执行管线。策略通过 `strategy_config` 表的 JSON 配置驱动，`StrategyConfigService` 管理 CRUD，`StrategyEngine` 执行管线。`FactorProvider` 桥接因子层与引擎层，`ContextBuilder` 统一构建实时和回测上下文。`BacktestService` 和 `StrategyExecutionService` 统一使用引擎执行。
 
-**因子系统**: 40 个因子模板（39 个计算器类），通过 `FactorTemplateRegistry` 登记，`FactorComputeService` 按「模板 + 规范化参数」现算。首批可配模板 5 个（`sma`/`return`/`return_std`/`rsi`/`atr`，声明 `parameter_schema` 与参数化回望窗口），其余为零参数模板（沿用旧因子 ID）。**因子值不落库**：实时分配、因子详情/IC/相关性、回测、稳健性扫描一律按当次参数从原始数据现算。策略用 `factor_aliases` 声明「别名 → 模板 + 参数」，未声明的引用按模板 ID 与默认参数解释。`normalization.py` 提供 zscore/rank/minmax/winsorize/MAD 横截面标准化。`evaluation.py` 提供 IC/IR 分析和因子相关性矩阵（现算结果派生）。
+**因子系统**: 32 个因子模板（32 个计算器类，一一对应），通过 `FactorTemplateRegistry` 登记，`FactorComputeService` 按「模板 + 规范化参数」现算。同一计算逻辑只登记一个模板：周期/窗口/比例等可调数值一律声明为 `parameter_schema`（22 个模板可调参），只有确实不含可调数值的模板才零参数（如 `close_price`/`pe_percentile`/`erp`/`index_diffusion_ratio`/`rrg_industry_match_score`）。**因子值不落库**：实时分配、因子详情/IC/相关性、回测、稳健性扫描一律按当次参数从原始数据现算。策略用 `factor_aliases` 声明「别名 → 模板 + 参数」，未声明的引用按模板 ID 与默认参数解释。`normalization.py` 提供 zscore/rank/minmax/winsorize/MAD 横截面标准化。`evaluation.py` 提供 IC/IR 分析和因子相关性矩阵（现算结果派生）。
 
 **Backtesting**: `BacktestService` 使用统一 `_run_backtest_loop`。集成 `FactorProvider` 预计算因子、`ContextBuilder` 构建上下文、专业绩效指标（`metrics.py`）、基准对比（`benchmark.py`）、交易成本模型（佣金+滑点）。支持调仓频率控制和换手率计算。回测仅支持配置模式（策略需配置 portfolio 模块）。
 
@@ -227,11 +227,11 @@ Services fully wired to PostgreSQL. Each data type has exactly **one** source: I
 - **Backend GET endpoints never return 500**: External API failures are caught/logged, returning `[]`. A 200 OK with empty array can mean either "no data yet" or "upstream error".
 - **AkShare API instability**: Upstream network errors (ConnectionResetError, AttributeError) are common. Tests use `_retry_fetch()` with 3 attempts. Frontend pages catch errors silently and show "暂无数据".
 - **因子值现算与同参去重**: `FactorComputeService.compute_matrix()` 以「模板 ID + 规范化参数」为去重键归并实例，同一模板同参数的多个别名只构建一个计算器、只算一次，结果再按实例 ID 展开。`asset_factors` 的键就是策略里的引用名，所以别名与模板 ID 对引擎完全等价。
-- **`main.py` circular import via `factor_registry`**: `api/deps.py::get_factor_registry()` and `infra/scheduler/__init__.py` both import `factor_registry` from `main.py` using deferred `from quant_etf_api.main import factor_registry` inside the function body — never at module level, or a circular import will occur.
-- **`FactorRow` (schemas/signal.py) is reused for factor API responses** — no separate factor value schema exists. `schemas/factor.py` only defines `FactorSpecResponse`.
+- **`main.py` circular import via `factor_template_registry`**: `api/deps.py::get_factor_registry()` imports `factor_template_registry` from `main.py` using a deferred `from quant_etf_api.main import factor_template_registry` inside the function body — never at module level, or a circular import will occur.
+- **`FactorRow` (schemas/signal.py) is reused for factor API responses** — `schemas/factor.py` 只额外定义模板元数据与横截面/IC 响应；因子值行本身仍复用 `FactorRow`（字段为 `factor_id` + `params`，不携带 `strategy_id`）。
 - **`from __future__ import annotations` + `dict[str, Any]` requires explicit `from typing import Any`**: When a file has `from __future__ import annotations`, ruff (F821) treats `Any` as undefined even though it's only used in stringified type hints. Always add `from typing import Any` alongside the future import when using `dict[str, Any]` or similar generic types.
 - **Ruff on Windows**: Installed at `.venv/Scripts/ruff.exe` (inside the project venv, not globally). Use `.venv/Scripts/ruff.exe check .` from `apps/api`.
-- **Engine transform 函数**: 内置变换函数在 `engine/score.py` 的 `_TRANSFORM_REGISTRY` 中注册。新增 transform 只需在该注册表中添加。
+- **Engine transform 函数**: 内置变换函数在 `engine/transforms.py` 的 `_TRANSFORM_REGISTRY` 中注册（`engine/score.py` 只做转发导入保持既有引用可用）。新增 transform 只需在该注册表中添加。
 - **FactorProvider 依赖注入**: `FactorProvider` 需要 `db: Session` 与 `registry: FactorTemplateRegistry`（两者齐备才能现算）。`BacktestService` 在 `__init__` 中取进程级单例模板注册表并注入 `FactorProvider`/`ContextBuilder`。
 - **回测仅支持配置模式**: 策略必须配置 `portfolio` 模块，`create_backtest` 会校验并拒绝无 portfolio 的策略。`backtest_mode` 和 `weighting` 字段已移除。
 - **回测日收益基准（benchmark_return）和换手率（turnover）**: 存储在 `backtest_daily_result` 表中（migration 0011），前端 `BacktestDailyResult` 接口包含这两个可选字段。
@@ -262,8 +262,8 @@ Key rules (details in the doc):
 - Every TypeScript function must have a Chinese JSDoc comment
 - When refactoring, **update** existing comments — never delete them
 - No `any` types in TypeScript; use semantic HTTP status codes in routers
-- **FactorSpec.lookback_days**: 新增因子时必须设置合理的 `lookback_days`（自然日），`FactorService._load_context()` 取所有因子的最大值。参考：5d→15, 20d→40, 60d→90, 估值百分位→730（2年），技术指标→period×1.5+5。
-- **volume_ratio_20d 返回值变更**: 数据不足时返回 `None`（原为 1.0），区分"无数据"与"量比恰好为 1"。`calc_volume_ratio_20d()` 返回 `float | None`，`calc_5d_return()` 仍返回 `float`（默认 0.0）。
+- **FactorSpec.lookback_days 与 `period_lookback_days()`**: 新增因子时必须设置合理的 `lookback_days`（自然日）。单周期技术指标统一用 `factors.base.period_lookback_days(period)`（交易日 × 1.6 + 10，至少 15 天）；月线类用 `monthly_lookback_days`（每月 60 天，至少 365）、RSRS 用 `rsrs_lookback_days(n, m)`、低振幅动量用 `low_amplitude_lookback_days`（1.75 倍）。**参数上界必须保证任一合法参数组合的回望 ≤ 注册表默认口径最大值（730 天）**，否则回测固定预热窗口下长窗口因子会静默算成 None（`test_no_legal_params_exceed_backtest_warmup` 守住该不变量）。
+- **量比返回值语义**: 数据不足时返回 `None`（而非 1.0），区分"无数据"与"量比恰好为 1"。`calc_volume_ratio(code, trade_date, all_bars, period=20)` 返回 `float | None`，`calc_5d_return()` 仍返回 `float`（默认 0.0）。
 - **BenchmarkIndexModel.is_active**: `ContextBuilder._build_live()` 只查询 `is_active=True` 的指数（实时只能用当日活跃集合）；`BacktestService._resolve_index_universe()` 用 point-in-time 口径（见下条）。新增指数默认 `is_active=True`。
 - **TradingCalendar 缓存**: 首次调用时从 AkShare 加载（`tool_trade_date_hist_sina()`），TTL=1 天。`IngestService._drop_non_trading_bars`（剔除假期伪行情）与 `DataManagementService` 的缺口检查（`_latest_trading_day`）已接入，不再用 `weekday()>=5`。
 - **rebalance.py 交易日历对齐**: `DefaultRebalanceScheduler` 接受 `TradingCalendar` 实例，weekly/biweekly/monthly 调仓的对齐语义是"**目标日（含）之后的第一个交易日**"：同周顺延、跨周顺延（目标周五休市 → 下周一）、跨月顺延（月末休市 → 下月首个交易日）都成立；`day_of_month` 超出当月天数时按当月最后一日处理；传入非交易日一律返回 False；日历不可用时异常上抛（不降级为按星期比较）。双周按 ISO 周序奇偶（`week_parity`）判定命中周期，未命中周期的目标日即使休市也不会在下一个周期补触发。`last_rebalance_date` 参数当前不参与判定。
@@ -281,11 +281,10 @@ Key rules (details in the doc):
 - **StrategyConfigForm 与 engine/config.py 的 StrategyConfig 同步**: 引擎新增配置模块时，需同步更新 `StrategyConfigForm.vue`（表单）、`StrategyDetailPage.vue`（详情展示）。目前已覆盖全部 7 个模块（score/timing/filters/rank/portfolio/risk/rebalance）+ 资产范围 index_codes。
 - **`StrategySummary` 已有 `index_codes` 顶层字段**: 列表 API 直接返回 `index_codes`，前端无需额外调用 `fetchStrategyDetail()`。`StrategyConfigForm.vue` 读取 `modelValue.index_codes`（config_json 内），`StrategyDetailPage.vue` 和 `BacktestCreatePage.vue` 读取顶层 `store.current?.index_codes`。
 - **index_daily_bar OHLC 字段**: `IndexDailyBarModel` 有 `open_price`、`high_price`、`low_price`、`close_price` 字段，技术指标因子（ATR/Donchian）通过 `ctx.index_bars` 直接访问。
-- **`get_default_factor_registry()` vs `build_default_factor_registry()`**: 进程级单例通过 `get_default_factor_registry()` 获取（首次构建后缓存），避免 `BacktestService` 每请求重建。只有 `cli.py` 和 `registry.py` 内部使用 `build_default_factor_registry()`。
-- **`BatchFactorComputer` Protocol**: 定义在 `factors/base.py`，回测因子预计算时优先调用 `compute_batch()`（一次遍历 bar 数据覆盖所有日期）。已在 momentum.py（return_5d/20d/60d/120d）实现。新增回测频繁使用的因子时建议实现此协议。
-- **`validate_config` 是 `@staticmethod`**: `StrategyConfigService.validate_config()` 不依赖 DB 会话，直接静态调用无需实例化服务。
-- **AI 分析双调度器**: 数据摄取+因子计算在 `schedule_time`（默认 17:30）执行，AI 舆情分析在 `ai_schedule_time`（默认 23:30）独立执行。两个调度器通过 `main.py` lifespan 分别启动，互不影响。`ai_analysis_enabled=False` 时 AI 调度器不启动。**所有数据源的定时摄取统一走全局数据同步调度器**（`data_sync_all` → `DataManagementService.sync_latest`，覆盖指数/宏观/行业/个股等全部受管数据集）：原独立的行业摄取调度器（`get_industry_scheduler` / `IndustryIngestScheduler`）与行业日频摄取链（`handle_industry_daily_ingest`、`IndustryDataService.run_daily_ingest()`）已删除，行业数据按 `industry_universe`/`industry_daily_bar`/`industry_membership` 数据集由全局同步增量补拉。行业与个股的**单对象手动入口**（`industry_universe_refresh`/`industry_bars_refresh`/`industry_quality_check`/`industry_data_fill`/`industry_data_rebuild`、`stock_quality_check`/`stock_data_fill`/`stock_data_rebuild`）与指数/宏观旧入口一样已全部删除，统一由数据管理操作承担。
-- **AI 因子在策略引擎中的行为**: AI 因子仅在已有 `daily_sentiment_aggregate` 数据的交易日有效。缺失数据时返回 `FactorValue(numeric=None)`，评分引擎默认 `missing_factor_strategy="ignore"` 会静默跳过。不要在 filter 规则中使用 AI 因子（None 会导致 filter 失败=资产被排除）。AI 因子专用 transform 函数：`sentiment_score`（[-1,1]→[0,100]）、`attention_score`（裁剪到 [0,100]）。
+- **`get_factor_template_registry()` vs `build_default_registry()`**: 进程级单例通过 `get_factor_template_registry()` 获取（首次构建后缓存），避免 `BacktestService` 每请求重建；`build_default_registry()` 每次返回全新注册表，供 CLI、模板单测与需要独立实例的场景使用。
+- **`BatchFactorComputer` Protocol**: 定义在 `factors/base.py`，回测因子预计算时优先调用 `compute_batch()`（一次遍历 bar 数据覆盖所有日期）。已实现者：均线/收益率/波动率/区间宽度/回撤/ATR/Donchian/RSI/量比（成交量类仅逐点）/RSRS/日内位置/低振幅/市场宽度/成交额量比。新增回测频繁使用的因子时建议实现此协议。
+- **`validate_config` 依赖 DB，`_structural_validation` 才是静态的**: `StrategyConfigService.validate_config()` / `validate_parsed()` 是实例方法，用 `self._db` 查 `factor_definition` 的 active 集合，并取进程级模板注册表；只有 `_structural_validation()` 是无状态的 `@staticmethod`。未知因子引用、别名指向未注册/停用模板、参数越界、未知变换函数都进 errors 快速失败。
+- **AI 分析双调度器**: 数据摄取在 `schedule_time`（默认 17:30）执行，AI 舆情分析在 `ai_schedule_time`（默认 23:30）独立执行。两个调度器通过 `main.py` lifespan 分别启动，互不影响。`ai_analysis_enabled=False` 时 AI 调度器不启动。**所有数据源的定时摄取统一走全局数据同步调度器**（`data_sync_all` → `DataManagementService.sync_latest`，覆盖指数/宏观/行业/个股等全部受管数据集）：原独立的行业摄取调度器（`get_industry_scheduler` / `IndustryIngestScheduler`）与行业日频摄取链（`handle_industry_daily_ingest`、`IndustryDataService.run_daily_ingest()`）已删除，行业数据按 `industry_universe`/`industry_daily_bar`/`industry_membership` 数据集由全局同步增量补拉。数据同步不再串联因子计算任务：因子值按请求/按研究任务现算。行业与个股的**单对象手动入口**（`industry_universe_refresh`/`industry_bars_refresh`/`industry_quality_check`/`industry_data_fill`/`industry_data_rebuild`、`stock_quality_check`/`stock_data_fill`/`stock_data_rebuild`）与指数/宏观旧入口一样已全部删除，统一由数据管理操作承担。
 - **关键词标签可配置化**: `keyword_tag_config` 表存储关键词→资产标签映射，替代硬编码的 `classifier._KEYWORD_TAG_MAP`。`TagClassifier._classify_via_keyword()` 优先使用 DB 映射，回退到静态默认值。CRUD 端点: `GET/POST/PUT/DELETE /keyword-tags`。
 - **市场综合研判**: `market_synthesis` 表存储每日 AI 生成的市场概况（200-300 字中文研判）。在 `AIFactorService.run_full_pipeline()` 步骤 7 自动生成，LLM 不可用时静默跳过。API: `GET /ai-factors/synthesis/{date}`。
-- **AI 因子注册**: 6 个 AI 因子（sentiment_1d/5d/divergence, attention_1d/5d, topic_momentum）通过 `register_ai_factors()` 在 `build_default_factor_registry()` 中注册，可像内置因子一样在策略配置中引用。
+- **AI 因子不在策略引擎中**: AI 因子（ai_sentiment_*/ai_attention_*/ai_topic_momentum）已从策略引擎移除，策略配置引用它们会被校验拒绝；`daily_sentiment_aggregate` 只服务于 AI 舆情分析展示页（新闻采集/情绪聚合/市场研判），不再作为策略因子输入。

@@ -400,11 +400,6 @@ import { useStrategyStore } from '../stores/strategies'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
 
-/** 获取因子指标描述的快捷方法 */
-function fh(key: string): string {
-  return getIndicator('factors', key)?.description ?? ''
-}
-
 const systemStatus = ref<SystemStatusResponse | null>(null)
 const statusLoading = ref(false)
 const error = ref<string | null>(null)
