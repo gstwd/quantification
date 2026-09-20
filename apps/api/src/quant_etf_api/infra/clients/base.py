@@ -33,7 +33,7 @@ class BaseDataClient(ABC):
     def source_name(self) -> str:
         """数据源唯一标识，如 'tencent'、'eastmoney'、'akshare_index'。
 
-        用于日志标识和 source_payload_log 表中的 source_name 字段。
+        用于日志标识以及数据管理运行记录中的来源字段。
         """
         ...
 

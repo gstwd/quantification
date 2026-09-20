@@ -34,6 +34,8 @@
 | 0026 | `0026_backtest_daily_missing_bar` | 回测日结果缺数计数 |
 | 0027 | `0027_remove_etf` | 删除全部 ETF 表，research_run_item 改 index_code |
 | — | `ac0cbcadbda1_add_column_comments` | 为已有表列添加中文注释 |
+| 0056 | `0056_parameterized_factor_templates` | 删除因子值缓存表，因子模板改为参数化现算 |
+| 0057 | `0057_remove_unused_legacy_tables` | 删除未接入运行时的原始载荷日志和信号定义表 |
 
 ## 新建迁移
 

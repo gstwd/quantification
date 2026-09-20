@@ -89,33 +89,6 @@ class IndexDailyBarModel(Base):
     )
 
 
-class SourcePayloadLogModel(Base):
-    __tablename__ = "source_payload_log"
-
-    id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True, comment="自增主键"
-    )
-    source_name: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="数据源名称，如 akshare、akshare_index"
-    )
-    resource_type: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="资源类型，如 daily_bar、share_snapshot"
-    )
-    resource_key: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="资源标识，如指数代码"
-    )
-    trade_date: Mapped[Date | None] = mapped_column(
-        Date, comment="对应交易日期，NULL 表示非日频数据"
-    )
-    request_meta: Mapped[dict | None] = mapped_column(JSON, comment="请求元数据，如 URL、参数等")
-    response_payload: Mapped[dict | None] = mapped_column(
-        JSON, comment="原始响应数据，用于调试和审计"
-    )
-    fetched_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, comment="数据拉取时间（UTC）"
-    )
-
-
 class FactorDefinitionModel(Base):
     __tablename__ = "factor_definition"
     __table_args__ = (
@@ -228,20 +201,6 @@ class IndexMemberEventModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow, comment="最后更新时间（UTC）"
     )
-
-
-class SignalDefinitionModel(Base):
-    __tablename__ = "signal_definition"
-
-    signal_id: Mapped[str] = mapped_column(
-        String(64), primary_key=True, comment="信号唯一标识，如 volume_breakout_signal"
-    )
-    strategy_id: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="产生该信号的策略 ID"
-    )
-    name: Mapped[str] = mapped_column(String(128), nullable=False, comment="信号中文名称")
-    description: Mapped[str] = mapped_column(Text, nullable=False, comment="信号含义和使用说明")
-    version: Mapped[str] = mapped_column(String(32), default="1.0.0", comment="信号版本号")
 
 
 class IndexSignalModel(Base):

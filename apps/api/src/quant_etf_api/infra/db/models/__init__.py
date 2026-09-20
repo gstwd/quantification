@@ -14,8 +14,6 @@ from .core import (
     MacroIndicatorModel,
     ResearchRunItemModel,
     ResearchRunModel,
-    SignalDefinitionModel,
-    SourcePayloadLogModel,
     StrategyConfigModel,
     TradingCalendarModel,
 )
@@ -42,8 +40,6 @@ __all__ = [
     "MacroIndicatorModel",
     "ResearchRunItemModel",
     "ResearchRunModel",
-    "SignalDefinitionModel",
-    "SourcePayloadLogModel",
     "StrategyConfigModel",
     "TradingCalendarModel",
     "IndustryDailyBarModel",
