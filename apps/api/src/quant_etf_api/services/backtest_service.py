@@ -140,19 +140,24 @@ class BacktestRunCaches:
     """同一批变体共享的行情快照与因子缓存（D-1 研究批量评估）。
 
     研究批量评估会在同一窗口上跑几十个变体（参数邻域 / 消融 / 池扰动）。
-    这些变体的行情、估值与宏观数据完全相同，因子值在没有新增所需因子时
-    也完全相同。默认每次 ``_run_backtest_loop`` 都会重新查库并重算，
+    这些变体的行情、估值与宏观数据完全相同；因子值只在"所需因子的计算实例"
+    相同时才相同。默认每次 ``_run_backtest_loop`` 都会重新查库并重算，
     批量场景下这部分开销会乘以变体数；把两者按窗口键缓存起来即可把
     "批量探索"从数小时压到分钟级，同时因为复用同一条执行路径，
     指标口径与平台回测严格一致。
 
     Attributes:
         data: 窗口键 → ``_prepare_backtest_data`` 结果元组。
-        factors: (窗口键, 因子集合键) → 逐日预计算因子值。
+        factors: (窗口键, 计算实例指纹, 参与计算的指数集合) → 逐日预计算因子值。
+            指纹来自 :meth:`FactorProvider.instance_fingerprint`（模板 ID +
+            规范化参数 + 模板版本），**不能只用因子引用名**——参数扰动下
+            引用名不变而因子值不同。
     """
 
     data: dict[str, tuple] = field(default_factory=dict)
-    factors: dict[tuple[str, str], dict] = field(default_factory=dict)
+    factors: dict[tuple[str, tuple[tuple[str, str, str], ...], str], dict] = field(
+        default_factory=dict
+    )
 
 
 def _window_cache_key(row: BacktestRunModel) -> str:
@@ -1308,11 +1313,17 @@ class BacktestService:
                     all_valuation.update(proxy_val)
 
         # 预计算所有因子值（含择时代理指数）；批量评估时按
-        # （窗口, 所需因子, 参与计算的指数）复用，避免每个变体重算一遍
+        # （窗口, 所需因子的计算实例, 参与计算的指数）复用，避免每个变体重算一遍。
+        # 缓存键必须携带模板 ID + 规范化参数 + 模板版本：参数高原扫描只在参数上
+        # 做扰动，引用名（别名）不变而因子值不同，只用引用名当键会让所有扰动变体
+        # 命中基线那份因子值，表现为"改了参数但指标一字不差"。
         required_factor_ids = FactorProvider.collect_required_factor_ids(config)
+        fingerprint = self._factor_provider.instance_fingerprint(config)
         factor_cache_key = (
             _window_cache_key(row),
-            ",".join(sorted(required_factor_ids)),
+            fingerprint
+            if fingerprint
+            else tuple((ref, ref, "") for ref in sorted(required_factor_ids)),
             ",".join(sorted(factor_index_codes)),
         )
         precomputed = caches.factors.get(factor_cache_key) if caches is not None else None

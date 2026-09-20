@@ -121,6 +121,41 @@ class FactorProvider:
             self.collect_required_factor_ids(config), config.factor_aliases
         )
 
+    def instance_fingerprint(self, config: "StrategyConfig") -> tuple[tuple[str, str, str], ...]:
+        """给出「引用名 → 计算实例」的规范化指纹，用于跨变体缓存分区。
+
+        仅用引用名（如 ``return_17d``）无法区分计算语义：同一个别名把
+        ``params.period`` 从 17 改成 10 后引用名不变，但因子值完全不同。
+        参数高原扫描恰好只在参数维度上做扰动，因此缓存键必须携带
+        「模板 ID + 规范化参数 + 模板版本」，否则所有扰动变体会命中同一份
+        因子值，表现为"改了参数但指标一字不差"。
+
+        指纹与 :func:`FactorComputeService.compute_matrix` 的同参去重键同源
+        （模板 ID + 规范化参数），并额外带上模板版本：模板升级会改变计算
+        语义，即使参数相同也不能复用旧值。
+
+        Args:
+            config: 策略配置。
+
+        Returns:
+            按引用名排序的 ``(引用名, 模板ID, 规范化参数+版本)`` 元组；
+            注册表缺失（未注入）时返回空元组，调用方需退化为只有引用名的键。
+        """
+        if self._registry is None:
+            return ()
+        instances = self.resolve_instances(config)
+        return tuple(
+            sorted(
+                (
+                    ref,
+                    instance.template.template_id,
+                    f"{instance.template.normalize_text(instance.params)}@"
+                    f"{instance.template.version}",
+                )
+                for ref, instance in instances.items()
+            )
+        )
+
     def load_asset_factor_matrix(
         self,
         config: "StrategyConfig",

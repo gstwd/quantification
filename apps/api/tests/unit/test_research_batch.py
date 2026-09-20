@@ -25,6 +25,8 @@ from quant_etf_api.engine.config import (
     ScoreConfig,
     StrategyConfig,
 )
+from quant_etf_api.engine.factor_provider import FactorProvider
+from quant_etf_api.factors.catalog import get_factor_template_registry
 from quant_etf_api.infra.db.models.core import BacktestRunModel
 from quant_etf_api.services.backtest_service import BacktestService
 from quant_etf_api.services.research_batch_service import (
@@ -293,6 +295,58 @@ class TestPersistFalse:
 
         # 第二个变体命中因子缓存，不再重算
         assert svc._factor_provider.precompute_backtest_factors.call_count == first_calls
+
+    def test_factor_cache_separates_different_parameters(self) -> None:
+        """参数不同的变体不得复用同一份因子缓存（参数高原扫描的正确性前提）。
+
+        历史缺陷：因子缓存键只含"所需的因子引用名"。参数扰动（如把
+        ``return_17d.params.period`` 从 17 改成 10）不改变引用名，于是所有
+        扰动变体都命中基线那份因子值，扫描结果表现为"改了参数但指标一字不差"，
+        "参数高原"结论完全失真。缓存键必须携带计算实例（模板 ID + 规范化参数）。
+        """
+        from quant_etf_api.engine.config import FactorAliasConfig
+        from quant_etf_api.services.backtest_service import BacktestRunCaches
+
+        svc, ctx = _stub_loop_service([{"000300": 1.0}, {"000300": 1.0}, {"000300": 1.0}])
+        svc._factor_provider = FactorProvider(
+            db=MagicMock(), registry=get_factor_template_registry()
+        )
+        caches = BacktestRunCaches()
+
+        def _variant(period: int) -> StrategyConfig:
+            """构造只改 return 周期的最小配置。"""
+            return StrategyConfig(
+                strategy_id="t_research",
+                display_name="t_research",
+                index_codes=["000300"],
+                factor_aliases={"mom": FactorAliasConfig(template_id="return", params={"period": period})},
+                score=ScoreConfig(factors={"mom": 1.0}),
+                rank=RankConfig(top_n=1),
+                portfolio=PortfolioConfig(method="equal_weight"),
+                risk=RiskConfig(max_asset_weight=1.0),
+            )
+
+        fingerprints = [
+            svc._factor_provider.instance_fingerprint(_variant(period)) for period in (17, 10)
+        ]
+        assert fingerprints[0] != fingerprints[1], "不同参数的实例指纹必须不同"
+        assert fingerprints[0] == svc._factor_provider.instance_fingerprint(_variant(17)), (
+            "同参数的实例指纹必须稳定（保证同参变体仍能命中缓存）"
+        )
+
+        svc._factor_provider.precompute_backtest_factors = MagicMock(
+            return_value={d: {("000300", "mom"): 1.0} for d in DATES}
+        )
+        svc._run_backtest_loop("bt-1", ctx["row"], _variant(17), persist=False, caches=caches)
+        assert svc._factor_provider.precompute_backtest_factors.call_count == 1
+
+        # 同参数的第二个变体仍应命中缓存
+        svc._run_backtest_loop("bt-2", ctx["row"], _variant(17), persist=False, caches=caches)
+        assert svc._factor_provider.precompute_backtest_factors.call_count == 1
+
+        # 参数不同的变体必须重算，而不是复用上一份因子值
+        svc._run_backtest_loop("bt-3", ctx["row"], _variant(10), persist=False, caches=caches)
+        assert svc._factor_provider.precompute_backtest_factors.call_count == 2
 
 
 class TestDeltaBlock:
