@@ -1,151 +1,52 @@
-# A股指数日频量化研究平台
+# A 股指数日频量化研究平台
 
-A-share index daily-frequency quantitative research platform — 后端 FastAPI + PostgreSQL，前端 Vue 3，策略以配置驱动方式接入。
+面向 A 股指数的日频研究、策略配置和历史回测系统。后端为 FastAPI + PostgreSQL，前端为 Vue 3；策略由 JSON 配置驱动，不提供交易执行、账户管理或 ETF 数据能力。
 
-> **系统范围说明：本系统仅研究 A 股指数（宽基/行业指数），不研究 ETF。** 系统不提供任何 ETF 数据源、ETF 数据表、ETF 接口或 ETF 前端页面。
+> 系统只以 `benchmark_index` 中由用户维护、且有实际 ETF 对应物的 A 股指数作为策略资产。申万行业与个股数据只可作为研究和指数级因子的内部输入，不能成为策略资产或回测标的。
 
----
+## 当前能力
 
-## 项目定位
+- 配置化策略引擎：择时、评分、过滤、排序、调仓、仓位分配和风险约束。
+- 参数化因子：32 个内置模板；策略可用 `factor_aliases` 将同一模板以不同参数重复引用。因子值按请求或任务从原始数据现算，不持久化。
+- 可审计回测：策略配置快照、交易日历来源、执行模型、候选池、换手和基准等口径均随结果保存。
+- 研究治理：研究期固定为 2016-01-01 至 2025-12-31，2026-01-01 起为验证期；稳健性扫描、优化会话与验证期消费留痕均受该边界约束。
+- 生命周期监控：LIVE/SUSPENDED/RETIRED 仅人工变更；系统提供健康诊断，不自动调参或自动升级策略。
+- 数据管理：非新闻外部数据通过统一数据管理入口、持久化任务队列和 `data_health_snapshot` 维护。
 
-| 维度 | 说明 |
-|------|------|
-| 资产范围 | 仅 A 股指数（宽基/行业指数），不涉及 ETF 与个股 |
-| 频率 | 日频，不做日内或实时 |
-| 用途 | 研究平台，不做交易执行、账户管理、实盘风控 |
-| 数据 | 通过公开 API（AkShare）抓取，统一存入 PostgreSQL |
-| 策略 | 多策略配置化，每个策略独立配置、独立运行 |
-| 前端 | Vue 3 研究工作台，展示指数信号、因子、运行记录 |
+## 架构
 
----
-
-## 目录结构
-
-```
-quantification/
-├── apps/
-│   ├── api/                    # FastAPI 后端
-│   │   ├── pyproject.toml      # Python 依赖与项目配置
-│   │   ├── alembic.ini         # 数据库迁移配置
-│   │   ├── alembic/            # 迁移脚本目录
-│   │   ├── .env.example        # 环境变量模板
-│   │   ├── src/quant_etf_api/  # 主包（历史命名保留）
-│   │   └── tests/              # 单元测试
-│   └── web/                    # Vue 3 前端
-│       ├── package.json
-│       └── src/
-│           ├── main.ts         # 应用入口
-│           ├── App.vue         # 根组件（含侧边栏导航）
-│           ├── router/         # Vue Router 路由配置
-│           ├── stores/         # Pinia 状态管理
-│           ├── api/            # Axios API 调用封装
-│           ├── pages/          # 页面组件
-│           ├── components/     # 可复用组件
-│           └── types/          # TypeScript 类型定义
-├── docs/                       # 文档
-└── deployment/                 # 部署脚本与配置
+```text
+HTTP → api/routers → services → engine
+                           ├→ factors        （模板解析与原始数据现算）
+                           ├→ domain         （纯业务规则）
+                           ├→ infra/db       （ORM 与 repositories）
+                           └→ infra/job_queue（持久化后台任务）
 ```
 
----
+策略管线为：
 
-## 后端架构
-
-### 技术栈
-
-| 库 | 版本约束 | 用途 |
-|----|---------|------|
-| **FastAPI** | `>=0.115` | Web 框架，自动生成 OpenAPI 文档 |
-| **Uvicorn** | `>=0.30` | ASGI 服务器 |
-| **SQLAlchemy 2** | `>=2.0` | ORM，定义数据库模型，执行查询 |
-| **psycopg 3** | `>=3.2` | PostgreSQL 驱动 |
-| **Alembic** | `>=1.13` | 数据库迁移工具 |
-| **Pydantic v2** | `>=2.8` | 数据验证与序列化 |
-| **pydantic-settings** | `>=2.4` | 从环境变量读取配置 |
-| **akshare** | `>=1.16` | A 股指数/宏观数据源 |
-
-### 分层说明
-
-```
-HTTP 请求
-    │
-    ▼
-api/routers/        ← 路由层：解析请求参数，调用 service，返回 schema
-    │
-    ▼
-services/           ← 业务逻辑层：编排数据摄取、策略执行、回测
-    │
-    ├── infra/db/       ← 数据库层：SQLAlchemy ORM 模型，repositories 封装查询
-    ├── infra/clients/  ← 外部 API 客户端：AkShare 指数/宏观
-    ├── infra/job_queue/← 统一后台任务队列（持久化 + 幂等去重）
-    │
-    ├── domain/         ← 领域层：纯业务规则、计算公式、值对象（无外部依赖）
-    ├── factors/        ← 因子层：单因子计算（全部基于指数数据）
-    └── engine/         ← 引擎层：组件化、配置驱动的策略执行管线
+```text
+[可选] Timing → Score → [可选] Filter → Rank → [可选] Portfolio → [可选] Risk
 ```
 
-**引擎管线：** `StrategyEngine.run(config, context)` 依次执行
-`[可选] Timing → Score → [可选] Filter → Rank → [可选] Portfolio → [可选] Risk`，
-资产主键统一为 `index_code`（指数代码）。
+回测中由 Rebalance 控制选股和风险调整的执行日；默认执行模型为 `t_plus_1_open`（T 日信号、T+1 开盘成交），也可显式选择 `t_plus_1_close`。不同执行模型的结果不可直接比较。
 
-### 数据库模型
+## 数据与因子
 
-核心表（迁移 0001–0027）：
+原始数据包括交易日历、指数日线/估值/成分、宏观、申万行业和个股基础数据。数据管理的质量结论只有一个来源：`data_health_snapshot`；首次部署应在“数据管理”页主动执行检查或同步。
 
-| 分组 | 表 |
-|------|------|
-| 参考 | `benchmark_index` |
-| 市场数据 | `index_daily_bar`、`index_valuation`、`macro_indicator`、`source_payload_log` |
-| 分析 | `factor_definition`、`index_factor_value`、`signal_definition`、`index_signal` |
-| 运行 | `research_run`、`research_run_item` |
-| 回测 | `backtest_run`、`backtest_daily_result`、`backtest_index_result`、`backtest_comparison` |
-| 策略 | `strategy_config` |
-| 任务队列 | `background_job` |
-| AI 舆情 | `news_item`、`ai_sentiment_result`、`daily_sentiment_aggregate`、`market_synthesis`、`keyword_tag_config` |
+`factor_definition` 是模板元数据目录，而非因子值表。每个模板声明版本、所需原始数据、默认参数、参数模式和回望窗口。运行时由 `FactorTemplateRegistry` 解析策略引用，`FactorComputeService` 按规范化参数批量计算；相同模板与参数在同一执行中只计算一次。
 
-迁移 `0027_remove_etf` 已删除全部 ETF 表（`etf_universe`、`etf_daily_bar`、`etf_daily_share`、`etf_factor_value`、`etf_signal`、`backtest_etf_result`）。
+## 主要接口与页面
 
-### API 路由
+所有 API 使用 `/api` 前缀，完整契约以运行中的 Swagger 为准：`http://localhost:8000/docs`。
 
-统一前缀 `/api`：
-
-| 路由文件 | 路径前缀 | 主要端点 |
-|---------|---------|---------|
-| `health.py` | `/api/health` | 健康检查 |
-| `system.py` | `/api/system` | 系统状态快照（数据概览、各表新鲜度、最近运行） |
-| `indexes.py` | `/api/indexes` | 基准指数 CRUD |
-| `market_data.py` | `/api/market-data` | 指数日线、估值、宏观指标 |
-| `strategies.py` | `/api/strategies` | 策略 CRUD、校验、配置模式决策 |
-| `factors.py` | `/api/factors` | 因子定义、IC/IR、相关性矩阵 |
-| `runs.py` | `/api/runs` | 运行记录与查询 |
-| `backtests.py` | `/api/backtests` | 回测与策略对比 |
-| `data_management.py` | `/api/data-management` | 数据集健康快照与同步/检查/修复/重拉 |
-| `ai_factors.py` | `/api/ai-factors` | AI 舆情分析 |
-| `keyword_tags.py` | `/api/keyword-tags` | 关键词标签映射 |
-
-访问 `http://localhost:8000/docs` 查看 Swagger UI。
-
----
-
-## 前端架构
-
-| 路径 | 页面组件 | 说明 |
-|------|---------|------|
-| `/` | `DashboardPage.vue` | 总览：指数数量、关注策略、AI 舆情、最近运行 |
-| `/indexes` | `IndexListPage.vue` | 指数列表（行情 + 估值快照） |
-| `/indexes/:indexCode` | `IndexDetailPage.vue` | 单只指数详情 |
-| `/strategies` | `StrategiesPage.vue` | 策略列表 |
-| `/strategies/:strategyId` | `StrategyDetailPage.vue` | 策略详情与决策调试 |
-| `/factors` | `FactorsPage.vue` | 因子列表 |
-| `/factors/:factorId` | `FactorDetailPage.vue` | 因子 IC/相关性/时间序列 |
-| `/ai-factors` | `AIFactorsPage.vue` | AI 舆情分析 |
-| `/keyword-tags` | `KeywordTagsPage.vue` | 关键词标签映射 |
-| `/runs` | `RunsPage.vue` | 运行记录 |
-| `/backtests` | `BacktestListPage.vue` 等 | 回测中心 |
-| `/macro` | `MacroPage.vue` | 宏观指标 |
-
-Pinia store：`strategies`、`signals`、`backtests`（只读数据页内联请求）。
-
----
+| 范围 | 页面与 API |
+| --- | --- |
+| 数据维护 | `/data-management`、`/indexes`、`/industries`、`/stocks`、`/macro` |
+| 策略与因子 | `/strategies`、`/factors`、`/lifecycle`、`/tools/rrg-lab` |
+| 回测与研究 | 页面 `/backtests`；API `/api/robustness`、`/api/queue`；CLI 提供批量研究和优化命令 |
+| 运营辅助 | `/runs`、`/ai-factors`、`/keyword-tags` |
 
 ## 快速启动
 
@@ -158,13 +59,8 @@ pip install -e ".[dev]"
 cp .env.example .env
 # 编辑 .env，填写 PostgreSQL 连接串
 alembic upgrade head
-uvicorn quant_etf_api.main:app --reload --port 8000
-```
-
-首次部署后同步因子定义。指数通过数据库迁移初始化，后续通过页面或 API 添加：
-
-```bash
 python -m quant_etf_api.cli init-factors
+uvicorn quant_etf_api.main:app --reload --port 8000
 ```
 
 ### 前端
@@ -175,7 +71,7 @@ npm install
 npm run dev
 ```
 
-### 运行测试
+### 检查
 
 ```bash
 cd apps/api
@@ -183,47 +79,34 @@ pytest
 ruff check .
 ```
 
----
-
-## 开发指南
-
-### 新增策略
-
-策略通过 JSON 配置驱动引擎执行，无需编写代码：
-
-1. 编写策略 JSON 配置（含 score、timing、filters、rank、portfolio、risk、rebalance 模块）
-2. 通过 `POST /api/strategies` 创建策略配置
-3. 通过 `GET /api/strategies/{id}/allocation` 查看决策管线输出
-4. 通过 `POST /api/backtests` 对策略进行历史回测
-
-### 数据库迁移
-
 ```bash
-cd apps/api
-alembic revision --autogenerate -m "描述变更内容"
-alembic upgrade head
-alembic downgrade -1
+cd apps/web
+npx vue-tsc --noEmit
 ```
 
-### 环境变量说明
+## 常用 CLI
 
-| 变量名 | 示例值 | 说明 |
-|--------|--------|------|
-| `QUANT_ETF_DATABASE_URL` | `postgresql+psycopg://postgres:postgres@localhost:5432/quant_etf` | PostgreSQL 连接串（历史命名保留） |
-| `QUANT_ETF_APP_ENV` | `development` | 运行环境 |
-| `QUANT_ETF_APP_HOST` | `0.0.0.0` | 监听地址 |
-| `QUANT_ETF_APP_PORT` | `8000` | 监听端口 |
-| `QUANT_ETF_CORS_ORIGINS` | `["http://localhost:5173"]` | 允许跨域的前端地址 |
+```bash
+python -m quant_etf_api.cli strategy list
+python -m quant_etf_api.cli backtest run --strategy <id>
+python -m quant_etf_api.cli backtest show <id> --cost-ladder 0,10,20,30,50
+python -m quant_etf_api.cli robustness scan --strategy <id> --preset quick
+python -m quant_etf_api.cli optimization start --strategy <id> --candidate-file candidates.json --hypothesis "..."
+```
 
----
+默认回测和优化使用研究期边界；如需使用 2026 年起的数据，须明确以 validation 或 monitor 用途运行，系统会留痕。
 
-## 参考资料
+## 文档导航
 
-- `AGENTS.md` — 项目开发指南（架构、命令、Gotchas）
-- `docs/architecture/指数量化系统策略层架构设计.md` — 策略层架构
-- `docs/用户手册.md` — 使用手册
-- [FastAPI 官方文档](https://fastapi.tiangolo.com/)
-- [SQLAlchemy 2 文档](https://docs.sqlalchemy.org/en/20/)
-- [Alembic 文档](https://alembic.sqlalchemy.org/)
-- [Vue 3 文档](https://vuejs.org/)
-- [Pinia 文档](https://pinia.vuejs.org/)
+- [策略架构与运行口径](docs/architecture/指数量化系统策略层架构设计.md)
+- [参数化因子与参数高原治理](docs/architecture/参数化因子与参数高原治理升级方案.md)
+- [因子研发与集成指引](docs/architecture/因子研发与集成指引.md)
+- [数据管理与外部数据接入规范](docs/architecture/数据管理与外部数据接入规范.md)
+- [稳健性评估与生命周期监控](docs/architecture/策略稳健性评估与生命周期监控实施说明.md)
+- [用户手册](docs/用户手册.md)
+- [开发约定](AGENTS.md)
+
+方法论文件解释研究原则，不替代接口或运行口径：
+
+- [个人量化策略：过拟合与因子研究方法论](docs/architecture/个人量化策略_过拟合与因子研究方法论.md)
+- [量化策略生命周期管理方法](docs/architecture/策略生命周期管理方法.md)

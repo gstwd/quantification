@@ -1,5 +1,7 @@
 # 因子目录
 
+> **维护状态：历史示例，非当前模板目录。** 当前因子以 `FactorTemplateRegistry`、`GET /api/factors` 或 CLI/API 校验结果为准。因子值不落库；使用参数化模板时应在 `factor_aliases` 显式声明模板与参数。
+
 所有可用因子的 ID、含义和参数。因子值基于指数数据计算（`index_factor_value` 表）。
 
 ## 动量类 (momentum)

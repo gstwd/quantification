@@ -1,5 +1,7 @@
 # 策略配置模型参考
 
+> **维护状态：辅助示例，非 schema 契约。** 创建或修改配置前，必须以 `engine/config.py`、策略校验接口或 CLI `strategy validate` 的当前结果为准。
+
 策略配置 JSON 的完整结构。创建时 `strategy_id`、`display_name` 等元数据在 API 请求顶层，引擎配置在 `config_json` 字段内。
 
 ## 顶层 StrategyConfig 字段 (config_json 内)

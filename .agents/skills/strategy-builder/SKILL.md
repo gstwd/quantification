@@ -1,7 +1,7 @@
 ---
 name: strategy-builder
 description: >
-  When a user describes a trading/investment strategy for the quant ETF system and wants it configured,
+  When a user describes an A-share index allocation, timing, or rotation strategy and wants it configured,
   use this skill. Trigger on phrases like "配置一个策略", "帮我建一个...策略", "create a strategy for...",
   "我想实现...轮动", or any natural-language description of an allocation/timing/rotation strategy.
   Also use when the user asks "能不能配置..." or "系统支持...吗" about a strategy idea —
@@ -11,7 +11,9 @@ description: >
 
 # 策略构建器
 
-根据用户的自然语言描述，自动在量化 ETF 系统中创建策略配置。如果系统的现有能力不支持该策略，则明确指出缺口和改进方向。
+> **当前契约优先**：本技能服务于 A 股指数研究系统，不配置 ETF、个股、做空或交易执行。执行前先读取仓库根目录 `AGENTS.md`、当前 `StrategyConfig` / 因子模板和 CLI `--help`。下方历史示例或 `references/` 与当前代码冲突时，一律以它们为准。
+
+根据用户的自然语言描述，生成 A 股指数策略配置。若现有能力不支持，应明确说明缺口和替代方案。
 
 ## 工作流程
 
@@ -19,7 +21,7 @@ description: >
 
 从用户描述中提取以下关键信息：
 
-1. **交易标的**：哪些指数/ETF？（如沪深300=000300，中证500=000905）
+1. **策略标的**：哪些可配置 A 股指数？（如沪深300=000300，中证500=000905）
 2. **选股/评分逻辑**：用什么指标判断好坏？是绝对评分还是相对比较？
 3. **仓位规则**：怎么分配资金？集中还是分散？有没有空仓条件？
 4. **择时规则**：需要根据市场环境调节仓位吗？
