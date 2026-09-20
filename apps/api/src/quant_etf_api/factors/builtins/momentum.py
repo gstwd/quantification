@@ -180,143 +180,42 @@ def _calc_nd_annualized_vol(
     return round(math.sqrt(variance) * _ANNUALIZE_FACTOR * 100, 4)
 
 
-class Return5dComputer:
-    """5 日动量因子计算器。
+class ReturnComputer:
+    """N 日动量因子计算器。
 
-    计算近 5 个交易日的指数价格涨跌幅（%），衡量短期动量。
-    数据不足 5 条时返回 None（而非 0.0），保持语义准确。
+    计算近 N 个交易日的指数收盘价涨跌幅（%），衡量动量。
+    数据不足 N 条时返回 None（而非 0.0），保持语义准确。
     实现 BatchFactorComputer 协议，支持回测批量预计算。
     """
 
-    @property
-    def spec(self) -> FactorSpec:
-        """返回 5 日收益率的因子元数据。"""
-        return FactorSpec(
-            factor_id="return_5d",
-            name="5日收益率",
-            category="momentum",
-            version="2.0.0",
-            description="指数近 5 个交易日的价格涨跌幅（%），衡量短期动量。",
-            required_data=["index_bars"],
-            lookback_days=15,
-        )
-
-    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 5 日收益率。
+    def __init__(self, period: int = 20) -> None:
+        """初始化 N 日收益率计算器。
 
         Args:
-            index_code: 指数代码。
-            trade_date: 目标交易日。
-            ctx: FactorContext。
+            period: 回望交易日数。
 
-        Returns:
-            FactorValue，历史数据不足 5 条时 numeric 为 None。
+        Raises:
+            ValueError: period 小于 1。
         """
-        value = _calc_nd_return(index_code, trade_date, ctx, n=5)
-        return FactorValue(
-            factor_id=self.spec.factor_id,
-            numeric=value,
-            payload={"lookback_days": 5},
-        )
-
-    def compute_batch(
-        self, index_code: str, dates: list[date], ctx: FactorContext
-    ) -> dict[date, FactorValue]:
-        """批量计算所有交易日的 5 日收益率。
-
-        Args:
-            index_code: 指数代码。
-            dates: 需要计算的交易日列表（升序）。
-            ctx: FactorContext，包含全量回望数据。
-
-        Returns:
-            key=交易日, value=FactorValue 的字典。
-        """
-        close_dates, close_prices = _build_sorted_closes(index_code, ctx)
-        return _calc_batch_returns(
-            close_dates, close_prices, dates, n=5, factor_id=self.spec.factor_id
-        )
-
-
-class Return20dComputer:
-    """20 日动量因子计算器。
-
-    计算近 20 个交易日的指数价格涨跌幅（%），衡量中期动量。
-    实现 BatchFactorComputer 协议，支持回测批量预计算。
-    """
+        if period < 1:
+            raise ValueError("period 必须不小于 1")
+        self._period = int(period)
 
     @property
     def spec(self) -> FactorSpec:
-        """返回 20 日收益率的因子元数据。"""
+        """返回 N 日收益率的因子元数据。"""
         return FactorSpec(
-            factor_id="return_20d",
-            name="20日收益率",
-            category="momentum",
-            version="2.0.0",
-            description="指数近 20 个交易日的价格涨跌幅（%），衡量中期动量。",
-            required_data=["index_bars"],
-            lookback_days=40,
-        )
-
-    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 20 日收益率。
-
-        Args:
-            index_code: 指数代码。
-            trade_date: 目标交易日。
-            ctx: FactorContext。
-
-        Returns:
-            FactorValue，历史数据不足 20 条时 numeric 为 None。
-        """
-        value = _calc_nd_return(index_code, trade_date, ctx, n=20)
-        return FactorValue(
-            factor_id=self.spec.factor_id,
-            numeric=value,
-            payload={"lookback_days": 20},
-        )
-
-    def compute_batch(
-        self, index_code: str, dates: list[date], ctx: FactorContext
-    ) -> dict[date, FactorValue]:
-        """批量计算所有交易日的 20 日收益率。
-
-        Args:
-            index_code: 指数代码。
-            dates: 需要计算的交易日列表（升序）。
-            ctx: FactorContext，包含全量回望数据。
-
-        Returns:
-            key=交易日, value=FactorValue 的字典。
-        """
-        close_dates, close_prices = _build_sorted_closes(index_code, ctx)
-        return _calc_batch_returns(
-            close_dates, close_prices, dates, n=20, factor_id=self.spec.factor_id
-        )
-
-
-class Return17dComputer:
-    """17 日动量因子计算器。
-
-    计算近 17 个交易日的指数价格涨跌幅（%），衡量中短期动量。
-    实现 BatchFactorComputer 协议，支持回测批量预计算。
-    """
-
-    @property
-    def spec(self) -> FactorSpec:
-        """返回 17 日收益率的因子元数据。"""
-        return FactorSpec(
-            factor_id="return_17d",
-            name="17日收益率",
+            factor_id=f"return_{self._period}d",
+            name=f"{self._period}日收益率",
             category="momentum",
             version="1.0.0",
-            description="指数近 17 个交易日的价格涨跌幅（%），衡量中短期动量。",
+            description=f"指数近 {self._period} 个交易日的价格涨跌幅（%），衡量动量。",
             required_data=["index_bars"],
-            lookback_days=35,
+            lookback_days=max(15, int(self._period * 1.5) + 5),
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 17 日收益率。
+        """计算 N 日收益率。
 
         Args:
             index_code: 指数代码。
@@ -324,19 +223,19 @@ class Return17dComputer:
             ctx: FactorContext。
 
         Returns:
-            FactorValue，历史数据不足 17 条时 numeric 为 None。
+            FactorValue，历史数据不足 N 条时 numeric 为 None。
         """
-        value = _calc_nd_return(index_code, trade_date, ctx, n=17)
+        value = _calc_nd_return(index_code, trade_date, ctx, n=self._period)
         return FactorValue(
             factor_id=self.spec.factor_id,
             numeric=value,
-            payload={"lookback_days": 17},
+            payload={"lookback_days": self._period},
         )
 
     def compute_batch(
         self, index_code: str, dates: list[date], ctx: FactorContext
     ) -> dict[date, FactorValue]:
-        """批量计算所有交易日的 17 日收益率。
+        """批量计算所有交易日的 N 日收益率。
 
         Args:
             index_code: 指数代码。
@@ -348,123 +247,7 @@ class Return17dComputer:
         """
         close_dates, close_prices = _build_sorted_closes(index_code, ctx)
         return _calc_batch_returns(
-            close_dates, close_prices, dates, n=17, factor_id=self.spec.factor_id
-        )
-
-
-class Return60dComputer:
-    """60 日动量因子计算器。
-
-    计算近 60 个交易日的指数价格涨跌幅（%），衡量中长期趋势。
-    需要 FactorContext 提供 90 个自然日回望以覆盖 60 个交易日。
-    实现 BatchFactorComputer 协议，支持回测批量预计算。
-    """
-
-    @property
-    def spec(self) -> FactorSpec:
-        """返回 60 日收益率的因子元数据。"""
-        return FactorSpec(
-            factor_id="return_60d",
-            name="60日收益率",
-            category="momentum",
-            version="2.0.0",
-            description=("指数近 60 个交易日的价格涨跌幅（%），衡量中长期趋势。"),
-            required_data=["index_bars"],
-            lookback_days=90,
-        )
-
-    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 60 日收益率。
-
-        Args:
-            index_code: 指数代码。
-            trade_date: 目标交易日。
-            ctx: FactorContext，需包含至少 61 条历史收盘价。
-
-        Returns:
-            FactorValue，历史数据不足 60 条时 numeric 为 None。
-        """
-        value = _calc_nd_return(index_code, trade_date, ctx, n=60)
-        return FactorValue(
-            factor_id=self.spec.factor_id,
-            numeric=value,
-            payload={"lookback_days": 60},
-        )
-
-    def compute_batch(
-        self, index_code: str, dates: list[date], ctx: FactorContext
-    ) -> dict[date, FactorValue]:
-        """批量计算所有交易日的 60 日收益率。
-
-        Args:
-            index_code: 指数代码。
-            dates: 需要计算的交易日列表（升序）。
-            ctx: FactorContext，包含全量回望数据。
-
-        Returns:
-            key=交易日, value=FactorValue 的字典。
-        """
-        close_dates, close_prices = _build_sorted_closes(index_code, ctx)
-        return _calc_batch_returns(
-            close_dates, close_prices, dates, n=60, factor_id=self.spec.factor_id
-        )
-
-
-class Return120dComputer:
-    """120 日动量因子计算器（约 6 个月）。
-
-    计算近 120 个交易日的指数价格涨跌幅（%），衡量中长期趋势。
-    用于沪深300波段策略中的 6 个月动量判断。
-    实现 BatchFactorComputer 协议，支持回测批量预计算。
-    """
-
-    @property
-    def spec(self) -> FactorSpec:
-        """返回 120 日收益率的因子元数据。"""
-        return FactorSpec(
-            factor_id="return_120d",
-            name="120日收益率",
-            category="momentum",
-            version="1.0.0",
-            description=("指数近 120 个交易日的价格涨跌幅（%），衡量中长期趋势。"),
-            required_data=["index_bars"],
-            lookback_days=180,
-        )
-
-    def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 120 日收益率。
-
-        Args:
-            index_code: 指数代码。
-            trade_date: 目标交易日。
-            ctx: FactorContext，需包含至少 121 条历史收盘价。
-
-        Returns:
-            FactorValue，历史数据不足 120 条时 numeric 为 None。
-        """
-        value = _calc_nd_return(index_code, trade_date, ctx, n=120)
-        return FactorValue(
-            factor_id=self.spec.factor_id,
-            numeric=value,
-            payload={"lookback_days": 120},
-        )
-
-    def compute_batch(
-        self, index_code: str, dates: list[date], ctx: FactorContext
-    ) -> dict[date, FactorValue]:
-        """批量计算所有交易日的 120 日收益率。
-
-        Args:
-            index_code: 指数代码。
-            dates: 需要计算的交易日列表（升序）。
-            ctx: FactorContext，包含全量回望数据。
-
-        Returns:
-            key=交易日, value=FactorValue 的字典。
-        """
-        close_dates, close_prices = _build_sorted_closes(index_code, ctx)
-        return _calc_batch_returns(
-            close_dates, close_prices, dates, n=120, factor_id=self.spec.factor_id
+            close_dates, close_prices, dates, n=self._period, factor_id=self.spec.factor_id
         )
 
 

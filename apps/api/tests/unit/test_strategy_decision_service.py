@@ -1,13 +1,13 @@
-"""统一策略执行服务测试（C1/C3 收敛点）。"""
+"""统一策略执行服务测试（C1 收敛点）。"""
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from types import SimpleNamespace
 from unittest import mock
 
-import quant_etf_api.services.strategy_decision_service as strategy_decision_service
 from quant_etf_api.engine.config import ScoreConfig, StrategyConfig
+from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.factors.base import MissingReason
 from quant_etf_api.schemas.strategy import StrategyValidationResult
 from quant_etf_api.services.strategy_decision_service import StrategyDecisionService
@@ -18,154 +18,111 @@ def _make_config() -> StrategyConfig:
     return StrategyConfig(
         strategy_id="s1",
         display_name="测试策略",
-        score=ScoreConfig(factors={"return_20d": 1.0}),
+        score=ScoreConfig(factors={"close_price": 1.0}),
     )
 
 
-def _make_context(missing: dict[str, str] | None = None) -> SimpleNamespace:
+def _make_context() -> SimpleNamespace:
     """构建带 universe/asset_factors 的伪上下文。"""
     return SimpleNamespace(
         trade_date=date(2025, 1, 15),
         universe=[{"index_code": "000300", "name_cn": "沪深300"}],
-        asset_factors={("000300", "return_20d"): 3.0},
-        _missing=missing or {},
+        asset_factors={("000300", "close_price"): 100.0},
     )
 
 
-class TestEnsureLiveFactors:
-    """服务层补算触发测试。"""
+class TestInsufficientFactorWarnings:
+    """实时分配的因子缺失告警测试。"""
 
-    def test_enqueues_for_not_computed_and_insufficient(self, monkeypatch) -> None:
-        """NOT_COMPUTED 与 INSUFFICIENT_DATA 应入队 factor_computation。"""
-        db = mock.MagicMock()
-        svc = StrategyDecisionService(db=db)
-        svc._is_factor_computation_current = mock.MagicMock(return_value=False)
-        fake_queue = mock.MagicMock()
-        monkeypatch.setattr("quant_etf_api.infra.job_queue.queue.get_job_queue", lambda: fake_queue)
-
+    def test_warns_for_insufficient_data(self) -> None:
+        """数据不足的因子应产生 MISSING_FACTOR 告警，且不阻塞本次分配。"""
+        svc = StrategyDecisionService(db=mock.MagicMock())
+        config = _make_config()
         context = _make_context()
-        svc._context_builder.detect_missing_factors = mock.MagicMock(
-            return_value={
-                "return_20d": MissingReason.NOT_COMPUTED.value,
-                "pe_percentile": MissingReason.INSUFFICIENT_DATA.value,
-            }
+
+        svc.get_config = mock.MagicMock(return_value=config)
+        svc.validate = mock.MagicMock(return_value=StrategyValidationResult(valid=True, errors=[]))
+        svc.build_live_context = mock.MagicMock(return_value=context)
+        svc._context_builder.insufficient_factors = mock.MagicMock(
+            return_value={"close_price": MissingReason.INSUFFICIENT_DATA.value}
+        )
+        fake_result = SimpleNamespace(
+            timing=None,
+            rankings=[],
+            positions={},
+            total_exposure=0.0,
+            cash_ratio=1.0,
+            pipeline_detail=None,
+        )
+        svc.run = mock.MagicMock(return_value=fake_result)
+
+        resp = svc.run_allocation("s1", trade_date=date(2025, 1, 15))
+
+        assert resp is not None
+        assert len(resp.warnings) == 1
+        assert resp.warnings[0].code == "MISSING_FACTOR"
+        assert "数据不足" in resp.warnings[0].message
+
+    def test_warns_for_compute_failure(self) -> None:
+        """计算失败的因子告警文案与数据不足区分。"""
+        svc = StrategyDecisionService(db=mock.MagicMock())
+        svc.get_config = mock.MagicMock(return_value=_make_config())
+        svc.validate = mock.MagicMock(return_value=StrategyValidationResult(valid=True, errors=[]))
+        svc.build_live_context = mock.MagicMock(return_value=_make_context())
+        svc._context_builder.insufficient_factors = mock.MagicMock(
+            return_value={"close_price": MissingReason.COMPUTE_FAILED.value}
+        )
+        svc.run = mock.MagicMock(
+            return_value=SimpleNamespace(
+                timing=None,
+                rankings=[],
+                positions={},
+                total_exposure=0.0,
+                cash_ratio=1.0,
+                pipeline_detail=None,
+            )
         )
 
-        triggered = svc.ensure_live_factors(_make_config(), context)
+        resp = svc.run_allocation("s1", trade_date=date(2025, 1, 15))
 
-        assert triggered == ["return_20d", "pe_percentile"]
-        assert fake_queue.enqueue.call_count == 1
-        job_type, payload = fake_queue.enqueue.call_args.args
-        assert job_type == "factor_computation"
-        assert payload == {"trade_date": "2025-01-15"}
-        assert fake_queue.enqueue.call_args.kwargs["job_key"] == "factor_computation:2025-01-15"
+        assert resp is not None
+        assert "计算失败" in resp.warnings[0].message
 
-    def test_skips_when_computation_already_current(self, monkeypatch) -> None:
-        """该交易日已有成功计算且输入无更新时应跳过重复补算。"""
-        db = mock.MagicMock()
-        svc = StrategyDecisionService(db=db)
-        svc._is_factor_computation_current = mock.MagicMock(return_value=True)
-        fake_queue = mock.MagicMock()
-        monkeypatch.setattr("quant_etf_api.infra.job_queue.queue.get_job_queue", lambda: fake_queue)
-
-        context = _make_context()
-        svc._context_builder.detect_missing_factors = mock.MagicMock(
-            return_value={"pe_percentile": MissingReason.INSUFFICIENT_DATA.value}
+    def test_no_warning_when_factors_ok(self) -> None:
+        """因子全部可用时不产生告警。"""
+        svc = StrategyDecisionService(db=mock.MagicMock())
+        svc.get_config = mock.MagicMock(return_value=_make_config())
+        svc.validate = mock.MagicMock(return_value=StrategyValidationResult(valid=True, errors=[]))
+        svc.build_live_context = mock.MagicMock(return_value=_make_context())
+        svc._context_builder.insufficient_factors = mock.MagicMock(return_value={})
+        svc.run = mock.MagicMock(
+            return_value=SimpleNamespace(
+                timing=None,
+                rankings=[],
+                positions={},
+                total_exposure=0.0,
+                cash_ratio=1.0,
+                pipeline_detail=None,
+            )
         )
 
-        triggered = svc.ensure_live_factors(_make_config(), context)
+        resp = svc.run_allocation("s1", trade_date=date(2025, 1, 15))
 
-        assert triggered == []
-        fake_queue.enqueue.assert_not_called()
+        assert resp is not None
+        assert resp.warnings == []
 
-    def test_skips_factor_unknown(self, monkeypatch) -> None:
-        """FACTOR_UNKNOWN 不应触发补算（配置校验期快速失败兜底）。"""
-        db = mock.MagicMock()
-        svc = StrategyDecisionService(db=db)
-        svc._is_factor_computation_current = mock.MagicMock(return_value=False)
-        fake_queue = mock.MagicMock()
-        monkeypatch.setattr("quant_etf_api.infra.job_queue.queue.get_job_queue", lambda: fake_queue)
-
-        context = _make_context()
-        svc._context_builder.detect_missing_factors = mock.MagicMock(
-            return_value={"typo_factor": MissingReason.FACTOR_UNKNOWN.value}
+    def test_insufficient_factors_reads_engine_context(self) -> None:
+        """缺失诊断直接消费引擎上下文，不重新计算因子。"""
+        svc = StrategyDecisionService(db=mock.MagicMock())
+        context = EngineContext(
+            trade_date=date(2025, 1, 15),
+            universe=[{"index_code": "000300"}],
+            asset_factors={("000300", "close_price"): None},
         )
 
-        triggered = svc.ensure_live_factors(_make_config(), context)
-
-        assert triggered == []
-        fake_queue.enqueue.assert_not_called()
-
-    def test_no_enqueue_when_all_factors_ok(self, monkeypatch) -> None:
-        """因子全部可用时不应入队。"""
-        db = mock.MagicMock()
-        svc = StrategyDecisionService(db=db)
-        svc._is_factor_computation_current = mock.MagicMock(return_value=False)
-        fake_queue = mock.MagicMock()
-        monkeypatch.setattr("quant_etf_api.infra.job_queue.queue.get_job_queue", lambda: fake_queue)
-
-        context = _make_context()
-        svc._context_builder.detect_missing_factors = mock.MagicMock(return_value={})
-
-        triggered = svc.ensure_live_factors(_make_config(), context)
-
-        assert triggered == []
-        fake_queue.enqueue.assert_not_called()
-
-
-class TestFactorComputationFreshnessGate:
-    """因子补算门控（结果是否已覆盖最新输入）测试。"""
-
-    def test_false_when_no_successful_run(self) -> None:
-        """从未成功计算过时应放行补算。"""
-        db = mock.MagicMock()
-        run_repo = mock.MagicMock()
-        run_repo.find_latest_successful_by_type_and_date.return_value = None
-        svc = StrategyDecisionService(db=db, run_repo=run_repo)
-
-        assert svc._is_factor_computation_current(date(2025, 1, 15), ["000300"]) is False
-
-    def test_false_when_new_input_arrived_after_last_run(self, monkeypatch) -> None:
-        """成功计算之后又有新输入入库时应放行重算。"""
-        db = mock.MagicMock()
-        run_repo = mock.MagicMock()
-        run_repo.find_latest_successful_by_type_and_date.return_value = SimpleNamespace(
-            finished_at=datetime(2025, 1, 15, 10, 0)
-        )
-        svc = StrategyDecisionService(db=db, run_repo=run_repo)
-        bar_repo = mock.MagicMock()
-        bar_repo.find_latest_ingested_at_for_date.return_value = datetime(2025, 1, 16, 9, 0)
-        valuation_repo = mock.MagicMock()
-        valuation_repo.find_latest_ingested_at_for_date.return_value = None
-        monkeypatch.setattr(
-            strategy_decision_service, "IndexDailyBarRepository", lambda _db: bar_repo
-        )
-        monkeypatch.setattr(
-            strategy_decision_service, "IndexValuationRepository", lambda _db: valuation_repo
-        )
-
-        assert svc._is_factor_computation_current(date(2025, 1, 15), ["000300"]) is False
-
-    def test_true_when_last_run_after_inputs(self, monkeypatch) -> None:
-        """成功计算晚于输入入库时应视为已覆盖并跳过补算。"""
-        db = mock.MagicMock()
-        run_repo = mock.MagicMock()
-        run_repo.find_latest_successful_by_type_and_date.return_value = SimpleNamespace(
-            finished_at=datetime(2025, 1, 16, 10, 0)
-        )
-        svc = StrategyDecisionService(db=db, run_repo=run_repo)
-        bar_repo = mock.MagicMock()
-        bar_repo.find_latest_ingested_at_for_date.return_value = datetime(2025, 1, 15, 9, 0)
-        valuation_repo = mock.MagicMock()
-        valuation_repo.find_latest_ingested_at_for_date.return_value = None
-        monkeypatch.setattr(
-            strategy_decision_service, "IndexDailyBarRepository", lambda _db: bar_repo
-        )
-        monkeypatch.setattr(
-            strategy_decision_service, "IndexValuationRepository", lambda _db: valuation_repo
-        )
-
-        assert svc._is_factor_computation_current(date(2025, 1, 15), ["000300"]) is True
+        assert svc._context_builder.insufficient_factors(context) == {
+            "close_price": MissingReason.INSUFFICIENT_DATA.value
+        }
 
 
 class TestRunAllocation:
@@ -181,7 +138,7 @@ class TestRunAllocation:
         svc.get_config = mock.MagicMock(return_value=config)
         svc.validate = mock.MagicMock(return_value=StrategyValidationResult(valid=True, errors=[]))
         svc.build_live_context = mock.MagicMock(return_value=context)
-        svc.ensure_live_factors = mock.MagicMock(return_value=[])
+        svc._context_builder.insufficient_factors = mock.MagicMock(return_value={})
         fake_result = SimpleNamespace(
             timing=None,
             rankings=[],
@@ -197,7 +154,7 @@ class TestRunAllocation:
         assert resp is not None
         assert resp.data_date == date(2025, 1, 15)
         assert resp.plan["method"] == "equal_weight"
-        svc.ensure_live_factors.assert_called_once_with(config, context)
+        svc.run.assert_called_once_with(config, context)
 
     def test_run_allocation_raises_on_invalid_config(self) -> None:
         """配置校验失败时快速失败，不继续执行。"""
@@ -222,13 +179,12 @@ class TestRunAllocation:
 class TestRunAndPersist:
     """策略运行持久化路径测试。"""
 
-    def test_run_and_persist_writes_via_repos(self) -> None:
-        """信号/因子快照写入应统一走仓库写入门禁并标记成功。"""
+    def test_run_and_persist_writes_signals_only(self) -> None:
+        """只持久化信号，不再写入任何因子值快照。"""
         db = mock.MagicMock()
         svc = StrategyDecisionService(
             db=db,
             signal_repo=mock.MagicMock(),
-            factor_value_repo=mock.MagicMock(),
             run_repo=mock.MagicMock(),
         )
         context = _make_context()
@@ -244,7 +200,6 @@ class TestRunAndPersist:
                     signal_level="MID",
                     signal_label="中等关注",
                     payload={"target_weight": 0.5},
-                    factor_values=[{"factor_id": "return_20d", "value": 3.0}],
                 )
             ]
         )
@@ -253,9 +208,7 @@ class TestRunAndPersist:
         svc.run_and_persist(_make_config(), date(2025, 1, 15), "run1")
 
         svc._signal_repo.delete_by_strategy_date.assert_called_once_with("s1", date(2025, 1, 15))
-        svc._factor_value_repo.delete_strategy_values.assert_called_once_with(
-            "s1", date(2025, 1, 15)
-        )
         svc._signal_repo.bulk_insert.assert_called_once()
-        svc._factor_value_repo.bulk_insert_strategy_values.assert_called_once()
         svc._run_repo.mark_success.assert_called_once()
+        # 因子值不落库：服务不持有因子值仓库
+        assert not hasattr(svc, "_factor_value_repo")

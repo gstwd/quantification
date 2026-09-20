@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from quant_etf_api.engine.config import (
+    FactorAliasConfig,
     FilterConfig,
     FilterRule,
     PortfolioConfig,
@@ -26,8 +27,7 @@ from quant_etf_api.engine.config import (
     TimingConfig,
 )
 from quant_etf_api.engine.factor_provider import FactorProvider
-from quant_etf_api.factors.builtins.price import ClosePriceComputer
-from quant_etf_api.factors.registry import FactorRegistry, get_default_factor_registry
+from quant_etf_api.factors.catalog import FactorResolutionError, build_default_registry
 from quant_etf_api.infra.db.repositories.strategy_config import StrategyConfigRepository
 from quant_etf_api.schemas.backtest import BacktestCreateRequest
 from quant_etf_api.schemas.strategy import StrategyValidationResult
@@ -38,8 +38,8 @@ from quant_etf_api.services.strategy_service import StrategyService
 
 
 def _registry_ids() -> set[str]:
-    """返回进程级注册表中全部因子 ID。"""
-    return {spec.factor_id for spec in get_default_factor_registry().specs()}
+    """返回默认模板注册表中全部模板 ID。"""
+    return set(build_default_registry().ids())
 
 
 class _WeekdayCalendar:
@@ -104,8 +104,9 @@ def _make_service(active_ids: set[str] | None = None) -> StrategyConfigService:
 
 
 def _valid_config_json() -> dict:
-    """构造一个引用全部合法因子的最小配置。"""
+    """构造一个引用全部合法模板与别名的配置。"""
     return {
+        "schema_version": "2",
         "score": {
             "factors": {"return_20d": 1.0, "ma_20d": 0.5, "pe_percentile": 0.8},
             "transforms": {"pe_percentile": "invert_percentile"},
@@ -114,6 +115,11 @@ def _valid_config_json() -> dict:
         "rank": {"momentum_factor": "return_20d", "valuation_factor": "pe_percentile"},
         "timing": {"factors": {"return_60d": 1.0}, "proxy_index_codes": ["000300"]},
         "portfolio": {"method": "equal_weight"},
+        "factor_aliases": {
+            "return_20d": {"template_id": "return", "params": {"period": 20}},
+            "ma_20d": {"template_id": "sma", "params": {"period": 20}},
+            "return_60d": {"template_id": "return", "params": {"period": 60}},
+        },
     }
 
 
@@ -182,21 +188,52 @@ class TestCollectRequiredFactorIds:
         assert "pe_percentile" not in ids
 
 
-class TestFactorParamHashes:
-    """因子参数指纹解析测试。"""
+class TestResolveInstances:
+    """因子引用解析测试。"""
 
-    def test_reads_default_params_from_factor_computer_spec(self) -> None:
-        """注册表返回计算器时，应从其 spec 读取无参数因子的默认配置。"""
-        registry = FactorRegistry()
-        registry.register(ClosePriceComputer())
-        provider = FactorProvider(registry=registry)
+    def test_alias_wins_over_template_default(self) -> None:
+        """声明了别名时按别名的模板与参数解析实例。"""
+        provider = FactorProvider(registry=build_default_registry())
         config = StrategyConfig(
             strategy_id="test",
             display_name="测试策略",
-            score=ScoreConfig(factors={"close_price": 1.0}),
+            score=ScoreConfig(factors={"trend_fast": 1.0}),
+            factor_aliases={
+                "trend_fast": FactorAliasConfig(template_id="sma", params={"period": 10})
+            },
         )
 
-        assert provider._params_hashes(config, ["close_price"]) == {"close_price": ""}
+        instances = provider.resolve_instances(config)
+
+        assert instances["trend_fast"].template_id == "sma"
+        assert instances["trend_fast"].params["period"] == 10
+
+    def test_bare_template_id_uses_default_params(self) -> None:
+        """未声明别名时按模板默认参数解析。"""
+        provider = FactorProvider(registry=build_default_registry())
+        config = StrategyConfig(
+            strategy_id="test",
+            display_name="测试策略",
+            score=ScoreConfig(factors={"close_price": 1.0, "sma": 0.5}),
+        )
+
+        instances = provider.resolve_instances(config)
+
+        assert instances["close_price"].template_id == "close_price"
+        assert instances["sma"].template_id == "sma"
+        assert instances["sma"].params["period"] == 20
+
+    def test_unresolvable_reference_raises(self) -> None:
+        """既非别名也非模板 ID 的引用解析失败。"""
+        provider = FactorProvider(registry=build_default_registry())
+        config = StrategyConfig(
+            strategy_id="test",
+            display_name="测试策略",
+            score=ScoreConfig(factors={"ghost": 1.0}),
+        )
+
+        with pytest.raises(FactorResolutionError):
+            provider.resolve_instances(config)
 
 
 class TestValidateConfig:
@@ -214,7 +251,7 @@ class TestValidateConfig:
         cfg["score"]["factors"] = {"return_20d": 1.0, "return_999d": 1.0}
         result = _make_service().validate_config(cfg)
         assert not result.valid
-        assert any("未知因子 'return_999d'" in e for e in result.errors)
+        assert any("未知因子" in e and "return_999d" in e for e in result.errors)
 
     def test_unknown_factor_in_timing_rejected(self) -> None:
         """择时因子拼写错误时快速失败。"""
@@ -222,7 +259,7 @@ class TestValidateConfig:
         cfg["timing"]["factors"] = {"no_such_timing_factor": 1.0}
         result = _make_service().validate_config(cfg)
         assert not result.valid
-        assert any("未知因子 'no_such_timing_factor'" in e for e in result.errors)
+        assert any("未知因子" in e and "no_such_timing_factor" in e for e in result.errors)
 
     def test_unknown_compare_to_rejected(self) -> None:
         """过滤规则 compare_to 引用未知因子时快速失败。"""
@@ -230,7 +267,7 @@ class TestValidateConfig:
         cfg["filters"] = {"rules": [{"factor": "return_20d", "op": "gt", "compare_to": "ma_999d"}]}
         result = _make_service().validate_config(cfg)
         assert not result.valid
-        assert any("未知因子 'ma_999d'" in e for e in result.errors)
+        assert any("未知因子" in e and "ma_999d" in e for e in result.errors)
 
     def test_unknown_rank_sub_factor_rejected(self) -> None:
         """排名模块 momentum_factor / valuation_factor 引用未知因子时快速失败。"""
@@ -238,7 +275,7 @@ class TestValidateConfig:
         cfg["rank"] = {"momentum_factor": "return_20d", "valuation_factor": "pe_999d"}
         result = _make_service().validate_config(cfg)
         assert not result.valid
-        assert any("未知因子 'pe_999d'" in e for e in result.errors)
+        assert any("未知因子" in e and "pe_999d" in e for e in result.errors)
 
     def test_unknown_factor_in_regime_rules_rejected(self) -> None:
         """regime 条件化配置中引用未知因子时快速失败。"""
@@ -248,14 +285,14 @@ class TestValidateConfig:
         }
         result = _make_service().validate_config(cfg)
         assert not result.valid
-        assert any("未知因子 'ghost_factor'" in e for e in result.errors)
+        assert any("未知因子" in e and "ghost_factor" in e for e in result.errors)
 
-    def test_deactivated_factor_rejected(self) -> None:
-        """注册表存在但 DB 中已停用/未同步的因子被拒绝。"""
-        active_ids = _registry_ids() - {"return_20d"}
+    def test_deactivated_template_rejected(self) -> None:
+        """模板已注册但 DB 中已停用/未同步时被拒绝。"""
+        active_ids = _registry_ids() - {"return"}
         result = _make_service(active_ids=active_ids).validate_config(_valid_config_json())
         assert not result.valid
-        assert any("return_20d" in e and "已停用或未同步" in e for e in result.errors)
+        assert any("return" in e and "已停用或未同步" in e for e in result.errors)
 
     def test_unknown_transform_rejected(self) -> None:
         """未知变换函数名被提前拦截，避免运行时 KeyError。"""

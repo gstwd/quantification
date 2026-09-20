@@ -303,13 +303,6 @@ class StrategyEngine:
                 scoring_mode=config.score.scoring_mode,
             )
 
-            # 构建因子值列表（仅含 config.score.factors 中定义的真实因子，
-            # timing_regime 和 target_weight 已在 payload 中记录，不重复写入因子值表）
-            factor_values = []
-            for factor_id in config.score.factors:
-                raw = context.asset_factors.get((code, factor_id))
-                factor_values.append({"factor_id": factor_id, "value": raw})
-
             # 构建 payload
             payload: dict[str, Any] = {
                 "target_weight": target_weight,
@@ -337,7 +330,6 @@ class StrategyEngine:
                     signal_score=round(score, 2),
                     signal_level=level,
                     signal_label=label,
-                    factor_values=factor_values,
                     payload=payload,
                     tags=[ranking.category if ranking else ""],
                 )

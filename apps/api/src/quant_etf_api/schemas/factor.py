@@ -7,20 +7,39 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-class FactorSpecResponse(BaseModel):
-    """因子元数据响应，对应 GET /factors/ 端点。
+class FactorParameterSpecResponse(BaseModel):
+    """模板单个可覆盖参数的声明。
 
     Attributes:
-        factor_id: 因子唯一标识，如 volume_ratio_20d。
-        name: 因子中文名称，如 20日量比。
+        type: 参数类型，integer 或 number。
+        minimum: 允许的最小值（含），None 表示不设下界。
+        maximum: 允许的最大值（含），None 表示不设上界。
+        default: 默认值。
+        description: 参数中文说明。
+    """
+
+    type: Literal["integer", "number"]
+    minimum: float | None = None
+    maximum: float | None = None
+    default: float
+    description: str
+
+
+class FactorSpecResponse(BaseModel):
+    """因子模板元数据响应，对应 GET /factors/ 端点。
+
+    Attributes:
+        factor_id: 因子模板 ID（factor_definition.factor_id），如 sma。
+        name: 模板中文名称，如 简单移动平均线。
         category: 因子类别：volume/momentum/volatility/flow/valuation。
-        version: 语义化版本号。
+        version: 模板语义化版本号。
         description: 计算逻辑说明。
         required_data: 依赖的数据源列表。
-        is_active: 是否启用。
+        is_active: 模板是否启用。
         value_shape: 因子值形态：asset=每资产值，market=市场级值。
         usage: 适用位置数组：timing/score/filter/rank。
-        default_params: 因子默认参数（参数化因子）。
+        parameter_schema: 可覆盖参数声明，空对象表示零参数模板。
+        default_params: 模板固有参数口径（零参数模板记录其固定口径）。
     """
 
     factor_id: str
@@ -32,6 +51,7 @@ class FactorSpecResponse(BaseModel):
     is_active: bool
     value_shape: Literal["asset", "market"] = "asset"
     usage: list[str] = Field(default_factory=list)
+    parameter_schema: dict[str, FactorParameterSpecResponse] = Field(default_factory=dict)
     default_params: dict | None = None
 
 
@@ -73,12 +93,14 @@ class CrossSectionResponse(BaseModel):
     """横截面查询响应。
 
     Attributes:
-        factor_id: 因子标识。
+        factor_id: 因子模板标识。
+        params: 本次计算的规范化参数。
         trade_date: 数据日期。
         rows: 横截面数据行列表。
     """
 
     factor_id: str
+    params: dict = Field(default_factory=dict)
     trade_date: str
     rows: list[CrossSectionRow]
 
@@ -139,12 +161,14 @@ class ICResponse(BaseModel):
     """因子 IC 分析响应。
 
     Attributes:
-        factor_id: 因子标识。
+        factor_id: 因子模板标识。
+        params: 本次计算的规范化参数。
         summary: IC 汇总统计。
         series: IC 时间序列。
     """
 
     factor_id: str
+    params: dict = Field(default_factory=dict)
     summary: ICSummary
     series: list[ICPoint]
 

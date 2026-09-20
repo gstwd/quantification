@@ -20,9 +20,7 @@ from quant_etf_api.factors.builtins.momentum import (
     DaysDownUpComputer,
     LowAmplitudeMomentumComputer,
     PricePositionIrComputer,
-    Return20dComputer,
-    Return5dComputer,
-    Return60dComputer,
+    ReturnComputer,
     RsrsComputer,
     Sharpe60dComputer,
     _calc_nd_return,
@@ -41,7 +39,7 @@ from quant_etf_api.factors.builtins.volatility import (
     Volatility20dComputer,
 )
 from quant_etf_api.factors.builtins.volume import AmountRatio20dComputer, VolumeRatio20dComputer
-from quant_etf_api.factors.registry import build_default_factor_registry
+from quant_etf_api.factors.catalog import FactorTemplateRegistry, build_default_registry
 
 
 # ─── 测试辅助：轻量 mock 数据行 ─────────────────────────────────────────────────
@@ -240,11 +238,11 @@ class TestCalcNdReturn:
         assert result < 0
 
 
-# ─── Return5dComputer ─────────────────────────────────────────────────────────────
+# ─── ReturnComputer(period=5) ─────────────────────────────────────────────────────────────
 
 
-class TestReturn5dComputer:
-    _computer = Return5dComputer()
+class TestReturnComputer5d:
+    _computer = ReturnComputer(period=5)
 
     def test_spec(self) -> None:
         assert self._computer.spec.factor_id == "return_5d"
@@ -268,11 +266,11 @@ class TestReturn5dComputer:
         assert result.numeric is None
 
 
-# ─── Return20dComputer ────────────────────────────────────────────────────────────
+# ─── ReturnComputer(period=20) ────────────────────────────────────────────────────────────
 
 
-class TestReturn20dComputer:
-    _computer = Return20dComputer()
+class TestReturnComputer20d:
+    _computer = ReturnComputer(period=20)
 
     def test_spec(self) -> None:
         assert self._computer.spec.factor_id == "return_20d"
@@ -299,17 +297,17 @@ class TestReturn20dComputer:
         trade_date = date(2024, 6, 1)
         bars = _build_index_bars("510300", trade_date, n_days=25, daily_return=0.01)
         ctx = FactorContext(index_bars=bars)
-        r5 = Return5dComputer().compute("510300", trade_date, ctx).numeric
-        r20 = Return20dComputer().compute("510300", trade_date, ctx).numeric
+        r5 = ReturnComputer(period=5).compute("510300", trade_date, ctx).numeric
+        r20 = ReturnComputer(period=20).compute("510300", trade_date, ctx).numeric
         assert r5 is not None and r20 is not None
         assert r20 > r5
 
 
-# ─── Return60dComputer ────────────────────────────────────────────────────────────
+# ─── ReturnComputer(period=60) ────────────────────────────────────────────────────────────
 
 
-class TestReturn60dComputer:
-    _computer = Return60dComputer()
+class TestReturnComputer60d:
+    _computer = ReturnComputer(period=60)
 
     def test_spec(self) -> None:
         assert self._computer.spec.factor_id == "return_60d"
@@ -439,40 +437,30 @@ class TestVolatility20dComputer:
         assert "sample_count" in result.payload
 
 
-# ─── FactorRegistry ──────────────────────────────────────────────────────────────
+# ─── FactorTemplateRegistry ──────────────────────────────────────────────────────
 
 
-class TestFactorRegistry:
-    def test_default_registry_has_all_factors(self) -> None:
-        """默认注册表应包含全部内置因子。"""
-        registry = build_default_factor_registry()
-        assert len(registry.all()) == 48
+class TestFactorTemplateRegistry:
+    def test_default_registry_has_all_templates(self) -> None:
+        """默认注册表应包含全部内置模板。"""
+        registry = build_default_registry()
+        assert len(registry.all()) == 40
 
-    def test_default_registry_factor_ids(self) -> None:
-        """默认注册表的 factor_id 集合应包含核心因子。"""
-        registry = build_default_factor_registry()
-        ids = {c.spec.factor_id for c in registry.all()}
-        # 核心因子应全部存在
+    def test_default_registry_template_ids(self) -> None:
+        """默认注册表的 template_id 集合应包含核心模板。"""
+        registry = build_default_registry()
+        ids = set(registry.ids())
+        # 零参数模板沿用原因子 ID
         assert ids >= {
             "volume_ratio_17d",
             "volume_ratio_20d",
             "amount_ratio_20d",
-            "return_5d",
-            "return_17d",
-            "return_20d",
-            "return_60d",
-            "return_120d",
             "low_amplitude_momentum_160d_70pct",
             "sharpe_60d",
             "volatility_17d",
             "volatility_20d",
             "pe_percentile",
             "pb_percentile",
-            "ma_5d",
-            "ma_10d",
-            "ma_17d",
-            "ma_20d",
-            "ma_60d",
             "ma60d_deviation",
             "drawdown_current",
             "donchian_17d_high",
@@ -482,30 +470,47 @@ class TestFactorRegistry:
             "pmi_momentum_3m",
             "breadth_ma20_pct",
             "rsrs",
-            "return_std_63d",
             "high_low_63d",
             "high_low_21d",
             "days_beyond_upper_lower_21d",
             "price_position_ir_60d",
             "days_down_up",
         }
+        # 首批可配模板
+        assert ids >= {"sma", "return", "return_std", "rsi", "atr"}
 
-    def test_get_returns_correct_computer(self) -> None:
-        """get() 按 factor_id 返回正确的计算器。"""
-        registry = build_default_factor_registry()
-        computer = registry.get("volume_ratio_20d")
-        assert computer is not None
-        assert computer.spec.factor_id == "volume_ratio_20d"
+    def test_get_returns_correct_template(self) -> None:
+        """get() 按 template_id 返回正确的模板。"""
+        registry = build_default_registry()
+        template = registry.get("volume_ratio_20d")
+        assert template is not None
+        assert template.template_id == "volume_ratio_20d"
 
     def test_get_returns_none_for_unknown(self) -> None:
-        """get() 未知 factor_id 返回 None。"""
-        registry = build_default_factor_registry()
+        """get() 未知 template_id 返回 None。"""
+        registry = build_default_registry()
         assert registry.get("unknown_factor") is None
 
-    def test_specs_returns_all_factor_specs(self) -> None:
-        """specs() 应返回与 all() 等量的 FactorSpec 列表。"""
-        registry = build_default_factor_registry()
-        assert len(registry.specs()) == len(registry.all())
+    def test_resolve_returns_instance(self) -> None:
+        """resolve() 应按模板 ID 产出可执行实例。"""
+        registry = build_default_registry()
+        instance = registry.resolve("volume_ratio_20d")
+        assert instance.instance_id == "volume_ratio_20d"
+        assert instance.computer.spec.factor_id == "volume_ratio_20d"
+
+    def test_register_rejects_duplicate(self) -> None:
+        """重复登记同一 template_id 应报错。"""
+        registry = build_default_registry()
+        template = registry.get("close_price")
+        assert template is not None
+        with pytest.raises(ValueError):
+            registry.register(template)
+
+    def test_custom_registry_is_independent(self) -> None:
+        """自定义注册表与默认注册表互不影响。"""
+        registry = FactorTemplateRegistry()
+        assert registry.all() == []
+        assert len(build_default_registry().all()) == 40
 
 
 # ─── LowAmplitudeMomentumComputer（低振幅条件动量）──────────────────────────────
@@ -522,8 +527,8 @@ class TestLowAmplitudeMomentumComputer:
     def test_lookback_covers_required_bars(self) -> None:
         """回望自然日必须容纳 period+1 根 bar：实测 161 根最多跨越 251 个自然日。
 
-        按需计算（``compute_and_store`` 只传本因子）时回望窗口就是本因子的
-        ``lookback_days``，不足会直接返回 None，因此这里做回归保护。
+        单独计算本因子时回望窗口就是本模板的 ``lookback_days``，
+        不足会直接返回 None，因此这里做回归保护。
         """
         spec = self._computer.spec
         assert spec.lookback_days >= 251

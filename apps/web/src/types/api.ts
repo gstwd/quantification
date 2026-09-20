@@ -729,6 +729,18 @@ export interface DateRange {
   max_date: string | null
 }
 
+/** 因子模板单个可覆盖参数的声明 */
+export interface FactorParameterSpec {
+  type: 'integer' | 'number'
+  /** 允许的最小值（含），null 表示不设下界 */
+  minimum: number | null
+  /** 允许的最大值（含），null 表示不设上界 */
+  maximum: number | null
+  default: number
+  description: string
+}
+
+/** 因子模板元数据（factor_id 即模板 ID） */
 export interface FactorSpec {
   factor_id: string
   name: string
@@ -741,7 +753,9 @@ export interface FactorSpec {
   value_shape?: 'asset' | 'market'
   /** 适用位置：timing/score/filter/rank */
   usage?: string[]
-  /** 因子默认参数（参数化因子） */
+  /** 可覆盖参数声明，空对象表示零参数模板 */
+  parameter_schema?: Record<string, FactorParameterSpec>
+  /** 模板固有参数口径 */
   default_params?: Record<string, unknown> | null
 }
 
@@ -749,10 +763,11 @@ export interface FactorRow {
   trade_date: string
   index_code: string
   factor_id: string
+  /** 本次计算的规范化参数 */
+  params: Record<string, unknown>
   factor_value_numeric: number | null
   factor_value_text: string | null
   factor_payload: Record<string, unknown>
-  strategy_id: string | null
 }
 
 /** 横截面数据行，包含指数中文名 */
@@ -766,6 +781,8 @@ export interface CrossSectionRow {
 /** 横截面查询响应 */
 export interface CrossSectionResponse {
   factor_id: string
+  /** 本次计算的规范化参数 */
+  params: Record<string, unknown>
   trade_date: string
   rows: CrossSectionRow[]
 }
@@ -816,6 +833,8 @@ export interface ICSummary {
 /** 因子 IC 分析响应 */
 export interface ICResponse {
   factor_id: string
+  /** 本次计算的规范化参数 */
+  params: Record<string, unknown>
   summary: ICSummary
   series: ICPoint[]
 }

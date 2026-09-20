@@ -102,4 +102,4 @@ class TestCreateConfigStatus:
         )
         model = svc._repo.upsert.call_args.args[0]
         assert model.status == "draft"
-        assert model.config_json["schema_version"] == "1"
+        assert model.config_json["schema_version"] == "2"

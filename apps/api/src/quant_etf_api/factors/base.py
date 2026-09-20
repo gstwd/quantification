@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from enum import Enum
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Literal, Protocol, runtime_checkable
 
 
-# 值形态：决定因子值在实时/回测中的加载与预计算方式。
+# 值形态：决定因子值在实时/回测中的加载与计算方式。
 VALUE_SHAPE_ASSET = "asset"  # 每资产一个独立值（如 return_20d）
 VALUE_SHAPE_MARKET = "market"  # 市场级单一值（如市场宽度）
 ValueShape = Literal["asset", "market"]
@@ -26,38 +24,17 @@ USAGE_RANK = "rank"
 DEFAULT_INDEX_FACTOR_USAGE = [USAGE_TIMING, USAGE_SCORE, USAGE_FILTER, USAGE_RANK]
 
 
-def factor_params_hash(params: dict[str, Any]) -> str:
-    """计算因子参数指纹（规范化 JSON 的 sha256）。
-
-    用于参数化因子值表（index_factor_value）区分
-    不同参数组合，避免同 factor_id 不同参数互相覆盖。
-
-    Args:
-        params: 因子计算参数字典。
-
-    Returns:
-        64 位十六进制 sha256 哈希。
-    """
-    canonical = json.dumps(
-        params,
-        sort_keys=True,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
 class MissingReason(str, Enum):
-    """因子值缺失原因（三态语义，对应层间协作问题 C2）。
+    """因子值缺失原因（三态语义）。
 
     引擎层区分三种缺失，避免全部退化为 None 后无法判断根因：
-    - FACTOR_UNKNOWN：因子 ID 未注册（配置错误，校验期应快速失败）
-    - NOT_COMPUTED：因子已注册但当日未计算（调度缺失，可补算）
-    - INSUFFICIENT_DATA：因子已计算但数值为 NULL（基础行情不足）
+    - TEMPLATE_UNKNOWN：因子引用无法解析为模板实例（配置错误，校验期应快速失败）
+    - COMPUTE_FAILED：计算过程抛出异常（实现或数据异常，需查日志）
+    - INSUFFICIENT_DATA：计算正常返回 None（基础行情不足）
     """
 
-    FACTOR_UNKNOWN = "factor_unknown"
-    NOT_COMPUTED = "not_computed"
+    TEMPLATE_UNKNOWN = "template_unknown"
+    COMPUTE_FAILED = "compute_failed"
     INSUFFICIENT_DATA = "insufficient_data"
 
 
@@ -66,7 +43,8 @@ class FactorSpec:
     """因子元数据描述符，由 FactorComputer.spec 属性提供。
 
     Attributes:
-        factor_id: 因子唯一标识，如 volume_ratio_20d。
+        factor_id: 因子标识。模板口径下是模板 ID（如 sma）；计算器自述口径下
+            是内部标签（如 ma_20d），不参与对外标识。
         name: 因子中文名称，如 20日量比。
         category: 因子类别：volume/momentum/volatility/flow/valuation/technical。
         version: 语义化版本号，如 1.0.0。
@@ -74,14 +52,14 @@ class FactorSpec:
         required_data: 依赖的数据源列表，如 ["index_bars", "index_valuation"]。
         lookback_days: 因子计算所需的自然日回望窗口，默认 90 天。
         market_scope: 是否需要在全市场指数范围上计算（如市场宽度类因子）。
-            为 True 时，回测服务会额外加载全市场行情数据作为因子上下文，
-            保证实时预计算（全市场）与回测（策略池 + 全市场补充）口径一致。
+            为 True 时，上下文构建会额外加载全市场行情数据，
+            保证实时与回测口径一致。
         value_shape: 因子值形态：asset=每资产值、market=市场级值、
             每资产可配置因子必须是 asset/market 形态（行业面板等只作
             因子内部数据依赖，不作为可配置因子）。
         usage: 适用位置数组：timing/score/filter/rank，
             配置校验按此限制因子在策略中的消费位置。
-        default_params: 因子默认参数（参数化因子的默认口径，非参数化因子为空）。
+        default_params: 因子默认参数（模板固有口径，零参数因子为空）。
     """
 
     factor_id: str
@@ -104,11 +82,11 @@ class FactorSpec:
 
 @dataclass
 class FactorContext:
-    """单次计算所需的全部数据视图，由 FactorService._load_context() 构建。
+    """单次计算所需的全部数据视图，由 FactorComputeService 构建。
 
     所有 dict 的 key 均为 (index_code, trade_date) 二元组，
     value 为对应的 ORM 行对象（保留 .volume、.close_price 等属性）。
-    回望窗口由各因子的 FactorSpec.lookback_days 最大值动态决定。
+    回望窗口由本次实际因子实例的最大 lookback 动态决定。
 
     Attributes:
         index_bars: 指数日线映射，key=(index_code, date)。
@@ -130,11 +108,12 @@ class FactorValue:
     """单个因子在单个指数上的计算结果。
 
     Attributes:
-        factor_id: 与 FactorSpec.factor_id 一致。
+        factor_id: 计算器自述的因子标识（内部标签，用于日志与 payload）；
+            对外标识由因子模板与策略别名决定。
         numeric: 数值型因子结果，None 表示数据不足无法计算。
         text: 文本型因子结果（枚举类因子使用）。
         payload: 计算中间过程数据，用于调试和解释。
-        missing_reason: 缺失原因（三态语义），numeric 为 None 时由加载侧填充。
+        missing_reason: 缺失原因（三态语义），numeric 为 None 时由调用侧填充。
     """
 
     factor_id: str

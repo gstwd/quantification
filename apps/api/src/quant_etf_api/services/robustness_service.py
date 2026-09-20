@@ -81,17 +81,18 @@ POOL_KEEP_RATIO = 0.8
 # 而不是按路径字母序——字母序会把 timing.thresholds.* 排到最后截掉，
 # 而择时阈值恰恰是最容易被调到"刚好"的参数。
 _KNOB_PRIORITY: tuple[tuple[str, int], ...] = (
-    ("timing.thresholds", 0),
-    ("timing.proxy_index_codes", 1),
-    ("timing.", 2),
-    ("filters.rules", 3),
-    ("filters.", 4),
-    ("score.factors", 5),
-    ("score.", 6),
-    ("risk.", 7),
-    ("portfolio.", 8),
-    ("rank.", 9),
-    ("rebalance.", 10),
+    ("factor_aliases.", 0),
+    ("timing.thresholds", 1),
+    ("timing.proxy_index_codes", 2),
+    ("timing.", 3),
+    ("filters.rules", 4),
+    ("filters.", 5),
+    ("score.factors", 6),
+    ("score.", 7),
+    ("risk.", 8),
+    ("portfolio.", 9),
+    ("rank.", 10),
+    ("rebalance.", 11),
 )
 
 # 扫描预设（D-2）：quick 用于"轻量体检"（默认写进优化验收清单），
@@ -969,7 +970,7 @@ class RobustnessService:
             新建的策略 ID；校验失败或创建异常时返回 None。
         """
         variant_config = dict(candidate["config"])
-        variant_config.setdefault("schema_version", "1")
+        variant_config.setdefault("schema_version", "2")
         validation = self._config_svc.validate_config(variant_config)
         if not validation.valid:
             logger.info(
@@ -1419,8 +1420,8 @@ def build_knob_variants(
     仓位）按 ×0.5 / ×1.5（上限 1）；其余浮点按 ±25%。粗粒度档位用来寻找
     "参数高原"而不是历史最优点。
 
-    截断顺序按**业务重要性**（``_KNOB_PRIORITY``：择时阈值 → 过滤阈值 →
-    评分权重 → 风险/仓位 → 调仓），而非路径字母序；``knobs`` 显式给出
+    截断顺序按**业务重要性**（``_KNOB_PRIORITY``：因子模板参数 → 择时阈值 →
+    过滤阈值 → 评分权重 → 风险/仓位 → 调仓），而非路径字母序；``knobs`` 显式给出
     "关键旋钮清单"时只扫这些路径（D-2）。
 
     Args:

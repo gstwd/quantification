@@ -68,7 +68,6 @@ class StrategyResult:
         signal_score: 综合得分，0-100。
         signal_level: 信号等级：HIGH / MID / LOW。
         signal_label: 信号中文标签：高确信 / 中等关注 / 正常。
-        factor_values: 各因子计算结果列表。
         payload: 计算中间数据，用于解释和调试。
         tags: 标签，如跟踪指数名称。
     """
@@ -79,7 +78,6 @@ class StrategyResult:
     signal_score: float
     signal_level: str
     signal_label: str
-    factor_values: list[dict[str, Any]] = field(default_factory=list)
     payload: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
 

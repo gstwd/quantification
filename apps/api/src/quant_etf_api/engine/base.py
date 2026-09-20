@@ -25,12 +25,12 @@ class EngineContext:
     Attributes:
         trade_date: 交易日。
         universe: 资产宇宙列表，每项含 index_code、name_cn、category。
-        asset_factors: 每资产的因子值，key=(index_code, factor_id)。
-        market_factors: 市场级因子值（用于择时），key=factor_id。
+        asset_factors: 每资产的因子值，key=(index_code, 因子引用名)。
+            值为 None 表示该因子在该资产上取不到数值。
+        market_factors: 市场级因子值（用于择时），key=因子引用名。
         asset_metadata: 资产元数据，key=index_code。
-        index_valuation: 指数估值映射，key=index_code，value=含 pe/pb 百分位等字段的字典。
-            类型化替代 extra["index_valuation"]，避免无类型逃生舱。
-        extra: 扩展字段（原始 K 线数据等）。
+        factor_failures: 现算过程抛出异常的因子引用名集合；
+            用于把"计算失败"与"数据不足"区分开。
     """
 
     trade_date: date
@@ -38,8 +38,7 @@ class EngineContext:
     asset_factors: dict[tuple[str, str], float | None] = field(default_factory=dict)
     market_factors: dict[str, float | None] = field(default_factory=dict)
     asset_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
-    index_valuation: dict[str, dict[str, float | None]] = field(default_factory=dict)
-    extra: dict[str, Any] = field(default_factory=dict)
+    factor_failures: set[str] = field(default_factory=set)
     # 持仓状态（回测/实时模式下由调用方填充，用于止损止盈和再平衡）
     current_positions: dict[str, float] = field(default_factory=dict)
     entry_prices: dict[str, float] = field(default_factory=dict)

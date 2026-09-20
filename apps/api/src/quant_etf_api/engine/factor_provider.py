@@ -1,76 +1,75 @@
 """因子供应器：桥接因子计算层与策略引擎层。
 
 职责：
-1. 从 StrategyConfig 中提取所有需要的因子 ID 列表。
-2. 实时模式：从 index_factor_value 表加载预计算因子值。
-3. 回测模式：利用预加载的 K 线数据，通过 FactorComputer 批量计算所有因子。
-4. 三态缺失语义：load_asset_factor_records 保留 FactorValue 的
-   missing_reason（因子未计算/数据不足/因子不存在），引擎层仍使用
-   扁平浮点字典以保持性能，服务层可基于记录做精确的补算决策。
+1. 从 StrategyConfig 中收集全部因子引用（策略别名或模板 ID）。
+2. 把引用解析为因子模板实例，并按本次实际参数现算因子值：实时模式计算目标
+   交易日，回测模式利用预加载的行情与估值一次性批量计算整个区间。
+3. 缺失语义由现算结果派生：COMPUTE_FAILED（计算抛异常）与
+   INSUFFICIENT_DATA（计算正常返回 None）。
+
+引擎层通过 ``asset_factors`` 的键读取因子值，键就是策略中的引用名，因此别名与
+模板 ID 对引擎完全等价。
 """
 
 from __future__ import annotations
 
 import logging
-import time
 from datetime import date
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from quant_etf_api.factors.base import (
-    BatchFactorComputer,
-    FactorContext,
-    FactorValue,
-    MissingReason,
-    factor_params_hash,
-)
-from quant_etf_api.factors.macro_period import macro_indicators_as_of
+from quant_etf_api.factors.base import FactorContext
+from quant_etf_api.factors.catalog import FactorInstance, FactorTemplateRegistry
+from quant_etf_api.factors.compute import FactorComputeService, FactorMatrix
 
 if TYPE_CHECKING:
     from quant_etf_api.engine.config import StrategyConfig
-    from quant_etf_api.factors.registry import FactorRegistry
 
 logger = logging.getLogger(__name__)
 
 
 class FactorProvider:
-    """因子供应器：从预计算因子表或实时计算中加载引擎所需的因子值。
+    """因子供应器：按策略配置现算引擎所需的因子值。
 
     Args:
-        db: SQLAlchemy 同步 Session（实时模式必需，回测模式可选）。
-        registry: 因子注册表（回测预计算模式必需）。
+        db: SQLAlchemy 同步 Session（现算需要读取原始数据）。
+        registry: 因子模板注册表。
     """
 
     def __init__(
         self,
         db: Session | None = None,
-        registry: "FactorRegistry | None" = None,
+        registry: FactorTemplateRegistry | None = None,
     ) -> None:
         """初始化因子供应器。
 
         Args:
-            db: 数据库会话，实时模式用于查询预计算因子值。
-            registry: 因子注册表，回测模式用于调用 FactorComputer。
+            db: 数据库会话，现算因子值时必需。
+            registry: 因子模板注册表，解析策略引用时必需。
         """
         self._db = db
         self._registry = registry
+        self._compute = (
+            FactorComputeService(db, registry)
+            if db is not None and registry is not None
+            else None
+        )
 
     @staticmethod
     def collect_required_factor_ids(config: "StrategyConfig") -> list[str]:
-        """从策略配置中收集所有需要的因子 ID。
+        """从策略配置中收集所有需要的因子引用。
 
         遍历 timing.factors、score.factors、filters.rules，
         排名模块的动量/估值子因子（rank.momentum_factor / rank.valuation_factor），
         以及 regime_rules 中所有 regime 的 score/filters 配置，
-        去重后返回完整的因子 ID 列表。
+        去重后返回完整的引用名列表。
 
         Args:
             config: 策略配置。
 
         Returns:
-            去重后的因子 ID 列表。
+            去重后的因子引用名列表（别名或模板 ID）。
         """
         factor_ids: set[str] = set()
 
@@ -90,9 +89,9 @@ class FactorProvider:
 
         # 只有排名模块实际按子排名排序时，子因子才参与策略决策。
         # 默认的动量/估值子排名仅用于结果展示，不应把展示字段缺失误报为策略因子缺失。
-        if config.rank.sort_by == "momentum_rank":
+        if config.rank.sort_by == "momentum_rank" and config.rank.momentum_factor:
             factor_ids.add(config.rank.momentum_factor)
-        elif config.rank.sort_by == "valuation_rank":
+        elif config.rank.sort_by == "valuation_rank" and config.rank.valuation_factor:
             factor_ids.add(config.rank.valuation_factor)
 
         # regime 条件化配置中引用的因子
@@ -107,173 +106,71 @@ class FactorProvider:
 
         return sorted(factor_ids)
 
-    def load_asset_factors(
+    def resolve_instances(self, config: "StrategyConfig") -> dict[str, FactorInstance]:
+        """把策略中的全部因子引用解析为模板实例。
+
+        Args:
+            config: 策略配置。
+
+        Returns:
+            {引用名: FactorInstance}；引用无法解析时抛 FactorResolutionError。
+        """
+        if self._registry is None:
+            return {}
+        return self._registry.resolve_all(
+            self.collect_required_factor_ids(config), config.factor_aliases
+        )
+
+    def load_asset_factor_matrix(
         self,
         config: "StrategyConfig",
         trade_date: date,
         index_codes: list[str],
-    ) -> dict[tuple[str, str], float | None]:
-        """从数据库加载预计算的资产因子值（实时模式）。
-
-        查询 index_factor_value 表，返回每资产 × 因子的平铺字典。
+    ) -> FactorMatrix:
+        """现算指定交易日的资产因子值，同时保留计算失败信息。
 
         Args:
-            config: 策略配置，用于推导需要的因子 ID 列表。
+            config: 策略配置，用于推导与解析因子引用。
             trade_date: 交易日。
             index_codes: 指数代码列表。
 
         Returns:
-            key=(index_code, factor_id), value=因子数值 的字典。
+            FactorMatrix，仅含 trade_date 一天。
         """
-        if self._db is None:
-            logger.warning("FactorProvider 未注入 db，无法加载预计算因子值")
-            return {}
-
-        factor_ids = self.collect_required_factor_ids(config)
-        if not factor_ids:
-            return {}
-
-        return self._query_factor_values(
-            factor_ids,
-            trade_date,
-            index_codes,
-            params_hashes=self._params_hashes(config, factor_ids),
-        )
-
-    def load_asset_factor_records(
-        self,
-        config: "StrategyConfig",
-        trade_date: date,
-        index_codes: list[str],
-    ) -> dict[tuple[str, str], FactorValue]:
-        """加载资产因子记录（保留缺失语义），供服务层诊断与补算决策。
-
-        与 load_asset_factors 的区别：返回值保留 FactorValue 的
-        missing_reason / payload / text，可区分"因子未计算 / 数据不足 / 因子不存在"。
-        引擎执行路径仍使用 load_asset_factors 的扁平字典以保持性能。
-
-        Args:
-            config: 策略配置，用于推导需要的因子 ID 列表。
-            trade_date: 交易日。
-            index_codes: 指数代码列表。
-
-        Returns:
-            key=(index_code, factor_id), value=带缺失语义的 FactorValue。
-        """
-        if self._db is None:
-            return {}
-
-        factor_ids = self.collect_required_factor_ids(config)
-        if not factor_ids:
-            return {}
-
-        rows = self._query_factor_rows(
-            factor_ids,
-            trade_date,
-            index_codes,
-            params_hashes=self._params_hashes(config, factor_ids),
-        )
-        records: dict[tuple[str, str], FactorValue] = {}
-        for r in rows:
-            records[(r.index_code, r.factor_id)] = FactorValue(
-                factor_id=r.factor_id,
-                numeric=r.factor_value_numeric,
-                text=r.factor_value_text,
-                payload=r.factor_payload or {},
-                missing_reason=(
-                    MissingReason.INSUFFICIENT_DATA if r.factor_value_numeric is None else None
-                ),
-            )
-        return records
-
-    def classify_missing(
-        self,
-        factor_id: str,
-        index_codes: list[str],
-        records: dict[tuple[str, str], FactorValue],
-    ) -> MissingReason | None:
-        """按三态语义分类单个因子的缺失原因。
-
-        Args:
-            factor_id: 因子标识。
-            index_codes: 指数代码列表。
-            records: load_asset_factor_records 的返回值。
-
-        Returns:
-            缺失原因；因子对全部指数均可用时返回 None。
-        """
-        if self._registry is not None and self._registry.get(factor_id) is None:
-            return MissingReason.FACTOR_UNKNOWN
-
-        present = [p for p in ((c, factor_id) for c in index_codes) if p in records]
-        if not present:
-            return MissingReason.NOT_COMPUTED
-        if any(records[p].numeric is None for p in present):
-            return MissingReason.INSUFFICIENT_DATA
-        return None
+        instances = list(self.resolve_instances(config).values())
+        if not instances or not index_codes:
+            return FactorMatrix()
+        return self._service().compute_asset_factors(instances, trade_date, index_codes)
 
     def load_market_factors(
         self,
         config: "StrategyConfig",
         trade_date: date,
     ) -> dict[str, float | None]:
-        """加载市场级因子值（用于择时）。
+        """现算市场级择时因子值。
 
-        根据 config.timing.factors 中配置的因子 ID，
-        从择时代理指数（config.timing.proxy_index_codes）加载因子值。
+        按 config.timing.proxy_index_codes 的顺序取第一个有值的代理指数口径。
 
         Args:
             config: 策略配置，需包含 timing 配置。
             trade_date: 交易日。
 
         Returns:
-            key=factor_id, value=因子数值 的字典。
+            key=引用名, value=因子数值 的字典。
         """
-        if self._db is None or config.timing is None:
+        if config.timing is None:
             return {}
-
-        factor_ids = list(config.timing.factors.keys())
-        if not factor_ids:
+        wanted = set(config.timing.factors)
+        instances = [
+            instance
+            for ref, instance in self.resolve_instances(config).items()
+            if ref in wanted
+        ]
+        if not instances:
             return {}
-
-        proxy_codes = config.timing.proxy_index_codes
-        result: dict[str, float | None] = {}
-        for factor_id in factor_ids:
-            for rep_code in proxy_codes:
-                values = self._query_factor_values([factor_id], trade_date, [rep_code])
-                val = values.get((rep_code, factor_id))
-                if val is not None:
-                    result[factor_id] = val
-                    break
-            else:
-                result[factor_id] = None
-
-        return result
-
-    def _params_hashes(
-        self,
-        config: "StrategyConfig",
-        factor_ids: list[str],
-    ) -> dict[str, str]:
-        """按策略 factor_params 与注册表默认参数解析每个因子的参数指纹。
-
-        Args:
-            config: 策略配置（含可选 factor_params）。
-            factor_ids: 需要解析的因子 ID 列表。
-
-        Returns:
-            {factor_id: params_hash}；非参数化因子为空串。
-        """
-        result: dict[str, str] = {}
-        for factor_id in factor_ids:
-            params = None
-            if factor_id in (config.factor_params or {}):
-                params = config.factor_params[factor_id]
-            elif self._registry is not None:
-                computer = self._registry.get(factor_id)
-                params = computer.spec.default_params if computer is not None else None
-            result[factor_id] = factor_params_hash(params) if params else ""
-        return result
+        return self._service().compute_market_factors(
+            instances, trade_date, list(config.timing.proxy_index_codes)
+        )
 
     def precompute_backtest_factors(
         self,
@@ -284,10 +181,7 @@ class FactorProvider:
         all_valuation: dict[tuple[str, date], Any],
         all_macro: dict[str, dict[str, float]] | None = None,
     ) -> dict[date, dict[tuple[str, str], float | None]]:
-        """回测模式：一次性计算所有因子值，避免逐日查库。
-
-        利用预加载的 K 线和估值数据构建 FactorContext，
-        对每个交易日 × 指数调用 FactorComputer 批量计算。
+        """回测模式：用预加载数据一次性计算区间内全部因子值。
 
         Args:
             config: 策略配置。
@@ -299,238 +193,64 @@ class FactorProvider:
                 逐点因子计算时按 period <= trade_date 做时点过滤，避免前视偏差。
 
         Returns:
-            三维映射：date → (index_code, factor_id) → factor_value。
+            三维映射：date → (index_code, 引用名) → 因子数值。
         """
-        if self._registry is None:
-            logger.warning("FactorProvider 未注入 registry，回测因子预计算不可用")
+        if self._compute is None:
+            logger.warning("FactorProvider 未注入 db 或 registry，回测因子计算不可用")
+            return {}
+        instances = list(self.resolve_instances(config).values())
+        if not instances or not dates or not index_codes:
             return {}
 
-        factor_ids = self.collect_required_factor_ids(config)
-        if not factor_ids:
-            return {}
-
-        computers = [c for c in self._registry.all() if c.spec.factor_id in factor_ids]
-        if not computers:
-            logger.warning("回测因子预计算：无匹配的因子计算器，factor_ids=%s", factor_ids)
-            return {}
-
-        # 批量因子必须使用预加载行情的完整交易日历计算。回测服务虽然会向前
-        # 预加载预热行情，但若仅传入回测区间 dates，160 日 MA 扩散等因子会从
-        # 回测首日重新计数，导致月初调仓时全部缺值并被 exclude 策略清空。
+        # 批量因子使用预加载行情的完整交易日历：回测服务会向前预加载预热行情，
+        # 若只用回测区间内的日期，复合因子（如 160 日扩散）会从回测首日重新计数。
         calculation_dates = sorted(
-            {
-                trade_date
-                for index_code, trade_date in all_bars
-                if index_code in index_codes
-            }
+            {trade_date for code, trade_date in all_bars if code in index_codes}
         )
         if not calculation_dates:
-            calculation_dates = dates
+            calculation_dates = list(dates)
 
-        # 复合因子面板：策略引用 index_membership/industry_selection 等
-        # 面板类因子时，在回测预计算阶段一次性装配并复用（不逐日查库）
-        panel_names = {
-            "index_membership",
-            "stock_closes",
-            "industry_selection",
-            "index_industry_exposure",
-        }
-        needs_panels = any(
-            name in set(computer.spec.required_data) for computer in computers for name in panel_names
+        panels = self._compute.build_panel_context(
+            instances, list(index_codes), calculation_dates
         )
-        needs_industry_panels = any(
-            name in {"industry_selection", "index_industry_exposure"}
-            for computer in computers
-            for name in computer.spec.required_data
+        ctx = FactorContext(
+            index_bars=all_bars,
+            index_valuation=all_valuation or {},
+            macro_indicators=all_macro or {},
+            panels=panels,
         )
-        panels: dict[str, Any] = {}
-        if needs_panels and self._db is not None:
-            from quant_etf_api.services.index_factor_panel_service import (
-                IndexFactorPanelService,
-            )
-
-            lookback = max((c.spec.lookback_days for c in computers), default=820)
-            panels = IndexFactorPanelService(self._db).build_panels(
-                index_codes=index_codes,
-                dates=calculation_dates,
-                lookback_natural_days=lookback,
-                # 仅扩散因子不依赖行业面板；避免为其重建无关的 RRG 行业选择，
-                # 既减少回测成本，也避免行业数据缺口干扰扩散因子的诊断。
-                include_industry_panels=needs_industry_panels,
-                # 回测与实时均从原始历史行业数据重建选择信号，保证计算口径一致。
-                calculate_industry_selection=needs_industry_panels,
-            )
-
-        start = time.perf_counter()
-
-        # 将 computers 分为批量和逐点两组
-        batch_computers = [c for c in computers if isinstance(c, BatchFactorComputer)]
-        point_computers = [c for c in computers if not isinstance(c, BatchFactorComputer)]
-
-        # 初始化结果字典（按日期）
-        result: dict[date, dict[tuple[str, str], float | None]] = {d: {} for d in dates}
-
-        # 批量因子：每个 (指数, 因子) 组合只构建一次收盘价序列，计算所有日期
-        # 使用全量 bar 数据的上下文（无需按日期切片，批量接口自行处理历史范围）
-        if batch_computers:
-            batch_ctx = FactorContext(
-                index_bars=all_bars,
-                index_valuation=all_valuation or {},
-                macro_indicators=all_macro or {},
-                panels=panels,
-            )
-            for code in index_codes:
-                for computer in batch_computers:
-                    try:
-                        batch_results = computer.compute_batch(code, calculation_dates, batch_ctx)
-                        for trade_date, fv in batch_results.items():
-                            if trade_date in result:
-                                result[trade_date][(code, fv.factor_id)] = fv.numeric
-                    except Exception:
-                        logger.warning(
-                            "回测批量因子计算失败: code=%s factor=%s",
-                            code,
-                            computer.spec.factor_id,
-                            exc_info=True,
-                        )
-                        for trade_date in dates:
-                            result[trade_date][(code, computer.spec.factor_id)] = None
-
-        # 逐点因子（不支持批量接口的计算器）：保留原有逐日循环
-        if point_computers:
-            for trade_date in dates:
-                ctx = FactorContext(
-                    index_bars=all_bars,
-                    index_valuation={
-                        (code, dt): val
-                        for (code, dt), val in (all_valuation or {}).items()
-                        if dt <= trade_date
-                    },
-                    # 宏数据按 period <= trade_date 做时点过滤，
-                    # 避免回测历史日期使用未来才公布的 LPR 等宏观数据
-                    macro_indicators=macro_indicators_as_of(all_macro, trade_date),
-                    panels=panels,
-                )
-                for code in index_codes:
-                    for computer in point_computers:
-                        try:
-                            fv = computer.compute(code, trade_date, ctx)
-                            result[trade_date][(code, fv.factor_id)] = fv.numeric
-                        except Exception:
-                            logger.warning(
-                                "回测因子计算失败: date=%s code=%s factor=%s",
-                                trade_date,
-                                code,
-                                computer.spec.factor_id,
-                                exc_info=True,
-                            )
-                            result[trade_date][(code, computer.spec.factor_id)] = None
-
-        total_cells = len(dates) * len(index_codes) * len(factor_ids)
+        matrix = self._compute.compute_matrix(
+            instances,
+            index_codes,
+            dates,
+            ctx=ctx,
+            calculation_ctx=ctx,
+            calculation_dates=calculation_dates,
+            include_panels=False,
+        )
         filled = sum(
-            1 for day_values in result.values() for value in day_values.values() if value is not None
+            1 for day in matrix.values.values() for value in day.values() if value is not None
         )
-        elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
-        coverage = round(filled / total_cells * 100, 2) if total_cells else 0.0
+        total_cells = len(dates) * len(index_codes) * len(instances)
         logger.info(
-            "[factor] 回测因子预计算完成: dates=%d index=%d factors=%d 覆盖率=%.2f%% 耗时=%sms",
+            "[factor] 回测因子现算完成: dates=%d index=%d factors=%d 覆盖率=%.2f%% 失败=%d",
             len(dates),
             len(index_codes),
-            len(factor_ids),
-            coverage,
-            elapsed_ms,
+            len(instances),
+            round(filled / total_cells * 100, 2) if total_cells else 0.0,
+            len(matrix.failed),
         )
-        return result
+        return matrix.values
 
-    # ==================================================================
-    # 内部方法
-    # ==================================================================
-
-    def _query_factor_values(
-        self,
-        factor_ids: list[str],
-        trade_date: date,
-        index_codes: list[str],
-        params_hashes: dict[str, str] | None = None,
-    ) -> dict[tuple[str, str], float | None]:
-        """查询 index_factor_value 表，返回平铺的因子值字典。
-
-        Args:
-            factor_ids: 需要查询的因子 ID 列表。
-            trade_date: 交易日。
-            index_codes: 指数代码列表。
+    def _service(self) -> FactorComputeService:
+        """返回现算服务。
 
         Returns:
-            key=(index_code, factor_id), value=因子数值 的字典。
+            FactorComputeService。
+
+        Raises:
+            RuntimeError: 未注入 db 或 registry。
         """
-        from quant_etf_api.infra.db.models.core import IndexFactorValueModel
-
-        hashes = params_hashes or {fid: "" for fid in factor_ids}
-        hash_conditions = or_(
-            *(
-                and_(
-                    IndexFactorValueModel.factor_id == fid,
-                    IndexFactorValueModel.params_hash == hashes.get(fid, ""),
-                )
-                for fid in factor_ids
-            )
-        )
-        rows = (
-            self._db.query(
-                IndexFactorValueModel.index_code,
-                IndexFactorValueModel.factor_id,
-                IndexFactorValueModel.factor_value_numeric,
-            )
-            .filter(
-                and_(
-                    hash_conditions,
-                    IndexFactorValueModel.trade_date == trade_date,
-                    IndexFactorValueModel.index_code.in_(index_codes),
-                    IndexFactorValueModel.strategy_id.is_(None),
-                )
-            )
-            .all()
-        )
-        return {(r.index_code, r.factor_id): r.factor_value_numeric for r in rows}
-
-    def _query_factor_rows(
-        self,
-        factor_ids: list[str],
-        trade_date: date,
-        index_codes: list[str],
-        params_hashes: dict[str, str] | None = None,
-    ) -> list[Any]:
-        """查询 index_factor_value 原始行（仅独立因子值，strategy_id IS NULL）。
-
-        Args:
-            factor_ids: 因子 ID 列表。
-            trade_date: 交易日。
-            index_codes: 指数代码列表。
-
-        Returns:
-            IndexFactorValueModel 行列表。
-        """
-        from quant_etf_api.infra.db.models.core import IndexFactorValueModel
-
-        hashes = params_hashes or {fid: "" for fid in factor_ids}
-        hash_conditions = or_(
-            *(
-                and_(
-                    IndexFactorValueModel.factor_id == fid,
-                    IndexFactorValueModel.params_hash == hashes.get(fid, ""),
-                )
-                for fid in factor_ids
-            )
-        )
-        return (
-            self._db.query(IndexFactorValueModel)
-            .filter(
-                and_(
-                    hash_conditions,
-                    IndexFactorValueModel.trade_date == trade_date,
-                    IndexFactorValueModel.index_code.in_(index_codes),
-                    IndexFactorValueModel.strategy_id.is_(None),
-                )
-            )
-            .all()
-        )
+        if self._compute is None:
+            raise RuntimeError("FactorProvider 缺少 db 或 registry，无法现算因子值")
+        return self._compute

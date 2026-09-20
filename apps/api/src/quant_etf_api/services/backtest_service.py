@@ -77,7 +77,7 @@ from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.orchestrator import StrategyEngine
 from quant_etf_api.engine.rebalance import DefaultRebalanceScheduler
-from quant_etf_api.factors.registry import max_lookback_days
+from quant_etf_api.factors.catalog import FactorTemplateRegistry
 from quant_etf_api.infra.db.models.core import (
     BacktestComparisonModel,
     BacktestDailyResultModel,
@@ -267,10 +267,10 @@ class BacktestService:
         # 每日调仓（或未配置 rebalance）不要求日历，此处保持为 None。
         self._rebalance_scheduler: DefaultRebalanceScheduler | None = None
 
-        # 使用进程级单例注册表，避免每次请求重建
-        from quant_etf_api.factors.registry import get_default_factor_registry
+        # 使用进程级单例模板注册表，避免每次请求重建
+        from quant_etf_api.factors.catalog import get_factor_template_registry
 
-        self._registry = get_default_factor_registry()
+        self._registry: FactorTemplateRegistry = get_factor_template_registry()
         self._factor_provider = FactorProvider(db=db, registry=self._registry)
         self._context_builder = ContextBuilder(db, factor_provider=self._factor_provider)
 
@@ -1448,7 +1448,6 @@ class BacktestService:
                 trade_date,
                 index_codes=day_codes,
                 all_bars=all_bars,
-                all_valuation=all_valuation,
                 precomputed_factors=day_factors,
                 cached_universe=day_universe,
                 cached_metadata=day_metadata,
@@ -2062,7 +2061,7 @@ class BacktestService:
     ) -> None:
         """为市场级因子补充加载全市场活跃指数行情数据（就地更新 all_bars）。
 
-        当策略引用的任一因子的 FactorSpec.market_scope 为 True 时，
+        当策略引用的任一模板声明 market_scope 为 True 时，
         额外加载全市场指数的日线数据作为因子上下文；这些数据只参与
         因子计算，不进入回测标的池，避免影响组合收益口径。
 
@@ -2072,14 +2071,13 @@ class BacktestService:
         （实时无法知道未来），这是模式固有的差异。
 
         Args:
-            config: 策略配置，用于推导所需因子 ID。
+            config: 策略配置，用于推导所需因子引用。
             trading_dates: 回测交易日列表。
             all_bars: 已加载的行情数据字典，就地补充全市场数据。
         """
-        factor_ids = FactorProvider.collect_required_factor_ids(config)
+        instances = self._factor_provider.resolve_instances(config)
         need_market = any(
-            (c := self._registry.get(fid)) is not None and getattr(c.spec, "market_scope", False)
-            for fid in factor_ids
+            instance.template.market_scope for instance in instances.values()
         )
         if not need_market:
             return
@@ -2256,13 +2254,27 @@ class BacktestService:
                     required_ids.add(rule.factor)
                     if rule.compare_to:
                         required_ids.add(rule.compare_to)
-        asset_factor_ids = {
-            spec.factor_id for spec in self._registry.specs() if spec.value_shape == "asset"
+        # 因子引用 → 模板 ID：别名按声明解析，未声明的引用名本身就是模板 ID
+        template_ids = {
+            (
+                config.factor_aliases[ref].template_id
+                if ref in config.factor_aliases
+                else ref
+            )
+            for ref in required_ids
         }
-        required_ids &= asset_factor_ids
+        asset_template_ids = {
+            template.template_id
+            for template in self._registry.all()
+            if template.value_shape == "asset"
+        }
+        required_template_ids = template_ids & asset_template_ids
+        # 这些模板依赖 high/low 价格：缺失时因子无法计算，需在候选池阶段剔除
         needs_high_low = any(
-            factor_id.startswith(("atr_", "donchian_", "monthly_", "rsrs", "price_position_ir_"))
-            for factor_id in required_ids
+            template_id.startswith(
+                ("atr", "donchian_", "monthly_", "rsrs", "price_position_ir_")
+            )
+            for template_id in required_template_ids
         )
         result: list[str] = []
         reasons: dict[str, set[str]] = {}
@@ -2627,16 +2639,19 @@ class BacktestService:
         return filtered, dropped
 
     def _get_lookback_days(self) -> int:
-        """按因子注册表推导回测回望自然日数，与实时模式口径一致。
+        """按因子模板注册表推导回测回望自然日数，与实时模式口径一致。
 
-        回望窗口取注册表所有因子 lookback_days 的最大值，避免长周期因子
-        （return_120d / ma_60d / 估值百分位 / ERP 百分位等）在回测前段
-        因回望不足而全部为 None，导致前段结果失真。
+        回望窗口取注册表全部模板在默认参数下的 lookback 最大值（730 天，
+        由估值百分位与 ERP 百分位决定），避免长周期因子在回测前段因回望
+        不足而全部为 None，导致前段结果失真；该值为任一合法参数的模板
+        回望上界（周期类模板最大 380 天）。
 
         Returns:
             最大回望自然日数。
         """
-        return max_lookback_days(self._registry)
+        return max(
+            (template.lookback_days() for template in self._registry.all()), default=90
+        )
 
     def _load_all_index_bars(
         self, trading_dates: list[date], index_codes: list[str]

@@ -22,11 +22,13 @@
             <span class="chip chip-domain">
               指数资产
             </span>
+            <span v-if="isTunable(spec)" class="chip chip-tunable">可调参</span>
             <button class="edit-btn" @click="startEdit(spec)">编辑</button>
           </div>
         </div>
         <h3 class="factor-name">{{ spec.name }}</h3>
         <p class="factor-desc">{{ spec.description }}</p>
+        <p v-if="isTunable(spec)" class="factor-params">{{ parameterSummary(spec) }}</p>
         <div class="card-footer">
           <span class="version">v{{ spec.version }}</span>
           <span class="required">{{ spec.required_data.join(', ') }}</span>
@@ -41,7 +43,7 @@
     <!-- 编辑弹窗 -->
     <div v-if="editing" class="modal-overlay" @click.self="cancelEdit">
       <div class="modal">
-        <h2 class="modal-title">编辑因子</h2>
+        <h2 class="modal-title">编辑因子模板</h2>
         <div class="form-group">
           <label class="form-label">因子名称</label>
           <input v-model="editForm.name" class="form-input" />
@@ -79,8 +81,8 @@
 /**
  * 因子中心页面。
  *
- * 展示所有因子元数据列表，支持编辑因子名称、描述、类别和启用状态。
- * 因子定义持久化在数据库中，代码仅实现计算逻辑。
+ * 展示所有因子模板元数据列表，支持编辑模板名称、描述、类别和启用状态。
+ * 模板元数据由代码同步到数据库，参数取值范围由 parameter_schema 声明。
  */
 
 import { onMounted, reactive, ref } from 'vue'
@@ -115,6 +117,24 @@ const CATEGORY_LABELS: Record<string, string> = {
   price: '价格',
   relative_strength: '相对强度',
   breadth: '市场宽度',
+}
+
+/** 模板是否可覆盖参数 */
+function isTunable(spec: FactorSpec): boolean {
+  return Object.keys(spec.parameter_schema ?? {}).length > 0
+}
+
+/** 可调参模板的参数摘要，如「period 2–250，默认 20」 */
+function parameterSummary(spec: FactorSpec): string {
+  return Object.entries(spec.parameter_schema ?? {})
+    .map(([key, param]) => {
+      const range =
+        param.minimum != null && param.maximum != null
+          ? `${param.minimum}–${param.maximum}`
+          : '不限范围'
+      return `${key} ${range}，默认 ${param.default}`
+    })
+    .join('；')
 }
 
 /** 进入编辑模式 */
@@ -207,6 +227,12 @@ onMounted(async () => {
 .card-actions { display: flex; align-items: center; gap: 8px; }
 
 .chip { font-size: 11px; padding: 2px 8px; border-radius: 20px; font-weight: 500; white-space: nowrap; }
+.chip-tunable  { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+.factor-params {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: monospace;
+}
 .chip-volume    { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
 .chip-momentum  { background: rgba(34, 197, 94, 0.12);  color: #4ade80; }
 .chip-volatility{ background: rgba(239, 68, 68, 0.12);  color: #f87171; }

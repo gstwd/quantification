@@ -30,6 +30,28 @@
             · {{ (spec.usage ?? []).join(' / ') || '未声明' }}
           </span>
         </div>
+        <div v-if="parameterKeys.length > 0" class="meta-row">
+          <span class="meta-label">模板参数</span>
+          <span class="meta-val param-row">
+            <template v-for="key in parameterKeys" :key="key">
+              <label class="param-field">
+                <span class="param-name" :title="parameterSpec(key)?.description">
+                  {{ key }}
+                </span>
+                <input
+                  v-model.number="params[key]"
+                  type="number"
+                  :step="parameterSpec(key)?.type === 'integer' ? 1 : 0.05"
+                  :min="parameterSpec(key)?.minimum ?? undefined"
+                  :max="parameterSpec(key)?.maximum ?? undefined"
+                  class="param-input"
+                  @change="reloadWithParams"
+                />
+              </label>
+            </template>
+            <span class="param-hint">规范化参数：{{ normalizedParamsText }}</span>
+          </span>
+        </div>
       </div>
 
       <!-- Tab 切换 -->
@@ -48,9 +70,6 @@
           <div class="controls">
             <input type="date" class="date-input" v-model="crossDateInput" :max="todayCn()" />
             <button class="query-btn" @click="loadCrossByDate">指定日期查询</button>
-            <button class="recompute-btn" :disabled="crossLoading" @click="loadCross(true)">
-              {{ crossLoading ? '计算中...' : '强制重新计算' }}
-            </button>
           </div>
         </div>
         <p v-if="crossDateError" class="error-text">{{ crossDateError }}</p>
@@ -113,15 +132,12 @@
             <span class="sep">~</span>
             <input type="date" class="date-input" v-model="seriesEnd" />
             <button class="query-btn" @click="() => loadSeries()">查询</button>
-            <button class="recompute-btn" :disabled="seriesLoading" @click="() => loadSeries(true)">
-              {{ seriesLoading ? '计算中...' : '强制重新计算' }}
-            </button>
           </div>
         </div>
         <details class="info-block">
           <summary>查看说明</summary>
           <p><strong>时间序列</strong>展示单个指数在指定日期范围内因子值的变化趋势。输入指数代码和日期范围后点击查询。</p>
-          <p>后端会自动补算缺失日期的因子值，勾选「强制重新计算」可覆盖已有数据。</p>
+          <p>因子值按页面顶部配置的模板参数从原始行情现算，不读取任何缓存。</p>
         </details>
         <div v-if="seriesLoading" class="empty">加载中...</div>
         <div v-else-if="seriesRows.length === 0" class="empty">输入指数代码并查询，查看因子值走势</div>
@@ -254,16 +270,15 @@
 /**
  * 因子详情页面。
  *
- * 展示单个因子的元数据、横截面快照和时间序列图表。
- * 横截面自动展示最新有数据的交易日，后端按需自动计算。
- * 时间序列查询时后端自动补算缺失日期。
+ * 展示单个因子模板的元数据、横截面快照和时间序列图表。
+ * 参数可覆盖，所有查询都按当前参数从原始数据现算，不读取任何缓存。
  */
 
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { fetchFactorCrossSection, fetchFactorCorrelation, fetchFactorIC, fetchFactorSpecs, fetchFactorTimeSeries } from '../api/factors'
-import type { CorrelationResponse, CrossSectionRow, FactorRow, FactorSpec, ICPoint, ICSummary } from '../types/api'
+import type { CorrelationResponse, CrossSectionRow, FactorRow, FactorParameterSpec, FactorSpec, ICPoint, ICSummary } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
 import { shiftDateCn, todayCn } from '../utils/date'
@@ -277,6 +292,36 @@ const props = defineProps<{ factorId: string }>()
 
 const spec = ref<FactorSpec | null>(null)
 const specLoading = ref(false)
+
+/** 当前模板参数：以模板默认值为初值，可由页面输入覆盖 */
+const params = ref<Record<string, number>>({})
+
+/** 当前模板声明的可覆盖参数名 */
+const parameterKeys = computed(() => Object.keys(spec.value?.parameter_schema ?? {}))
+
+/** 查询单个参数的声明 */
+function parameterSpec(key: string): FactorParameterSpec | undefined {
+  return spec.value?.parameter_schema?.[key]
+}
+
+/** 规范化参数的展示文本 */
+const normalizedParamsText = computed(() => {
+  const entries = Object.entries(params.value).sort(([a], [b]) => a.localeCompare(b))
+  if (entries.length === 0) return '无参数'
+  return entries.map(([key, value]) => `${key}=${value}`).join(', ')
+})
+
+/** 参数变更后按新参数重新查询当前 Tab */
+function reloadWithParams(): void {
+  if (tab.value === 'ic') {
+    void loadIC()
+  } else if (tab.value === 'correlation') {
+    void loadCorrelation()
+  } else if (tab.value === 'series') {
+    void loadSeries()
+  }
+  void loadCross()
+}
 
 const tab = ref<'cross' | 'series' | 'ic' | 'correlation'>('cross')
 
@@ -350,11 +395,11 @@ function barWidth(val: number | null): number {
 }
 
 /** 加载横截面数据（默认最新日期），按因子值降序排列 */
-async function loadCross(forceRecompute = false) {
+async function loadCross() {
   crossDateError.value = ''
   crossLoading.value = true
   try {
-    const resp = await fetchFactorCrossSection(props.factorId, undefined, forceRecompute)
+    const resp = await fetchFactorCrossSection(props.factorId, undefined, params.value)
     crossDate.value = resp.trade_date
     crossDateInput.value = resp.trade_date
     crossRows.value = resp.rows
@@ -377,7 +422,7 @@ async function loadCrossByDate() {
   crossDateError.value = ''
   crossLoading.value = true
   try {
-    const resp = await fetchFactorCrossSection(props.factorId, crossDateInput.value)
+    const resp = await fetchFactorCrossSection(props.factorId, crossDateInput.value, params.value)
     crossDate.value = resp.trade_date
     crossRows.value = resp.rows
       .slice()
@@ -397,7 +442,7 @@ function goToSeries(indexCode: string) {
 }
 
 /** 加载时间序列数据并渲染图表 */
-async function loadSeries(forceRecompute = false) {
+async function loadSeries() {
   if (!seriesIndex.value.trim()) return
   seriesLoading.value = true
   try {
@@ -406,7 +451,7 @@ async function loadSeries(forceRecompute = false) {
       seriesIndex.value.trim(),
       seriesStart.value,
       seriesEnd.value,
-      forceRecompute,
+      params.value,
     )
   } catch {
     seriesRows.value = []
@@ -534,7 +579,14 @@ async function loadIC() {
   if (!icStart.value || !icEnd.value) return
   icLoading.value = true
   try {
-    const resp = await fetchFactorIC(props.factorId, icStart.value, icEnd.value)
+    const resp = await fetchFactorIC(
+      props.factorId,
+      icStart.value,
+      icEnd.value,
+      1,
+      undefined,
+      params.value,
+    )
     icSummary.value = resp.summary
     icSeries.value = resp.series
   } catch {
@@ -688,6 +740,11 @@ onMounted(async () => {
   try {
     const all = await fetchFactorSpecs()
     spec.value = all.find(s => s.factor_id === props.factorId) ?? null
+    const defaults: Record<string, number> = {}
+    for (const [key, parameter] of Object.entries(spec.value?.parameter_schema ?? {})) {
+      defaults[key] = parameter.default
+    }
+    params.value = defaults
   } catch {
     spec.value = null
   } finally {
@@ -970,4 +1027,20 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--text-muted);
 }
+
+.param-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.param-field { display: flex; align-items: center; gap: 6px; }
+.param-name { font-family: monospace; font-size: 12px; color: var(--text-muted); }
+.param-input {
+  width: 90px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--text);
+  outline: none;
+}
+.param-input:focus { border-color: var(--accent); }
+.param-hint { font-family: monospace; font-size: 11px; color: var(--text-muted); }
 </style>

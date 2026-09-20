@@ -11,7 +11,12 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.engine.config import SUPPORTED_SCHEMA_VERSIONS, StrategyConfig
 from quant_etf_api.engine.transforms import list_transform_names
-from quant_etf_api.factors.registry import get_default_factor_registry
+from quant_etf_api.factors.catalog import (
+    FactorResolutionError,
+    FactorTemplateRegistry,
+    get_factor_template_registry,
+)
+from quant_etf_api.factors.templates import FactorParameterError
 from quant_etf_api.infra.db.models.core import StrategyConfigModel, StrategyLifecycleModel
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
 from quant_etf_api.infra.db.repositories.strategy_config import StrategyConfigRepository
@@ -138,9 +143,9 @@ class StrategyConfigService:
         if not validation.valid:
             raise ValueError(f"配置校验失败: {'; '.join(validation.errors)}")
 
-        # 归一化：config_json 未显式声明 schema_version 时写入默认 v1
+        # 归一化：config_json 未显式声明 schema_version 时写入当前版本
         config_json = dict(req.config_json)
-        config_json.setdefault("schema_version", "1")
+        config_json.setdefault("schema_version", "2")
 
         model = StrategyConfigModel(
             strategy_id=req.strategy_id,
@@ -194,9 +199,9 @@ class StrategyConfigService:
             validation = self.validate_config(req.config_json)
             if not validation.valid:
                 raise ValueError(f"配置校验失败: {'; '.join(validation.errors)}")
-            # 归一化：保留已显式声明的 schema_version，缺失时写入默认 v1
+            # 归一化：保留已显式声明的 schema_version，缺失时写入当前版本
             req.config_json = dict(req.config_json)
-            req.config_json.setdefault("schema_version", "1")
+            req.config_json.setdefault("schema_version", "2")
 
         if req.display_name is not None:
             existing.display_name = req.display_name
@@ -441,8 +446,8 @@ class StrategyConfigService:
             validation_input = {
                 "strategy_id": "_validate_",
                 "display_name": "_validate_",
-                # 旧配置无 schema_version 字段时按 v1 校验（默认兼容）
-                "schema_version": config_json.get("schema_version", "1"),
+                # 配置未声明 schema_version 时按当前版本校验
+                "schema_version": config_json.get("schema_version", "2"),
                 **config_json,
             }
             config = StrategyConfig(**validation_input)
@@ -455,8 +460,8 @@ class StrategyConfigService:
         """校验已解析的 StrategyConfig（供运行时路径复用，避免二次解析）。
 
         在结构校验基础上，额外校验：
-        - 引用的每个因子 ID 均存在于 factor_definition 且已启用
-        - 因子 usage 覆盖其消费模块
+        - factor_aliases 声明的模板存在、启用、参数合法
+        - 各模块引用的因子引用可解析（别名或模板 ID），且模板 usage 覆盖消费模块
         - transforms 引用的变换函数均存在于引擎变换注册表
 
         Args:
@@ -466,8 +471,13 @@ class StrategyConfigService:
             校验结果。
         """
         errors, warnings = self._structural_validation(config)
-        errors.extend(self._factor_params_errors(config))
-        errors.extend(self._factor_reference_errors(config))
+        registry = get_factor_template_registry()
+        active_by_id = {
+            row.factor_id: row
+            for row in FactorDefinitionRepository(self._db).find_active()
+        }
+        errors.extend(self._factor_alias_errors(config, registry, active_by_id, warnings))
+        errors.extend(self._factor_reference_errors(config, registry, active_by_id))
         errors.extend(self._transform_validation_errors(config))
         return StrategyValidationResult(
             valid=len(errors) == 0,
@@ -562,6 +572,10 @@ class StrategyConfigService:
         # 排名配置校验
         if config.rank.top_n is not None and config.rank.bottom_n is not None:
             errors.append("top_n 和 bottom_n 不能同时设置")
+        if config.rank.sort_by == "momentum_rank" and not config.rank.momentum_factor:
+            errors.append("rank.sort_by=momentum_rank 时必须设置 rank.momentum_factor")
+        if config.rank.sort_by == "valuation_rank" and not config.rank.valuation_factor:
+            errors.append("rank.sort_by=valuation_rank 时必须设置 rank.valuation_factor")
 
         # 组合配置校验
         valid_methods = {"equal_weight", "score_weight", "winner_take_all"}
@@ -606,20 +620,97 @@ class StrategyConfigService:
 
         return errors, warnings
 
-    def _factor_reference_errors(self, config: StrategyConfig) -> list[str]:
-        """校验策略引用的全部因子 ID 存在、启用且用途/挂载类型匹配。
+    def _factor_alias_errors(
+        self,
+        config: StrategyConfig,
+        registry: FactorTemplateRegistry,
+        active_by_id: dict[str, Any],
+        warnings: list[str],
+    ) -> list[str]:
+        """校验 factor_aliases 声明的模板存在、启用且参数合法。
 
-        除“因子存在且 is_active=True”外，继续做因子元数据校验：
-        - 已被停用的行业轮动 4 因子会在同步后 is_active=False，此处按“已停用或未同步”提示；
-        - 引用位置必须出现在因子的 usage 中（如 breadth 不允许放入 score/rank）。
+        Args:
+            config: 已解析的策略配置。
+            registry: 因子模板注册表。
+            active_by_id: 数据库侧已启用的模板定义，key=模板 ID。
+            warnings: 追加非阻塞提示的列表。
+
+        Returns:
+            错误信息列表；全部别名合法时为空。
+        """
+        if not config.factor_aliases:
+            return []
+        referenced = set(self._collect_referenced_factors(config))
+        errors: list[str] = []
+        for alias, alias_config in config.factor_aliases.items():
+            template = registry.get(alias_config.template_id)
+            if template is None:
+                errors.append(
+                    f"别名 {alias} 指向未知模板 {alias_config.template_id}：可用模板见 GET /factors"
+                )
+                continue
+            try:
+                template.resolve_params(alias_config.params)
+            except FactorParameterError as exc:
+                errors.append(f"别名 {alias} 参数不合法：{exc}")
+            if template.template_id not in active_by_id:
+                errors.append(
+                    f"别名 {alias} 指向的模板 {template.template_id} 已停用或未同步："
+                    "请运行 POST /factors/init 同步并确保 is_active=true"
+                )
+            if alias not in referenced:
+                warnings.append(f"别名 {alias} 已声明但未被任何模块引用")
+        return errors
+
+    @staticmethod
+    def _collect_referenced_factors(config: StrategyConfig) -> list[str]:
+        """收集策略各模块引用到的全部因子引用名。
 
         Args:
             config: 已解析的策略配置。
 
         Returns:
-           错误信息列表。
+            去重后的引用名列表。
         """
-        # 各消费点 → factor_id 列表；usage 校验按消费点匹配
+        refs: set[str] = set(config.score.factors or {})
+        if config.timing:
+            refs.update(config.timing.factors)
+        if config.filters:
+            for rule in config.filters.rules:
+                refs.add(rule.factor)
+                if rule.compare_to:
+                    refs.add(rule.compare_to)
+        if config.rank.momentum_factor:
+            refs.add(config.rank.momentum_factor)
+        if config.rank.valuation_factor:
+            refs.add(config.rank.valuation_factor)
+        for regime_rule in config.regime_rules.values():
+            if regime_rule.score:
+                refs.update(regime_rule.score.factors)
+            if regime_rule.filters:
+                for rule in regime_rule.filters.rules:
+                    refs.add(rule.factor)
+                    if rule.compare_to:
+                        refs.add(rule.compare_to)
+        return sorted(refs)
+
+    def _factor_reference_errors(
+        self,
+        config: StrategyConfig,
+        registry: FactorTemplateRegistry,
+        active_by_id: dict[str, Any],
+    ) -> list[str]:
+        """校验策略引用的全部因子可解析、模板启用且用途与消费模块匹配。
+
+        Args:
+            config: 已解析的策略配置。
+            registry: 因子模板注册表。
+            active_by_id: 数据库侧已启用的模板定义，key=模板 ID。
+
+        Returns:
+            错误信息列表。
+        """
+        # 各消费点 → 因子引用列表；usage 校验按消费点匹配
         module_refs: list[tuple[str, str, list[str]]] = [
             ("score", "评分", list((config.score.factors or {}).keys())),
         ]
@@ -632,9 +723,10 @@ class StrategyConfigService:
                 if rule.compare_to:
                     rule_ids.append(rule.compare_to)
             module_refs.append(("filter", "过滤", rule_ids))
-        module_refs.append(
-            ("rank", "排名子因子", [config.rank.momentum_factor, config.rank.valuation_factor])
-        )
+        rank_refs = [
+            ref for ref in (config.rank.momentum_factor, config.rank.valuation_factor) if ref
+        ]
+        module_refs.append(("rank", "排名子因子", rank_refs))
         for regime_rule in config.regime_rules.values():
             if regime_rule.score:
                 module_refs.append(("score", "regime 评分", list(regime_rule.score.factors.keys())))
@@ -646,70 +738,30 @@ class StrategyConfigService:
                         regime_ids.append(rule.compare_to)
                 module_refs.append(("filter", "regime 过滤", regime_ids))
 
-        active_rows = FactorDefinitionRepository(self._db).find_active()
-        active_by_id = {row.factor_id: row for row in active_rows}
-        registry_ids = {spec.factor_id for spec in get_default_factor_registry().specs()}
-
         errors: list[str] = []
         seen: set[tuple[str, str]] = set()
-        for module_key, module_label, factor_ids in module_refs:
-            for factor_id in factor_ids:
-                if (module_key, factor_id) in seen:
+        for module_key, module_label, factor_refs in module_refs:
+            for ref in factor_refs:
+                if (module_key, ref) in seen:
                     continue
-                seen.add((module_key, factor_id))
-                row = active_by_id.get(factor_id)
-                if row is None:
-                    if factor_id in registry_ids:
-                        errors.append(
-                            f"因子 '{factor_id}' 已停用或未同步："
-                            "请运行 POST /factors/init 同步并确保 is_active=true"
-                        )
-                    else:
-                        errors.append(
-                            f"未知因子 '{factor_id}'：请检查拼写（可用因子见 GET /factors）"
-                        )
+                seen.add((module_key, ref))
+                try:
+                    instance = registry.resolve(ref, config.factor_aliases)
+                except FactorResolutionError as exc:
+                    errors.append(str(exc))
                     continue
-                row_usage = list(getattr(row, "usage", None) or [])
-                if row_usage and module_key not in row_usage:
+                template = instance.template
+                usage = list(template.usage)
+                if usage and module_key not in usage:
                     errors.append(
-                        f"因子 '{factor_id}' 不适用于{module_label}位置"
-                        f"（usage={row_usage}），请调整配置或选择其他因子"
+                        f"因子 {ref}（模板 {template.template_id}）不适用于{module_label}位置"
+                        f"（usage={usage}），请调整配置或选择其他因子"
                     )
-        return errors
-
-    def _factor_params_errors(self, config: StrategyConfig) -> list[str]:
-        """校验 factor_params 引用的因子存在且允许参数化、参数键合法。
-
-        Args:
-            config: 已解析的策略配置。
-
-        Returns:
-            错误信息列表；参数覆盖合法时为空。
-        """
-        if not config.factor_params:
-            return []
-        specs = {spec.factor_id: spec for spec in get_default_factor_registry().specs()}
-        errors: list[str] = []
-        for factor_id, params in config.factor_params.items():
-            spec = specs.get(factor_id)
-            if spec is None:
-                # 未知因子的具体错误由 _factor_reference_errors 给出，避免重复
-                continue
-            if not spec.default_params:
-                errors.append(f"因子 '{factor_id}' 非参数化因子，不允许配置 factor_params")
-                continue
-            unknown = sorted(set(params.keys()) - set(spec.default_params.keys()))
-            if unknown:
-                errors.append(
-                    f"因子 '{factor_id}' 存在未知参数 {unknown}，"
-                    f"可用参数: {sorted(spec.default_params.keys())}"
-                )
-                continue
-            if params != spec.default_params:
-                errors.append(
-                    f"因子 '{factor_id}' 自定义参数暂未支持，本轮仅接受默认参数"
-                    f"（default_params={spec.default_params}）"
-                )
+                if template.template_id not in active_by_id:
+                    errors.append(
+                        f"因子 {ref} 指向的模板 {template.template_id} 已停用或未同步："
+                        "请运行 POST /factors/init 同步并确保 is_active=true"
+                    )
         return errors
 
     @staticmethod

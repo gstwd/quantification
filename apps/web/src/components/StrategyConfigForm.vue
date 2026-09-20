@@ -63,7 +63,7 @@
 
         <!-- 因子列表表头 -->
         <div class="factor-header">
-          <span class="fh-factor">因子</span>
+          <span class="fh-factor">模板 / 别名 / 参数</span>
           <span class="fh-weight">权重</span>
           <span class="fh-transform">变换函数</span>
           <span class="fh-action"></span>
@@ -127,7 +127,7 @@
         <div class="module-desc">基于市场估值/趋势/量能判断 regime（进攻/中性/防守），控制组合总仓位。</div>
 
         <div class="factor-header">
-          <span class="fh-factor">因子</span>
+          <span class="fh-factor">模板 / 别名 / 参数</span>
           <span class="fh-weight">权重</span>
           <span class="fh-transform">变换函数</span>
           <span class="fh-action"></span>
@@ -217,11 +217,9 @@
             @change="updateFilterRule(i, 'factor', ($event.target as HTMLSelectElement).value)"
           >
             <option value="" disabled>选择因子</option>
-            <optgroup v-for="group in filterGroupedFactors" :key="group.category" :label="group.category || '其他'">
-              <option v-for="f in group.items" :key="f.factor_id" :value="f.factor_id">
-                {{ f.factor_id }}
-              </option>
-            </optgroup>
+            <option v-for="opt in filterFactorOptions" :key="opt.value" :value="opt.value">
+              {{ opt.label }}
+            </option>
           </select>
 
           <select
@@ -288,11 +286,9 @@
                 @change="updateFilterRule(i, 'compare_to', ($event.target as HTMLSelectElement).value)"
               >
                 <option value="" disabled>选择比较因子</option>
-                <optgroup v-for="group in filterGroupedFactors" :key="group.category" :label="group.category || '其他'">
-                  <option v-for="f in group.items" :key="f.factor_id" :value="f.factor_id">
-                    {{ f.factor_id }}
-                  </option>
-                </optgroup>
+                <option v-for="opt in filterFactorOptions" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </option>
               </select>
             </template>
             <template v-else>
@@ -363,6 +359,24 @@
               class="fp-input"
               placeholder="留空=不启用"
             />
+          </div>
+          <div v-if="rankSortBy === 'momentum_rank'" class="sub-field">
+            <label class="sub-label">动量子因子</label>
+            <select v-model="rankMomentumFactor" class="fp-select">
+              <option value="" disabled>选择动量子因子</option>
+              <option v-for="alias in declaredAliases" :key="alias" :value="alias">
+                {{ alias }}
+              </option>
+            </select>
+          </div>
+          <div v-if="rankSortBy === 'valuation_rank'" class="sub-field">
+            <label class="sub-label">估值子因子</label>
+            <select v-model="rankValuationFactor" class="fp-select">
+              <option value="" disabled>选择估值子因子</option>
+              <option v-for="alias in declaredAliases" :key="alias" :value="alias">
+                {{ alias }}
+              </option>
+            </select>
           </div>
         </div>
       </div>
@@ -677,9 +691,11 @@ function scHelp(key: string): string {
   return getIndicator('strategy_config', key)?.description ?? ''
 }
 
-/** 因子行数据 */
+/** 因子行数据：别名 + 模板 + 参数 + 权重 + 变换 */
 interface FactorRowValue {
-  factor_id: string
+  alias: string
+  template_id: string
+  params: Record<string, number>
   weight: number
   transform?: string
 }
@@ -723,6 +739,8 @@ onMounted(async () => {
   } catch {
     availableIndexes.value = []
   }
+  // 模板参数默认值来自 parameter_schema，必须等模板列表就绪后再解析配置
+  reinitialize()
 })
 
 /** 因子是否可用于指定消费模块（usage 元数据过滤，未声明 usage 时按可用处理） */
@@ -738,18 +756,6 @@ const scoreModuleFactors = computed(() =>
 const timingModuleFactors = computed(() =>
   availableFactors.value.filter(f => usableFor(f, 'timing')),
 )
-
-/** 按 category 分组（过滤模块使用，只含 filter 适用因子） */
-const filterGroupedFactors = computed(() => {
-  const groups = new Map<string, FactorSpec[]>()
-  for (const f of availableFactors.value) {
-    if (!usableFor(f, 'filter')) continue
-    const cat = f.category || '其他'
-    if (!groups.has(cat)) groups.set(cat, [])
-    groups.get(cat)!.push(f)
-  }
-  return Array.from(groups.entries()).map(([category, items]) => ({ category, items }))
-})
 
 // ── 模块展开状态 ──────────────────────────────────────────────────
 const expanded = reactive({
@@ -798,22 +804,72 @@ const scoreFactors = ref<FactorRowValue[]>([])
 const scoreMissingStrategy = ref('ignore')
 const scoreScoringMode = ref('absolute')
 
+/** 从 config_json 读取因子别名声明 */
+function readFactorAliases(): Record<
+  string,
+  { template_id: string; params: Record<string, number> }
+> {
+  const raw = props.modelValue.factor_aliases as
+    | Record<string, { template_id?: string; params?: Record<string, number> }>
+    | undefined
+  const result: Record<string, { template_id: string; params: Record<string, number> }> = {}
+  for (const [alias, declaration] of Object.entries(raw ?? {})) {
+    result[alias] = {
+      template_id: declaration?.template_id ?? '',
+      params: { ...(declaration?.params ?? {}) },
+    }
+  }
+  return result
+}
+
+/** 模板声明的参数默认值 */
+function templateDefaults(templateId: string): Record<string, number> {
+  const template = availableFactors.value.find(f => f.factor_id === templateId)
+  const defaults: Record<string, number> = {}
+  for (const [key, spec] of Object.entries(template?.parameter_schema ?? {})) {
+    defaults[key] = spec.default
+  }
+  return defaults
+}
+
+/**
+ * 把配置中的因子引用还原成一行。
+ * 引用名在 factor_aliases 中声明时按声明的模板与参数解析；
+ * 否则引用名本身就是模板 ID，参数取模板默认值。
+ */
+function resolveFactorRow(
+  ref: string,
+  aliases: Record<string, { template_id: string; params: Record<string, number> }>,
+): FactorRowValue {
+  const declaration = aliases[ref]
+  if (declaration) {
+    return {
+      alias: ref,
+      template_id: declaration.template_id,
+      params: declaration.params,
+      weight: 0,
+    }
+  }
+  return { alias: ref, template_id: ref, params: templateDefaults(ref), weight: 0 }
+}
+
 function initScore(): void {
   const score = props.modelValue.score as Record<string, unknown> | undefined
   if (!score) return
   const factors = (score.factors ?? {}) as Record<string, number>
   const transforms = (score.transforms ?? {}) as Record<string, string>
-  scoreFactors.value = Object.entries(factors).map(([fid, w]) => ({
-    factor_id: fid,
-    weight: w,
-    transform: transforms[fid] || undefined,
+  const aliases = readFactorAliases()
+  scoreFactors.value = Object.entries(factors).map(([ref, weight]) => ({
+    ...resolveFactorRow(ref, aliases),
+    weight,
+    transform: transforms[ref] || undefined,
   }))
   scoreMissingStrategy.value = (score.missing_factor_strategy as string) || 'ignore'
   scoreScoringMode.value = (score.scoring_mode as string) || 'absolute'
 }
 
 function addScoreFactor(): void {
-  scoreFactors.value.push({ factor_id: '', weight: 0.5 })
+  scoreFactors.value.push({ alias: '', template_id: '', params: {}, weight: 0.5 })
 }
 
 function updateScoreFactor(i: number, val: FactorRowValue): void {
@@ -839,10 +895,11 @@ function initTiming(): void {
   timingEnabled.value = true
   const factors = (timing.factors ?? {}) as Record<string, number>
   const transforms = (timing.transforms ?? {}) as Record<string, string>
-  timingFactors.value = Object.entries(factors).map(([fid, w]) => ({
-    factor_id: fid,
-    weight: w,
-    transform: transforms[fid] || undefined,
+  const aliases = readFactorAliases()
+  timingFactors.value = Object.entries(factors).map(([ref, weight]) => ({
+    ...resolveFactorRow(ref, aliases),
+    weight,
+    transform: transforms[ref] || undefined,
   }))
   const thresholds = (timing.thresholds ?? {}) as Record<string, number>
   timingOffensive.value = thresholds.offensive ?? 65
@@ -852,7 +909,7 @@ function initTiming(): void {
 }
 
 function addTimingFactor(): void {
-  timingFactors.value.push({ factor_id: '', weight: 0.5 })
+  timingFactors.value.push({ alias: '', template_id: '', params: {}, weight: 0.5 })
 }
 
 function updateTimingFactor(i: number, val: FactorRowValue): void {
@@ -864,6 +921,29 @@ function removeTimingFactor(i: number): void {
   timingFactors.value.splice(i, 1)
   emitConfig()
 }
+
+/** 已声明的因子别名（评分 + 择时），过滤器与排名子因子从这里引用 */
+const declaredAliases = computed(() => {
+  const aliases = [...scoreFactors.value, ...timingFactors.value]
+    .map(row => row.alias)
+    .filter(Boolean)
+  return Array.from(new Set(aliases))
+})
+
+/** 过滤器因子候选：已声明别名 + 零参数模板（可直接引用模板 ID，无需声明） */
+const filterFactorOptions = computed(() => {
+  const options: Array<{ value: string; label: string }> = declaredAliases.value.map(alias => ({
+    value: alias,
+    label: `${alias}（别名）`,
+  }))
+  for (const f of availableFactors.value) {
+    const zeroParam = Object.keys(f.parameter_schema ?? {}).length === 0
+    if (zeroParam && usableFor(f, 'filter')) {
+      options.push({ value: f.factor_id, label: f.factor_id })
+    }
+  }
+  return options
+})
 
 // ── 过滤模块 ──────────────────────────────────────────────────────
 const filterEnabled = ref(false)
@@ -922,6 +1002,8 @@ const rankSortBy = ref('score')
 const rankOrder = ref('desc')
 const rankTopN = ref<string>('')
 const rankBottomN = ref<string>('')
+const rankMomentumFactor = ref('')
+const rankValuationFactor = ref('')
 
 function initRank(): void {
   const rank = props.modelValue.rank as Record<string, unknown> | undefined
@@ -930,6 +1012,8 @@ function initRank(): void {
   rankOrder.value = (rank.order as string) || 'desc'
   rankTopN.value = rank.top_n != null ? String(rank.top_n) : ''
   rankBottomN.value = rank.bottom_n != null ? String(rank.bottom_n) : ''
+  rankMomentumFactor.value = (rank.momentum_factor as string) || ''
+  rankValuationFactor.value = (rank.valuation_factor as string) || ''
 }
 
 // ── 组合模块 ──────────────────────────────────────────────────────
@@ -1004,17 +1088,45 @@ function initRebalance(): void {
 // ── 校验 ──────────────────────────────────────────────────────────
 const errors = computed((): string[] => {
   const errs: string[] = []
-  const validFactors = scoreFactors.value.filter(f => f.factor_id)
+  const validFactors = scoreFactors.value.filter(f => f.alias && f.template_id)
   if (validFactors.length === 0) {
     errs.push('评分模块：至少需要 1 个因子')
   }
+  const allRows = [...scoreFactors.value, ...timingFactors.value].filter(f => f.template_id)
+  const seen = new Set<string>()
+  for (const f of allRows) {
+    if (!f.alias) {
+      errs.push(`因子 ${f.template_id}：未填写别名`)
+      continue
+    }
+    if (seen.has(f.alias)) {
+      errs.push(`因子别名 ${f.alias} 重复，同一策略内别名必须唯一`)
+    }
+    seen.add(f.alias)
+    for (const [key, spec] of schemaOf(f.template_id)) {
+      const value = f.params[key]
+      if (value === undefined || Number.isNaN(value)) {
+        errs.push(`因子 ${f.alias}：参数 ${key} 未填写`)
+        continue
+      }
+      if (spec.minimum != null && value < spec.minimum) {
+        errs.push(`因子 ${f.alias}：参数 ${key} 不能小于 ${spec.minimum}`)
+      }
+      if (spec.maximum != null && value > spec.maximum) {
+        errs.push(`因子 ${f.alias}：参数 ${key} 不能大于 ${spec.maximum}`)
+      }
+      if (spec.type === 'integer' && !Number.isInteger(value)) {
+        errs.push(`因子 ${f.alias}：参数 ${key} 必须是整数`)
+      }
+    }
+  }
   for (const f of validFactors) {
     if (f.weight === 0) {
-      errs.push(`评分模块：因子 ${f.factor_id} 权重为 0，将不参与评分`)
+      errs.push(`评分模块：因子 ${f.alias} 权重为 0，将不参与评分`)
     }
   }
   if (timingEnabled.value) {
-    const validTiming = timingFactors.value.filter(f => f.factor_id)
+    const validTiming = timingFactors.value.filter(f => f.alias && f.template_id)
     if (validTiming.length === 0) {
       errs.push('择时模块：已启用但未配置因子')
     }
@@ -1033,8 +1145,35 @@ const errors = computed((): string[] => {
       }
     }
   }
+  if (rankSortBy.value === 'momentum_rank' && !rankMomentumFactor.value) {
+    errs.push('排名模块：按动量排名排序时必须选择动量子因子')
+  }
+  if (rankSortBy.value === 'valuation_rank' && !rankValuationFactor.value) {
+    errs.push('排名模块：按估值排名排序时必须选择估值子因子')
+  }
   return errs
 })
+
+/** 查询模板声明的参数模式 */
+function schemaOf(templateId: string): Array<[string, { type: string; minimum: number | null; maximum: number | null }]> {
+  const template = availableFactors.value.find(f => f.factor_id === templateId)
+  return Object.entries(template?.parameter_schema ?? {})
+}
+
+/**
+ * 生成别名声明：别名与模板 ID 同名且参数等于模板默认值时返回 null（无需声明）。
+ */
+function buildAliasDeclaration(
+  alias: string,
+  templateId: string,
+  params: Record<string, number>,
+): { template_id: string; params: Record<string, number> } | null {
+  const defaults = templateDefaults(templateId)
+  const paramsText = JSON.stringify(Object.fromEntries(Object.entries(params).sort()))
+  const defaultsText = JSON.stringify(Object.fromEntries(Object.entries(defaults).sort()))
+  if (alias === templateId && paramsText === defaultsText) return null
+  return { template_id: templateId, params: { ...params } }
+}
 
 // ── 构建并输出 config_json ────────────────────────────────────────
 function buildConfig(): Record<string, unknown> {
@@ -1052,10 +1191,13 @@ function buildConfig(): Record<string, unknown> {
   // 评分
   const factors: Record<string, number> = {}
   const transforms: Record<string, string> = {}
+  const factorAliases: Record<string, { template_id: string; params: Record<string, number> }> = {}
   for (const f of scoreFactors.value) {
-    if (!f.factor_id) continue
-    factors[f.factor_id] = f.weight
-    if (f.transform) transforms[f.factor_id] = f.transform
+    if (!f.alias || !f.template_id) continue
+    factors[f.alias] = f.weight
+    if (f.transform) transforms[f.alias] = f.transform
+    const declaration = buildAliasDeclaration(f.alias, f.template_id, f.params)
+    if (declaration) factorAliases[f.alias] = declaration
   }
   const scoreConfig: Record<string, unknown> = { factors }
   if (Object.keys(transforms).length > 0) scoreConfig.transforms = transforms
@@ -1068,9 +1210,11 @@ function buildConfig(): Record<string, unknown> {
     const tFactors: Record<string, number> = {}
     const tTransforms: Record<string, string> = {}
     for (const f of timingFactors.value) {
-      if (!f.factor_id) continue
-      tFactors[f.factor_id] = f.weight
-      if (f.transform) tTransforms[f.factor_id] = f.transform
+      if (!f.alias || !f.template_id) continue
+      tFactors[f.alias] = f.weight
+      if (f.transform) tTransforms[f.alias] = f.transform
+      const declaration = buildAliasDeclaration(f.alias, f.template_id, f.params)
+      if (declaration) factorAliases[f.alias] = declaration
     }
     const timingConfig: Record<string, unknown> = { factors: tFactors }
     if (Object.keys(tTransforms).length > 0) timingConfig.transforms = tTransforms
@@ -1084,6 +1228,11 @@ function buildConfig(): Record<string, unknown> {
       .filter(Boolean)
     if (proxyCodes.length > 0) timingConfig.proxy_index_codes = proxyCodes
     config.timing = timingConfig
+  }
+
+  // 因子别名声明：别名与模板 ID 同名且无参数覆盖时无需声明
+  if (Object.keys(factorAliases).length > 0) {
+    config.factor_aliases = factorAliases
   }
 
   // 过滤
@@ -1112,6 +1261,12 @@ function buildConfig(): Record<string, unknown> {
   }
   if (rankTopN.value !== '') rank.top_n = parseInt(rankTopN.value, 10)
   if (rankBottomN.value !== '') rank.bottom_n = parseInt(rankBottomN.value, 10)
+  if (rankSortBy.value === 'momentum_rank' && rankMomentumFactor.value) {
+    rank.momentum_factor = rankMomentumFactor.value
+  }
+  if (rankSortBy.value === 'valuation_rank' && rankValuationFactor.value) {
+    rank.valuation_factor = rankValuationFactor.value
+  }
   config.rank = rank
 
   // 组合
@@ -1176,7 +1331,7 @@ watch(
     scoreFactors, scoreMissingStrategy, scoreScoringMode,
     timingEnabled, timingFactors, timingOffensive, timingDefensive, timingProxyIndexCodes,
     filterEnabled, filterLogic, filterRules,
-    rankSortBy, rankOrder, rankTopN, rankBottomN,
+    rankSortBy, rankOrder, rankTopN, rankBottomN, rankMomentumFactor, rankValuationFactor,
     portfolioMethod, portfolioDefaultExposure, exposureOffensive, exposureNeutral, exposureDefensive,
     riskEnabled, riskMaxAssetWeight, riskMaxPortfolioExposure, riskMinCashRatio,
     rebalanceEnabled, selectionFrequency, selectionDayOfWeek, selectionWeekParity, selectionDayOfMonth,
@@ -1186,8 +1341,8 @@ watch(
   { deep: true },
 )
 
-// ── 初始化：从 modelValue 解析各模块 ──────────────────────────────
-onMounted(() => {
+/** 从 modelValue 重新解析全部模块 */
+function reinitialize(): void {
   initScope()
   initScore()
   initTiming()
@@ -1196,20 +1351,13 @@ onMounted(() => {
   initPortfolio()
   initRisk()
   initRebalance()
-})
+}
 
 // 外部 modelValue 变化时重新初始化（排除自身 emit 导致的循环更新）
 let selfUpdating = false
 watch(() => props.modelValue, () => {
   if (selfUpdating) return
-  initScope()
-  initScore()
-  initTiming()
-  initFilter()
-  initRank()
-  initPortfolio()
-  initRisk()
-  initRebalance()
+  reinitialize()
 }, { deep: true })
 </script>
 

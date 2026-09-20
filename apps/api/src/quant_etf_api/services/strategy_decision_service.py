@@ -2,16 +2,15 @@
 
 原先策略执行被三处各自编排：
 - StrategyService.run_allocation（实时分配）
-- StrategyExecutionService.execute（持久化信号与因子值）
+- StrategyExecutionService.execute（持久化信号）
 - BacktestService._run_backtest_loop（回测）
 
-本服务收敛"加载配置 → 校验 → 构建上下文 → 补算触发 → 引擎执行"这条
-公共编排链：实时分配与策略运行共用同一入口；回测因逐日循环与
-checkpoint 语义特殊，保留自己的主循环，但共享 ContextBuilder 与
-领域层数据准备。
+本服务收敛"加载配置 → 校验 → 构建上下文 → 引擎执行"这条公共编排链：
+实时分配与策略运行共用同一入口；回测因逐日循环与 checkpoint 语义特殊，
+保留自己的主循环，但共享 ContextBuilder 与领域层数据准备。
 
-同时承载引擎侧按需补算的迁移（C3）：ContextBuilder 保持只读，
-因子缺失检测结果在本服务层转换为 factor_computation 异步任务。
+因子值一律由 ContextBuilder 按本次策略实际参数现算，本服务不做因子值持久化，
+也不为缺失因子入队补算任务。
 """
 
 from __future__ import annotations
@@ -31,11 +30,8 @@ from quant_etf_api.engine.config import RebalanceScheduleConfig, StrategyConfig
 from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.orchestrator import StrategyEngine
 from quant_etf_api.factors.base import MissingReason
-from quant_etf_api.factors.registry import get_default_factor_registry
-from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
-from quant_etf_api.infra.db.repositories.index_factor_value import IndexFactorValueRepository
+from quant_etf_api.factors.catalog import get_factor_template_registry
 from quant_etf_api.infra.db.repositories.index_signal import IndexSignalRepository
-from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
 from quant_etf_api.infra.db.repositories.research_run import ResearchRunRepository
 from quant_etf_api.infra.trading_calendar import TradingCalendar, resolve_trading_calendar
 from quant_etf_api.schemas.backtest import BacktestWarning
@@ -92,27 +88,24 @@ class StrategyDecisionService:
         engine: StrategyEngine | None = None,
         run_repo: ResearchRunRepository | None = None,
         signal_repo: IndexSignalRepository | None = None,
-        factor_value_repo: IndexFactorValueRepository | None = None,
     ) -> None:
         """初始化统一策略决策服务。
 
         Args:
             db: SQLAlchemy Session。
-            registry: 因子注册表，默认进程级单例。
+            registry: 因子模板注册表，默认进程级单例。
             context_builder: 上下文构建器，未提供时自动创建。
             engine: 策略引擎，未提供时自动创建。
             run_repo: 运行记录仓库。
             signal_repo: 信号仓库。
-            factor_value_repo: 因子值仓库。
         """
         self._db = db
-        self._registry = registry or get_default_factor_registry()
+        self._registry = registry or get_factor_template_registry()
         self._engine = engine or StrategyEngine()
         self._context_builder = context_builder or ContextBuilder(db, registry=self._registry)
         self._config_svc = StrategyConfigService(db)
         self._run_repo = run_repo or ResearchRunRepository(db)
         self._signal_repo = signal_repo or IndexSignalRepository(db)
-        self._factor_value_repo = factor_value_repo or IndexFactorValueRepository(db)
 
     # ==================================================================
     # 编排链公共步骤
@@ -156,93 +149,6 @@ class StrategyDecisionService:
         """
         effective_date = resolve_effective_date(trade_date)
         return self._context_builder.build(config, effective_date)
-
-    def ensure_live_factors(self, config: StrategyConfig, context: Any) -> list[str]:
-        """检测实时上下文缺失因子并触发异步补算。
-
-        三种缺失语义中，FACTOR_UNKNOWN（配置引用未知因子）不做补算，
-        由配置校验期快速失败兜底；NOT_COMPUTED 与 INSUFFICIENT_DATA
-        入队 factor_computation（按交易日去重）。当该交易日已有覆盖最新
-        入库数据的成功计算时跳过补算，避免浏览页面反复触发空转任务。
-
-        Args:
-            config: 策略配置。
-            context: 实时模式构建的 EngineContext。
-
-        Returns:
-            本次触发补算的因子 ID 列表（空表示无需补算）。
-        """
-        index_codes = [u["index_code"] for u in context.universe]
-        missing = self._context_builder.detect_missing_factors(
-            config, index_codes, context.asset_factors
-        )
-        actionable = [
-            fid
-            for fid, reason in missing.items()
-            if reason in (MissingReason.NOT_COMPUTED.value, MissingReason.INSUFFICIENT_DATA.value)
-        ]
-        if not actionable:
-            return []
-
-        if self._is_factor_computation_current(context.trade_date, index_codes):
-            logger.info(
-                "因子缺失但该交易日已存在覆盖最新入库数据的成功计算，"
-                "跳过重复补算: trade_date=%s missing=%s",
-                context.trade_date,
-                actionable[:5],
-            )
-            return []
-
-        logger.info(
-            "因子数据缺失，入队异步计算: trade_date=%s missing=%s",
-            context.trade_date,
-            actionable[:5],
-        )
-        from quant_etf_api.infra.job_queue.queue import get_job_queue
-
-        get_job_queue().enqueue(
-            "factor_computation",
-            {"trade_date": context.trade_date.isoformat()},
-            job_key=f"factor_computation:{context.trade_date}",
-        )
-        return actionable
-
-    def _is_factor_computation_current(self, trade_date: date, index_codes: list[str]) -> bool:
-        """判断目标交易日是否已有覆盖最新输入数据的成功因子计算。
-
-        实时分配检测到因子值缺失时，INSUFFICIENT_DATA 可能来自数据源本身
-        不支持（如 legulegu 估值仅少数指数有值），这类 NULL 无论重算多少次
-        都不会消失。若最近一次成功计算晚于该交易日日线/估值的最后入库时间，
-        说明重算无法产出新结果，应跳过补算；若之后又有新数据补入，门控会
-        自动放行重算，保证迟到数据仍可回填因子值。
-
-        Args:
-            trade_date: 目标交易日。
-            index_codes: 当前策略资产范围的指数代码。
-
-        Returns:
-            True 表示已存在覆盖最新输入数据的成功计算，无需重复补算。
-        """
-        last_run = self._run_repo.find_latest_successful_by_type_and_date(
-            "factor_computation", trade_date
-        )
-        if last_run is None or last_run.finished_at is None:
-            return False
-
-        bar_repo = IndexDailyBarRepository(self._db)
-        valuation_repo = IndexValuationRepository(self._db)
-        input_times = [
-            ts
-            for ts in (
-                bar_repo.find_latest_ingested_at_for_date(trade_date, index_codes),
-                valuation_repo.find_latest_ingested_at_for_date(trade_date, index_codes),
-            )
-            if ts is not None
-        ]
-        if not input_times:
-            # 该交易日无任何行情/估值输入，重算只会得到 NULL，视为已覆盖
-            return True
-        return max(input_times) <= last_run.finished_at
 
     def run(
         self,
@@ -295,31 +201,25 @@ class StrategyDecisionService:
         start = time.perf_counter()
         logger.info("[strategy] 实时分配启动: strategy=%s trade_date=%s", strategy_id, trade_date)
         context = self.build_live_context(config, trade_date)
-        # 缺失因子触发异步补算（只读检测，不阻塞本次返回）
-        self.ensure_live_factors(config, context)
         result = self.run(config, context)
 
         # 构建结构化警告：未知因子已被配置校验拦截，这里只透传可执行的
-        # NOT_COMPUTED / INSUFFICIENT_DATA，避免"看起来正常但结果为空"的静默问题。
-        index_codes = [u["index_code"] for u in context.universe]
-        missing = self._context_builder.detect_missing_factors(
-            config, index_codes, context.asset_factors
-        )
+        # 计算失败 / 数据不足，避免"看起来正常但结果为空"的静默问题。
+        missing = self._context_builder.insufficient_factors(context)
         warnings: list[BacktestWarning] = []
-        for fid, reason in missing.items():
-            if reason in (MissingReason.NOT_COMPUTED.value, MissingReason.INSUFFICIENT_DATA.value):
-                label = "当日未计算" if reason == MissingReason.NOT_COMPUTED.value else "数据不足"
-                warnings.append(
-                    BacktestWarning(
-                        level="warning",
-                        code="MISSING_FACTOR",
-                        message=f"因子 {fid} 缺失（{label}），本次决策中该因子按缺失处理",
-                        trade_date=context.trade_date,
-                    )
+        for factor_ref, reason in missing.items():
+            label = "计算失败" if reason == MissingReason.COMPUTE_FAILED.value else "数据不足"
+            warnings.append(
+                BacktestWarning(
+                    level="warning",
+                    code="MISSING_FACTOR",
+                    message=f"因子 {factor_ref} 缺失（{label}），本次决策中该因子按缺失处理",
+                    trade_date=context.trade_date,
                 )
+            )
         if missing:
             logger.warning(
-                "[strategy] 因子缺失: strategy=%s missing=%s",
+                "[strategy] 因子值不完整: strategy=%s missing=%s",
                 strategy_id,
                 missing,
             )
@@ -358,7 +258,7 @@ class StrategyDecisionService:
         run_id: str,
         params: dict[str, Any] | None = None,
     ) -> None:
-        """执行单日策略信号计算并持久化到 index_signal / 因子快照。
+        """执行单日策略信号计算并持久化到 index_signal。
 
         Args:
             config: 策略配置。
@@ -383,11 +283,8 @@ class StrategyDecisionService:
 
         # 先删除该策略在有效交易日的旧记录（配置修改后不残留旧数据）
         self._signal_repo.delete_by_strategy_date(strategy_id, effective_date)
-        self._factor_value_repo.delete_strategy_values(strategy_id, effective_date)
 
-        # 收集待写入的信号和因子值
         signal_rows: list[dict[str, Any]] = []
-        factor_rows: list[dict[str, Any]] = []
         for r in result.strategy_results:
             signal_rows.append(
                 {
@@ -401,29 +298,8 @@ class StrategyDecisionService:
                     "run_id": run_id,
                 }
             )
-            for fv in r.factor_values:
-                raw = fv.get("value")
-                num_val: float | None = None
-                txt_val: str | None = None
-                if isinstance(raw, (int, float)):
-                    num_val = float(raw)
-                elif raw is not None:
-                    txt_val = str(raw)
-                factor_rows.append(
-                    {
-                        "trade_date": r.trade_date,
-                        "index_code": r.index_code,
-                        "factor_id": fv["factor_id"],
-                        "factor_value_numeric": num_val,
-                        "factor_value_text": txt_val,
-                        "factor_payload": fv.get("payload"),
-                        "strategy_id": r.strategy_id,
-                    }
-                )
 
-        # 批量写入信号与因子快照（仓库写入门禁）
         self._signal_repo.bulk_insert(signal_rows)
-        self._factor_value_repo.bulk_insert_strategy_values(factor_rows)
         self._db.commit()
 
         asset_count = len(context.universe)
@@ -432,14 +308,12 @@ class StrategyDecisionService:
             metrics={
                 "index_count": asset_count,
                 "signal_count": len(signal_rows),
-                "factor_count": len(factor_rows),
             },
         )
         logger.info(
-            "策略执行完成: %s signals=%d factors=%d",
+            "策略执行完成: %s signals=%d",
             config.strategy_id,
             len(signal_rows),
-            len(factor_rows),
         )
 
     def _mark_run_failed(self, run_id: str, message: str) -> None:

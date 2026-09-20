@@ -33,9 +33,11 @@ from typing import Any
 from scipy.stats import spearmanr
 from sqlalchemy.orm import Session
 
+from quant_etf_api.factors.catalog import FactorInstance, FactorTemplateRegistry, get_factor_template_registry
+from quant_etf_api.factors.compute import FactorComputeService, FactorMatrix
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
+from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
-from quant_etf_api.infra.db.repositories.index_factor_value import IndexFactorValueRepository
 
 # 有效 Rank IC 所需的最小横截面指数数量
 MIN_CROSS_SECTION_N: int = 20
@@ -313,51 +315,42 @@ def _insufficient_reason(
 
 def _load_ic_observations(
     db: Session,
-    factor_id: str,
+    instance: FactorInstance,
     start_date: date,
     end_date: date,
     forward_days: int,
     min_n: int,
+    registry: FactorTemplateRegistry | None = None,
 ) -> list[dict[str, Any]]:
-    """批量加载并构造区间内的 IC 观测（三次区间查询，无逐日往返）。
+    """批量加载并构造区间内的 IC 观测。
+
+    横截面取该区间起点的 point-in-time 指数集合，因子值由现算服务一次算出，
+    不做逐日往返查询；前瞻收益仍统一从指数日线构造。
 
     Args:
         db: SQLAlchemy 同步 Session。
-        factor_id: 因子标识。
+        instance: 已解析的因子实例。
         start_date: 起始日期（含）。
         end_date: 截止日期（含）。
         forward_days: 前瞻交易日数量。
         min_n: 有效 IC 所需的最小横截面指数数量。
+        registry: 因子模板注册表，None 时使用进程级单例。
 
     Returns:
         按交易日升序的观测列表（含 low_n / no_forward 观测）。
     """
-    factor_rows = IndexFactorValueRepository(db).find_factor_series_range(
-        factor_id, start_date, end_date
-    )
-    if not factor_rows:
-        return []
-
-    values_by_date: dict[date, dict[str, float]] = {}
-    for trade_date, index_code, value in factor_rows:
-        values_by_date.setdefault(trade_date, {})[index_code] = value
-    index_codes = sorted({code for _, code, _ in factor_rows})
-
-    window_end = end_date + timedelta(days=FORWARD_LOOKAHEAD_CALENDAR_DAYS)
     bar_repo = IndexDailyBarRepository(db)
-    # 日历取全部指数的观测并集：不因某个因子只覆盖少数指数而丢失交易日
+    window_end = end_date + timedelta(days=FORWARD_LOOKAHEAD_CALENDAR_DAYS)
+    # 日历取全部指数的观测并集：不因某个指数缺行情而丢失交易日
     trading_dates = bar_repo.find_all_trading_dates(start_date, window_end)
     if not trading_dates:
-        return [
-            {
-                "trade_date": trade_date,
-                "ic": None,
-                "cross_section_n": 0,
-                "status": STATUS_NO_FORWARD,
-            }
-            for trade_date in sorted(values_by_date)
-        ]
+        return []
+    observation_dates = [trade_date for trade_date in trading_dates if trade_date <= end_date]
 
+    index_codes = [
+        row.index_code
+        for row in BenchmarkIndexRepository(db).find_for_period(start_date)
+    ]
     bar_map = bar_repo.find_all_date_range(start_date, window_end, index_codes)
     price_lookup: dict[tuple[str, date], float] = {}
     for (code, bar_date), row in bar_map.items():
@@ -366,8 +359,13 @@ def _load_ic_observations(
 
     forward_returns = build_forward_returns(price_lookup, trading_dates, forward_days)
 
+    matrix = FactorMatrix()
+    if observation_dates and index_codes:
+        compute = FactorComputeService(db, registry or get_factor_template_registry())
+        matrix = compute.compute_matrix([instance], index_codes, observation_dates)
+
     observations: list[dict[str, Any]] = []
-    for trade_date in sorted(values_by_date):
+    for trade_date in observation_dates:
         per_index = forward_returns.get(trade_date)
         if per_index is None:
             observations.append(
@@ -379,31 +377,37 @@ def _load_ic_observations(
                 }
             )
             continue
+        day = matrix.day(trade_date)
+        values = {
+            code: value
+            for (code, ref), value in day.items()
+            if ref == instance.instance_id and value is not None
+        }
         observations.append(
-            build_ic_observation(
-                trade_date, values_by_date[trade_date], per_index, min_n
-            )
+            build_ic_observation(trade_date, values, per_index, min_n)
         )
     return observations
 
 
 def analyze_ic(
     db: Session,
-    factor_id: str,
+    instance: FactorInstance,
     start_date: date,
     end_date: date,
     forward_days: int = 1,
     min_n: int = MIN_CROSS_SECTION_N,
+    registry: FactorTemplateRegistry | None = None,
 ) -> dict[str, Any]:
     """一次加载同时产出 IC 序列与汇总统计（推荐入口）。
 
     Args:
         db: SQLAlchemy 同步 Session。
-        factor_id: 因子标识。
+        instance: 已解析的因子实例。
         start_date: 起始日期（含）。
         end_date: 截止日期（含）。
         forward_days: 前瞻交易日数量，需 ≥ 1。
         min_n: 有效 IC 所需的最小横截面指数数量。
+        registry: 因子模板注册表，None 时使用进程级单例。
 
     Returns:
         ``{"series": [...], "summary": {...}}``；``series`` 每项含
@@ -412,7 +416,7 @@ def analyze_ic(
     if start_date > end_date or forward_days < 1:
         return {"series": [], "summary": summarize_ic([], forward_days, min_n)}
     observations = _load_ic_observations(
-        db, factor_id, start_date, end_date, forward_days, min_n
+        db, instance, start_date, end_date, forward_days, min_n, registry
     )
     summary = summarize_ic(observations, forward_days, min_n)
     series = [
@@ -654,82 +658,75 @@ def _selection_windows_are_non_overlapping(
     )
 
 
-def calc_ic_series(
+def calc_factor_correlation_matrix(
     db: Session,
-    factor_id: str,
-    start_date: date,
-    end_date: date,
-    forward_days: int = 1,
-    min_n: int = MIN_CROSS_SECTION_N,
-) -> list[dict[str, Any]]:
-    """计算因子在指定时间范围内的 IC 时间序列。
-
-    Args:
-        db: SQLAlchemy 同步 Session。
-        factor_id: 因子标识。
-        start_date: 起始日期（含）。
-        end_date: 截止日期（含）。
-        forward_days: 前瞻交易日数量。
-        min_n: 有效 IC 所需的最小横截面指数数量。
-
-    Returns:
-        按日期升序排列的 IC 序列，每项包含 trade_date / ic / cross_section_n。
-    """
-    return analyze_ic(db, factor_id, start_date, end_date, forward_days, min_n)["series"]
-
-
-def calc_ic_summary(
-    db: Session,
-    factor_id: str,
-    start_date: date,
-    end_date: date,
-    forward_days: int = 1,
-    min_n: int = MIN_CROSS_SECTION_N,
-) -> dict[str, Any]:
-    """汇总因子 IC 统计信息。
-
-    Args:
-        db: SQLAlchemy 同步 Session。
-        factor_id: 因子标识。
-        start_date: 起始日期（含）。
-        end_date: 截止日期（含）。
-        forward_days: 前瞻交易日数量。
-        min_n: 有效 IC 所需的最小横截面指数数量。
-
-    Returns:
-        见 ``summarize_ic`` 的返回说明。
-    """
-    return analyze_ic(db, factor_id, start_date, end_date, forward_days, min_n)["summary"]
-
-
-def calc_rank_ic(
-    db: Session,
-    factor_id: str,
     trade_date: date,
-    forward_days: int = 1,
+    factor_ids: list[str] | None = None,
     min_n: int = MIN_CROSS_SECTION_N,
-) -> float | None:
-    """计算单日 Rank IC（因子值与下期收益的 Spearman 秩相关系数）。
+    registry: FactorTemplateRegistry | None = None,
+) -> dict[str, Any]:
+    """计算因子间截面 Rank 相关矩阵。
+
+    对指定日期的全部活跃指数，按**成对交集**计算各因子值之间的 Spearman
+    相关系数；因子值由现算服务按各模板默认参数一次算出。
 
     Args:
         db: SQLAlchemy 同步 Session。
-        factor_id: 因子标识。
-        trade_date: 因子值对应的交易日。
-        forward_days: 前瞻交易日数量。
-        min_n: 有效 IC 所需的最小横截面指数数量。
+        trade_date: 交易日。
+        factor_ids: 要计算的模板 ID 列表，None 表示全部已注册模板。
+        min_n: 计算相关系数所需的最小成对样本数。
+        registry: 因子模板注册表，None 时使用进程级单例。
 
     Returns:
-        Rank IC 值（-1 到 1）；横截面不足或缺少前瞻行情时返回 None。
+        含 factor_ids / matrix / pair_counts / index_count /
+        undetermined_pair_count / trade_date 的字典；``index_count`` 为当日
+        有任一因子值的指数数量（原始横截面规模）。
     """
-    observations = _load_ic_observations(
-        db, factor_id, trade_date, trade_date, forward_days, min_n
+    templates = registry or get_factor_template_registry()
+    refs = list(factor_ids) if factor_ids else templates.ids()
+    instances = [templates.resolve(ref) for ref in refs]
+    index_codes = [
+        row.index_code for row in BenchmarkIndexRepository(db).find_for_period(trade_date)
+    ]
+
+    values_by_factor: dict[str, dict[str, float]] = {}
+    index_codes_with_value: set[str] = set()
+    if instances and index_codes:
+        matrix = FactorComputeService(db, templates).compute_matrix(
+            instances, index_codes, [trade_date]
+        )
+        day = matrix.day(trade_date)
+        for instance in instances:
+            code_values = {
+                code: value
+                for (code, ref), value in day.items()
+                if ref == instance.instance_id and value is not None
+            }
+            if code_values:
+                values_by_factor[instance.instance_id] = code_values
+                index_codes_with_value.update(code_values)
+
+    if len(values_by_factor) < 2:
+        return {
+            "factor_ids": sorted(values_by_factor),
+            "matrix": [],
+            "pair_counts": [],
+            "index_count": len(index_codes_with_value),
+            "undetermined_pair_count": 0,
+            "trade_date": str(trade_date),
+        }
+
+    factor_id_list, matrix, pair_counts, undetermined = pairwise_rank_correlation(
+        values_by_factor, min_n
     )
-    for item in observations:
-        if item.get("status") == STATUS_OK:
-            return float(item["ic"])
-    return None
-
-
+    return {
+        "factor_ids": factor_id_list,
+        "matrix": matrix,
+        "pair_counts": pair_counts,
+        "index_count": len(index_codes_with_value),
+        "undetermined_pair_count": undetermined,
+        "trade_date": str(trade_date),
+    }
 def pairwise_rank_correlation(
     values_by_factor: Mapping[str, Mapping[str, float]],
     min_n: int = MIN_CROSS_SECTION_N,
@@ -770,57 +767,3 @@ def pairwise_rank_correlation(
             if corr is None:
                 undetermined += 1
     return factor_ids, matrix, pair_counts, undetermined
-
-
-def calc_factor_correlation_matrix(
-    db: Session,
-    trade_date: date,
-    factor_ids: list[str] | None = None,
-    min_n: int = MIN_CROSS_SECTION_N,
-) -> dict[str, Any]:
-    """计算因子间截面 Rank 相关矩阵。
-
-    对指定日期的所有指数，按**成对交集**计算各因子值之间的 Spearman 相关系数。
-
-    Args:
-        db: SQLAlchemy 同步 Session。
-        trade_date: 交易日。
-        factor_ids: 要计算的因子列表，None 表示所有有数据的因子。
-        min_n: 计算相关系数所需的最小成对样本数。
-
-    Returns:
-        含 factor_ids / matrix / pair_counts / index_count /
-        undetermined_pair_count / trade_date 的字典；``index_count`` 为当日
-        有任一因子值的指数数量（原始横截面规模）。
-    """
-    rows = IndexFactorValueRepository(db).find_cross_section_values(
-        trade_date, factor_ids
-    )
-
-    values_by_factor: dict[str, dict[str, float]] = {}
-    index_codes: set[str] = set()
-    for index_code, factor_id, value in rows:
-        index_codes.add(index_code)
-        values_by_factor.setdefault(factor_id, {})[index_code] = value
-
-    if len(values_by_factor) < 2:
-        return {
-            "factor_ids": sorted(values_by_factor),
-            "matrix": [],
-            "pair_counts": [],
-            "index_count": len(index_codes),
-            "undetermined_pair_count": 0,
-            "trade_date": str(trade_date),
-        }
-
-    factor_id_list, matrix, pair_counts, undetermined = pairwise_rank_correlation(
-        values_by_factor, min_n
-    )
-    return {
-        "factor_ids": factor_id_list,
-        "matrix": matrix,
-        "pair_counts": pair_counts,
-        "index_count": len(index_codes),
-        "undetermined_pair_count": undetermined,
-        "trade_date": str(trade_date),
-    }

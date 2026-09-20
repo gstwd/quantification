@@ -158,7 +158,7 @@ class OptimizationService:
         if not validation.valid:
             raise ValueError(f"候选配置校验失败: {'; '.join(validation.errors)}")
         candidate_config = dict(candidate_config)
-        candidate_config.setdefault("schema_version", "1")
+        candidate_config.setdefault("schema_version", "2")
         try:
             StrategyConfig(
                 strategy_id="_candidate_",

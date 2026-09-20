@@ -1,13 +1,15 @@
-"""因子元数据 usage 校验测试。"""
+"""因子模板元数据与别名声明校验测试。"""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
 from quant_etf_api.factors.base import USAGE_FILTER, USAGE_TIMING
-from quant_etf_api.factors.builtins.breadth import BreadthMA20Computer
-from quant_etf_api.factors.registry import get_default_factor_registry
+from quant_etf_api.factors.catalog import build_default_registry
+from quant_etf_api.factors.templates import FactorParameterError
 from quant_etf_api.services.strategy_config_service import StrategyConfigService
 
 
@@ -27,24 +29,25 @@ def _make_service(rows: list[SimpleNamespace]) -> StrategyConfigService:
 
 
 def test_default_registry_has_no_industry_factors() -> None:
-    """正式因子注册表不再登记行业域因子，全部挂载在指数资产上。"""
-    specs = {spec.factor_id: spec for spec in get_default_factor_registry().specs()}
-    assert "rrg_rs_ratio" not in specs
-    assert "rrg_rs_momentum" not in specs
-    assert "rrg_quadrant" not in specs
-    assert "diffusion_count_ratio" not in specs
-    for spec in specs.values():
-        assert spec.value_shape in {"asset", "market"}
-        assert spec.usage
+    """正式模板目录不再登记行业域因子，全部挂载在指数资产上。"""
+    templates = {template.template_id: template for template in build_default_registry().all()}
+    assert "rrg_rs_ratio" not in templates
+    assert "rrg_rs_momentum" not in templates
+    assert "rrg_quadrant" not in templates
+    assert "diffusion_count_ratio" not in templates
+    for template in templates.values():
+        assert template.value_shape in {"asset", "market"}
+        assert template.usage
 
 
 def test_breadth_factor_usage_restricted() -> None:
-    """市场宽度因子 usage 不含 score，配置校验拒绝放入评分。"""
-    breadth = BreadthMA20Computer().spec
-    assert breadth.usage == [USAGE_TIMING, USAGE_FILTER]
+    """市场宽度模板 usage 不含 score，配置校验拒绝放入评分。"""
+    breadth = build_default_registry().get("breadth_ma20_pct")
+    assert breadth is not None
+    assert list(breadth.usage) == [USAGE_TIMING, USAGE_FILTER]
     rows = [
         _meta_row("breadth_ma20_pct", usage=[USAGE_TIMING, USAGE_FILTER]),
-        _meta_row("return_20d", usage=["score", "filter", "rank", "timing"]),
+        _meta_row("return", usage=["score", "filter", "rank", "timing"]),
     ]
     svc = _make_service(rows)
     config = {
@@ -56,43 +59,88 @@ def test_breadth_factor_usage_restricted() -> None:
     assert any("不适用于评分位置" in e for e in result.errors)
 
 
-def test_factor_params_rejected_for_non_parameterized_factor() -> None:
-    """factor_params 只允许作用于有 default_params 的参数化因子。"""
-    rows = [
-        _meta_row("return_20d", usage=["score", "filter", "rank", "timing"]),
-    ]
+def test_alias_unknown_template_rejected() -> None:
+    """别名指向未注册模板时快速失败。"""
+    rows = [_meta_row("return", usage=["score", "filter", "rank", "timing"])]
     svc = _make_service(rows)
     config = {
-        "score": {"factors": {"return_20d": 1.0}},
+        "score": {"factors": {"trend_fast": 1.0}},
         "portfolio": {"method": "equal_weight"},
-        "factor_params": {"return_20d": {"period": 30}},
+        "factor_aliases": {"trend_fast": {"template_id": "no_such_template"}},
     }
     result = svc.validate_config(config)
     assert not result.valid
-    assert any("非参数化因子" in e for e in result.errors)
+    assert any("指向未知模板" in e for e in result.errors)
 
 
-def test_factor_params_custom_values_rejected_for_now() -> None:
-    """参数化因子本轮仅接受默认参数，自定义参数快速失败。"""
-    rows = [
-        _meta_row(
-            "index_diffusion_ratio",
-            usage=["score", "filter", "rank"],
-        )
-    ]
+def test_alias_params_rejected_for_zero_param_template() -> None:
+    """零参数模板不接受任何参数覆盖。"""
+    rows = [_meta_row("close_price", usage=["score", "filter", "rank", "timing"])]
     svc = _make_service(rows)
     config = {
-        "score": {"factors": {"index_diffusion_ratio": 1.0}},
+        "score": {"factors": {"last_close": 1.0}},
         "portfolio": {"method": "equal_weight"},
-        "factor_params": {
-            "index_diffusion_ratio": {
-                "trend_window": 200,
-                "fast_window": 150,
-                "slow_window": 25,
-                "weighting_mode": "index_weight",
-            }
+        "factor_aliases": {"last_close": {"template_id": "close_price", "params": {"period": 5}}},
+    }
+    result = svc.validate_config(config)
+    assert not result.valid
+    assert any("参数不合法" in e for e in result.errors)
+
+
+def test_alias_params_out_of_range_rejected() -> None:
+    """参数超出模板声明范围时快速失败。"""
+    rows = [_meta_row("sma", usage=["score", "filter", "rank", "timing"])]
+    svc = _make_service(rows)
+    config = {
+        "score": {"factors": {"trend_slow": 1.0}},
+        "portfolio": {"method": "equal_weight"},
+        "factor_aliases": {"trend_slow": {"template_id": "sma", "params": {"period": 999}}},
+    }
+    result = svc.validate_config(config)
+    assert not result.valid
+    assert any("不能大于" in e for e in result.errors)
+
+
+def test_alias_custom_params_accepted() -> None:
+    """合法自定义参数通过校验，同一模板可多次以不同参数出现。"""
+    rows = [_meta_row("sma", usage=["score", "filter", "rank", "timing"])]
+    svc = _make_service(rows)
+    config = {
+        "score": {"factors": {"trend_fast": 0.35, "trend_slow": 0.25}},
+        "portfolio": {"method": "equal_weight"},
+        "factor_aliases": {
+            "trend_fast": {"template_id": "sma", "params": {"period": 10}},
+            "trend_slow": {"template_id": "sma", "params": {"period": 30}},
         },
     }
     result = svc.validate_config(config)
-    assert not result.valid
-    assert any("自定义参数暂未支持" in e for e in result.errors)
+    assert result.valid, result.errors
+
+
+def test_alias_declared_but_unused_warns() -> None:
+    """已声明但未被引用的别名给出非阻塞提示。"""
+    rows = [_meta_row("close_price", usage=["score", "filter", "rank", "timing"])]
+    svc = _make_service(rows)
+    config = {
+        "score": {"factors": {"close_price": 1.0}},
+        "portfolio": {"method": "equal_weight"},
+        "factor_aliases": {"unused_alias": {"template_id": "close_price"}},
+    }
+    result = svc.validate_config(config)
+    assert result.valid, result.errors
+    assert any("已声明但未被任何模块引用" in w for w in result.warnings)
+
+
+def test_template_parameter_spec_coercion() -> None:
+    """ParameterSpec 规范化：整数校验与范围校验。"""
+    registry = build_default_registry()
+    template = registry.get("sma")
+    assert template is not None
+    assert template.resolve_params({"period": 10})["period"] == 10
+    with pytest.raises(FactorParameterError):
+        template.resolve_params({"period": 1.5})
+    assert template.resolve_params({"period": 250})["period"] == 250
+    with pytest.raises(FactorParameterError):
+        template.resolve_params({"period": 251})
+    with pytest.raises(FactorParameterError):
+        template.resolve_params({"unknown": 1})

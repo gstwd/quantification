@@ -28,7 +28,7 @@ from quant_etf_api.api.routers import (
 )
 from quant_etf_api.config.logging_config import setup_logging
 from quant_etf_api.config.settings import get_settings
-from quant_etf_api.factors.registry import FactorRegistry, get_default_factor_registry
+from quant_etf_api.factors.catalog import FactorTemplateRegistry, get_factor_template_registry
 from quant_etf_api.infra.job_queue.queue import get_job_queue
 from quant_etf_api.infra.scheduler import (
     get_ai_scheduler,
@@ -39,8 +39,8 @@ logger = logging.getLogger(__name__)
 
 setup_logging()
 settings = get_settings()
-# 因子注册表在进程启动时构建一次，所有请求共享同一实例
-factor_registry: FactorRegistry = get_default_factor_registry()
+# 因子模板注册表在进程启动时构建一次，所有请求共享同一实例
+factor_template_registry: FactorTemplateRegistry = get_factor_template_registry()
 
 
 @asynccontextmanager

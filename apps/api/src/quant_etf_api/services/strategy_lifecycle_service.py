@@ -34,6 +34,7 @@ from quant_etf_api.domain.research.periods import (
     PeriodBoundaries,
 )
 from quant_etf_api.domain.research.stability import compute_stability_metrics
+from quant_etf_api.factors.catalog import get_factor_template_registry
 from quant_etf_api.factors.evaluation import analyze_backtest_score_ic, analyze_ic
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import (
@@ -615,19 +616,22 @@ class StrategyLifecycleService:
             },
             "factors": {"score_factor_ids": factor_ids, "per_factor": {}},
         }
-        for factor_id in factor_ids:
+        for factor_ref in factor_ids:
             try:
+                instance = get_factor_template_registry().resolve(
+                    factor_ref, config.factor_aliases if config is not None else None
+                )
                 analysis = analyze_ic(
-                    self._db, factor_id, start, end, forward_days=forward_days
+                    self._db, instance, start, end, forward_days=forward_days
                 )
             except Exception:
-                logger.warning("计算因子 %s 的 IC 失败", factor_id, exc_info=True)
+                logger.warning("计算因子 %s 的 IC 失败", factor_ref, exc_info=True)
                 continue
             summary = analysis["summary"]
             decay = ic_decay_evidence(
                 [item["ic"] for item in analysis["series"]], overlap_step=forward_days
             )
-            result["factors"]["per_factor"][factor_id] = {
+            result["factors"]["per_factor"][factor_ref] = {
                 "role": "score_diagnostic",
                 "count": summary["count"],
                 "ic_mean": summary["ic_mean"],

@@ -5,7 +5,6 @@ from quant_etf_api.infra.db.repositories.base import BaseRepository
 from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.infra.db.repositories.data_health import DataHealthSnapshotRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
-from quant_etf_api.infra.db.repositories.index_factor_value import IndexFactorValueRepository
 from quant_etf_api.infra.db.repositories.index_signal import IndexSignalRepository
 from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
 from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
@@ -17,7 +16,6 @@ __all__ = [
     "BenchmarkIndexRepository",
     "DataHealthSnapshotRepository",
     "IndexDailyBarRepository",
-    "IndexFactorValueRepository",
     "IndexSignalRepository",
     "IndexValuationRepository",
     "MacroIndicatorRepository",

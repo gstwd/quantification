@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import date
 from typing import Any
 
 from sqlalchemy.orm import load_only
@@ -73,37 +72,6 @@ class ResearchRunRepository(BaseRepository):
             .order_by(ResearchRunModel.started_at.desc())
             .limit(limit)
             .all()
-        )
-
-    def find_latest_successful_by_type_and_date(
-        self,
-        run_type: str,
-        trade_date: date,
-    ) -> ResearchRunModel | None:
-        """查询指定运行类型与交易日最近一次成功运行。
-
-        用于实时分配补算门控：判断某个交易日是否已经完成过因子计算，
-        避免浏览页面反复触发无结果的重复计算。
-
-        Args:
-            run_type: 运行类型，如 factor_computation。
-            trade_date: 交易日。
-
-        Returns:
-            最近一次成功运行记录，不存在时返回 None。
-        """
-        return (
-            self._db.query(ResearchRunModel)
-            .filter(
-                ResearchRunModel.run_type == run_type,
-                ResearchRunModel.trade_date == trade_date,
-                ResearchRunModel.status == "success",
-            )
-            .order_by(
-                ResearchRunModel.finished_at.desc().nullslast(),
-                ResearchRunModel.started_at.desc(),
-            )
-            .first()
         )
 
     def find_items_by_run_id(self, run_id: str) -> list[ResearchRunItemModel]:

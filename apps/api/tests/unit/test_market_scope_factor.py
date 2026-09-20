@@ -74,7 +74,7 @@ class TestEnsureMarketScopeBars:
         config = StrategyConfig(
             strategy_id="s1",
             display_name="普通策略",
-            score=ScoreConfig(factors={"return_20d": 1.0}),
+            score=ScoreConfig(factors={"close_price": 1.0}),
         )
         all_bars: dict = {("000300", date(2024, 1, 2)): object()}
 

@@ -8,13 +8,25 @@ import type {
   ICResponse,
 } from '../types/api'
 
-/** 获取所有因子元数据列表（含已禁用） */
+/** 模板参数取值：可覆盖参数名 → 数值 */
+export type FactorParams = Record<string, number>
+
+/**
+ * 把模板参数序列化为查询串取值。
+ * 后端以 JSON 对象文本接收 params，空参数返回 undefined 以便省略该查询参数。
+ */
+function encodeParams(params?: FactorParams): string | undefined {
+  if (!params || Object.keys(params).length === 0) return undefined
+  return JSON.stringify(params)
+}
+
+/** 获取所有因子模板元数据列表（含已禁用） */
 export async function fetchFactorSpecs(): Promise<FactorSpec[]> {
   const { data } = await apiClient.get<FactorSpec[]>('/factors/')
   return data
 }
 
-/** 编辑因子元数据 */
+/** 编辑因子模板元数据 */
 export async function updateFactor(
   factorId: string,
   payload: FactorUpdatePayload,
@@ -23,67 +35,76 @@ export async function updateFactor(
   return data
 }
 
-/** 查询单因子在指定交易日的横截面（含指数中文名），不传日期时自动选最新 */
+/** 查询因子模板实例在指定交易日的横截面（含指数中文名），不传日期时自动选最新 */
 export async function fetchFactorCrossSection(
   factorId: string,
   tradeDate?: string,
-  forceRecompute = false,
+  params?: FactorParams,
 ): Promise<CrossSectionResponse> {
-  const params: Record<string, string | boolean> = {}
+  const query: Record<string, string> = {}
   if (tradeDate) {
-    params.trade_date = tradeDate
+    query.trade_date = tradeDate
   }
-  if (forceRecompute) {
-    params.force_recompute = true
+  const encoded = encodeParams(params)
+  if (encoded) {
+    query.params = encoded
   }
   const { data } = await apiClient.get<CrossSectionResponse>(
     `/factors/${factorId}/cross-section`,
-    { params },
+    { params: query },
   )
   return data
 }
 
-/** 查询单因子在单指数上的时间序列（后端自动补算缺失日期） */
+/** 查询因子模板实例在单指数上的时间序列 */
 export async function fetchFactorTimeSeries(
   factorId: string,
   indexCode: string,
   startDate: string,
   endDate: string,
-  forceRecompute = false,
+  params?: FactorParams,
 ): Promise<FactorRow[]> {
-  const params: Record<string, string | boolean> = {
+  const query: Record<string, string> = {
     index_code: indexCode,
     start_date: startDate,
     end_date: endDate,
   }
-  if (forceRecompute) {
-    params.force_recompute = true
+  const encoded = encodeParams(params)
+  if (encoded) {
+    query.params = encoded
   }
-  const { data } = await apiClient.get<FactorRow[]>(`/factors/${factorId}/values`, { params })
+  const { data } = await apiClient.get<FactorRow[]>(`/factors/${factorId}/values`, {
+    params: query,
+  })
   return data
 }
 
-/** 查询因子 IC 分析（IC 时间序列和汇总统计） */
+/** 查询因子模板实例的 IC 分析（IC 时间序列和汇总统计） */
 export async function fetchFactorIC(
   factorId: string,
   startDate: string,
   endDate: string,
   forwardDays = 1,
   minCrossSectionN?: number,
+  params?: FactorParams,
 ): Promise<ICResponse> {
-  const params: Record<string, string | number> = {
+  const query: Record<string, string | number> = {
     start_date: startDate,
     end_date: endDate,
     forward_days: forwardDays,
   }
   if (minCrossSectionN !== undefined) {
-    params.min_cross_section_n = minCrossSectionN
+    query.min_cross_section_n = minCrossSectionN
   }
-  const { data } = await apiClient.get<ICResponse>(`/factors/${factorId}/ic`, { params })
+  const encoded = encodeParams(params)
+  if (encoded) {
+    query.params = encoded
+  }
+  const { data } = await apiClient.get<ICResponse>(`/factors/${factorId}/ic`, { params: query })
   return data
 }
 
-/** 查询因子间截面 Rank 相关性矩阵 */
+/** 查询因子间截面 Rank 相关性矩阵（按各模板默认参数口径） */
 export async function fetchFactorCorrelation(
   tradeDate: string,
   factorIds?: string[],

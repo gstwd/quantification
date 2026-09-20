@@ -12,7 +12,10 @@ from typing import Any
 def calc_volume_ratio_20d(
     code: str, trade_date: date, all_bars: dict[tuple[str, date], Any]
 ) -> float | None:
-    """计算 20 日量比：当日成交量 / 近 20 日平均成交量。
+    """计算 20 日量比：当日成交量 / 近 20 个交易日平均成交量。
+
+    取 trade_date 之前按日期最近的 20 个有成交量的交易日作为分母；
+    可用历史不足 20 个交易日时按实际条数平均。
 
     Args:
         code: 指数代码。
@@ -25,23 +28,25 @@ def calc_volume_ratio_20d(
     today_bar = all_bars.get((code, trade_date))
     if today_bar is None or today_bar.volume is None:
         return None
-    past_volumes = [
-        v.volume
+    past = sorted(
+        (dt, v.volume)
         for (c, dt), v in all_bars.items()
         if c == code and dt < trade_date and v.volume is not None
-    ]
-    past_volumes.sort()
-    recent_20 = past_volumes[-20:] if len(past_volumes) >= 20 else past_volumes
-    if not recent_20:
+    )
+    if not past:
         return None
-    avg = sum(recent_20) / len(recent_20)
+    recent = [volume for _dt, volume in past[-20:]]
+    avg = sum(recent) / len(recent)
     return round(today_bar.volume / avg, 4) if avg > 0 else None
 
 
 def calc_volume_ratio_17d(
     code: str, trade_date: date, all_bars: dict[tuple[str, date], Any]
 ) -> float | None:
-    """计算 17 日量比：当日成交量 / 近 17 日平均成交量。
+    """计算 17 日量比：当日成交量 / 近 17 个交易日平均成交量。
+
+    取 trade_date 之前按日期最近的 17 个有成交量的交易日作为分母；
+    可用历史不足 17 个交易日时按实际条数平均。
 
     Args:
         code: 指数代码。
@@ -54,16 +59,15 @@ def calc_volume_ratio_17d(
     today_bar = all_bars.get((code, trade_date))
     if today_bar is None or today_bar.volume is None:
         return None
-    past_volumes = [
-        v.volume
+    past = sorted(
+        (dt, v.volume)
         for (c, dt), v in all_bars.items()
         if c == code and dt < trade_date and v.volume is not None
-    ]
-    past_volumes.sort()
-    recent_17 = past_volumes[-17:] if len(past_volumes) >= 17 else past_volumes
-    if not recent_17:
+    )
+    if not past:
         return None
-    avg = sum(recent_17) / len(recent_17)
+    recent = [volume for _dt, volume in past[-17:]]
+    avg = sum(recent) / len(recent)
     return round(today_bar.volume / avg, 4) if avg > 0 else None
 
 

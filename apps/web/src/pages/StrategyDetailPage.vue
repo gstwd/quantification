@@ -98,7 +98,7 @@
                 <span class="config-key">因子权重</span>
                 <div class="factor-weights">
                   <span v-for="(weight, fid) in scoreConfig.factors" :key="fid" class="factor-tag">
-                    <span class="factor-name">{{ fid }}</span>
+                    <span class="factor-name">{{ factorLabel(String(fid)) }}</span>
                     <span class="factor-weight">{{ weight }}</span>
                   </span>
                 </div>
@@ -107,7 +107,7 @@
                 <span class="config-key">变换函数</span>
                 <div class="factor-weights">
                   <span v-for="(fn, fid) in scoreConfig.transforms" :key="fid" class="factor-tag transform">
-                    <span class="factor-name">{{ fid }}</span>
+                    <span class="factor-name">{{ factorLabel(String(fid)) }}</span>
                     <span class="factor-weight">{{ fn }}</span>
                   </span>
                 </div>
@@ -134,7 +134,7 @@
                 <span class="config-key">因子权重</span>
                 <div class="factor-weights">
                   <span v-for="(weight, fid) in timingConfig.factors" :key="fid" class="factor-tag">
-                    <span class="factor-name">{{ fid }}</span>
+                    <span class="factor-name">{{ factorLabel(String(fid)) }}</span>
                     <span class="factor-weight">{{ weight }}</span>
                   </span>
                 </div>
@@ -166,8 +166,8 @@
               <div v-for="(rule, i) in filterConfig.rules" :key="i" class="config-row">
                 <span class="config-key">规则 {{ i + 1 }}</span>
                 <span class="config-val mono">
-                  {{ rule.factor }} {{ rule.op }}
-                  {{ rule.compare_to ? rule.compare_to : rule.value }}
+                  {{ factorLabel(rule.factor) }} {{ rule.op }}
+                  {{ rule.compare_to ? factorLabel(rule.compare_to) : rule.value }}
                   <span v-if="rule.missing_strategy && rule.missing_strategy !== 'fail'">
                     （缺失:{{ rule.missing_strategy === 'pass' ? '通过' : '排除' }}）
                   </span>
@@ -195,8 +195,35 @@
                 <span class="config-key">Bottom N</span>
                 <span class="config-val">{{ rankConfig.bottom_n }}</span>
               </div>
+              <div v-if="rankConfig.momentum_factor" class="config-row">
+                <span class="config-key">动量子因子</span>
+                <span class="config-val mono">{{ factorLabel(rankConfig.momentum_factor) }}</span>
+              </div>
+              <div v-if="rankConfig.valuation_factor" class="config-row">
+                <span class="config-key">估值子因子</span>
+                <span class="config-val mono">{{ factorLabel(rankConfig.valuation_factor) }}</span>
+              </div>
             </div>
             <div v-else class="config-empty">默认排名</div>
+          </div>
+        </div>
+
+        <!-- 因子别名声明 -->
+        <div v-if="Object.keys(factorAliasMap).length > 0" class="config-card">
+          <div class="config-header">因子别名声明 (factor_aliases)</div>
+          <div class="config-body">
+            <div class="config-section">
+              <div v-for="(declaration, alias) in factorAliasMap" :key="alias" class="config-row">
+                <span class="config-key mono">{{ alias }}</span>
+                <span class="config-val mono">
+                  {{ declaration.template_id }}
+                  <template v-if="Object.keys(declaration.params ?? {}).length > 0">
+                    ({{ formatParams(declaration.params) }})
+                  </template>
+                </span>
+              </div>
+            </div>
+            <div class="config-desc">别名承载策略语义，模板 ID 与参数承载计算语义；未在此声明的引用按模板 ID 与默认参数解释。</div>
           </div>
         </div>
 
@@ -861,6 +888,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
+import { fetchFactorSpecs } from '../api/factors'
 import { fetchIndexDailyBars } from '../api/market_data'
 import {
   abandonRobustnessRun,
@@ -875,6 +903,7 @@ import { toast } from '../stores/toast'
 import type {
   AllocationResponse,
   DailyBar,
+  FactorSpec,
   RobustnessCoverage,
   RobustnessDetail,
   RobustnessSummary,
@@ -884,6 +913,9 @@ import { formatCnTime, shiftDateCn, todayCn } from '../utils/date'
 const props = defineProps<{ strategyId: string }>()
 const store = useStrategyStore()
 const router = useRouter()
+
+/** 因子模板列表（用于把引用名解析成可读模板名） */
+const availableFactors = ref<FactorSpec[]>([])
 
 /** 今天日期字符串，用于日期选择器上限 */
 const todayStr = todayCn()
@@ -929,7 +961,40 @@ const indexCodesList = computed(() => store.current?.index_codes ?? [])
 const scoreConfig = computed(() => configJson.value.score as { factors?: Record<string, number>; transforms?: Record<string, string>; missing_factor_strategy?: string; scoring_mode?: string } | undefined)
 const timingConfig = computed(() => configJson.value.timing as { factors?: Record<string, number>; transforms?: Record<string, string>; thresholds?: { offensive?: number; defensive?: number }; proxy_index_codes?: string[] } | undefined)
 const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string; missing_strategy?: string }> } | undefined)
-const rankConfig = computed(() => configJson.value.rank as { sort_by?: string; order?: string; top_n?: number; bottom_n?: number } | undefined)
+const rankConfig = computed(() => configJson.value.rank as { sort_by?: string; order?: string; top_n?: number; bottom_n?: number; momentum_factor?: string; valuation_factor?: string } | undefined)
+
+/** 因子别名声明：别名 → 模板与参数 */
+const factorAliasMap = computed(
+  () =>
+    (configJson.value.factor_aliases ?? {}) as Record<
+      string,
+      { template_id: string; params?: Record<string, number> }
+    >,
+)
+
+/** 参数对象的展示文本（键有序） */
+function formatParams(params?: Record<string, number>): string {
+  return Object.entries(params ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join(', ')
+}
+
+/**
+ * 因子引用的展示文案。
+ * 声明了别名时展示「别名 → 模板(参数)」；未声明时引用名本身就是模板 ID。
+ */
+function factorLabel(ref: string): string {
+  const declaration = factorAliasMap.value[ref]
+  if (!declaration) {
+    const template = availableFactors.value.find(f => f.factor_id === ref)
+    return template ? `${ref}（${template.name}）` : ref
+  }
+  const paramsText = formatParams(declaration.params)
+  return paramsText
+    ? `${ref} → ${declaration.template_id}(${paramsText})`
+    : `${ref} → ${declaration.template_id}`
+}
 const portfolioConfig = computed(() => (
   configJson.value.portfolio ?? { method: 'equal_weight', default_exposure: 0.5 }
 ) as { method?: string; timing_exposure?: Record<string, number>; default_exposure?: number })
@@ -1375,7 +1440,14 @@ async function handleClearResearchData(): Promise<void> {
   }
 }
 
-onMounted(() => store.loadOne(props.strategyId))
+onMounted(async () => {
+  await store.loadOne(props.strategyId)
+  try {
+    availableFactors.value = await fetchFactorSpecs()
+  } catch {
+    availableFactors.value = []
+  }
+})
 onUnmounted(() => disposeCharts())
 </script>
 

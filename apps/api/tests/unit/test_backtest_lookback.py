@@ -1,7 +1,7 @@
 """回测回望窗口（B2）单元测试。
 
 覆盖：
-- max_lookback_days 从注册表推导最大回望自然日数，与实时模式口径一致
+- 回望自然日数从因子模板注册表推导，与实时模式口径一致
 - BacktestService 按注册表推导回望窗口，行情与估值加载共用同一窗口
 - 预热期估算：前 N 个交易日因子数据不足的天数提示
 """
@@ -12,16 +12,17 @@ from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 from quant_etf_api.factors.base import FactorSpec
-from quant_etf_api.factors.registry import (
-    FactorRegistry,
-    build_default_factor_registry,
-    max_lookback_days,
+from quant_etf_api.factors.catalog import (
+    FactorTemplateRegistry,
+    build_default_registry,
+    build_template,
 )
+from quant_etf_api.factors.templates import FactorTemplate
 from quant_etf_api.services.backtest_service import BacktestService
 
 
 class _StubComputer:
-    """仅用于构造注册表的因子计算器桩，只暴露 spec。"""
+    """仅用于构造模板桩的因子计算器，只暴露 spec。"""
 
     def __init__(self, factor_id: str, lookback_days: int) -> None:
         """初始化桩计算器。
@@ -46,31 +47,47 @@ class _StubComputer:
         )
 
 
+def _stub_template(template_id: str, lookback_days: int) -> FactorTemplate:
+    """构造仅用于回望推导测试的模板桩。
+
+    Args:
+        template_id: 模板标识。
+        lookback_days: 模板声明的回望自然日数。
+
+    Returns:
+        FactorTemplate。
+    """
+    return build_template(
+        template_id, lambda _params: _StubComputer(template_id, lookback_days)
+    )
+
+
 class TestMaxLookbackDays:
-    """max_lookback_days 推导测试。"""
+    """回望自然日数推导测试。"""
 
     def test_default_registry_returns_max_lookback(self) -> None:
-        """默认注册表应返回全部因子的最大 lookback（估值百分位/ERP 为 730）。"""
-        registry = build_default_factor_registry()
-        assert max_lookback_days(registry) == 730
+        """默认注册表应返回全部模板的最大 lookback（估值百分位/ERP 为 730）。"""
+        registry = build_default_registry()
+        assert max(template.lookback_days() for template in registry.all()) == 730
 
-    def test_empty_registry_returns_default(self) -> None:
-        """空注册表应返回默认 90 天。"""
-        assert max_lookback_days(FactorRegistry()) == 90
+    def test_empty_instances_return_default(self) -> None:
+        """无实例时应返回默认 90 天。"""
+        assert FactorTemplateRegistry.max_lookback_days([]) == 90
 
-    def test_custom_registry_returns_max(self) -> None:
-        """自定义注册表应返回声明的最大 lookback。"""
-        registry = FactorRegistry()
-        registry.register(_StubComputer("return_120d", 175))
-        registry.register(_StubComputer("ma_5d", 15))
-        assert max_lookback_days(registry) == 175
+    def test_custom_templates_return_max(self) -> None:
+        """多模板时应返回声明的最大 lookback。"""
+        registry = FactorTemplateRegistry()
+        registry.register(_stub_template("long_momentum", 175))
+        registry.register(_stub_template("ma_short", 15))
+        instances = [registry.resolve(template.template_id) for template in registry.all()]
+        assert FactorTemplateRegistry.max_lookback_days(instances) == 175
 
 
 class TestBacktestServiceLookback:
     """BacktestService 回望窗口相关行为测试。"""
 
     def test_get_lookback_days_uses_registry(self) -> None:
-        """回望天数应由注册表最大 lookback 推导（默认注册表为 730）。"""
+        """回望天数应由注册表模板的最大 lookback 推导（默认注册表为 730）。"""
         svc = BacktestService(db=MagicMock())
         assert svc._get_lookback_days() == 730
 

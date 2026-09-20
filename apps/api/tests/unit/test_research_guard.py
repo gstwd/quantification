@@ -118,7 +118,7 @@ class TestLiveFreeze:
         svc.get_config = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
         result = svc.update_config("s1", StrategyConfigUpdate(config_json={"score": {}}))
         assert result is not None
-        assert existing.config_json == {"score": {}, "schema_version": "1"}
+        assert existing.config_json == {"score": {}, "schema_version": "2"}
 
 
 class TestLifecycleOnline:

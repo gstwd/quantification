@@ -39,13 +39,13 @@ def _bar(close: float, open_price: float | None) -> SimpleNamespace:
     )
 
 
-def _make_service(specs: list[str] | None = None) -> BacktestService:
-    """构建测试用 BacktestService（Mock 会话 + 桩注册表）。"""
+def _make_service(template_ids: list[str] | None = None) -> BacktestService:
+    """构建测试用 BacktestService（Mock 会话 + 桩模板注册表）。"""
     svc = BacktestService(db=MagicMock())
-    factor_ids = specs if specs is not None else ["return_5d", "ma_5d"]
+    factor_ids = template_ids if template_ids is not None else ["close_price", "sma"]
     svc._registry = MagicMock()
-    svc._registry.specs.return_value = [
-        SimpleNamespace(factor_id=fid, value_shape="asset") for fid in factor_ids
+    svc._registry.all.return_value = [
+        SimpleNamespace(template_id=tid, value_shape="asset") for tid in factor_ids
     ]
     return svc
 
@@ -139,18 +139,18 @@ class TestBuildCandidatePool:
         assert reasons["399001"] == {"MISSING_CLOSE"}
 
     def test_requires_high_low_for_atr_like_factors(self) -> None:
-        """引用 ATR/Donchian 类因子时，最高/最低价缺失应剔除标的。"""
-        svc = _make_service(specs=["atr_14d"])
+        """引用 ATR/Donchian 类模板时，最高/最低价缺失应剔除标的。"""
+        svc = _make_service(template_ids=["atr"])
         bars = {
             ("000300", DATES[0]): SimpleNamespace(
                 close_price=100.0, open_price=100.0, high_price=None, low_price=None
             ),
             ("000300", DATES[1]): _bar(101.0, 101.0),
         }
-        factors = {("000300", "atr_14d"): 1.0}
+        factors = {("000300", "atr"): 1.0}
 
         codes, reasons = svc._build_candidate_pool(
-            _config(score_factors={"atr_14d": 1.0}),
+            _config(score_factors={"atr": 1.0}),
             DATES[0],
             DATES[1],
             ["000300"],
@@ -165,7 +165,7 @@ class TestBuildCandidatePool:
     def test_requires_high_low_for_rsrs_and_price_position_factors(self) -> None:
         """引用 rsrs / price_position_ir 因子时，最高/最低价缺失应报 MISSING_HIGH_LOW。"""
         for factor_id in ("rsrs", "price_position_ir_60d"):
-            svc = _make_service(specs=[factor_id])
+            svc = _make_service(template_ids=[factor_id])
             bars = {
                 ("000300", DATES[0]): SimpleNamespace(
                     close_price=100.0, open_price=100.0, high_price=None, low_price=None
@@ -207,17 +207,17 @@ class TestBuildCandidatePool:
 
     def test_excludes_missing_next_high_low_for_atr_factor(self) -> None:
         """次日最高/最低价缺失时记 MISSING_NEXT_HIGH_LOW。"""
-        svc = _make_service(specs=["atr_14d"])
+        svc = _make_service(template_ids=["atr"])
         bars = {
             ("000300", DATES[0]): _bar(100.0, 100.0),
             ("000300", DATES[1]): SimpleNamespace(
                 close_price=101.0, open_price=101.0, high_price=None, low_price=None
             ),
         }
-        factors = {("000300", "atr_14d"): 1.0}
+        factors = {("000300", "atr"): 1.0}
 
         codes, reasons = svc._build_candidate_pool(
-            _config(score_factors={"atr_14d": 1.0}),
+            _config(score_factors={"atr": 1.0}),
             DATES[0],
             DATES[1],
             ["000300"],
@@ -244,7 +244,7 @@ class TestBuildCandidatePool:
 
     def test_filter_compare_to_factor_is_required(self) -> None:
         """过滤规则 compare_to 引用的因子缺失时，标的同样被剔除。"""
-        svc = _make_service(specs=["close_price", "ma_5d"])
+        svc = _make_service(template_ids=["close_price", "sma"])
         bars = {
             ("000300", DATES[0]): _bar(100.0, 100.0),
             ("000300", DATES[1]): _bar(101.0, 101.0),

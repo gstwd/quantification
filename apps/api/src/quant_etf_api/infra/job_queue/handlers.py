@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import date
 from typing import Any
 
 from quant_etf_api.infra.time import today_cn
@@ -251,71 +250,12 @@ def handle_data_management_operation(payload: dict) -> dict[str, Any]:
 
 
 def handle_data_sync_all(payload: dict) -> None:
-    """执行每日全局同步并驱动后续因子链路。
+    """执行每日全局同步。
 
-    同步完成后，指数日线或估值有新记录时按实际最新指数交易日入队通用因子计算。
+    因子值在实时分配与因子查询时按策略实际参数现算，不做批量预计算，
+    因此同步完成后无需再驱动任何因子链路。
     """
-    result = handle_data_management_operation({**payload, "operation": "sync_latest"})
-    try:
-        from sqlalchemy import func
-
-        from quant_etf_api.infra.db.base import SessionLocal
-        from quant_etf_api.infra.db.models.core import IndexDailyBarModel
-        from quant_etf_api.infra.job_queue.queue import get_job_queue
-
-        items = {item["dataset_key"]: item for item in result["items"]}
-        db = SessionLocal()
-        try:
-            bar_item = items.get("index_daily_bar", {})
-            valuation_item = items.get("index_valuation", {})
-            if (
-                bar_item.get("status") == "success"
-                and valuation_item.get("status") == "success"
-                and (
-                    int(bar_item.get("records") or 0) > 0
-                    or int(valuation_item.get("records") or 0) > 0
-                )
-            ):
-                data_date = db.query(func.max(IndexDailyBarModel.trade_date)).scalar()
-                if data_date is not None:
-                    get_job_queue().enqueue(
-                        "factor_computation",
-                        {"trade_date": data_date.isoformat()},
-                        job_key=f"factor_computation:{data_date.isoformat()}",
-                    )
-        finally:
-            db.close()
-    except Exception:
-        # 同步本身已成功并落库，后续因子入队失败不应把运行改写为失败
-        logger.exception("全局同步完成，但后续因子任务入队失败")
-
-
-def handle_factor_computation(payload: dict) -> None:
-    """执行指定交易日的因子计算并入库。"""
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.main import factor_registry  # noqa: PLC0415
-    from quant_etf_api.services.run_service import RunService
-
-    trade_date_str = payload.get("trade_date") or today_cn().isoformat()
-    trade_date = date.fromisoformat(trade_date_str)
-    db = SessionLocal()
-    run_id = ""
-    try:
-        from quant_etf_api.factors.service import FactorService
-
-        run_svc = RunService(db)
-        run = run_svc.create_run("factor_computation", None, trade_date)
-        run_id = run.run_id
-        run_svc.mark_running(run_id)
-        result = FactorService(db, factor_registry).compute_and_store(trade_date)
-        run_svc.mark_success(run_id, metrics=result)
-    except Exception as e:
-        logger.exception("因子计算任务异常: trade_date=%s", trade_date)
-        if run_id:
-            RunService(db).mark_failed(run_id, f"因子计算异常: {type(e).__name__}: {e}")
-        raise
-    finally:
-        db.close()
+    handle_data_management_operation({**payload, "operation": "sync_latest"})
 
 
 def handle_warm_calendar(payload: dict) -> None:
@@ -340,7 +280,6 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "data_fill": handle_data_fill,
     "data_manage_operation": handle_data_management_operation,
     "data_sync_all": handle_data_sync_all,
-    "factor_computation": handle_factor_computation,
     "warm_calendar": handle_warm_calendar,
 }
 

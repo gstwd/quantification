@@ -11,7 +11,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 # 引擎配置 schema 版本：配置模型演进时递增并做兼容迁移检测（7.4#3）
-SUPPORTED_SCHEMA_VERSIONS = {"1"}
+#
+# v2 起，策略中的因子引用既可以是 factor_aliases 中声明的别名，
+# 也可以是模板 ID 本身（使用模板默认参数）。
+SUPPORTED_SCHEMA_VERSIONS = {"2"}
 
 
 class TimingThresholds(BaseModel):
@@ -30,8 +33,8 @@ class TimingConfig(BaseModel):
     """市场择时配置（可选模块）。
 
     Attributes:
-        factors: 因子权重映射，key=factor_id, value=权重。
-        transforms: 因子变换函数映射，key=factor_id, value=transform 名称。
+        factors: 因子权重映射，key=因子引用（别名或模板 ID），value=权重。
+        transforms: 因子变换函数映射，key=因子引用，value=transform 名称。
         thresholds: regime 判定阈值。
         proxy_index_codes: 择时代理指数代码列表，用于加载市场级因子值。默认沪深300。
     """
@@ -46,8 +49,8 @@ class ScoreConfig(BaseModel):
     """资产评分配置。
 
     Attributes:
-        factors: 因子权重映射，key=factor_id, value=权重（支持正负权重）。
-        transforms: 因子变换函数映射。
+        factors: 因子权重映射，key=因子引用（别名或模板 ID），value=权重（支持正负权重）。
+        transforms: 因子变换函数映射，key=因子引用。
         missing_factor_strategy: 因子值缺失时的处理策略。
             ignore=忽略该因子重新归一化权重, zero=按 0 处理, exclude=排除该资产。
         scoring_mode: 评分模式。
@@ -65,14 +68,14 @@ class FilterRule(BaseModel):
 
     支持两种比较模式：
     - 因子 vs 固定值：设置 value 字段。
-    - 因子 vs 因子：设置 compare_to 字段引用另一个因子 ID。
+    - 因子 vs 因子：设置 compare_to 字段引用另一个因子引用名。
     value 和 compare_to 必须恰好提供一个。
 
     Attributes:
-        factor: 因子标识。
+        factor: 因子引用（别名或模板 ID）。
         op: 比较操作符：gt / lt / gte / lte / eq / neq / between。
         value: 比较值（固定阈值），between 时为 [min, max]。与 compare_to 二选一。
-        compare_to: 被比较的因子 ID，用于跨因子比较（如 ma_5d > ma_20d）。与 value 二选一。
+        compare_to: 被比较的因子引用（如 sma(10) > sma(20) 的两个别名）。与 value 二选一。
         missing_strategy: 因子值缺失时的处理策略。
             fail=规则不满足（默认，与历史行为一致）, pass=规则视为通过,
             exclude=明确排除该资产（语义上与 fail 区分，便于调试定位）。
@@ -97,6 +100,22 @@ class FilterConfig(BaseModel):
     rules: list[FilterRule] = Field(default_factory=list)
 
 
+class FactorAliasConfig(BaseModel):
+    """单个因子别名声明：把策略语义名绑定到模板与参数。
+
+    别名承载策略语义（如 trend_fast），模板 ID 与参数承载计算语义。
+    同一模板可以在同一策略中以多个别名、不同参数重复出现。
+
+    Attributes:
+        template_id: 目标因子模板 ID。
+        params: 参数覆盖，键必须是模板 parameter_schema 中声明的参数；
+            未给出的参数使用模板默认值。
+    """
+
+    template_id: str
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
 class RankConfig(BaseModel):
     """排名配置。
 
@@ -105,16 +124,16 @@ class RankConfig(BaseModel):
         order: 排序方向，desc / asc。
         top_n: 取前 N 名，None 表示全部。
         bottom_n: 取后 N 名，与 top_n 二选一。
-        momentum_factor: 动量子排名所用因子 ID，默认 return_20d。
-        valuation_factor: 估值子排名所用因子 ID，默认 pe_percentile。
+        momentum_factor: 动量子排名所用因子引用，仅在 sort_by=momentum_rank 时必填。
+        valuation_factor: 估值子排名所用因子引用，仅在 sort_by=valuation_rank 时必填。
     """
 
     sort_by: str = "score"
     order: str = "desc"
     top_n: int | None = Field(default=None, ge=1)
     bottom_n: int | None = Field(default=None, ge=1)
-    momentum_factor: str = "return_20d"
-    valuation_factor: str = "pe_percentile"
+    momentum_factor: str | None = None
+    valuation_factor: str | None = None
 
 
 class PortfolioConfig(BaseModel):
@@ -284,27 +303,26 @@ class StrategyConfig(BaseModel):
         portfolio: 组合配置；兼容旧配置时缺失字段自动补为默认等权配置。
         risk: 风控配置，None 表示无风控。
         rebalance: 调仓配置，None 表示每日调仓。
-        factor_params: 参数化因子的参数覆盖，key=factor_id, value=参数
-            dict。本轮仅接受与 FactorSpec.default_params 完全一致的默认
-            参数；自定义参数能力预留（校验层会拒绝非默认组合）。
+        factor_aliases: 因子别名声明，key=别名，value=模板与参数。
+            评分/过滤/择时/排名中未在此声明的引用一律按模板 ID 解释。
     """
 
     strategy_id: str
     display_name: str
     version: str = "1.0.0"
-    schema_version: str = "1"
+    schema_version: str = "2"
     description: str = ""
     frequency: str = "daily"
     index_codes: list[str] = Field(
         default_factory=list,
         description=(
-            "指定指数代码列表（benchmark_index 中由用户添加、存在实际 ETF 对应物"
-            "的指数），非空时仅对这些指数运行策略"
+            "指定指数代码列表（benchmark_index 中由用户添加的指数），"
+            "非空时仅对这些指数运行策略"
         ),
     )
-    factor_params: dict[str, dict[str, Any]] = Field(
+    factor_aliases: dict[str, FactorAliasConfig] = Field(
         default_factory=dict,
-        description="参数化因子参数覆盖，key=factor_id，缺省使用因子默认参数",
+        description="因子别名声明，key=别名，value=目标模板与参数覆盖",
     )
     timing: TimingConfig | None = None
     score: ScoreConfig

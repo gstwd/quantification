@@ -799,26 +799,26 @@ class TestPairwiseRankCorrelation:
         assert undetermined == 1
 
 
-# ─── FactorRegistry 估值因子注册 ────────────────────────────────────────────────
+# ─── FactorTemplateRegistry 估值模板登记 ────────────────────────────────────────
 
 
 class TestValuationRegistry:
-    def test_default_registry_has_all_factors(self) -> None:
-        """默认注册表应包含足量内置因子（含估值与技术指标因子）。"""
-        from quant_etf_api.factors.registry import build_default_factor_registry
+    def test_default_registry_has_all_templates(self) -> None:
+        """默认注册表应包含足量内置模板（含估值与技术指标模板）。"""
+        from quant_etf_api.factors.catalog import build_default_registry
 
-        registry = build_default_factor_registry()
-        # 只校验下界，避免每次新增因子都要改这个数字
+        registry = build_default_registry()
+        # 只校验下界，避免每次新增模板都要改这个数字
         assert len(registry.all()) >= 40
 
-    def test_valuation_factors_registered(self) -> None:
-        """估值因子应已注册。"""
-        from quant_etf_api.factors.registry import build_default_factor_registry
+    def test_valuation_templates_registered(self) -> None:
+        """估值模板应已登记。"""
+        from quant_etf_api.factors.catalog import build_default_registry
 
-        registry = build_default_factor_registry()
+        registry = build_default_registry()
         pe = registry.get("pe_percentile")
         pb = registry.get("pb_percentile")
         assert pe is not None
         assert pb is not None
-        assert pe.spec.category == "valuation"
-        assert pb.spec.category == "valuation"
+        assert pe.category == "valuation"
+        assert pb.category == "valuation"

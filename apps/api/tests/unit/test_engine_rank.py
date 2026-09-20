@@ -114,7 +114,9 @@ class TestDefaultRankEngine:
     def test_sub_rankings(self) -> None:
         """子维度排名分配。"""
         engine = DefaultRankEngine()
-        config = RankConfig()
+        config = RankConfig(
+            momentum_factor="return_20d", valuation_factor="pe_percentile"
+        )
         assets = {"A": 80.0, "B": 70.0, "C": 60.0}
         context = _make_context(
             asset_factors={

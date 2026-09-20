@@ -87,7 +87,7 @@
           <StrategyConfigForm v-if="!advancedMode" v-model="configJson" />
 
           <template v-else>
-            <textarea v-model="configJsonText" class="form-textarea mono" rows="12" placeholder='{"score": {"factors": {...}}}'></textarea>
+            <textarea v-model="configJsonText" class="form-textarea mono" rows="12" placeholder='{"schema_version": "2", "score": {"factors": {}}, "factor_aliases": {}}'></textarea>
             <div v-if="jsonError" class="form-error">{{ jsonError }}</div>
           </template>
         </div>
@@ -199,17 +199,24 @@ const copyForm = ref({
 })
 
 /** 表单模式下的 config_json 对象 */
-const configJson = ref<Record<string, unknown>>({ score: { factors: {} } })
+const configJson = ref<Record<string, unknown>>({
+  schema_version: '2',
+  score: { factors: {} },
+  factor_aliases: {},
+})
 
 /** 高级模式下的 JSON 文本 */
-const configJsonText = ref('{\n  "score": {\n    "factors": {}\n  }\n}')
+const configJsonText = ref(
+  '{\n  "schema_version": "2",\n  "score": {\n    "factors": {}\n  },\n  "factor_aliases": {}\n}',
+)
 
 /** 监听新建弹窗关闭，重置表单 */
 watch(showCreate, (val) => {
   if (!val) {
     form.value = { strategy_id: '', display_name: '', description: '', frequency: 'daily' }
-    configJson.value = { score: { factors: {} } }
-    configJsonText.value = '{\n  "score": {\n    "factors": {}\n  }\n}'
+    configJson.value = { schema_version: '2', score: { factors: {} }, factor_aliases: {} }
+    configJsonText.value =
+      '{\n  "schema_version": "2",\n  "score": {\n    "factors": {}\n  },\n  "factor_aliases": {}\n}'
     jsonError.value = ''
     advancedMode.value = false
     store.validationResult = null
