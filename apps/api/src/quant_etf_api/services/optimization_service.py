@@ -849,16 +849,24 @@ class OptimizationService:
         for fold in session.fold_backtests or []:
             base = self._collect_net_metrics(fold.get("baseline_backtest_id"), cost_bps)
             cand = self._collect_net_metrics(fold.get("candidate_backtest_id"), cost_bps)
-            if base is not None:
-                baseline_net.append(base)
-            if cand is not None:
-                candidate_net.append(cand)
+            # 只比较同一折两侧都有净指标的数据，避免缺失值改变比较样本。
+            if base is None or cand is None:
+                continue
+            baseline_net.append(base)
+            candidate_net.append(cand)
         base_mean = statistics.mean(baseline_net) if baseline_net else None
         cand_mean = statistics.mean(candidate_net) if candidate_net else None
         return self._check_item(
             "net_cost_nonnegative",
             f"净成本口径（{cost_bps:g}bp）验证窗平均夏普 ≥ 基线",
             _ge(cand_mean, base_mean),
+            evidence={
+                "cost_bps": cost_bps,
+                "paired_folds": len(baseline_net),
+                "total_folds": len(session.fold_backtests or []),
+                "baseline_mean": base_mean,
+                "candidate_mean": cand_mean,
+            },
         )
 
     def _check_neighborhood(self, session: StrategyOptimizationModel) -> dict[str, Any]:
@@ -869,7 +877,7 @@ class OptimizationService:
 
         - 跑在本次会话的基线上且 ``baseline_config_hash`` 与会话基线一致；
         - ``baseline_config_hash`` 与会话候选配置一致（等价于已对候选做过扫描）；
-        - 扫描对象就是候选策略（``strategy_id == candidate_strategy_id``）。
+        候选策略 ID 相同不能替代哈希匹配，因为草稿配置可能在扫描后发生修改。
 
         同样要求**执行口径一致**（``execution_model`` 与会话相同）：开盘口径下的
         邻域平台不能为收盘口径的会话背书——两种执行的逐日收益归属不同，
@@ -906,7 +914,6 @@ class OptimizationService:
                             )
                         ),
                         RobustnessRunModel.baseline_config_hash == session.candidate_config_hash,
-                        RobustnessRunModel.strategy_id == session.candidate_strategy_id,
                     ),
                 )
                 .order_by(RobustnessRunModel.created_at.desc())
@@ -929,10 +936,7 @@ class OptimizationService:
         scan_params = row.scan_params or {}
         matched_config = (
             "candidate"
-            if (
-                row.baseline_config_hash == session.candidate_config_hash
-                or row.strategy_id == session.candidate_strategy_id
-            )
+            if row.baseline_config_hash == session.candidate_config_hash
             else "baseline"
         )
         return self._check_item(

@@ -383,6 +383,27 @@ class TestDeltaBlock:
 class TestDigests:
     """结果摘要字段。"""
 
+    def test_batch_caliber_uses_executed_calendar_source(self) -> None:
+        """日历来源在回测运行后产生，批量结果必须保留实际执行来源。"""
+        svc = ResearchBatchService(db=MagicMock())
+        svc._config_svc = MagicMock()
+        svc._config_svc.get_config.return_value = SimpleNamespace(
+            config_json=_config().model_dump(exclude={
+                "strategy_id", "display_name", "version", "description", "frequency",
+            }), display_name="测试", version="1",
+            description="", frequency="daily",
+        )
+        svc._build_windows = MagicMock(return_value=[{
+            "label": "W0", "start": "2025-01-02", "end": "2025-01-06",
+        }])
+        loop, ctx = _stub_loop_service([{"000300": 1.0}] * 3)
+        outcome = loop._run_backtest_loop("test", ctx["row"], _config(), persist=False)
+        outcome["params"]["_calendar_source"] = "database"
+        svc._backtest_svc._run_backtest_loop = MagicMock(return_value=outcome)
+        result = svc.run("test", [], windows=1, cost_bps=10)
+        assert result.variants[0]["caliber"]["calendar_source"] == "database"
+        assert result.variants[0]["caliber"]["persisted"] is False
+
     def test_net_digest_contains_cost_ladder(self) -> None:
         """净口径摘要包含多档成本并列结果（成本是本轮最关键的结论维度）。"""
         stability = SimpleNamespace(

@@ -351,6 +351,33 @@ class TestFoldSummary:
         assert drawdown["baseline_mean"] == pytest.approx((-10.0 - 9.0 - 11.0) / 3)
 
 
+class TestNetCostPairing:
+    """净成本验收必须使用同一批配对折。"""
+
+    @pytest.mark.parametrize(
+        "values,expected,paired",
+        [
+            ([1.0, 0.9, None, 10.0], False, 1),
+            ([1.0, 1.1, 10.0, None], True, 1),
+            ([None, 10.0, 1.0, None], False, 0),
+        ],
+    )
+    def test_unpaired_values_do_not_change_verdict(
+        self, values: list[float | None], expected: bool, paired: int
+    ) -> None:
+        """单侧极值不得让劣化候选通过，也不得否决有效的配对改善。"""
+        svc = _make_service()
+        svc._collect_net_metrics = MagicMock(side_effect=values)
+        session = _make_session(fold_backtests=[
+            {"baseline_backtest_id": "b0", "candidate_backtest_id": "c0"},
+            {"baseline_backtest_id": "b1", "candidate_backtest_id": "c1"},
+        ])
+        item = svc._check_net_cost(session)
+        assert item["pass"] is expected
+        assert item["evidence"]["paired_folds"] == paired
+        assert item["evidence"]["total_folds"] == 2
+
+
 class TestFinish:
     """结束会话。"""
 

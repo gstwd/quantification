@@ -10,6 +10,9 @@ from __future__ import annotations
 from datetime import date
 from unittest.mock import MagicMock
 
+import pytest
+from sqlalchemy import Column, MetaData, String, Table, create_engine, select
+
 from quant_etf_api.infra.db.models.core import RobustnessRunModel, StrategyOptimizationModel
 from quant_etf_api.services.optimization_service import OptimizationService
 
@@ -81,8 +84,8 @@ def _service(scan_row: RobustnessRunModel | None) -> OptimizationService:
 class TestNeighborhoodEvidence:
     """证据匹配与清单项内容。"""
 
-    def test_filter_covers_baseline_candidate_and_candidate_strategy(self) -> None:
-        """查询条件覆盖"执行口径 + 基线哈希 / 候选哈希 / 候选策略 ID"。"""
+    def test_filter_requires_config_hash(self) -> None:
+        """查询条件要求执行口径与基线或候选哈希匹配。"""
         svc = _service(None)
         svc._check_neighborhood(_session())
 
@@ -92,7 +95,7 @@ class TestNeighborhoodEvidence:
         assert "status" in str(args[1])
         assert "execution_model" in str(args[2])
         or_group = args[3]
-        assert len(or_group.clauses) == 3
+        assert len(or_group.clauses) == 2
         assert "baseline_config_hash" in str(or_group)
         assert "strategy_id" in str(or_group)
 
@@ -126,12 +129,67 @@ class TestNeighborhoodEvidence:
         assert item["evidence"]["matched_config"] == "candidate"
 
     def test_candidate_strategy_scan_marks_candidate(self) -> None:
-        """直接扫描候选策略同样视为有效证据。"""
-        svc = _service(_scan_row(_BASE_HASH, strategy_id="base__opt_1234"))
+        """直接扫描候选策略且哈希匹配时视为有效证据。"""
+        svc = _service(_scan_row(_CAND_HASH, strategy_id="base__opt_1234"))
         item = svc._check_neighborhood(_session())
 
         assert item["pass"] is True
         assert item["evidence"]["matched_config"] == "candidate"
+
+    @pytest.mark.parametrize(
+        "strategy_id,config_hash,execution_model,expected",
+        [
+            ("base__opt_1234", "stale-hash", "t_plus_1_close", False),
+            ("base__opt_1234", "", "t_plus_1_close", False),
+            ("base__opt_1234", _CAND_HASH, "t_plus_1_close", True),
+            ("base", _BASE_HASH, "t_plus_1_close", True),
+            ("other", _BASE_HASH, "t_plus_1_close", False),
+            ("base", _BASE_HASH, "t_plus_1_open", False),
+        ],
+    )
+    def test_evidence_sql_rejects_stale_candidate_hash(
+        self, strategy_id: str, config_hash: str, execution_model: str, expected: bool
+    ) -> None:
+        """执行实际 SQL 条件，防止同候选 ID 绕过哈希或执行模型约束。"""
+        svc = _service(None)
+        svc._check_neighborhood(_session())
+        criteria = svc._db.query.return_value.filter.call_args.args
+        engine = create_engine("sqlite://")
+        metadata = MetaData()
+        table = Table(
+            "robustness_run",
+            metadata,
+            *(
+                Column(name, String)
+                for name in (
+                    "robustness_id",
+                    "kind",
+                    "status",
+                    "strategy_id",
+                    "baseline_config_hash",
+                    "execution_model",
+                )
+            ),
+        )
+        metadata.create_all(engine)
+        try:
+            with engine.begin() as connection:
+                connection.execute(
+                    table.insert().values(
+                        robustness_id="rb-1",
+                        kind="scan",
+                        status="success",
+                        strategy_id=strategy_id,
+                        baseline_config_hash=config_hash,
+                        execution_model=execution_model,
+                    )
+                )
+                result = connection.execute(
+                    select(RobustnessRunModel.robustness_id).where(*criteria)
+                ).scalar_one_or_none()
+                assert (result is not None) is expected
+        finally:
+            engine.dispose()
 
     def test_no_matching_scan_fails_with_hint(self) -> None:
         """没有匹配证据时不通过，并提示该对哪个策略跑 scan。"""

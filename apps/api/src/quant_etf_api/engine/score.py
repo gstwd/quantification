@@ -265,16 +265,18 @@ _default_scorer = DefaultScoreCalculator()
 
 
 class CrossSectionScorer:
-    """横截面评分器：在所有资产间比较因子值进行评分。
+    """横截面评分器：在所有资产间比较加权综合值进行评分。
 
-    支持三种模式：
-    - rank：横截面百分位排名（0-100），天然处理量纲差异
-    - zscore：横截面 Z-Score 标准化
-    - relative：相对于参考资产（如沪深300）的差值得分
+    支持两种模式：
+    - rank：加权综合值的横截面百分位排名（0-100）
+    - zscore：加权综合值的横截面 Z-Score 标准化
+
+    因子先应用配置的变换，再按原有尺度加权；横截面变换只作用于综合值，
+    不会消除不同因子在加权阶段的量纲差异，配置权重时需要考虑因子尺度。
 
     与 DefaultScoreCalculator 的区别：
     DefaultScoreCalculator 每资产独立评分（加权平均自身因子值），
-    CrossSectionScorer 在横截面上比较所有资产的因子值后统一评分，
+    CrossSectionScorer 在横截面上比较所有资产的加权综合值后统一评分，
     适用于轮动策略、相对强弱策略等需要资产间比较的场景。
     """
 

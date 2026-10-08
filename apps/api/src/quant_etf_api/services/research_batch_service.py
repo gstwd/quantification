@@ -322,7 +322,6 @@ class ResearchBatchService:
                     cost_bps=effective_cost,
                     execution_model=execution_model,
                 )
-                params = dict(row.params or {})
                 outcome = self._backtest_svc._run_backtest_loop(  # noqa: SLF001
                     f"research:{strategy_id}:{variant.label}:{window['label']}",
                     row,
@@ -330,6 +329,8 @@ class ResearchBatchService:
                     persist=False,
                     caches=caches,
                 )
+                # 日历来源在执行中才确定，必须读取执行后的参数作为口径指纹。
+                params = dict(outcome["params"])
                 daily_rows = outcome["daily_rows"]
                 all_daily_rows.extend(daily_rows)
                 stability = self._backtest_svc._compute_stability(  # noqa: SLF001

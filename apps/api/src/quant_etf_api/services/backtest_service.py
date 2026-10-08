@@ -1481,8 +1481,15 @@ class BacktestService:
             result = self._engine.run(config, context, include_details=False)
 
             target_positions = dict(result.positions) if result.positions else {}
+            # 收盘模式先成交昨日指令，再合成今日指令；仅风险腿到期时必须沿用
+            # 今日收盘成交后的成分，避免换回旧成分或将已清空的仓位重新建立。
+            composition_positions = (
+                pending_positions
+                if execution_model == "t_plus_1_close" and pending_positions is not None
+                else prev_positions
+            )
             new_positions = compose_two_leg_positions(
-                previous=prev_positions,
+                previous=composition_positions,
                 selection_target=target_positions,
                 timing_target_exposure=result.total_exposure,
                 should_select=should_select,

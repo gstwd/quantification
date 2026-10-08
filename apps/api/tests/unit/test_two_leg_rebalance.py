@@ -15,11 +15,13 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from quant_etf_api.domain.portfolio.scaling import (
     compose_two_leg_positions,
     scale_to_exposure,
 )
-from quant_etf_api.domain.strategies.rebalance import DefaultRebalanceScheduler
+from quant_etf_api.domain.strategies.rebalance import DefaultRebalanceScheduler, RebalanceLegs
 from quant_etf_api.domain.strategies.models import TimingSignal
 from quant_etf_api.engine.base import EngineContext, EngineResult
 from quant_etf_api.engine.config import (
@@ -36,12 +38,24 @@ from quant_etf_api.services.backtest_service import BacktestService
 DATES = [date(2025, 1, 2), date(2025, 1, 3), date(2025, 1, 6)]
 
 
-class _WeekdayCalendar:
-    """仅按周末判定交易日的日历替身（覆盖测试区间内的周一至周五）。"""
+class _SnapshotCalendar:
+    """测试区间的明确交易日快照，避免单元测试依赖外部日历请求。"""
 
     def is_trading_day(self, day: date) -> bool:
-        """按周末判定。"""
-        return day.weekday() < 5
+        """按测试快照判断，不以周末近似交易日。"""
+        return day in DATES
+
+
+@pytest.fixture(autouse=True)
+def _use_calendar_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把日历外部依赖替换为明确快照，保留调仓日历对齐逻辑。"""
+    def resolve_snapshot(db: object, **kwargs: object) -> tuple[_SnapshotCalendar, str]:
+        """提供当前测试区间的交易日快照。"""
+        return _SnapshotCalendar(), "database"
+
+    monkeypatch.setattr(
+        "quant_etf_api.services.backtest_service.resolve_trading_calendar", resolve_snapshot
+    )
 
 
 class TestScaleToExposure:
@@ -251,7 +265,7 @@ def _stub_loop_service(
     svc._engine = MagicMock()
     svc._engine.run.side_effect = _run_engine
     # daily 频率不需要真实日历；显式注入替身以覆盖需要日历时的情况
-    svc._rebalance_scheduler = DefaultRebalanceScheduler(_WeekdayCalendar())
+    svc._rebalance_scheduler = DefaultRebalanceScheduler(_SnapshotCalendar())
     collected: list[Any] = []
     svc._backtest_repo = MagicMock()
     svc._backtest_repo.add_daily_result.side_effect = collected.append
@@ -283,6 +297,51 @@ def _config(rebalance: RebalanceConfig | None) -> StrategyConfig:
 
 class TestLoopLegs:
     """回测主循环的双腿调度。"""
+
+    @pytest.mark.parametrize(
+        "targets,legs,expected_positions,expected_turnovers",
+        [
+            (
+                [{"a": 0.8}, {"b": 0.6}, {"c": 0.3}, {"c": 0.3}],
+                [(True, True), (True, True), (False, True), (False, False)],
+                [{}, {"a": 0.8}, {"b": 0.6}, {"b": 0.3}],
+                [0.0, 0.4, 0.7, 0.15],
+            ),
+            (
+                [{"a": 0.8}, {}, {"c": 0.3}, {"c": 0.3}],
+                [(True, True), (True, True), (False, True), (False, False)],
+                [{}, {"a": 0.8}, {}, {}],
+                [0.0, 0.4, 0.4, 0.0],
+            ),
+            (
+                [{"a": 0.8}, {"b": 0.2}, {"c": 0.3}, {"c": 0.3}],
+                [(True, True), (True, False), (False, False), (False, False)],
+                [{}, {"a": 0.8}, {"b": 0.8}, {"b": 0.8}],
+                [0.0, 0.4, 0.8, 0.0],
+            ),
+        ],
+    )
+    def test_close_execution_composes_from_today_filled_positions(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        targets: list[dict[str, float]],
+        legs: list[tuple[bool, bool]],
+        expected_positions: list[dict[str, float]],
+        expected_turnovers: list[float],
+    ) -> None:
+        """收盘模式合成下一笔目标须基于今日成交，不能复活旧成分或旧仓位。"""
+        monkeypatch.setattr(__name__ + ".DATES", DATES + [date(2025, 1, 7)])
+        svc, ctx = _stub_loop_service(targets, [sum(row.values()) for row in targets])
+        ctx["row"].params = {**ctx["row"].params, "_execution_model": "t_plus_1_close"}
+        svc._select_legs = MagicMock(
+            side_effect=[RebalanceLegs(selection=s, risk=r) for s, r in legs]
+        )
+        svc._run_backtest_loop("bt-two-leg", ctx["row"], _config(None))
+
+        assert [row.positions or {} for row in ctx["collected"]] == expected_positions
+        assert [row.turnover or 0.0 for row in ctx["collected"]] == pytest.approx(
+            expected_turnovers
+        )
 
     def test_identical_legs_match_legacy_daily_rebuild(self) -> None:
         '''两腿同频（每日）时，每日按"新成分 + 择时仓位"重建，等价改造前行为。'''
