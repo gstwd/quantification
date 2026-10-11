@@ -300,13 +300,18 @@
           {{ store.current.stability.data_quality_mode || '—' }} /
           基准 {{ store.current.stability.benchmark_index_code || '未启用' }} /
           日历 {{ calendarSourceLabel }} /
-          换手 {{ turnoverModelLabel }}
+          换手 {{ turnoverModelLabel }} /
+          记账 {{ accountingModelLabel }}
           <template v-if="store.current.purpose && store.current.purpose !== 'research'">
             ｜用途：{{ store.current.purpose }}
           </template>
           <div v-if="isLegacyTurnover" class="legacy-warning">
             ⚠ 该回测使用历史换手口径（未计入清仓/建仓腿），净口径指标偏低，
             需重跑后才能与当前口径的回测比较。
+          </div>
+          <div v-if="isLegacyAccounting" class="legacy-warning">
+            ⚠ 该回测使用历史记账口径（持仓不随行情漂移、等价于每日再平衡），收益与换手
+            与当前口径存在偏差，需重跑后才能与当前口径的回测比较。
           </div>
         </div>
       </div>
@@ -516,6 +521,19 @@ const turnoverModelLabel = computed(() => {
 /** 是否为历史换手口径（净口径指标偏低，需重跑后可比） */
 const isLegacyTurnover = computed(
   () => (store.current?.stability?.turnover_model ?? 'legacy_v1') === 'legacy_v1',
+)
+
+/** 记账口径中文标签 */
+const accountingModelLabel = computed(() => {
+  const model = store.current?.stability?.accounting_model
+  if (model === 'drift_v1') return '持仓漂移（当前口径）'
+  if (model === 'constant_mix_v0') return '历史口径（每日再平衡）'
+  return model ?? '未知'
+})
+
+/** 是否为历史记账口径（收益与换手需重跑后可比） */
+const isLegacyAccounting = computed(
+  () => (store.current?.stability?.accounting_model ?? 'constant_mix_v0') === 'constant_mix_v0',
 )
 
 /** 有效候选池时间线（C6） */

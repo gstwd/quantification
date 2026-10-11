@@ -87,9 +87,13 @@ def handle_backtest(payload: dict) -> None:
         raise
     finally:
         if comparison_id:
+            from quant_etf_api.services.backtest_comparison_service import (
+                BacktestComparisonService,
+            )
+
             db = SessionLocal()
             try:
-                BacktestService(db).finalize_comparison_if_ready(comparison_id)
+                BacktestComparisonService(db).finalize_comparison_if_ready(comparison_id)
             finally:
                 db.close()
 
@@ -129,9 +133,11 @@ def abandon_backtest(payload: dict, reason: str) -> None:
             )
         if comparison_id:
             try:
-                from quant_etf_api.services.backtest_service import BacktestService
+                from quant_etf_api.services.backtest_comparison_service import (
+                    BacktestComparisonService,
+                )
 
-                BacktestService(db).finalize_comparison_if_ready(comparison_id)
+                BacktestComparisonService(db).finalize_comparison_if_ready(comparison_id)
             except Exception:
                 logger.warning("对比回测收口失败: %s", comparison_id, exc_info=True)
     except Exception:
@@ -169,12 +175,12 @@ def handle_comparison(payload: dict) -> None:
     """启动对比回测：标记运行中并入队两个子回测任务，立即返回。"""
     from quant_etf_api.infra.db.base import SessionLocal
     from quant_etf_api.infra.job_queue.queue import get_job_queue
-    from quant_etf_api.services.backtest_service import BacktestService
+    from quant_etf_api.services.backtest_comparison_service import BacktestComparisonService
 
     comparison_id = payload.get("comparison_id") or ""
     db = SessionLocal()
     try:
-        children = BacktestService(db).launch_comparison(comparison_id)
+        children = BacktestComparisonService(db).launch_comparison(comparison_id)
     finally:
         db.close()
 

@@ -346,6 +346,19 @@ class BacktestRepository(BaseRepository):
         """
         self._db.add(row)
 
+    def bulk_insert_index_results(self, rows: list[dict[str, Any]]) -> None:
+        """批量写入指数级信号/收益结果（不提交，随主循环 checkpoint 一并提交）。
+
+        回测每天为全部标的各写一行（N×T 行），逐个构造 ORM 对象再 flush 的开销
+        远大于计算本身；这里直接用 Core ``INSERT ... VALUES`` 的 executemany。
+
+        Args:
+            rows: 列名 → 值的字典列表（字段同 ``BacktestIndexResultModel``）。
+        """
+        if not rows:
+            return
+        self._db.execute(sa.insert(BacktestIndexResultModel), rows)
+
     def mark_failed(
         self,
         backtest_id: str,

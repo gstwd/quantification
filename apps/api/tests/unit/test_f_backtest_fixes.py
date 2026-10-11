@@ -17,7 +17,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
-from quant_etf_api.services.backtest_service import BacktestService, _execution_price_warning
+from quant_etf_api.services.backtest_diagnostics import (
+    collect_missing_factor_warnings,
+    estimate_warmup_trading_days,
+)
+from quant_etf_api.services.backtest_diagnostics import (
+    execution_price_warning as _execution_price_warning,
+)
+from quant_etf_api.services.backtest_service import BacktestService
 
 
 def _make_service() -> BacktestService:
@@ -30,7 +37,6 @@ class TestWarmupPerAsset:
 
     def test_late_listed_index_does_not_inflate_warmup(self) -> None:
         """后上市指数只按自己的首根 K 线起算，不把前面整段算成预热。"""
-        svc = _make_service()
         dates = [date(2024, 6, 1) + timedelta(days=i) for i in range(6)]
         codes = ["000300", "000688"]
         precomputed: dict[date, dict[tuple[str, str], float | None]] = {}
@@ -43,7 +49,7 @@ class TestWarmupPerAsset:
             }
         first_bar = {"000300": dates[0], "000688": dates[3]}
 
-        warmup = svc._estimate_warmup_trading_days(
+        warmup = estimate_warmup_trading_days(
             precomputed, dates, codes, ["return_60d"], first_bar
         )
 
@@ -53,7 +59,6 @@ class TestWarmupPerAsset:
 
     def test_all_index_warmup_uses_max_local_gap(self) -> None:
         """多个指数的预热期取各自局部缺口的最大值。"""
-        svc = _make_service()
         dates = [date(2024, 6, 1) + timedelta(days=i) for i in range(4)]
         precomputed = {
             dates[0]: {("A", "f"): None, ("B", "f"): None},
@@ -62,7 +67,7 @@ class TestWarmupPerAsset:
             dates[3]: {("A", "f"): 1.0, ("B", "f"): 2.0},
         }
 
-        warmup = svc._estimate_warmup_trading_days(
+        warmup = estimate_warmup_trading_days(
             precomputed, dates, ["A", "B"], ["f"], {"A": dates[0], "B": dates[0]}
         )
 
@@ -74,7 +79,6 @@ class TestMissingFactorWarningDetail:
 
     def test_lists_index_by_missing_days(self) -> None:
         """明细应按缺失天数排序，让人一眼看出是哪只指数在缺。"""
-        svc = _make_service()
         dates = [date(2025, 1, 2), date(2025, 1, 3), date(2025, 1, 6)]
         precomputed = {
             dates[0]: {("000300", "f"): 1.0, ("000688", "f"): None, ("000905", "f"): 1.0},
@@ -82,7 +86,7 @@ class TestMissingFactorWarningDetail:
             dates[2]: {("000300", "f"): None, ("000688", "f"): 1.0, ("000905", "f"): 1.0},
         }
 
-        warnings = svc._collect_missing_factor_warnings(
+        warnings = collect_missing_factor_warnings(
             precomputed, dates, ["000300", "000688", "000905"], ["f"]
         )
 

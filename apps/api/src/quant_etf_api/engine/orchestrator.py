@@ -103,28 +103,32 @@ class StrategyEngine:
         Args:
             config: 策略配置。
             context: 引擎上下文。
-            include_details: 是否构建详细的 StrategyResult 列表。
-                回测模式传 False 以跳过 _build_strategy_results()，
-                避免逐日构造无用对象，提升回测性能。
+            include_details: 是否构建详细的 StrategyResult 列表与管线调试详情。
+                回测模式传 False 以跳过 _build_strategy_results() 与
+                _build_pipeline_detail()，并把阶段日志降为 DEBUG，
+                避免逐日构造无用对象与刷屏日志，提升回测性能。
 
         Returns:
             统一的引擎执行结果。
         """
         stage_start = time.perf_counter()
         strategy_tag = f"strategy={config.strategy_id} date={context.trade_date}"
+        # 回测（include_details=False）逐日调用管线：阶段日志降为 DEBUG，
+        # 否则 10 年回测会产生上万行 INFO 日志并拖慢主循环
+        log = logger.info if include_details else logger.debug
 
         # 1. 择时评估（可选）
         timing = None
         if config.timing:
             timing = self._run_timing(config, context)
-            logger.info(
+            log(
                 "[pipeline] 择时完成: %s regime=%s confidence=%s",
                 strategy_tag,
                 timing.regime,
                 timing.confidence,
             )
         else:
-            logger.info("[pipeline] 择时完成: %s regime=none（未配置择时）", strategy_tag)
+            log("[pipeline] 择时完成: %s regime=none（未配置择时）", strategy_tag)
 
         # 1.5 regime 条件化配置覆盖
         effective = self._resolve_regime_config(config, timing)
@@ -136,7 +140,7 @@ class StrategyEngine:
         full_context = context
         context, excluded = self._eligible_context(effective, context, scoring_debug)
         if excluded:
-            logger.info(
+            log(
                 "[pipeline] 因子缺失剔除: %s 剔除 %s 个 %s",
                 strategy_tag,
                 len(excluded),
@@ -149,7 +153,7 @@ class StrategyEngine:
         else:
             scores = self._score.calculate(effective.score, context, debug=scoring_debug)
         scored_before_filter = len(scores)
-        logger.info(
+        log(
             "[pipeline] 评分完成: %s mode=%s 有效资产=%s",
             strategy_tag,
             effective.score.scoring_mode,
@@ -160,7 +164,7 @@ class StrategyEngine:
         filter_debug: list[Any] = []
         if effective.filters:
             scores = self._filter.filter(effective.filters, scores, context, debug=filter_debug)
-            logger.info(
+            log(
                 "[pipeline] 过滤完成: %s %s → %s（排除 %s 个）",
                 strategy_tag,
                 scored_before_filter,
@@ -170,7 +174,7 @@ class StrategyEngine:
 
         # 4. 排名
         rankings = self._rank.rank(effective.rank, scores, context)
-        logger.info(
+        log(
             "[pipeline] 排名完成: %s 排名资产=%s top=%s",
             strategy_tag,
             len(rankings),
@@ -191,7 +195,7 @@ class StrategyEngine:
                 if abs(pre_risk_positions.get(code, 0.0) - positions.get(code, 0.0)) > 1e-9
             }
             if changed:
-                logger.info(
+                log(
                     "[pipeline] 风控裁剪: %s 调整 %s 个仓位 %s",
                     strategy_tag,
                     len(changed),
@@ -213,7 +217,7 @@ class StrategyEngine:
         timing_target_exposure = cap_target_exposure(
             resolve_target_exposure(effective.portfolio, timing), effective.risk
         )
-        logger.info(
+        log(
             "[pipeline] 组合构建: %s method=%s 持仓数=%s total_exposure=%s cash_ratio=%s",
             strategy_tag,
             effective.portfolio.method,
@@ -241,13 +245,15 @@ class StrategyEngine:
                 cash_ratio,
             )
 
-        # 8. 构建管线调试详情
-        pipeline_detail = self._build_pipeline_detail(
-            effective, scoring_debug, filter_debug, timing
+        # 8. 构建管线调试详情（回测模式不消费调试详情，跳过构建）
+        pipeline_detail = (
+            self._build_pipeline_detail(effective, scoring_debug, filter_debug, timing)
+            if include_details
+            else None
         )
 
         elapsed_ms = round((time.perf_counter() - stage_start) * 1000, 2)
-        logger.info(
+        log(
             "[pipeline] 管线完成: %s 耗时=%sms 最终资产=%s 排名=%s",
             strategy_tag,
             elapsed_ms,

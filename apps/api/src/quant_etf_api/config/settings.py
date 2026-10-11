@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     # 回测与监控的默认交易成本（单边，基点）：系统回测为毛收益口径，
     # 净口径指标按"单边换手率 × cost_bps"在读取路径折算
     default_cost_bps: float = Field(
-        default=0.5, ge=0.0, description="默认单边交易成本（基点），用于净口径指标折算"
+        default=0.5, ge=0.0, description="默认往返交易成本（基点，按单边换手折算），用于净口径指标折算"
     )
     # 净口径多档并列（C3）：读取路径按该梯子现算，无需重跑回测；0 表示毛口径
     stability_cost_ladder: list[float] = Field(

@@ -11,9 +11,9 @@ import math
 from unittest.mock import MagicMock
 
 from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
+from quant_etf_api.domain.common.numeric import safe_metric_diff as _safe_metric_diff
 from quant_etf_api.services.backtest_service import (
     BacktestService,
-    _safe_metric_diff,
     _sanitize_metric_value,
 )
 

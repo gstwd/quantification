@@ -247,10 +247,12 @@ class TestPersistFalse:
 
         assert svc._backtest_repo.add_daily_result.call_count == 0
         assert svc._backtest_repo.add_index_result.call_count == 0
+        assert svc._backtest_repo.bulk_insert_index_results.call_count == 0
         assert svc._backtest_repo.mark_success.call_count == 0
         assert svc._backtest_repo.update_progress.call_count == 0
-        # 逐日结果原样返回给调用方（净口径与稳健性指标现算）
-        assert len(outcome["daily_rows"]) == len(DATES)
+        # 逐日结果原样返回给调用方（净口径与稳健性指标现算）；
+        # 最后一个交易日没有收益窗口，不产生逐日行
+        assert len(outcome["daily_rows"]) == len(DATES) - 1
         assert "metrics" in outcome
 
     def test_metrics_match_persisted_path(self) -> None:

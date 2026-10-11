@@ -222,7 +222,7 @@ export interface BacktestCreateRequest {
   purpose?: 'research' | 'validation' | 'monitor'
   /** 用途说明与触发来源，用于验证期数据留痕 */
   purpose_reason?: string | null
-  /** 净口径指标使用的单边成本（基点），留空取系统默认值 */
+  /** 净口径指标使用的往返交易成本（基点，按单边换手折算），留空取系统默认值 */
   cost_bps?: number | null
 }
 
@@ -272,7 +272,7 @@ export interface BacktestMetrics {
 
 /** 单个成本档位下的净口径指标（C3） */
 export interface CostLadderEntry {
-  /** 单边交易成本（基点），0 表示毛口径 */
+  /** 往返交易成本（基点，按单边换手折算），0 表示毛口径 */
   cost_bps: number
   /** 扣成本后累计收益率（%） */
   net_cumulative_return_pct: number
@@ -320,7 +320,7 @@ export interface BacktestCandidatePool {
 
 /** 回测稳健性指标：描述结果对历史细节的依赖程度（读取路径现算） */
 export interface BacktestStability {
-  /** 成本折算使用的单边成本（基点） */
+  /** 成本折算使用的往返交易成本（基点，按单边换手折算） */
   cost_bps: number
   /** 指标口径指纹：该回测使用的执行模型 */
   execution_model: string | null
@@ -332,6 +332,8 @@ export interface BacktestStability {
   calendar_source?: string | null
   /** 指标口径指纹：换手口径（delta_w_v2 含清仓/建仓腿；legacy_v1 未含） */
   turnover_model?: string | null
+  /** 指标口径指纹：记账口径（drift_v1 持仓漂移+两段复利+行情前向填充；constant_mix_v0 历史每日再平衡口径） */
+  accounting_model?: string | null
   /** 多档成本并列的净口径指标（C3） */
   cost_ladder?: CostLadderEntry[]
   /** 逐日有效候选池时间线（C6），存量回测为 null */

@@ -26,6 +26,7 @@ from quant_etf_api.schemas.backtest import (
     ValidationUsageResponse,
 )
 from quant_etf_api.schemas.pagination import PaginatedResponse
+from quant_etf_api.services.backtest_comparison_service import BacktestComparisonService
 from quant_etf_api.services.backtest_service import BacktestService
 
 router = APIRouter(tags=["backtests"])
@@ -139,7 +140,7 @@ def create_comparison(
 ) -> BacktestComparisonSummary:
     """创建策略对比回测，入队对比任务（由队列派发两个子回测）。"""
     try:
-        summary = BacktestService(db).create_comparison(req)
+        summary = BacktestComparisonService(db).create_comparison(req)
     except ValueError as e:
         # 任一策略配置校验失败 → 422，不创建对比记录
         raise HTTPException(status_code=422, detail=str(e))
@@ -157,7 +158,7 @@ def list_comparisons(
     db: Session = Depends(get_db),
 ) -> PaginatedResponse[BacktestComparisonSummary]:
     """分页返回对比回测列表，按创建时间倒序。"""
-    items, total = BacktestService(db).list_comparisons(offset=offset, limit=limit)
+    items, total = BacktestComparisonService(db).list_comparisons(offset=offset, limit=limit)
     return PaginatedResponse(items=items, total=total, offset=offset, limit=limit)
 
 
@@ -170,7 +171,7 @@ def get_comparison(
     db: Session = Depends(get_db),
 ) -> BacktestComparisonDetail:
     """返回对比回测详情，含两个子回测的完整信息和对比指标。"""
-    detail = BacktestService(db).get_comparison(comparison_id)
+    detail = BacktestComparisonService(db).get_comparison(comparison_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="对比记录不存在")
     return detail
@@ -185,7 +186,7 @@ def get_comparison_daily(
     db: Session = Depends(get_db),
 ) -> ComparisonDailyResponse:
     """返回两个策略的每日组合绩效，用于叠加图表渲染。"""
-    return BacktestService(db).get_comparison_daily(comparison_id)
+    return BacktestComparisonService(db).get_comparison_daily(comparison_id)
 
 
 @router.get("/backtests/{backtest_id}", response_model=BacktestDetail)

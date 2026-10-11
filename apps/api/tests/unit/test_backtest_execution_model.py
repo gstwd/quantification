@@ -168,7 +168,8 @@ class TestCloseExecutionAttribution:
         svc, ctx = _stub_service(execution_model="t_plus_1_close")
         svc._run_backtest_loop("bt-close", ctx["row"], _config())
         rows = ctx["rows"]
-        assert len(rows) == len(DATES)
+        # 最后一个交易日没有收益窗口，不落终端行
+        assert len(rows) == len(DATES) - 1
 
         # 首个决策日：成交发生在次日收盘，当日无仓位、0 收益
         assert rows[0].portfolio_return == 0.0
@@ -189,9 +190,6 @@ class TestCloseExecutionAttribution:
         assert rows[2].portfolio_return == pytest.approx(10.0)
         assert rows[2].turnover is None
 
-        # 最后一日无下一交易日 → 0 收益
-        assert rows[3].portfolio_return == 0.0
-
     def test_open_execution_keeps_overnight_and_intraday_legs(self) -> None:
         """对照组：T+1 开盘执行，调仓日收益拆隔夜段与日内段。"""
         svc, ctx = _stub_service(execution_model="t_plus_1_open")
@@ -200,11 +198,14 @@ class TestCloseExecutionAttribution:
 
         # 首个调仓日：旧仓位为空，只吃新仓位的日内段 [open_D1, close_D1]
         assert rows[0].portfolio_return == pytest.approx(round((110 / 105 - 1) * 100, 4))
-        # 第二个调仓日：旧仓位隔夜段 [close_D1, open_D2] + 新仓位日内段 [open_D2, close_D2]
-        # （两段各自四舍五入后再相加，与领域函数口径一致）
+        # 第二个调仓日：旧仓位隔夜段 [close_D1, open_D2] 与新仓位日内段 [open_D2, close_D2]
+        # 按复利衔接（各段先四舍五入到 4 位，与领域函数口径一致）
         overnight = round((115 / 110 - 1) * 100, 4)
         intraday = round((121 / 115 - 1) * 100, 4)
-        assert rows[1].portfolio_return == pytest.approx(round(overnight + intraday, 4))
+        expected = ((1 + overnight / 100) * (1 + intraday / 100) - 1) * 100
+        assert rows[1].portfolio_return == pytest.approx(round(expected, 4))
+        # 满仓同一资产时两段复利等于收盘到收盘收益
+        assert rows[1].portfolio_return == pytest.approx(10.0, abs=1e-3)
         # 目标仓位未变 → 无换手（落库为 None）
         assert rows[1].turnover is None
 
@@ -218,15 +219,15 @@ class TestMetricsCaliber:
         svc._run_backtest_loop("bt-bench", ctx["row"], _config())
         metrics = svc._backtest_repo.mark_success.call_args.args[1]
 
-        # 基准（买入持有 000300）：D0~D2 各 +10%，最后一日记 0 → 3/4 = 75%
-        assert metrics["benchmark_up_days_pct"] == pytest.approx(75.0)
+        # 基准（买入持有 000300）：D0~D2 三个决策日各 +10%（无终端 0 收益行）→ 100%
+        assert metrics["benchmark_up_days_pct"] == pytest.approx(100.0)
         assert metrics["benchmark_return_pct"] == pytest.approx(33.1)
         # 累计口径超额 = 策略累计 − 基准累计
         assert metrics["excess_return_pct"] == pytest.approx(
             round(metrics["cumulative_return_pct"] - 33.1, 2)
         )
         # 年化口径超额（毛口径）= 策略年化 − 基准年化
-        bench_returns = [10.0, 10.0, 10.0, 0.0]
+        bench_returns = [10.0, 10.0, 10.0]
         expected_annualized_excess = round(
             metrics["annualized_return_pct"]
             - compute_performance_metrics(bench_returns).annualized_return_pct,

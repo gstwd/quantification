@@ -25,6 +25,7 @@ from quant_etf_api.engine.config import (
     StrategyConfig,
 )
 from quant_etf_api.infra.db.models.core import BacktestRunModel
+from quant_etf_api.services.backtest_diagnostics import build_candidate_pool_timeline
 from quant_etf_api.services.backtest_service import BacktestService
 
 DATES = [date(2025, 1, 2) + timedelta(days=i) for i in range(6)]
@@ -40,7 +41,7 @@ class TestTimelineEncoding:
 
     def test_run_length_encoding_merges_equal_sizes(self) -> None:
         """连续相同规模合并为一段，规模变化处切分。"""
-        pool = _service()._build_candidate_pool_timeline(
+        pool = build_candidate_pool_timeline(
             DATES, [20, 20, 21, 21, 21, 19], 21, {}, {}
         )
         assert [seg["size"] for seg in pool["segments"]] == [20, 21, 19]
@@ -60,7 +61,7 @@ class TestTimelineEncoding:
         """时间线必须可直接 JSON 序列化（JSONB 列不接受 date 对象，回归防护）。"""
         exclusion_dates = {"000905": [DATES[0], DATES[1]]}
         reasons = {"000905": {"MISSING_OPEN"}}
-        pool = _service()._build_candidate_pool_timeline(
+        pool = build_candidate_pool_timeline(
             DATES[:4], [18, 19, 19, 20], 21, exclusion_dates, reasons
         )
         encoded = json.dumps(pool)
@@ -70,14 +71,14 @@ class TestTimelineEncoding:
 
     def test_coverage_ratio(self) -> None:
         """池覆盖率 = 逐日规模之和 /（理论规模 × 交易日数）。"""
-        pool = _service()._build_candidate_pool_timeline(DATES[:4], [10, 10, 20, 20], 20, {}, {})
+        pool = build_candidate_pool_timeline(DATES[:4], [10, 10, 20, 20], 20, {}, {})
         # (10+10+20+20) / (20*4) = 0.75
         assert pool["pool_coverage_ratio"] == 0.75
 
     def test_exclusions_sorted_and_truncated(self, monkeypatch) -> None:
         """剔除明细按交易日数降序并按配置上限截断。"""
         monkeypatch.setattr(
-            "quant_etf_api.services.backtest_service.get_settings",
+            "quant_etf_api.services.backtest_diagnostics.get_settings",
             lambda: SimpleNamespace(candidate_pool_exclusion_limit=2),
         )
         exclusion_dates = {
@@ -86,7 +87,7 @@ class TestTimelineEncoding:
             "399001": [DATES[0], DATES[1]],
         }
         reasons = {"000905": {"MISSING_OPEN", "MISSING_FACTOR"}}
-        pool = _service()._build_candidate_pool_timeline(
+        pool = build_candidate_pool_timeline(
             DATES[:4], [18, 19, 19, 20], 21, exclusion_dates, reasons
         )
         assert [item["index_code"] for item in pool["exclusions"]] == ["000905", "399001"]
@@ -97,7 +98,7 @@ class TestTimelineEncoding:
 
     def test_empty_pool_sizes(self) -> None:
         """无逐日规模时返回零值结构而不是抛错。"""
-        pool = _service()._build_candidate_pool_timeline([], [], 21, {}, {})
+        pool = build_candidate_pool_timeline([], [], 21, {}, {})
         assert pool["trading_days"] == 0
         assert pool["segments"] == []
         assert pool["pool_coverage_ratio"] == 0.0

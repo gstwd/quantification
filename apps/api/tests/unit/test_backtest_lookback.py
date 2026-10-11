@@ -18,6 +18,7 @@ from quant_etf_api.factors.catalog import (
     build_template,
 )
 from quant_etf_api.factors.templates import FactorTemplate
+from quant_etf_api.services.backtest_diagnostics import estimate_warmup_trading_days
 from quant_etf_api.services.backtest_service import BacktestService
 
 
@@ -138,7 +139,6 @@ class TestEstimateWarmupTradingDays:
 
     def test_returns_max_first_full_date(self) -> None:
         """应取各因子首次全覆盖日期的最大值作为预热期。"""
-        svc = self._make_svc()
         dates = [date(2024, 6, 1), date(2024, 6, 2), date(2024, 6, 3), date(2024, 6, 4)]
         precomputed = {
             dates[0]: {("000300", "return_120d"): None, ("000300", "ma_5d"): 1.0},
@@ -146,7 +146,7 @@ class TestEstimateWarmupTradingDays:
             dates[2]: {("000300", "return_120d"): None, ("000300", "ma_5d"): 1.2},
             dates[3]: {("000300", "return_120d"): 5.0, ("000300", "ma_5d"): 1.3},
         }
-        warmup = svc._estimate_warmup_trading_days(
+        warmup = estimate_warmup_trading_days(
             precomputed, dates, ["000300"], ["return_120d", "ma_5d"]
         )
         # return_120d 第 4 个交易日才有效（index=3），ma_5d 首日有效（index=0）
@@ -154,18 +154,16 @@ class TestEstimateWarmupTradingDays:
 
     def test_ignores_never_full_factor(self) -> None:
         """从未达到全指数覆盖的因子不应参与预热统计。"""
-        svc = self._make_svc()
         dates = [date(2024, 6, 1), date(2024, 6, 2)]
         precomputed = {
             dates[0]: {("000300", "pe_percentile"): 50.0, ("399001", "pe_percentile"): None},
             dates[1]: {("000300", "pe_percentile"): 51.0, ("399001", "pe_percentile"): None},
         }
-        warmup = svc._estimate_warmup_trading_days(
+        warmup = estimate_warmup_trading_days(
             precomputed, dates, ["000300", "399001"], ["pe_percentile"]
         )
         assert warmup == 0
 
     def test_empty_inputs_return_zero(self) -> None:
         """空因子列表或空交易日列表应返回 0。"""
-        svc = self._make_svc()
-        assert svc._estimate_warmup_trading_days({}, [], ["000300"], []) == 0
+        assert estimate_warmup_trading_days({}, [], ["000300"], []) == 0

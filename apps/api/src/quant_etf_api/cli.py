@@ -346,7 +346,11 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
         "validation=验证期验收，monitor=上线后监控",
     )
     p.add_argument("--purpose-reason", help="用途说明，写入留痕记录")
-    p.add_argument("--cost-bps", type=float, help="净口径指标的单边成本（基点），默认 10")
+    p.add_argument(
+        "--cost-bps",
+        type=float,
+        help="净口径指标的往返交易成本（基点，按单边换手折算），默认取系统配置",
+    )
     p.add_argument(
         "--execution-model",
         choices=EXECUTION_MODELS,

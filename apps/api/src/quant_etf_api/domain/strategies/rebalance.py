@@ -19,10 +19,6 @@ from datetime import date, timedelta
 from typing import Protocol
 
 from quant_etf_api.domain.common.trading_calendar import TradingCalendarLike
-from quant_etf_api.engine.config import (
-    RebalanceConfig,
-    RebalanceScheduleConfig,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +26,25 @@ logger = logging.getLogger(__name__)
 # 不使用 ISO 周号：53 周年份（如 2020、2026）的第 53 周与次年第 1 周同为奇数周，
 # 会导致双周调仓连续两周触发。连续计数在 2020-W53 之前与 ISO 周序奇偶完全一致。
 _BIWEEKLY_ANCHOR_MONDAY = date(2016, 1, 4)
+
+
+class RebalanceScheduleLike(Protocol):
+    """单条调仓腿的频率配置协议（由 ``engine.config.RebalanceScheduleConfig`` 实现）。
+
+    领域层只依赖该结构协议，不反向导入引擎层的 pydantic 配置模型。
+    """
+
+    frequency: str
+    day_of_week: int | None
+    week_parity: str | None
+    day_of_month: int | None
+
+
+class TwoLegRebalanceLike(Protocol):
+    """双腿调仓配置协议（由 ``engine.config.RebalanceConfig`` 实现）。"""
+
+    selection: RebalanceScheduleLike
+    risk: RebalanceScheduleLike
 
 
 @dataclass(frozen=True)
@@ -70,16 +85,14 @@ class RebalanceScheduler(Protocol):
 
     def should_rebalance(
         self,
-        config: RebalanceScheduleConfig,
+        config: RebalanceScheduleLike | TwoLegRebalanceLike,
         current_date: date,
-        last_rebalance_date: date | None = None,
     ) -> bool:
         """判断某条腿是否应该在当前交易日调仓。
 
         Args:
             config: 单条调仓腿的频率配置。
             current_date: 当前日期。
-            last_rebalance_date: 上次调仓日期。
 
         Returns:
             是否应该调仓。
@@ -112,9 +125,8 @@ class DefaultRebalanceScheduler:
 
     def should_rebalance(
         self,
-        config: RebalanceScheduleConfig,
+        config: RebalanceScheduleLike | TwoLegRebalanceLike,
         current_date: date,
-        last_rebalance_date: date | None = None,
     ) -> bool:
         """判断某一条腿是否应该在当前交易日调仓。
 
@@ -136,9 +148,8 @@ class DefaultRebalanceScheduler:
         Args:
             config: 单条调仓腿的频率配置（旧式 ``RebalanceConfig`` 亦被兼容，
                 按其中的选股腿解析）。
-            current_date: 当前日期（调用方应只传交易日）。
-            last_rebalance_date: 上次调仓日期。本实现**不使用**该参数：同一自然
-                周/周期/月内"目标日之后的第一个交易日"唯一，无需额外状态即可判定。
+            current_date: 当前日期（调用方应只传交易日）。同一自然周/周期/月内
+                "目标日之后的第一个交易日"唯一，无需"上次调仓日"等额外状态即可判定。
 
         Returns:
             是否应该调仓。
@@ -149,7 +160,7 @@ class DefaultRebalanceScheduler:
                 （配置层已做枚举校验，此处为防守，避免静默退化为每日调仓）。
         """
         # 旧调用点可能传入整个 RebalanceConfig；此处取其选股腿，保持向后兼容。
-        schedule = config.selection if isinstance(config, RebalanceConfig) else config
+        schedule: RebalanceScheduleLike = getattr(config, "selection", config)
         if schedule.frequency == "daily":
             return True
 
@@ -222,10 +233,8 @@ class DefaultRebalanceScheduler:
 
 def select_active_legs(
     scheduler: RebalanceScheduler,
-    rebalance: RebalanceConfig | None,
+    rebalance: TwoLegRebalanceLike | None,
     current_date: date,
-    last_selection_date: date | None = None,
-    last_risk_date: date | None = None,
 ) -> RebalanceLegs:
     """判定当日到期的调仓腿。
 
@@ -239,8 +248,6 @@ def select_active_legs(
         scheduler: 调仓调度器（交易日历必填的严格实现）。
         rebalance: 双腿调仓配置，None 表示未配置。
         current_date: 当前交易日。
-        last_selection_date: 上次选股腿调仓日（当前实现不参与判定，保留签名）。
-        last_risk_date: 上次风险腿调仓日（当前实现不参与判定，保留签名）。
 
     Returns:
         两腿到期情况。
@@ -248,6 +255,6 @@ def select_active_legs(
     if rebalance is None:
         return RebalanceLegs(selection=True, risk=True)
     return RebalanceLegs(
-        selection=scheduler.should_rebalance(rebalance.selection, current_date, last_selection_date),
-        risk=scheduler.should_rebalance(rebalance.risk, current_date, last_risk_date),
+        selection=scheduler.should_rebalance(rebalance.selection, current_date),
+        risk=scheduler.should_rebalance(rebalance.risk, current_date),
     )

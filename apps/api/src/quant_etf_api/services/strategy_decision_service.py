@@ -375,9 +375,7 @@ class StrategyDecisionService:
 
                 actual_date = allocation.data_date
                 # 两腿口径与回测共用领域实现，避免"回测按双腿、实时按单腿"的口径分叉
-                legs = select_active_legs(
-                    scheduler, config.rebalance, actual_date, None, None
-                )
+                legs = select_active_legs(scheduler, config.rebalance, actual_date)
                 rebalance_cfg = config.rebalance
                 selection_schedule = (
                     rebalance_cfg.selection if rebalance_cfg is not None else RebalanceScheduleConfig()

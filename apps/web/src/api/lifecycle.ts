@@ -69,7 +69,7 @@ export async function updateLifecycleStatus(
  * 人工触发一次健康体检（同步执行上线后回测并与研究期分布比对）。
  *
  * @param strategyId - 策略 ID
- * @param payload - 可选的单边成本覆盖
+ * @param payload - 可选的往返交易成本覆盖
  * @returns 新生成的健康快照
  */
 export async function refreshLifecycle(

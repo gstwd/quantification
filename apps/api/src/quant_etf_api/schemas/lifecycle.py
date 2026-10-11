@@ -21,7 +21,7 @@ class LifecycleOnlineRequest(BaseModel):
     Attributes:
         live_at: 上线业务日期（监控区间起点），留空时取当前北京时间日期。
         note: 上线备注（研究结论、上线依据），便于日后回溯决策背景。
-        cost_bps: 净口径指标使用的单边成本（基点），留空取系统默认值。
+        cost_bps: 净口径指标使用的往返交易成本（基点，按单边换手折算），留空取系统默认值。
     """
 
     live_at: date | None = None
@@ -45,7 +45,7 @@ class LifecycleRefreshRequest(BaseModel):
     """刷新健康快照的请求体。
 
     Attributes:
-        cost_bps: 本次刷新使用的单边成本（基点），留空取系统默认值。
+        cost_bps: 本次刷新使用的往返交易成本（基点，按单边换手折算），留空取系统默认值。
     """
 
     cost_bps: float | None = None

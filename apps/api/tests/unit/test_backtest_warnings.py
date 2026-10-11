@@ -15,6 +15,10 @@ from unittest.mock import MagicMock
 
 from quant_etf_api.infra.db.models.core import BacktestRunModel
 from quant_etf_api.schemas.backtest import BacktestWarning
+from quant_etf_api.services.backtest_diagnostics import (
+    collect_data_gap_warnings,
+    collect_missing_factor_warnings,
+)
 from quant_etf_api.services.backtest_service import BacktestService
 
 
@@ -28,7 +32,6 @@ class TestCollectMissingFactorWarnings:
 
     def test_aggregates_missing_days_and_codes(self) -> None:
         """应按因子汇总缺失天数与涉及指数，生成一条警告。"""
-        svc = _make_service()
         dates = [date(2025, 1, 2), date(2025, 1, 3), date(2025, 1, 6)]
         precomputed = {
             dates[0]: {("000300", "pe_percentile"): 50.0, ("000905", "pe_percentile"): None},
@@ -36,7 +39,7 @@ class TestCollectMissingFactorWarnings:
             dates[2]: {("000300", "pe_percentile"): 55.0, ("000905", "pe_percentile"): 60.0},
         }
 
-        warnings = svc._collect_missing_factor_warnings(
+        warnings = collect_missing_factor_warnings(
             precomputed, dates, ["000300", "000905"], ["pe_percentile"]
         )
 
@@ -50,11 +53,10 @@ class TestCollectMissingFactorWarnings:
 
     def test_no_missing_returns_empty(self) -> None:
         """因子全区间完整时不产生警告。"""
-        svc = _make_service()
         dates = [date(2025, 1, 2)]
         precomputed = {dates[0]: {("000300", "ma_5d"): 1.0}}
 
-        warnings = svc._collect_missing_factor_warnings(precomputed, dates, ["000300"], ["ma_5d"])
+        warnings = collect_missing_factor_warnings(precomputed, dates, ["000300"], ["ma_5d"])
 
         assert warnings == []
 
@@ -64,7 +66,6 @@ class TestCollectDataGapWarnings:
 
     def test_missing_bars_generate_warning(self) -> None:
         """指数在回测区间内缺行情时应生成 DATA_GAP 警告。"""
-        svc = _make_service()
         dates = [date(2025, 1, 2), date(2025, 1, 3), date(2025, 1, 6)]
         all_bars = {
             ("000300", dates[0]): SimpleNamespace(close_price=100.0, open_price=100.0),
@@ -75,7 +76,7 @@ class TestCollectDataGapWarnings:
             ("000905", dates[2]): SimpleNamespace(close_price=102.0, open_price=102.0),
         }
 
-        warnings = svc._collect_data_gap_warnings(dates, ["000300", "000905"], all_bars)
+        warnings = collect_data_gap_warnings(dates, ["000300", "000905"], all_bars)
 
         assert len(warnings) == 1
         w = warnings[0]
@@ -85,7 +86,6 @@ class TestCollectDataGapWarnings:
 
     def test_missing_open_price_generates_warning(self) -> None:
         """bar 存在但开盘价缺失（如 932088 港股通指数）也应生成 DATA_GAP 警告。"""
-        svc = _make_service()
         dates = [date(2025, 1, 2), date(2025, 1, 3)]
         all_bars = {
             ("000300", dates[0]): SimpleNamespace(close_price=100.0, open_price=100.0),
@@ -95,7 +95,7 @@ class TestCollectDataGapWarnings:
             ("932088", dates[1]): SimpleNamespace(close_price=101.0, open_price=None),
         }
 
-        warnings = svc._collect_data_gap_warnings(dates, ["000300", "932088"], all_bars)
+        warnings = collect_data_gap_warnings(dates, ["000300", "932088"], all_bars)
 
         assert len(warnings) == 1
         w = warnings[0]
@@ -105,13 +105,12 @@ class TestCollectDataGapWarnings:
 
     def test_strict_mode_suppresses_excluded_open_gap_warning(self) -> None:
         """严格模式下，开盘价缺失由 DATA_EXCLUDED 表达，不应重复生成 DATA_GAP。"""
-        svc = _make_service()
         dates = [date(2025, 1, 2)]
         all_bars = {
             ("932088", dates[0]): SimpleNamespace(close_price=100.0, open_price=None),
         }
 
-        warnings = svc._collect_data_gap_warnings(
+        warnings = collect_data_gap_warnings(
             dates,
             ["932088"],
             all_bars,
@@ -123,13 +122,12 @@ class TestCollectDataGapWarnings:
 
     def test_close_execution_does_not_warn_for_missing_open_price(self) -> None:
         """T+1 收盘执行不依赖开盘价，不应生成开盘价缺失告警。"""
-        svc = _make_service()
         dates = [date(2025, 1, 2)]
         all_bars = {
             ("932088", dates[0]): SimpleNamespace(close_price=100.0, open_price=None),
         }
 
-        warnings = svc._collect_data_gap_warnings(
+        warnings = collect_data_gap_warnings(
             dates,
             ["932088"],
             all_bars,
@@ -164,7 +162,7 @@ class TestWarningsPersistence:
         )
         row.warnings = [warning.model_dump()]
 
-        detail = svc._row_to_detail(row)
+        detail = svc.row_to_detail(row)
 
         assert len(detail.warnings) == 1
         assert detail.warnings[0].code == "WARMUP"
@@ -186,7 +184,7 @@ class TestWarningsPersistence:
         )
         row.warnings = [{"level": "unknown_level"}]
 
-        detail = svc._row_to_detail(row)
+        detail = svc.row_to_detail(row)
 
         assert detail.warnings == []
 

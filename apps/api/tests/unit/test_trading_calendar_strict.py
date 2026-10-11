@@ -189,6 +189,30 @@ class TestResolveTradingCalendar:
         with pytest.raises(TradingCalendarUnavailableError):
             resolve_trading_calendar(db, required_range=(date(2016, 1, 1), date(2016, 12, 31)))
 
+    def test_required_range_partially_covered(self, monkeypatch) -> None:
+        """快照只覆盖区间前段时同样视为不可用（尾部真实交易日不能被当成休市）。"""
+        monkeypatch.setattr(calendar_module, "_load_from_upstream", lambda: (None, None))
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = [
+            (date(2025, 1, 2),),
+            (date(2025, 12, 31),),
+        ]
+        with pytest.raises(TradingCalendarUnavailableError):
+            resolve_trading_calendar(db, required_range=(date(2025, 1, 1), date(2026, 6, 30)))
+
+    def test_required_range_endpoints_inside_holiday(self, monkeypatch) -> None:
+        """区间端点落在长假里（快照首尾交易日略晚/略早于端点）仍视为覆盖。"""
+        monkeypatch.setattr(calendar_module, "_load_from_upstream", lambda: (None, None))
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = [
+            (date(2016, 1, 4),),
+            (date(2025, 12, 31),),
+        ]
+        _, source = resolve_trading_calendar(
+            db, required_range=(date(2016, 1, 1), date(2026, 1, 3))
+        )
+        assert source == "database"
+
     def test_load_db_trading_days_handles_error(self) -> None:
         """读取本地表异常时返回 None（由调用方按不可用处理）。"""
         db = MagicMock()

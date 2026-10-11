@@ -17,7 +17,7 @@ from datetime import date
 
 # 年化系数与绩效指标模块保持一致，避免"汇总一套、稳健性一套"的口径漂移
 DEFAULT_TRADING_DAYS_PER_YEAR = 252
-# 默认单边交易成本（基点）：1bp = 0.01%
+# 默认往返交易成本（基点，按单边换手折算）：1bp = 0.01%
 DEFAULT_COST_BPS = 0.5
 
 
@@ -26,7 +26,7 @@ class StabilityMetrics:
     """单次回测的稳健性指标汇总。
 
     Attributes:
-        cost_bps: 成本折算使用的单边成本（基点）。
+        cost_bps: 成本折算使用的往返交易成本（基点，按单边换手折算）。
         annualized_turnover: 年化单边换手率（倍）。
         cost_drag_pct_per_year: 成本拖累（百分点/年）= 年化换手 × 成本。
         net_cumulative_return_pct: 扣成本后累计收益率（%）。
@@ -99,7 +99,7 @@ def compute_stability_metrics(
         turnovers: 与 ``daily_returns`` 等长的单边换手率序列，缺失日按 0 处理。
         exposures: 与 ``daily_returns`` 等长的总仓位序列，用于统计平均仓位。
         positions: 与 ``daily_returns`` 等长的持仓权重字典序列，用于统计集中度。
-        cost_bps: 单边交易成本（基点），默认 10bp。
+        cost_bps: 往返交易成本（基点，按单边换手折算），默认 ``DEFAULT_COST_BPS``。
         trading_days_per_year: 年化系数，默认 252。
 
     Returns:
@@ -162,7 +162,7 @@ class CostLadderEntry:
     """单个成本档位下的净口径指标（C3）。
 
     Attributes:
-        cost_bps: 该档位的单边交易成本（基点），0 表示毛口径。
+        cost_bps: 该档位的往返交易成本（基点，按单边换手折算），0 表示毛口径。
         net_cumulative_return_pct: 扣成本后累计收益率（%）。
         net_annualized_return_pct: 扣成本后年化收益率（%）。
         net_sharpe_ratio: 扣成本后年化夏普比率。
@@ -249,7 +249,7 @@ def net_return_series(
     Args:
         daily_returns: 组合日收益率序列（%）。
         turnovers: 与 ``daily_returns`` 等长的单边换手率序列，缺失日按 0 处理。
-        cost_bps: 单边交易成本（基点）。
+        cost_bps: 往返交易成本（基点，按单边换手折算）。
 
     Returns:
         扣成本后的日收益率序列（%），长度与输入一致。

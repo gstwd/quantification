@@ -120,7 +120,8 @@ class TestTurnoverAndReturns:
         }
         # 旧仓位 100% 持有 a：隔夜段 = 102/100 - 1 = 2%
         # 新仓位 100% 持有 a：日内段 = 104/102 - 1 ≈ 1.9608%
-        # 合计 = 3.9608%（函数四舍五入到 4 位小数）
+        # 两段复利：1.02 × 104/102 - 1 = 4%（与收盘到收盘一致；
+        # 历史上两段直接相加得到 3.9608%，漏掉交叉项）
         ret = compute_rebalance_day_return(
             {"a": 1.0},
             {"a": 1.0},
@@ -128,7 +129,7 @@ class TestTurnoverAndReturns:
             date(2025, 1, 16),
             bars,
         )
-        assert ret == pytest.approx(3.9608)
+        assert ret == pytest.approx(4.0)
 
     def test_compute_rebalance_day_return_old_sells_new_buys(self) -> None:
         """调仓换仓：旧仓位吃隔夜，新仓位吃日内。"""
@@ -147,8 +148,8 @@ class TestTurnoverAndReturns:
             date(2025, 1, 16),
             bars,
         )
-        # 函数四舍五入到 4 位小数：-3.761904... → -3.7619
-        assert ret == pytest.approx(-3.7619)
+        # 两段复利：1.01 × 200/210 - 1 = -3.809523... → -3.8095（4 位小数）
+        assert ret == pytest.approx(-3.8095)
 
     def test_compute_rebalance_day_return_no_next_date(self) -> None:
         """最后一个交易日无下一交易日，返回 0。"""

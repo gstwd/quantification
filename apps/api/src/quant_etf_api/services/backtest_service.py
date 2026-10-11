@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-from bisect import bisect_left
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from time import perf_counter
@@ -26,28 +25,23 @@ from quant_etf_api.domain.common.numeric import (
     price_invalid as _price_invalid,
 )
 from quant_etf_api.domain.common.numeric import (
-    safe_metric_diff as _safe_metric_diff,
-)
-from quant_etf_api.domain.common.numeric import (
     sanitize_metric_value as _sanitize_metric_value,
 )
 from quant_etf_api.domain.common.signal_level import determine_signal_level
 from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
 from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
 from quant_etf_api.domain.portfolio.benchmark import compute_buy_hold_benchmark
-from quant_etf_api.domain.portfolio.returns import (
-    compute_allocation_return,
-    compute_close_execution_return,
-    compute_rebalance_day_return,
-    count_missing_allocation_assets,
-    count_missing_rebalance_assets,
-    get_index_return,
+from quant_etf_api.domain.portfolio.execution import (
+    ACCOUNTING_MODEL_DRIFT,
+    ACCOUNTING_MODEL_LEGACY,
+    BacktestExecutor,
+    forward_fill_return_bars,
 )
+from quant_etf_api.domain.portfolio.returns import get_index_return
 from quant_etf_api.domain.portfolio.scaling import compose_two_leg_positions
 from quant_etf_api.domain.portfolio.turnover import (
     TURNOVER_MODEL_DELTA_W,
     TURNOVER_MODEL_LEGACY,
-    compute_turnover,
 )
 from quant_etf_api.domain.portfolio.universe import (
     build_universe_items,
@@ -73,7 +67,6 @@ from quant_etf_api.domain.strategies.rebalance import (
     select_active_legs,
 )
 from quant_etf_api.engine.config import (
-    RebalanceScheduleConfig,
     StrategyConfig,
     iter_factor_refs,
 )
@@ -84,7 +77,6 @@ from quant_etf_api.engine.rebalance import DefaultRebalanceScheduler
 from quant_etf_api.factors.catalog import OHLC_DEPENDENT_TEMPLATE_IDS, FactorTemplateRegistry
 from quant_etf_api.factors.compute import FactorMatrix
 from quant_etf_api.infra.db.models.core import (
-    BacktestComparisonModel,
     BacktestDailyResultModel,
     BacktestIndexResultModel,
     BacktestRunModel,
@@ -105,9 +97,6 @@ from quant_etf_api.infra.trading_calendar import resolve_trading_calendar
 from quant_etf_api.schemas.backtest import (
     AnnualMetrics,
     BacktestCandidatePool,
-    BacktestComparisonCreateRequest,
-    BacktestComparisonDetail,
-    BacktestComparisonSummary,
     BacktestCreateRequest,
     BacktestDailyResult,
     BacktestDeleteResponse,
@@ -118,14 +107,21 @@ from quant_etf_api.schemas.backtest import (
     BacktestStability,
     BacktestSummary,
     BacktestWarning,
-    ComparisonDailyPoint,
-    ComparisonDailyResponse,
-    ComparisonMetrics,
     CostLadderEntry,
     DanglingReferenceItem,
     DanglingReferenceReport,
     ValidationUsageItem,
     ValidationUsageResponse,
+)
+from quant_etf_api.services.backtest_diagnostics import (
+    RunDiagnostics,
+    build_candidate_pool_timeline,
+    collect_compute_failure_warnings,
+    collect_data_gap_warnings,
+    collect_missing_factor_warnings,
+    collect_run_warnings,
+    estimate_warmup_trading_days,
+    first_bar_by_code,
 )
 from quant_etf_api.services.backtest_reference_service import (
     HOLDER_OPTIMIZATION_FOLDS,
@@ -179,74 +175,20 @@ def _window_cache_key(row: BacktestRunModel) -> str:
     return f"{row.start_date.isoformat()}~{row.end_date.isoformat()}|{universe_filter}"
 
 
-# 因行情价格字段缺失被剔除的原因 → 展示用标签（F-8）
-_PRICE_EXCLUSION_LABELS: dict[str, str] = {
-    "MISSING_OPEN": "缺开盘价",
-    "MISSING_HIGH_LOW": "缺最高/最低价",
-    "MISSING_NEXT_HIGH_LOW": "缺最高/最低价",
-}
+def _round_weights(positions: dict[str, float]) -> dict[str, float]:
+    """把持仓权重取整到 4 位小数用于落库与展示，取整后为 0 的资产剔除。
 
-
-def _execution_price_warning(
-    exclusion_dates: dict[str, list[date]],
-    exclusion_reasons: dict[str, set[str]],
-) -> BacktestWarning | None:
-    """构造"缺开盘价或最高/最低价被剔除"的警告（F-8）。
-
-    执行模型是 T+1 开盘价时，缺开盘价的指数当期无法建仓；策略使用 ATR、
-    唐奇安、RSRS 等需要最高/最低价的因子时，缺最高/最低价的指数同样会被
-    排除在候选池之外。部分指数上游长期只提供收盘价，被剔除的天数可达数年，
-    因此这里列出全部受影响指数及其天数与原因，不再只列前 5 只。
+    执行器内部保留全精度漂移权重（避免舍入误差在逐日漂移中累积），
+    只在落库时取整。
 
     Args:
-        exclusion_dates: 指数 → 被剔除的交易日列表。
-        exclusion_reasons: 指数 → 剔除原因集合。
+        positions: 持仓权重。
 
     Returns:
-        结构化警告；没有因价格字段缺失被剔除的指数时返回 None。
+        取整后的持仓权重。
     """
-    affected: dict[str, tuple[int, list[str]]] = {}
-    for code, dates in exclusion_dates.items():
-        labels = sorted(
-            {
-                label
-                for reason, label in _PRICE_EXCLUSION_LABELS.items()
-                if reason in exclusion_reasons.get(code, set())
-            }
-        )
-        if labels:
-            affected[code] = (len(dates), labels)
-    if not affected:
-        return None
-    ranked = sorted(affected.items(), key=lambda item: (-item[1][0], item[0]))
-    detail = "、".join(f"{code} {days} 天（{'/'.join(labels)}）" for code, (days, labels) in ranked)
-    return BacktestWarning(
-        level="warning",
-        code="EXECUTION_PRICE_MISSING",
-        message=(
-            f"{len(affected)} 个指数因行情价格字段缺失被排除在候选池之外"
-            f"（合计 {sum(days for days, _ in affected.values())} 个交易日）：{detail}；"
-            "缺开盘价时 T+1 开盘执行无法建仓，缺最高/最低价时相关因子无法计算，"
-            "实际可交易资产域小于配置资产池"
-        ),
-    )
-
-
-def _first_bar_by_code(all_bars: dict[tuple[str, date], Any]) -> dict[str, date]:
-    """汇总每个指数在回测区间内的首根 K 线日期（F-6 预热期口径用）。
-
-    Args:
-        all_bars: 行情数据，键为 (index_code, trade_date)。
-
-    Returns:
-        指数代码 → 首根 K 线日期。
-    """
-    first: dict[str, date] = {}
-    for (code, trade_date) in all_bars:
-        current = first.get(code)
-        if current is None or trade_date < current:
-            first[code] = trade_date
-    return first
+    rounded = {code: round(weight, 4) for code, weight in sorted(positions.items())}
+    return {code: weight for code, weight in rounded.items() if weight > 0}
 
 
 def _parse_candidate_pool(raw: Any) -> BacktestCandidatePool | None:
@@ -422,8 +364,11 @@ class BacktestService:
             self._db.add(row)
             self._db.commit()
         except Exception:
+            # 写库失败必须上抛：吞掉异常会让调用方拿到一条不存在的 pending 回测
+            # （随后入队、轮询都找不到记录），并错误地留下验证期消费痕迹
             self._db.rollback()
-            logger.warning("create_backtest DB insert failed", exc_info=True)
+            logger.exception("create_backtest DB insert failed: backtest_id=%s", backtest_id)
+            raise
 
         # 验证期消费留痕（D-5）：只要创建了使用验证期数据的回测，该策略的
         # "验证期样本外"身份即被消费，此后这段数据只能用于否决。留痕挂在策略
@@ -652,7 +597,7 @@ class BacktestService:
             row = self._backtest_repo.find_by_id(backtest_id)
             if row is None:
                 return None
-            detail = self._row_to_detail(row, self._queue_info([backtest_id]).get(backtest_id))
+            detail = self.row_to_detail(row, self._queue_info([backtest_id]).get(backtest_id))
             # 分年度绩效表：读取时按自然年切分已持久化的日收益序列计算，
             # 存量回测无需重跑即可获得该表（滚动/分年度口径仅依赖单条序列）
             if detail.status == "success":
@@ -971,6 +916,7 @@ class BacktestService:
             ),
             calendar_source=params.get("_calendar_source"),
             turnover_model=params.get("_turnover_model") or TURNOVER_MODEL_LEGACY,
+            accounting_model=params.get("_accounting_model") or ACCOUNTING_MODEL_LEGACY,
             cost_ladder=ladder,
             candidate_pool=_parse_candidate_pool(getattr(row, "candidate_pool", None)),
             warmup_trading_days=int(params.get("_warmup_trading_days") or 0),
@@ -1266,11 +1212,15 @@ class BacktestService:
         1. 准备数据（标的、交易日、行情、估值，回望窗口按因子 lookback 推导）
         2. 解析交易日历并注入口径指纹（C1）
         3. 预计算全区间因子值
-        3. 逐日执行引擎管线
-        4. 按仓位/排名计算组合收益（毛收益，不扣除交易成本）
+        4. 逐决策日执行引擎管线，由 ``BacktestExecutor`` 结算持仓、收益与换手
+           （毛收益，不扣除交易成本；记账口径见 ``domain.portfolio.execution``）
         5. 计算基准收益（如启用）
         6. 写入每日结果和指数结果
-        7. 计算汇总绩效指标
+        7. 计算汇总绩效指标与结构化告警
+
+        决策日为除最后一个交易日之外的全部交易日：第 i 行收益是
+        [收盘 T_i, 收盘 T_{i+1}] 的实现收益，最后一个交易日没有下一交易日、不产生
+        收益窗口，因此不落行（历史口径会落一行人为的 0 收益）。
 
         ``persist=False`` 时保留完全相同的计算路径，只是不写 ``backtest_daily_result``
         / ``backtest_index_result``、不提交、不落最终状态，并把逐日结果原样返回，
@@ -1292,6 +1242,7 @@ class BacktestService:
 
         Raises:
             JobCancelledError: 收到协作取消请求时抛出（由调用方落 cancelled）。
+            ValueError: 标的范围为空或区间内交易日不足 2 个时抛出。
         """
         # 回测使用一次性行情快照；关闭 checkpoint commit 后的 ORM 对象过期，
         # 避免收尾数据质量扫描访问行情字段时逐条触发隐式 SELECT。
@@ -1302,15 +1253,25 @@ class BacktestService:
         universe, index_codes, trading_dates, all_bars, all_valuation, all_macro = (
             self._prepare_backtest_data(row, caches)
         )
+        # 批量评估的行情快照被多个变体共享，而下面会就地补充代理指数、基准与
+        # 全市场行情：先浅拷贝，避免一个变体的补充数据泄漏进其他变体的缓存
+        all_bars = dict(all_bars)
+        all_valuation = dict(all_valuation)
         # 非交易日行情过滤（F-7）：上游偶尔把行情打在假期日期上，直接当交易日
         # 会多出假调仓日与假收益；日历不可用时保持原行为并留痕
         trading_dates, non_trading_dates = self._filter_non_trading_dates(
             row.start_date, row.end_date, trading_dates
         )
+        if len(trading_dates) < 2:
+            raise ValueError(
+                f"区间 {row.start_date} ~ {row.end_date} 内有效交易日不足 2 个，"
+                "无法形成任何收益窗口"
+            )
+        # params 是普通 JSON 列，不追踪原地修改：必须在新 dict 上改完再整体赋值，
+        # 否则口径元数据（预热期、记账口径等）不会写入数据库
+        run_params = dict(row.params or {})
         if non_trading_dates:
-            params = dict(row.params or {})
-            params["_non_trading_bar_dates"] = [d.isoformat() for d in non_trading_dates]
-            row.params = params
+            run_params["_non_trading_bar_dates"] = [d.isoformat() for d in non_trading_dates]
 
         # 策略显式限定资产范围时，必须在因子预计算前收窄回测池。此前仅在主循环
         # 构建上下文时过滤，会让扩散等成分面板因子为无关指数加载数据并产生缺失告警。
@@ -1331,12 +1292,8 @@ class BacktestService:
             for proxy_code in config.timing.proxy_index_codes:
                 if proxy_code not in factor_index_codes:
                     factor_index_codes.append(proxy_code)
-                    # 加载代理指数的日线数据
-                    proxy_bars = self._load_all_index_bars(trading_dates, [proxy_code])
-                    all_bars.update(proxy_bars)
-                    # 加载代理指数的估值数据
-                    proxy_val = self._load_all_valuation(trading_dates, [proxy_code])
-                    all_valuation.update(proxy_val)
+                    all_bars.update(self._load_all_index_bars(trading_dates, [proxy_code]))
+                    all_valuation.update(self._load_all_valuation(trading_dates, [proxy_code]))
 
         # 预计算所有因子值（含择时代理指数）；批量评估时按
         # （窗口, 所需因子的计算实例, 参与计算的指数）复用，避免每个变体重算一遍。
@@ -1364,18 +1321,23 @@ class BacktestService:
         market_shape_refs = set(self._factor_provider.market_shape_refs(config))
 
         # 记录实际回望天数与因子预热期（"前 N 个交易日因子数据不足"提示），
-        # 写入回测 params 元数据，随 mark_success 一并持久化
+        # 写入回测 params 元数据，随 checkpoint / mark_success 一并持久化
         lookback_days = self._get_lookback_days()
-        warmup_trading_days = self._estimate_warmup_trading_days(
+        warmup_trading_days = estimate_warmup_trading_days(
             precomputed,
             trading_dates,
             factor_index_codes,
             required_factor_ids,
-            _first_bar_by_code(all_bars),
+            first_bar_by_code(all_bars),
         )
-        run_params = row.params or {}
         run_params["_lookback_days"] = lookback_days
         run_params["_warmup_trading_days"] = warmup_trading_days
+        # 基准口径标记：策略/基准逐日序列均按"决策日归因"落账
+        # （T 日决策 → T+1 行情），历史数据一次性回填命令据此跳过新记录
+        run_params["_benchmark_alignment"] = "decision_day"
+        # 记账口径指纹：持仓漂移 + 调仓日两段复利 + 收益行情前向填充 + 无终端行，
+        # 存量回测无该键（读取时按 constant_mix_v0 标注），两者指标不可直接比较
+        run_params["_accounting_model"] = ACCOUNTING_MODEL_DRIFT
         row.params = run_params
         if warmup_trading_days > 0:
             logger.warning(
@@ -1384,27 +1346,31 @@ class BacktestService:
                 warmup_trading_days,
             )
 
-        # 基准配置
-        params = row.params or {}
-        enable_benchmark = params.get("_enable_benchmark", True)
-        benchmark_index_code = params.get("_benchmark_index_code", "000300")
-        # 基准口径标记：策略/基准逐日序列均按"决策日归因"落账
-        # （T 日决策 → T+1 行情），历史数据一次性回填命令据此跳过新记录
-        params["_benchmark_alignment"] = "decision_day"
-        row.params = params
+        enable_benchmark = run_params.get("_enable_benchmark", True)
+        benchmark_index_code = run_params.get("_benchmark_index_code", "000300")
+        execution_model = run_params.get("_execution_model", "t_plus_1_open")
+        data_quality_mode = run_params.get("_data_quality_mode", "warn")
         # 无风险利率（%）：默认 0（历史口径），预留从回测参数读取的通道
-        risk_free_rate_pct = float(params.get("_annual_risk_free_rate_pct", 0.0) or 0.0)
+        risk_free_rate_pct = float(run_params.get("_annual_risk_free_rate_pct", 0.0) or 0.0)
 
-        # 基准日收益率序列
+        if enable_benchmark and benchmark_index_code not in index_codes:
+            # 基准指数可能不在策略 universe 中，单独补充行情
+            all_bars.update(self._load_all_index_bars(trading_dates, [benchmark_index_code]))
+        # 收益结算专用的前向填充行情：缺口期间的涨跌在缺口后补回，而不是永久丢失；
+        # 候选池、因子与缺口统计仍使用原始行情
+        return_codes = list(index_codes)
+        if enable_benchmark and benchmark_index_code not in return_codes:
+            return_codes.append(benchmark_index_code)
+        return_bars = forward_fill_return_bars(all_bars, return_codes, trading_dates)
+
+        # 决策日：最后一个交易日没有下一交易日，不形成收益窗口
+        decision_dates = trading_dates[:-1]
+        # 基准日收益率序列（与决策日等长，第 i 个元素为 [收盘 T_i, 收盘 T_{i+1}]）
         benchmark_returns: list[float] = []
         if enable_benchmark:
-            # 确保基准指数的日线数据已加载（基准指数可能不在策略 universe 中）
-            if benchmark_index_code not in index_codes:
-                benchmark_bars = self._load_all_index_bars(trading_dates, [benchmark_index_code])
-                all_bars.update(benchmark_bars)
             benchmark_returns = compute_buy_hold_benchmark(
-                all_bars, benchmark_index_code, trading_dates
-            )
+                return_bars, benchmark_index_code, trading_dates
+            )[: len(decision_dates)]
 
         logger.info(
             "[backtest] 回测启动: backtest_id=%s strategy=%s 区间=%s~%s 标的=%d "
@@ -1416,22 +1382,19 @@ class BacktestService:
             len(index_codes),
             lookback_days,
             warmup_trading_days,
-            params.get("_execution_model", "t_plus_1_open"),
-            params.get("_data_quality_mode", "warn"),
+            execution_model,
+            data_quality_mode,
             benchmark_index_code if enable_benchmark else "禁用",
         )
 
-        # ORM 行列表：用于 checkpoint 提交后释放对象引用
-        daily_results: list[BacktestDailyResultModel] = []
         # 不落库模式（D-1）下保留全部逐日结果，供净口径与稳健性指标现算
         memory_rows: list[BacktestDailyResultModel] = []
-        # 账户累积器：累计净值/回撤等账务状态由领域对象跟踪，
-        # 主循环只负责生成当日持仓与收益（执行与绩效关注点分离）
+        # 指数级结果缓冲：按 checkpoint 批量 INSERT，避免逐行构造 ORM 对象
+        index_buffer: list[dict[str, Any]] = []
+        # 账户累积器：累计净值/回撤等账务状态由领域对象跟踪
         accumulator = BacktestDayAccumulator()
-        prev_positions: dict[str, float] = {}
-        pending_positions: dict[str, float] | None = None
-        last_selection_rebalance_date: date | None = None
-        last_risk_rebalance_date: date | None = None
+        # 执行器：维护漂移后的实际持仓，按执行模型结算收益与换手
+        executor = BacktestExecutor(execution_model)
         # 数据缺口天数：至少一个持仓资产当日收益受缺失行情影响的交易日数（B10）
         data_gap_days = 0
         # 数据缺口剔除记录：两种数据质量口径共用同一候选池，因此剔除集合一致，
@@ -1440,229 +1403,125 @@ class BacktestService:
         exclusion_reasons: dict[str, set[str]] = {}
         # 有效候选池逐日规模（C6）：用于还原"早期实际可交易池只有 N 个"这类事实
         pool_sizes: list[int] = []
-        # 进度跟踪：每完成约 10% 交易日写一次进度
         last_progress = 0
-        total_dates = len(trading_dates)
-
+        total_dates = len(decision_dates)
         # 信号准确率累积器（替代 DB 查询）
         total_in_pos_count = 0
         total_in_pos_positive = 0
-
-        # 预构建 universe 和 metadata（回测区间内不变，避免每日重复构造）
-        codes = index_codes
-        if config.index_codes:
-            strategy_codes = set(config.index_codes)
-            codes = [c for c in codes if c in strategy_codes]
         # benchmark_index 无分类字段：不再伪造 category，排名展示留空
-        cached_metadata = {code: {"name_cn": code} for code in codes}
+        cached_metadata = {code: {"name_cn": code} for code in index_codes}
         # 择时降级（择时因子全部缺失 → 按中性运行）的交易日，收尾时生成告警
         timing_degraded_dates: list[date] = []
+        all_index_codes = set(index_codes)
 
-        for i, trade_date in enumerate(trading_dates):
+        for i, trade_date in enumerate(decision_dates):
             # 协作取消检查点（B2）：取消标记有短 TTL 缓存，不会每个交易日都查库
             ensure_not_cancelled()
-            day_factors = precomputed.get(trade_date, {})
-            next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else None
+            next_date = trading_dates[i + 1]
 
-            execution_model = params.get("_execution_model", "t_plus_1_open")
-            data_quality_mode = params.get("_data_quality_mode", "warn")
             # 口径统一：候选池与 data_quality_mode 无关，两种模式都使用"当日可执行
-            # 候选池"。宽松模式此前把所有标的（含无法交易/因子缺失的标的）放进
-            # 横截面 z-score 池，会改变统计量进而改变选股结果——同一配置在两种
-            # 口径下得到完全不同的组合与收益，这是需要消除的口径分叉。
-            # 行情可执行性在此判定；"决策所需因子缺失"的剔除由引擎按生效配置执行
-            # （与实时路径同一实现），引擎执行后再合并进剔除记录
+            # 候选池"；行情可执行性在此判定，"决策所需因子缺失"的剔除由引擎按生效
+            # 配置执行（与实时路径同一实现），引擎执行后再合并进剔除记录
             day_codes, day_exclusion_reasons = self._build_candidate_pool(
                 config, trade_date, next_date, index_codes, all_bars, execution_model
             )
-            day_universe = build_universe_items(
-                [{"index_code": c, "name_cn": c} for c in day_codes]
-            )
-            day_metadata = {code: cached_metadata[code] for code in day_codes}
-
-            # 构建上下文
             context = self._context_builder.build(
                 config,
                 trade_date,
                 index_codes=day_codes,
                 all_bars=all_bars,
-                precomputed_factors=day_factors,
-                cached_universe=day_universe,
-                cached_metadata=day_metadata,
+                precomputed_factors=precomputed.get(trade_date, {}),
+                cached_universe=build_universe_items(
+                    [{"index_code": c, "name_cn": c} for c in day_codes]
+                ),
+                cached_metadata={code: cached_metadata[code] for code in day_codes},
                 market_shape_refs=market_shape_refs,
             )
 
             # 两条腿独立到期：选股腿改成分，风险腿仅按择时等比缩放总仓位。
             # 两腿同频（旧配置升级后的默认形态）时，两腿同日命中，合成为改造前的
-            # "新成分 + 择时目标仓位"，历史回测口径不变。
-            legs = self._select_legs(
-                config,
-                trade_date,
-                last_selection_rebalance_date,
-                last_risk_rebalance_date,
-            )
-            should_select = legs.selection
-            should_scale_risk = legs.risk
-            should_rebalance = should_select or should_scale_risk
+            # "新成分 + 择时目标仓位"。
+            legs = self._select_legs(config, trade_date)
 
-            # 执行引擎（回测模式跳过详细的 StrategyResult 构建以提升性能）
+            # 执行引擎（回测模式跳过详细的 StrategyResult 与调试详情构建以提升性能）
             result = self._engine.run(config, context, include_details=False)
 
             # 合并引擎的因子缺失剔除，得到当日最终有效候选池
             for excluded_code, reason in result.excluded.items():
                 day_exclusion_reasons.setdefault(excluded_code, set()).add(reason)
             eligible_codes = [code for code in day_codes if code not in result.excluded]
-            for excluded_code in set(index_codes) - set(eligible_codes):
+            for excluded_code in all_index_codes - set(eligible_codes):
                 exclusion_dates.setdefault(excluded_code, []).append(trade_date)
                 exclusion_reasons.setdefault(excluded_code, set()).update(
                     day_exclusion_reasons.get(excluded_code, {"DATA_EXCLUDED"})
                 )
-            # 逐日有效候选池规模（C6）：与剔除记录共用同一次池计算，零额外开销
             pool_sizes.append(len(eligible_codes))
             if result.timing is not None and result.timing.factors.get("degraded"):
                 timing_degraded_dates.append(trade_date)
 
-            target_positions = dict(result.positions) if result.positions else {}
-            # 收盘模式先成交昨日指令，再合成今日指令；仅风险腿到期时必须沿用
-            # 今日收盘成交后的成分，避免换回旧成分或将已清空的仓位重新建立。
-            composition_positions = (
-                pending_positions
-                if execution_model == "t_plus_1_close" and pending_positions is not None
-                else prev_positions
-            )
-            new_positions = compose_two_leg_positions(
-                previous=composition_positions,
-                selection_target=target_positions,
+            # 以"调仓前实际持仓"（已随行情漂移）合成当日目标；收盘模式先成交昨日
+            # 指令，仅风险腿到期时沿用今日收盘成交后的成分
+            target_positions = compose_two_leg_positions(
+                previous=executor.composition_base,
+                selection_target=dict(result.positions) if result.positions else {},
                 timing_target_exposure=result.timing_target_exposure,
-                should_select=should_select,
-                should_scale_risk=should_scale_risk,
+                should_select=legs.selection,
+                should_scale_risk=legs.risk,
                 max_asset_weight=result.max_asset_weight,
             )
-            executed_positions = dict(prev_positions)
-            next_positions = dict(prev_positions)
-
-            # 确定持仓与收益。收盘模式将信号延迟到下一交易日收盘执行。
-            if execution_model == "t_plus_1_close":
-                # T+1 收盘成交：上一决策日产生的目标仓位在今日收盘成交，
-                # 因此本行收益区间 [close_T, close_{T+1}] 使用的仓位就是
-                # ``pending_positions``（首次建仓前沿用上一日实际仓位）。
-                # 历史缺陷：此处用 prev_positions 计收益，使新仓位的首个收益
-                # 区间被旧仓位吃掉，实际等价于 T+2 收盘执行。
-                executed_positions = (
-                    dict(pending_positions)
-                    if pending_positions is not None
-                    else dict(prev_positions)
-                )
-                portfolio_return = compute_close_execution_return(
-                    executed_positions, trade_date, next_date, all_bars
-                )
-                # 落库的 positions 表示当日实际持仓（与开盘模型一致）
-                positions = executed_positions
-                next_positions = executed_positions
-                if pending_positions is not None:
-                    # 成交腿 = 昨日实际持仓 → 今日成交后的仓位
-                    turnover = compute_turnover(prev_positions, pending_positions)
-                else:
-                    turnover = 0.0
-                if should_select:
-                    last_selection_rebalance_date = trade_date
-                if should_scale_risk:
-                    last_risk_rebalance_date = trade_date
-                pending_positions = new_positions if should_rebalance else None
-                day_total_exposure = round(sum(executed_positions.values()), 4)
-                day_cash_ratio = round(1.0 - day_total_exposure, 4)
-            elif should_rebalance:
-                # 调仓日：旧仓位持有至 T+1 开盘（隔夜段），新仓位自 T+1 开盘买入（日内段），
-                # 当日收益 = 旧仓位 × [close_T, open_{T+1}] + 新仓位 × [open_{T+1}, close_{T+1}]
-                portfolio_return = compute_rebalance_day_return(
-                    prev_positions, new_positions, trade_date, next_date, all_bars
-                )
-                positions = new_positions
-                executed_positions = new_positions
-                next_positions = new_positions
-                day_total_exposure = round(sum(positions.values()), 4)
-                day_cash_ratio = round(1.0 - day_total_exposure, 4)
-                # 换手率基于新旧目标仓位计算（C2）：统一按 Σ|Δw|/2，
-                # 不再在 prev/new 为空时跳过——清仓腿与建仓腿同样是真实成本
-                turnover = compute_turnover(prev_positions, new_positions)
-                if should_select:
-                    last_selection_rebalance_date = trade_date
-                if should_scale_risk:
-                    last_risk_rebalance_date = trade_date
-            else:
-                # 非调仓日：沿用上次持仓，按收盘对收盘计算收益
-                positions = dict(prev_positions)
-                executed_positions = positions
-                next_positions = positions
-                day_total_exposure = round(sum(positions.values()), 4)
-                day_cash_ratio = round(1.0 - day_total_exposure, 4)
-                turnover = 0.0
-                portfolio_return = compute_allocation_return(
-                    positions, trade_date, next_date, all_bars
-                )
-
-            # 统计当日受数据缺口影响的持仓资产数（B10），
-            # 供逐日 missing_bar_count 记录与 data_gap_days 指标汇总
-            if execution_model == "t_plus_1_close":
-                missing_bar_count = count_missing_allocation_assets(
-                    executed_positions, trade_date, next_date, all_bars
-                )
-            elif should_rebalance:
-                missing_bar_count = count_missing_rebalance_assets(
-                    prev_positions, positions, trade_date, next_date, all_bars
-                )
-            else:
-                missing_bar_count = count_missing_allocation_assets(
-                    positions, trade_date, next_date, all_bars
-                )
-            if missing_bar_count > 0:
+            day = executor.step(
+                trade_date=trade_date,
+                next_date=next_date,
+                target_positions=target_positions,
+                should_rebalance=legs.selection or legs.risk,
+                return_bars=return_bars,
+                quality_bars=all_bars,
+            )
+            if day.missing_bar_count > 0:
                 data_gap_days += 1
 
-            # 持仓统计
-            has_positions = bool(executed_positions)
-            # 更新累计净值、峰值与回撤（领域对象记账）
-            accumulator.apply_day(portfolio_return, has_positions)
-            cumulative_return_pct = accumulator.cumulative_return_pct
-            drawdown = accumulator.drawdown_pct
-
-            # 基准收益
+            accumulator.apply_day(day.portfolio_return, bool(day.executed_positions))
+            day_total_exposure = round(sum(day.positions.values()), 4)
+            positions = _round_weights(day.positions)
+            executed_positions = _round_weights(day.executed_positions)
             benchmark_ret = benchmark_returns[i] if i < len(benchmark_returns) else None
+            timing_regime = result.timing.regime if result.timing else None
 
             daily_row = BacktestDailyResultModel(
                 backtest_id=backtest_id,
                 trade_date=trade_date,
-                portfolio_return=round(portfolio_return, 4),
-                cumulative_return=round(cumulative_return_pct, 4),
-                drawdown=round(drawdown, 4),
-                timing_regime=result.timing.regime if result.timing else None,
+                portfolio_return=day.portfolio_return,
+                cumulative_return=round(accumulator.cumulative_return_pct, 4),
+                drawdown=round(accumulator.drawdown_pct, 4),
+                timing_regime=timing_regime,
                 total_exposure=day_total_exposure,
-                cash_ratio=day_cash_ratio,
-                positions=positions if positions else None,
-                executed_positions=executed_positions if executed_positions else None,
+                cash_ratio=round(1.0 - day_total_exposure, 4),
+                positions=positions or None,
+                executed_positions=executed_positions or None,
                 benchmark_return=round(benchmark_ret, 4) if benchmark_ret is not None else None,
-                turnover=round(turnover, 4) if turnover > 0 else None,
-                missing_bar_count=missing_bar_count,
+                turnover=round(day.turnover, 4) if round(day.turnover, 4) > 0 else None,
+                missing_bar_count=day.missing_bar_count,
             )
             if persist:
                 self._backtest_repo.add_daily_result(daily_row)
-                daily_results.append(daily_row)
             else:
                 memory_rows.append(daily_row)
 
-            # 写入指数结果并获取持仓统计
+            # 写入指数结果并获取持仓统计（指数收益与组合收益共用前向填充行情）
             day_pos_count, day_pos_positive = self._write_index_results(
                 backtest_id,
                 trade_date,
                 next_date,
                 universe,
                 result,
-                all_bars,
+                return_bars,
                 result.positions if result.positions else {},
-                held_positions=executed_positions,
-                timing_regime=result.timing.regime if result.timing else None,
+                held_positions=day.executed_positions,
+                timing_regime=timing_regime,
                 scoring_mode=result.effective_scoring_mode,
-                selection_rebalanced=should_select,
+                selection_rebalanced=legs.selection,
                 persist=persist,
+                index_buffer=index_buffer,
             )
             total_in_pos_count += day_pos_count
             total_in_pos_positive += day_pos_positive
@@ -1671,57 +1530,41 @@ class BacktestService:
                 "[backtest] 日结果: backtest_id=%s date=%s regime=%s exposure=%s 持仓=%s 收益=%s%%",
                 backtest_id,
                 trade_date,
-                result.timing.regime if result.timing else None,
+                timing_regime,
                 day_total_exposure,
-                {k: round(v, 4) for k, v in positions.items()},
-                round(portfolio_return, 4),
+                positions,
+                day.portfolio_return,
             )
 
-            prev_positions = next_positions
-
-            # 每 10% 交易日更新一次进度（最少 1 天触发）
-            if total_dates > 0:
-                new_progress = int((i + 1) / total_dates * 100)
-                if new_progress - last_progress >= 10:
-                    if persist:
-                        self._backtest_repo.update_progress(backtest_id, new_progress)
-                    last_progress = new_progress
-                    logger.info(
-                        "[backtest] 进度: backtest_id=%s %s/%s (%s%%) date=%s 累计收益=%s%%",
-                        backtest_id,
-                        i + 1,
-                        total_dates,
-                        new_progress,
-                        trade_date,
-                        round(cumulative_return_pct, 2),
-                    )
+            # 每 10% 决策日更新一次进度
+            new_progress = int((i + 1) / total_dates * 100)
+            if new_progress - last_progress >= 10:
+                if persist:
+                    self._backtest_repo.update_progress(backtest_id, new_progress)
+                last_progress = new_progress
+                logger.info(
+                    "[backtest] 进度: backtest_id=%s %s/%s (%s%%) date=%s 累计收益=%s%%",
+                    backtest_id,
+                    i + 1,
+                    total_dates,
+                    new_progress,
+                    trade_date,
+                    round(accumulator.cumulative_return_pct, 2),
+                )
 
             # 每 100 天 checkpoint 提交一次：
             # - 释放事务大小，避免长区间回测的单一巨大事务
             # - 中途失败时已提交的分段结果保留，前端可查看部分权益曲线
-            # - progress 裸 SQL 更新随本次 commit 一起对其它连接可见
+            # - progress 裸 SQL 更新与 params 口径元数据随本次 commit 一起可见
             if persist and (i + 1) % 100 == 0:
-                self._db.flush()
+                self._flush_results(index_buffer)
                 self._db.commit()
-                daily_results.clear()  # 释放 ORM 对象，账户累积器已保留关键数据
 
         finalize_started = perf_counter()
-        logger.info(
-            "[backtest] 收尾开始: backtest_id=%s 已完成循环=%s天，准备最终 flush",
-            backtest_id,
-            total_dates,
-        )
         if persist:
-            self._db.flush()
-        flush_elapsed = perf_counter() - finalize_started
-        logger.info(
-            "[backtest] 收尾 flush 完成: backtest_id=%s 耗时=%.3fs",
-            backtest_id,
-            flush_elapsed,
-        )
+            self._flush_results(index_buffer)
 
         # 计算汇总指标（使用账户累积器与内存中的信号准确率，避免依赖已 flush 的 ORM 对象）
-        metrics_started = perf_counter()
         metrics = self._compute_summary_metrics(
             accumulator,
             benchmark_returns,
@@ -1730,193 +1573,34 @@ class BacktestService:
             data_gap_days=data_gap_days,
             annual_risk_free_rate_pct=risk_free_rate_pct,
         )
-        logger.info(
-            "[backtest] 汇总指标完成: backtest_id=%s 耗时=%.3fs",
-            backtest_id,
-            perf_counter() - metrics_started,
+
+        # 收集结构化警告，随成功状态一并持久化，前端轮询时按 key 去重弹窗
+        candidate_pool = build_candidate_pool_timeline(
+            decision_dates, pool_sizes, len(index_codes), exclusion_dates, exclusion_reasons
         )
-        # 收集结构化警告：预热期 / 因子缺失 / 数据缺口 / 基准缺失，
-        # 随成功状态一并持久化，前端轮询时按 key 去重弹窗。
-        warnings_started = perf_counter()
-        run_warnings: list[BacktestWarning] = []
-        # 口径提示（C1）：使用本地日历表快照而非上游数据源时显式告知，
-        # 便于判断"同一配置两条回测的调仓日历是否来自同一来源"
-        if (row.params or {}).get("_calendar_source") == "database":
-            run_warnings.append(
-                BacktestWarning(
-                    level="info",
-                    code="CALENDAR_SOURCE_DATABASE",
-                    message=(
-                        "交易日历来自本地 trading_calendar 表快照"
-                        "（上游 Tushare/AkShare 当前不可用，快照可能滞后于官方日历）"
-                    ),
-                )
-            )
-        # 非交易日行情（F-7）：行情表里存在日历判定为非交易日的日期时
-        # 显式告知，避免"回测多出一个假调仓日"被当成正常波动
-        non_trading_dates = (row.params or {}).get("_non_trading_bar_dates") or []
-        if non_trading_dates:
-            run_warnings.append(
-                BacktestWarning(
-                    level="warning",
-                    code="NON_TRADING_BAR",
-                    message=(
-                        f"行情数据包含 {len(non_trading_dates)} 个非交易日"
-                        f"（{', '.join(non_trading_dates[:5])}"
-                        f"{' 等' if len(non_trading_dates) > 5 else ''}），"
-                        "已从回测交易日中剔除（上游把行情打在假期日期上）"
-                    ),
-                )
-            )
-        # point-in-time 标的池提示：纳入"已停用但区间内仍存续"的指数，
-        # 让研究者知道资产域包含退市/停发指数（而非只统计活到今天的资产）
-        effective_codes = set(index_codes)
-        delisted_codes = sorted(
-            item["index_code"]
-            for item in universe
-            if item.get("is_active") is False and item["index_code"] in effective_codes
-        )
-        if delisted_codes:
-            run_warnings.append(
-                BacktestWarning(
-                    level="info",
-                    code="UNIVERSE_INCLUDES_DELISTED",
-                    message=(
-                        f"标的池包含 {len(delisted_codes)} 个已停用（退市/停发）指数："
-                        f"{'、'.join(delisted_codes[:5])}"
-                        f"{' 等' if len(delisted_codes) > 5 else ''}；"
-                        "回测按 point-in-time 口径纳入区间内仍存续的指数，"
-                        "其停止发布后的日期由逐日候选池自动剔除（避免幸存者偏差）"
-                    ),
-                )
-            )
-        if warmup_trading_days > 0:
-            run_warnings.append(
-                BacktestWarning(
-                    level="warning",
-                    code="WARMUP",
-                    message=(
-                        f"回测前 {warmup_trading_days} 个交易日长周期因子数据不足"
-                        "（按各指数自身首根 K 线起算的预热期），前段信号与绩效参考价值有限"
-                    ),
-                )
-            )
-        # 有效候选池时间线（C6）：逐日规模游程编码 + 剔除指数区间，
-        # 随 mark_success 落库；缩水到理论池以下时补一条信息级提示
-        candidate_pool = self._build_candidate_pool_timeline(
-            trading_dates, pool_sizes, len(codes), exclusion_dates, exclusion_reasons
-        )
-        if candidate_pool["min_size"] < candidate_pool["base_size"]:
-            shrunk = next(
-                (
-                    seg
-                    for seg in candidate_pool["segments"]
-                    if seg["size"] == candidate_pool["min_size"]
+        factor_warnings = collect_missing_factor_warnings(
+            precomputed, trading_dates, factor_index_codes, required_factor_ids
+        ) + collect_compute_failure_warnings(set(factor_matrix.failed) & set(required_factor_ids))
+        run_warnings = collect_run_warnings(
+            RunDiagnostics(
+                calendar_source=run_params.get("_calendar_source"),
+                non_trading_dates=run_params.get("_non_trading_bar_dates") or [],
+                delisted_codes=sorted(
+                    item["index_code"]
+                    for item in universe
+                    if item.get("is_active") is False and item["index_code"] in all_index_codes
                 ),
-                None,
-            )
-            run_warnings.append(
-                BacktestWarning(
-                    level="info",
-                    code="CANDIDATE_POOL_SHRINK",
-                    message=(
-                        f"有效候选池 {candidate_pool['base_size']} → 最小 "
-                        f"{candidate_pool['min_size']}"
-                        + (
-                            f"（{shrunk['start_date']}~{shrunk['end_date']}）"
-                            if shrunk is not None
-                            else ""
-                        )
-                        + "，逐日时间线见 stability.candidate_pool"
-                    ),
-                )
-            )
-        missing_factor_started = perf_counter()
-        required_factor_ids = FactorProvider.collect_required_factor_ids(config)
-        run_warnings.extend(
-            self._collect_missing_factor_warnings(
-                precomputed,
-                trading_dates,
-                factor_index_codes,
-                required_factor_ids,
-            )
+                warmup_trading_days=warmup_trading_days,
+                candidate_pool=candidate_pool,
+                timing_degraded_dates=timing_degraded_dates,
+                exclusion_dates=exclusion_dates,
+                exclusion_reasons=exclusion_reasons,
+                data_quality_mode=data_quality_mode,
+            ),
+            factor_warnings,
         )
         run_warnings.extend(
-            self._collect_compute_failure_warnings(
-                set(factor_matrix.failed) & set(required_factor_ids)
-            )
-        )
-        if timing_degraded_dates:
-            run_warnings.append(
-                BacktestWarning(
-                    level="warning",
-                    code="TIMING_DEGRADED",
-                    message=(
-                        f"择时因子在 {len(timing_degraded_dates)} 个交易日全部缺失"
-                        f"（{timing_degraded_dates[0]}~{timing_degraded_dates[-1]}），"
-                        "这些交易日按中性 regime 决定总仓位"
-                    ),
-                )
-            )
-        logger.info(
-            "[backtest] 缺失因子告警完成: backtest_id=%s factors=%s dates=%s indexes=%s "
-            "warnings=%s 耗时=%.3fs",
-            backtest_id,
-            len(required_factor_ids),
-            len(trading_dates),
-            len(factor_index_codes),
-            len(run_warnings),
-            perf_counter() - missing_factor_started,
-        )
-        if exclusion_dates:
-            exclusion_warning_started = perf_counter()
-            excluded_days_total = sum(len(dates) for dates in exclusion_dates.values())
-            # 价格字段缺失导致的剔除单列（F-8）：t_plus_1_open 下缺开盘价、
-            # 使用高低价因子时缺最高/最低价的指数会被静默排除在候选池之外，
-            # 实际资产域可能远小于配置的资产池；这里显式列出全部受影响资产、
-            # 被排除的天数与原因
-            execution_warning = _execution_price_warning(exclusion_dates, exclusion_reasons)
-            if execution_warning is not None:
-                run_warnings.append(execution_warning)
-            if data_quality_mode == "strict":
-                for code, dates in list(exclusion_dates.items())[:5]:
-                    run_warnings.append(
-                        BacktestWarning(
-                            level="warning",
-                            code="DATA_EXCLUDED",
-                            message=(
-                                f"数据缺口剔除指数 {code} {len(dates)} 个交易日，"
-                                f"范围 {dates[0]}~{dates[-1]}；"
-                                f"原因：{','.join(sorted(exclusion_reasons.get(code, set())))}"
-                            ),
-                            index_code=code,
-                        )
-                    )
-            else:
-                # 宽松口径：决策与严格口径一致，仅把逐指数明细压缩为一条汇总提示
-                run_warnings.append(
-                    BacktestWarning(
-                        level="warning",
-                        code="DATA_EXCLUDED",
-                        message=(
-                            f"数据缺口剔除 {len(exclusion_dates)} 个指数、"
-                            f"合计 {excluded_days_total} 个交易日（候选池口径与严格模式一致，"
-                            "切换严格模式可查看逐指数明细）"
-                        ),
-                    )
-                )
-            logger.info(
-                "[backtest] 数据缺口剔除告警完成: backtest_id=%s mode=%s excluded_indexes=%s "
-                "warnings=%s 耗时=%.3fs",
-                backtest_id,
-                data_quality_mode,
-                len(exclusion_dates),
-                len(run_warnings),
-                perf_counter() - exclusion_warning_started,
-            )
-        data_gap_started = perf_counter()
-        run_warnings.extend(
-            self._collect_data_gap_warnings(
+            collect_data_gap_warnings(
                 trading_dates,
                 index_codes,
                 all_bars,
@@ -1924,17 +1608,7 @@ class BacktestService:
                 data_quality_mode=data_quality_mode,
             )
         )
-        logger.info(
-            "[backtest] 行情缺口告警完成: backtest_id=%s dates=%s indexes=%s warnings=%s "
-            "耗时=%.3fs",
-            backtest_id,
-            len(trading_dates),
-            len(index_codes),
-            len(run_warnings),
-            perf_counter() - data_gap_started,
-        )
         if enable_benchmark:
-            benchmark_warning_started = perf_counter()
             bench_missing = [d for d in trading_dates if (benchmark_index_code, d) not in all_bars]
             if bench_missing:
                 run_warnings.append(
@@ -1943,34 +1617,24 @@ class BacktestService:
                         code="BENCHMARK_MISSING",
                         message=(
                             f"基准指数 {benchmark_index_code} 有 {len(bench_missing)} 个交易日"
-                            f"缺行情数据（{bench_missing[0]}~{bench_missing[-1]}），基准对比存在缺口"
+                            f"缺行情数据（{bench_missing[0]}~{bench_missing[-1]}），"
+                            "缺口期间按前值平盘、缺口后补回涨跌"
                         ),
                         index_code=benchmark_index_code,
                     )
                 )
-            logger.info(
-                "[backtest] 基准缺口告警完成: backtest_id=%s missing_dates=%s 耗时=%.3fs",
-                backtest_id,
-                len(bench_missing),
-                perf_counter() - benchmark_warning_started,
-            )
-        logger.info(
-            "[backtest] 告警收集完成: backtest_id=%s warnings=%s 耗时=%.3fs",
-            backtest_id,
-            len(run_warnings),
-            perf_counter() - warnings_started,
-        )
         logger.info(
             "[backtest] 回测完成: backtest_id=%s 累计收益=%s%% 最大回撤=%s%% 夏普=%s "
-            "胜率=%s%% 信号准确率=%s%%",
+            "胜率=%s%% 信号准确率=%s%% 告警=%s 收尾耗时=%.3fs",
             backtest_id,
             metrics.get("cumulative_return_pct", 0.0),
             metrics.get("max_drawdown_pct", 0.0),
             metrics.get("sharpe_ratio", 0.0),
             metrics.get("win_rate_pct", 0.0),
             metrics.get("signal_accuracy_pct", 0.0),
+            len(run_warnings),
+            perf_counter() - finalize_started,
         )
-        mark_success_started = perf_counter()
         if persist:
             self._backtest_repo.mark_success(
                 backtest_id,
@@ -1978,21 +1642,6 @@ class BacktestService:
                 warnings=[w.model_dump() for w in run_warnings],
                 candidate_pool=candidate_pool,
             )
-        else:
-            # 不落库模式：结果只回传给调用方（研究批量评估），
-            # 数据库里不留下任何"看起来像验收记录"的痕迹
-            logger.info(
-                "[backtest] 研究模式完成（未落库）: run_id=%s 累计收益=%s%% 夏普=%s",
-                backtest_id,
-                metrics.get("cumulative_return_pct", 0.0),
-                metrics.get("sharpe_ratio", 0.0),
-            )
-        logger.info(
-            "[backtest] 最终状态提交完成: backtest_id=%s 耗时=%.3fs 总收尾耗时=%.3fs",
-            backtest_id,
-            perf_counter() - mark_success_started,
-            perf_counter() - finalize_started,
-        )
         return {
             "metrics": metrics,
             "daily_rows": memory_rows,
@@ -2002,95 +1651,15 @@ class BacktestService:
             "params": dict(row.params or {}),
         }
 
-    def _build_candidate_pool_timeline(
-        self,
-        trading_dates: list[date],
-        pool_sizes: list[int],
-        base_size: int,
-        exclusion_dates: dict[str, list[date]],
-        exclusion_reasons: dict[str, set[str]],
-    ) -> dict[str, Any]:
-        """构建逐日有效候选池时间线（C6）。
-
-        - 逐日规模做**游程编码**（连续相同规模合并为一段），避免把 2400 个交易日
-          逐条落库；
-        - 剔除明细按"指数—日期区间"聚合，按交易日数降序截断到
-          ``candidate_pool_exclusion_limit``。
+    def _flush_results(self, index_buffer: list[dict[str, Any]]) -> None:
+        """把缓冲的指数级结果批量写入，并 flush 逐日结果（不提交）。
 
         Args:
-            trading_dates: 回测交易日列表（升序）。
-            pool_sizes: 与 ``trading_dates`` 等长的逐日有效候选池规模。
-            base_size: 回测标的池的理论规模。
-            exclusion_dates: 指数 → 被剔除交易日列表。
-            exclusion_reasons: 指数 → 剔除原因集合。
-
-        Returns:
-            可直接写入 ``backtest_run.candidate_pool`` 的字典。
+            index_buffer: 指数级结果缓冲，写入后清空。
         """
-        total_days = len(trading_dates)
-        if not pool_sizes or total_days == 0:
-            return {
-                "base_size": base_size,
-                "min_size": 0,
-                "max_size": 0,
-                "median_size": 0,
-                "trading_days": 0,
-                "pool_coverage_ratio": 0.0,
-                "segments": [],
-                "exclusions": [],
-                "truncated_exclusions": False,
-            }
-
-        # 游程编码：把连续相同规模合并为一段
-        # 日期统一转 ISO 字符串——candidate_pool 列是 JSONB，psycopg 的 json
-        # 编码器不认 date 对象（读取时由 pydantic 还原为 date）
-        segments: list[dict[str, Any]] = []
-        start_index = 0
-        for index in range(1, len(pool_sizes) + 1):
-            if index < len(pool_sizes) and pool_sizes[index] == pool_sizes[start_index]:
-                continue
-            segments.append(
-                {
-                    "start_date": trading_dates[start_index].isoformat(),
-                    "end_date": trading_dates[index - 1].isoformat(),
-                    "trading_days": index - start_index,
-                    "size": pool_sizes[start_index],
-                }
-            )
-            start_index = index
-
-        sorted_sizes = sorted(pool_sizes)
-        median_size = sorted_sizes[len(sorted_sizes) // 2]
-        total_slots = base_size * total_days
-        coverage = (sum(pool_sizes) / total_slots) if total_slots > 0 else 0.0
-
-        limit = get_settings().candidate_pool_exclusion_limit
-        exclusions = sorted(
-            (
-                {
-                    "index_code": code,
-                    "first_date": dates[0].isoformat(),
-                    "last_date": dates[-1].isoformat(),
-                    "trading_days": len(dates),
-                    "reasons": sorted(exclusion_reasons.get(code, set())),
-                }
-                for code, dates in exclusion_dates.items()
-                if dates
-            ),
-            key=lambda item: item["trading_days"],
-            reverse=True,
-        )
-        return {
-            "base_size": base_size,
-            "min_size": min(pool_sizes),
-            "max_size": max(pool_sizes),
-            "median_size": median_size,
-            "trading_days": total_days,
-            "pool_coverage_ratio": round(coverage, 4),
-            "segments": segments,
-            "exclusions": exclusions[:limit],
-            "truncated_exclusions": len(exclusions) > limit,
-        }
+        self._backtest_repo.bulk_insert_index_results(list(index_buffer))
+        index_buffer.clear()
+        self._db.flush()
 
     def _prepare_backtest_data(
         self,
@@ -2189,6 +1758,7 @@ class BacktestService:
         scoring_mode: str = "absolute",
         selection_rebalanced: bool = True,
         persist: bool = True,
+        index_buffer: list[dict[str, Any]] | None = None,
     ) -> tuple[int, int]:
         """写入每日每指数的回测结果，使用与实时一致的信号等级判定逻辑。
 
@@ -2211,7 +1781,7 @@ class BacktestService:
             next_date: 下一交易日（无则为 None）。
             universe: 当日标的列表。
             result: 引擎执行结果。
-            all_bars: 行情数据。
+            all_bars: 收益结算用行情（主循环传入前向填充后的行情，与组合收益同口径）。
             signal_positions: 当日目标权重。
             held_positions: 当日实际持仓（None 时退化为目标权重，兼容旧调用）。
             timing_regime: 当日择时 regime。
@@ -2219,6 +1789,8 @@ class BacktestService:
             selection_rebalanced: 当日是否执行选股调仓；组合分数 IC 只评估这类日期。
             persist: False 时只统计持仓命中数（信号准确率），不写指数结果行
                 （D-1 研究批量评估路径）。
+            index_buffer: 提供时把结果行以字典追加到缓冲，由主循环按 checkpoint
+                批量 INSERT；None 时逐行登记 ORM 对象（兼容旧调用）。
 
         Returns:
             (in_portfolio_count, in_portfolio_positive_count) 元组。
@@ -2246,40 +1818,31 @@ class BacktestService:
 
             idx_ret = None
             if next_date and in_portfolio:
-                idx_ret = self._get_index_return(code, trade_date, next_date, all_bars)
+                idx_ret = get_index_return(code, trade_date, next_date, all_bars)
                 in_pos_count += 1
                 if idx_ret is not None and idx_ret > 0:
                     in_pos_positive += 1
 
-            if persist:
-                self._backtest_repo.add_index_result(
-                    BacktestIndexResultModel(
-                        backtest_id=backtest_id,
-                        trade_date=trade_date,
-                        index_code=code,
-                        signal_score=signal_score,
-                        scored=scored,
-                        selection_rebalanced=selection_rebalanced,
-                        signal_level=level,
-                        in_portfolio=in_portfolio,
-                        index_return=idx_ret,
-                        target_weight=round(target_weight, 4),
-                    )
-                )
+            if not persist:
+                continue
+            values = {
+                "backtest_id": backtest_id,
+                "trade_date": trade_date,
+                "index_code": code,
+                "signal_score": signal_score,
+                "scored": scored,
+                "selection_rebalanced": selection_rebalanced,
+                "signal_level": level,
+                "in_portfolio": in_portfolio,
+                "index_return": idx_ret,
+                "target_weight": round(target_weight, 4),
+            }
+            if index_buffer is not None:
+                index_buffer.append(values)
+            else:
+                self._backtest_repo.add_index_result(BacktestIndexResultModel(**values))
 
         return in_pos_count, in_pos_positive
-
-    # ── 收益计算 ───────────────────────────────────────────────────────────
-
-    def _compute_allocation_return(
-        self,
-        positions: dict[str, float],
-        trade_date: date,
-        next_date: date | None,
-        all_bars: dict,
-    ) -> float:
-        """按仓位分配方案计算指数组合 T+1 收益（委托领域函数）。"""
-        return compute_allocation_return(positions, trade_date, next_date, all_bars)
 
     # ── 调仓检查 ───────────────────────────────────────────────────────────
 
@@ -2311,6 +1874,11 @@ class BacktestService:
         说明（已知取舍）：条件 1~3 只用当日信息，条件 4 需要"次日行情是否存在"，
         属 ex-ante 可执行域约束——若不剔除，缺次日行情的资产会以 0 收益参与组合，
         反而系统性低估波动。剔除明细逐日记录在候选池时间线（C6）中，可审计。
+
+        T+1 收盘执行下成交价是次日收盘（条件 4 已检查），成交后首个收益窗口还需
+        T+2 收盘价。这里**不**再向前多看一天：收益结算使用前向填充行情
+        （``forward_fill_return_bars``），T+2 缺行情时该段记 0、缺口后补回涨跌，
+        不会永久丢失收益，因此无需为此扩大前视范围。
 
         `data_quality_mode` 只影响缺口提示的详细程度（strict 逐指数 / warn 汇总），
         不影响候选池、选股结果与收益序列。
@@ -2446,71 +2014,18 @@ class BacktestService:
         if commit:
             self._db.commit()
 
-    def _check_rebalance_schedule(
-        self,
-        schedule: RebalanceScheduleConfig | None,
-        trade_date: date,
-        last_rebalance_date: date | None,
-    ) -> bool:
-        """检查某条腿当日是否到期。
-
-        委托给 DefaultRebalanceScheduler，与实盘模式使用相同的交易日历对齐逻辑。
-        未传腿配置（或配置未启用调仓模块）时默认为每日调仓。
-
-        Args:
-            schedule: 单条腿的频率配置，None 表示每日调仓。
-            trade_date: 当前交易日。
-            last_rebalance_date: 上次调仓日期。
-
-        Returns:
-            是否应该调仓。
-
-        Raises:
-            ValueError: 需要交易日历但未解析出调度器时抛出。
-        """
-        if schedule is None:
-            return True
-        if schedule.frequency == "daily":
-            return True
-        if self._rebalance_scheduler is None:
-            raise ValueError("调仓调度器未初始化：周度/月度/双周调仓前必须先解析交易日历（C1）")
-        return self._rebalance_scheduler.should_rebalance(
-            schedule, trade_date, last_rebalance_date
-        )
-
-    def _check_rebalance(
-        self, config: StrategyConfig, trade_date: date, last_rebalance_date: date | None
-    ) -> bool:
-        """兼容旧内部调用：按选股腿判断当日是否调仓。
-
-        Args:
-            config: 策略配置。
-            trade_date: 当前交易日。
-            last_rebalance_date: 上次调仓日期。
-
-        Returns:
-            选股腿当日是否到期。
-        """
-        return self._check_rebalance_schedule(
-            config.rebalance.selection if config.rebalance else None,
-            trade_date,
-            last_rebalance_date,
-        )
-
     def _select_legs(
         self,
         config: StrategyConfig,
         trade_date: date,
-        last_selection_date: date | None,
-        last_risk_date: date | None,
     ) -> RebalanceLegs:
         """判定当日到期的调仓腿（回测主循环与口径指纹共用）。
+
+        委托给 DefaultRebalanceScheduler，与实时模式使用相同的交易日历对齐逻辑。
 
         Args:
             config: 策略配置。
             trade_date: 当前交易日。
-            last_selection_date: 上次选股腿调仓日。
-            last_risk_date: 上次风险腿调仓日。
 
         Returns:
             两腿到期情况；未配置调仓模块时为每日调仓。
@@ -2530,13 +2045,7 @@ class BacktestService:
                 )
             # 两腿均为每日调仓：无需日历，直接短路避免构造调度器
             return RebalanceLegs(selection=True, risk=True)
-        return select_active_legs(
-            self._rebalance_scheduler,
-            rebalance,
-            trade_date,
-            last_selection_date,
-            last_risk_date,
-        )
+        return select_active_legs(self._rebalance_scheduler, rebalance, trade_date)
 
     # ── 汇总指标 ───────────────────────────────────────────────────────────
 
@@ -2701,8 +2210,10 @@ class BacktestService:
                 end,
             )
             return trading_dates, []
-        filtered = [d for d in trading_dates if calendar.is_trading_day(d)]
-        dropped = [d for d in trading_dates if d not in set(filtered)]
+        filtered: list[date] = []
+        dropped: list[date] = []
+        for day in trading_dates:
+            (filtered if calendar.is_trading_day(day) else dropped).append(day)
         if dropped:
             logger.warning(
                 "[backtest] 行情包含非交易日数据，已从回测交易日中剔除: %s", dropped
@@ -2763,218 +2274,6 @@ class BacktestService:
         """
         return MacroIndicatorRepository(self._db).find_all_as_map()
 
-    @staticmethod
-    def _collect_compute_failure_warnings(failed_refs: set[str]) -> list[BacktestWarning]:
-        """为计算抛异常的因子生成 COMPUTE_FAILED 警告（与"数据不足"区分）。
-
-        Args:
-            failed_refs: 计算失败的因子引用集合。
-
-        Returns:
-            每个失败引用一条警告，按引用名排序。
-        """
-        return [
-            BacktestWarning(
-                level="warning",
-                code="COMPUTE_FAILED",
-                message=(
-                    f"因子 {ref} 现算抛出异常（计算失败，而非数据不足），"
-                    "该因子在回测区间内按缺失处理，请检查服务日志"
-                ),
-            )
-            for ref in sorted(failed_refs)
-        ]
-
-    def _collect_missing_factor_warnings(
-        self,
-        precomputed: dict[date, dict[tuple[str, str], float | None]],
-        trading_dates: list[date],
-        index_codes: list[str],
-        factor_ids: list[str],
-    ) -> list[BacktestWarning]:
-        """按因子聚合回测区间内的缺失情况，生成 MISSING_FACTOR 警告。
-
-        计数口径（F-6）：``缺失天数`` 仍是"任一指数缺值即算一天"，但**必须
-        同时给出按指数排序的明细**——历史实现只列字母序前 5 个指数，导致
-        "只有一只后上市指数缺数据"被读成"整个资产池数据损坏"。
-
-        Args:
-            precomputed: 预计算因子值，date → (index_code, factor_id) → 数值。
-            trading_dates: 回测交易日列表。
-            index_codes: 参与因子计算的指数代码列表（含择时代理指数）。
-            factor_ids: 策略实际引用的因子 ID 列表。
-
-        Returns:
-            结构化警告列表，最多 5 条（按因子），避免刷屏。
-        """
-        warnings: list[BacktestWarning] = []
-        for factor_id in factor_ids:
-            missing_days = 0
-            missing_days_by_code: dict[str, int] = {}
-            first_missing: date | None = None
-            last_missing: date | None = None
-            for trade_date in trading_dates:
-                day_values = precomputed.get(trade_date, {})
-                missing_codes = [
-                    code for code in index_codes if day_values.get((code, factor_id)) is None
-                ]
-                if missing_codes:
-                    missing_days += 1
-                    for code in missing_codes:
-                        missing_days_by_code[code] = missing_days_by_code.get(code, 0) + 1
-                    if first_missing is None:
-                        first_missing = trade_date
-                    last_missing = trade_date
-            if missing_days > 0:
-                ranked = sorted(
-                    missing_days_by_code.items(), key=lambda item: (-item[1], item[0])
-                )
-                detail = "、".join(f"{code} {days} 天" for code, days in ranked[:5])
-                if len(ranked) > 5:
-                    detail += f" 等 {len(ranked)} 个指数"
-                warnings.append(
-                    BacktestWarning(
-                        level="warning",
-                        code="MISSING_FACTOR",
-                        message=(
-                            f"因子 {factor_id} 在 {missing_days} 个交易日存在缺失"
-                            f"（{first_missing}~{last_missing}）；"
-                            f"按缺失天数排序：{detail}"
-                        ),
-                    )
-                )
-        return warnings[:5]
-
-    def _collect_data_gap_warnings(
-        self,
-        trading_dates: list[date],
-        index_codes: list[str],
-        all_bars: dict,
-        execution_model: str = "t_plus_1_open",
-        data_quality_mode: str = "warn",
-    ) -> list[BacktestWarning]:
-        """按指数统计回测区间内缺行情数据的交易日，生成 DATA_GAP 警告。
-
-        兼容模式下提示实际可能影响收益的行情缺口；严格模式下，已由
-        DATA_EXCLUDED 覆盖的开盘价缺失不重复提示，避免把“已排除”误解为
-        “仍参与收益计算”。
-
-        Args:
-            trading_dates: 回测交易日列表。
-            index_codes: 回测标的指数代码列表。
-            all_bars: 预加载行情，key=(index_code, trade_date)。
-            execution_model: 执行模型，决定是否检查开盘价。
-            data_quality_mode: 数据质量模式，严格模式不重复报告已排除的开盘价缺失。
-
-        Returns:
-            结构化警告列表，最多 5 条（按指数）。
-        """
-        warnings: list[BacktestWarning] = []
-        for code in index_codes:
-            missing_days: list[date] = []
-            open_missing_days: list[date] = []
-            for d in trading_dates:
-                bar = all_bars.get((code, d))
-                if bar is None or _price_invalid(getattr(bar, "close_price", None)):
-                    # 整日缺行情或收盘价不可用：该日收益无法按收盘口径计算
-                    missing_days.append(d)
-                    continue
-                if (
-                    execution_model == "t_plus_1_open"
-                    and data_quality_mode != "strict"
-                    and _price_invalid(getattr(bar, "open_price", None))
-                ):
-                    # bar 存在但开盘价缺失：T+1 开盘执行模型的隔夜/日内段受影响
-                    open_missing_days.append(d)
-            parts: list[str] = []
-            if missing_days:
-                parts.append(
-                    f"缺行情数据 {len(missing_days)} 个交易日"
-                    f"（{missing_days[0]}~{missing_days[-1]}）"
-                )
-            if open_missing_days:
-                parts.append(
-                    f"开盘价缺失 {len(open_missing_days)} 个交易日"
-                    f"（{open_missing_days[0]}~{open_missing_days[-1]}，影响 T+1 开盘执行日）"
-                )
-            if parts:
-                warnings.append(
-                    BacktestWarning(
-                        level="warning",
-                        code="DATA_GAP",
-                        message=(
-                            f"指数 {code} 回测区间内{'、'.join(parts)}，"
-                            "相关日期的因子与收益按缺失处理"
-                        ),
-                        index_code=code,
-                    )
-                )
-        return warnings[:5]
-
-    def _estimate_warmup_trading_days(
-        self,
-        precomputed: dict[date, dict[tuple[str, str], float | None]],
-        trading_dates: list[date],
-        index_codes: list[str],
-        factor_ids: list[str],
-        first_bar_by_code: dict[str, date] | None = None,
-    ) -> int:
-        """估算回测前段因子数据不足的预热交易日数。
-
-        口径（F-6）：对每个 (因子, 指数) 组合，从**该指数自己的首根 K 线**
-        开始数"该因子还没有有效值"的天数，取最大值作为预热期——这才是
-        真正影响策略的可交易起点。
-
-        历史实现要求"全部指数都有有效值"才算预热结束，单只后上市指数
-        （如 000688 行情自 2020 年才有）会把整个回测的前 1038 个交易日
-        （约 4.3 年）判成预热期，读起来像"前四年结果无效"，实际只是
-        一只指数缺数据。指数上市前的空缺属于数据缺口（DATA_GAP），
-        不在这里计数。
-
-        Args:
-            precomputed: 预计算因子值，date → (index_code, factor_id) → 数值。
-            trading_dates: 回测交易日列表。
-            index_codes: 参与因子计算的指数代码列表（含择时代理指数）。
-            factor_ids: 策略实际引用的因子 ID 列表。
-            first_bar_by_code: 指数 → 回测区间内首根 K 线日期；提供后每个指数
-                只从自己的首根 K 线起算（None 时等价于从区间首日起算）。
-
-        Returns:
-            前 N 个交易日中因子数据不足的天数；无预热期时返回 0。
-        """
-        if not factor_ids or not trading_dates:
-            return 0
-        warmup = 0
-        for factor_id in factor_ids:
-            for code in index_codes:
-                start_index = 0
-                if first_bar_by_code is not None:
-                    first_bar = first_bar_by_code.get(code)
-                    if first_bar is None:
-                        # 该指数在窗口内完全没有行情，整体缺失由 DATA_GAP 报告
-                        continue
-                    start_index = bisect_left(trading_dates, first_bar)
-                for i in range(start_index, len(trading_dates)):
-                    if precomputed.get(trading_dates[i], {}).get((code, factor_id)) is not None:
-                        # 只计"该指数自己序列开头"的缺口，指数上市前的空缺不算
-                        warmup = max(warmup, i - start_index)
-                        break
-                else:
-                    # 该指数在窗口内始终没有该因子值：结构性缺失，
-                    # 由 MISSING_FACTOR / 数据质量检查负责，不算预热
-                    continue
-        return warmup
-
-    def _get_index_return(
-        self,
-        index_code: str,
-        trade_date: date,
-        next_date: date,
-        all_bars: dict,
-    ) -> float | None:
-        """获取指数 T+1 日收益率（%）（委托领域函数）。"""
-        return get_index_return(index_code, trade_date, next_date, all_bars)
-
     # ── Schema 转换辅助 ────────────────────────────────────────────────────
 
     def _row_to_summary(
@@ -3021,7 +2320,7 @@ class BacktestService:
             batch_id=info.get("batch_id"),
         )
 
-    def _row_to_detail(
+    def row_to_detail(
         self, row: BacktestRunModel, queue_info: dict[str, Any] | None = None
     ) -> BacktestDetail:
         """将 ORM 行转换为 BacktestDetail（含结构化警告）。"""
@@ -3040,327 +2339,6 @@ class BacktestService:
             data_cutoff_date=getattr(row, "data_cutoff_date", None),
             optimization_id=getattr(row, "optimization_id", None),
             purpose_reason=getattr(row, "purpose_reason", None),
-        )
-
-    # ── 策略对比回测 ────────────────────────────────────────────────────
-
-    def create_comparison(self, req: BacktestComparisonCreateRequest) -> BacktestComparisonSummary:
-        """创建策略对比回测，生成两个子回测和一个对比记录。
-
-        两个子回测共享同一时间区间，但标的范围各自独立。
-        若策略自身已配置 index_codes，则强制使用策略配置（不可修改）；
-        否则使用请求中对应策略的 a_index_codes / b_index_codes。
-
-        Args:
-            req: 对比回测创建请求。
-
-        Returns:
-            BacktestComparisonSummary 对比摘要。
-
-        Raises:
-            ValueError: 策略不存在或两策略相同。
-        """
-        comparison_id = str(uuid4())
-        now = utcnow_aware()
-
-        # 校验两个策略不同
-        if req.strategy_a_id == req.strategy_b_id:
-            raise ValueError("请选择两个不同的策略进行对比")
-
-        # 校验两个策略都存在且配置了 portfolio
-        config_svc = StrategyConfigService(self._db)
-        for sid in [req.strategy_a_id, req.strategy_b_id]:
-            cfg = config_svc.get_parsed_config(sid)
-            if cfg is None:
-                raise ValueError(f"策略 {sid} 配置不存在")
-        # 创建子回测 A（create_backtest 内部会处理策略自身的 index_codes 限定）
-        a_mode = "subset" if req.a_index_codes else "all"
-        bt_a_summary = self.create_backtest(
-            BacktestCreateRequest(
-                strategy_id=req.strategy_a_id,
-                start_date=req.start_date,
-                end_date=req.end_date,
-                universe_mode=a_mode,  # type: ignore[arg-type]
-                index_codes=req.a_index_codes,
-                enable_benchmark=req.enable_benchmark,
-                benchmark_index_code=req.benchmark_index_code,
-                execution_model=req.execution_model,
-                data_quality_mode=req.data_quality_mode,
-            )
-        )
-
-        # 创建子回测 B
-        b_mode = "subset" if req.b_index_codes else "all"
-        bt_b_summary = self.create_backtest(
-            BacktestCreateRequest(
-                strategy_id=req.strategy_b_id,
-                start_date=req.start_date,
-                end_date=req.end_date,
-                universe_mode=b_mode,  # type: ignore[arg-type]
-                index_codes=req.b_index_codes,
-                enable_benchmark=req.enable_benchmark,
-                benchmark_index_code=req.benchmark_index_code,
-                execution_model=req.execution_model,
-                data_quality_mode=req.data_quality_mode,
-            )
-        )
-
-        # 创建对比记录
-        comp_row = BacktestComparisonModel(
-            comparison_id=comparison_id,
-            name=req.name,
-            strategy_a_id=req.strategy_a_id,
-            strategy_b_id=req.strategy_b_id,
-            backtest_a_id=bt_a_summary.backtest_id,
-            backtest_b_id=bt_b_summary.backtest_id,
-            start_date=req.start_date,
-            end_date=req.end_date,
-            status="pending",
-            params={
-                "_enable_benchmark": req.enable_benchmark,
-                "_benchmark_index_code": req.benchmark_index_code,
-                "_execution_model": req.execution_model,
-                "_data_quality_mode": req.data_quality_mode,
-                "a_index_codes": req.a_index_codes,
-                "b_index_codes": req.b_index_codes,
-            },
-            created_at=now,
-        )
-        self._db.add(comp_row)
-        self._db.commit()
-
-        return self._comp_row_to_summary(comp_row)
-
-    def list_comparisons(
-        self, offset: int = 0, limit: int = 50
-    ) -> tuple[list[BacktestComparisonSummary], int]:
-        """分页返回对比回测列表，按创建时间倒序。"""
-        try:
-            rows, total = self._backtest_repo.find_all_comparisons(offset=offset, limit=limit)
-            items = [self._comp_row_to_summary(r) for r in rows]
-            return items, total
-        except Exception:
-            logger.warning("list_comparisons DB query failed", exc_info=True)
-            return [], 0
-
-    def get_comparison(self, comparison_id: str) -> BacktestComparisonDetail | None:
-        """返回对比回测详情，含两个子回测的完整信息。"""
-        try:
-            comp = self._backtest_repo.find_comparison_by_id(comparison_id)
-            if comp is None:
-                return None
-
-            bt_a = self._backtest_repo.find_by_id(comp.backtest_a_id)
-            bt_b = self._backtest_repo.find_by_id(comp.backtest_b_id)
-
-            return BacktestComparisonDetail(
-                **self._comp_row_to_summary(comp).model_dump(),
-                backtest_a=self._row_to_detail(bt_a) if bt_a else None,
-                backtest_b=self._row_to_detail(bt_b) if bt_b else None,
-                params=comp.params,
-            )
-        except Exception:
-            logger.warning("get_comparison DB query failed", exc_info=True)
-            return None
-
-    def get_comparison_daily(self, comparison_id: str) -> ComparisonDailyResponse:
-        """返回两个策略的每日组合绩效摘要（仅图表渲染所需字段），用于叠加图表渲染。"""
-        try:
-            comp = self._backtest_repo.find_comparison_by_id(comparison_id)
-            if comp is None:
-                return ComparisonDailyResponse(a_daily=[], b_daily=[])
-
-            def _to_point(daily: BacktestDailyResult) -> ComparisonDailyPoint:
-                return ComparisonDailyPoint(
-                    trade_date=daily.trade_date,
-                    portfolio_return=daily.portfolio_return,
-                    cumulative_return=daily.cumulative_return,
-                    drawdown=daily.drawdown,
-                )
-
-            return ComparisonDailyResponse(
-                a_daily=[_to_point(d) for d in self.get_daily_results(comp.backtest_a_id)],
-                b_daily=[_to_point(d) for d in self.get_daily_results(comp.backtest_b_id)],
-            )
-        except Exception:
-            logger.warning("get_comparison_daily DB query failed", exc_info=True)
-            return ComparisonDailyResponse(a_daily=[], b_daily=[])
-
-    def launch_comparison(self, comparison_id: str) -> tuple[str, str] | None:
-        """标记对比回测为运行中，返回两个子回测 ID。
-
-        由 comparison 任务处理器调用：对比任务不再等待子回测完成，
-        而是由子回测完成后的 finalize_comparison_if_ready 触发汇总，
-        避免嵌套线程池与父任务空等占用 worker。
-
-        Args:
-            comparison_id: 对比回测 ID。
-
-        Returns:
-            (backtest_a_id, backtest_b_id)；对比记录不存在时返回 None。
-        """
-        comp = self._backtest_repo.find_comparison_by_id(comparison_id)
-        if comp is None:
-            logger.error("launch_comparison: comparison_id %s not found", comparison_id)
-            return None
-
-        comp.status = "running"
-        comp.started_at = utcnow_aware()
-        self._db.commit()
-        return comp.backtest_a_id, comp.backtest_b_id
-
-    def finalize_comparison_if_ready(self, comparison_id: str) -> None:
-        """子回测完成后尝试汇总对比结果，两个子回测均终态时执行。
-
-        单个子回测完成即调用本方法；若另一个子回测仍在执行则直接返回，
-        待其完成后再次触发。汇总逻辑与旧的 run_comparison 保持一致。
-
-        Args:
-            comparison_id: 对比回测 ID。
-        """
-        comp = self._backtest_repo.find_comparison_by_id(comparison_id)
-        if comp is None:
-            return
-        bt_a = self._backtest_repo.find_by_id(comp.backtest_a_id)
-        bt_b = self._backtest_repo.find_by_id(comp.backtest_b_id)
-        if bt_a is None or bt_b is None:
-            return
-
-        statuses = [bt_a.status, bt_b.status]
-        if any(s not in ("success", "failed") for s in statuses):
-            # 仍有子回测未完成，等待另一个子回测完成时再次触发
-            return
-
-        errors: dict[str, str] = {}
-        if bt_a.status == "failed":
-            errors["a"] = bt_a.error_message or "策略A回测失败"
-        if bt_b.status == "failed":
-            errors["b"] = bt_b.error_message or "策略B回测失败"
-
-        if len(errors) == 2:
-            self._backtest_repo.mark_comparison_failed(
-                comparison_id,
-                f"策略A: {errors['a']}; 策略B: {errors['b']}",
-            )
-        elif len(errors) == 1:
-            self._backtest_repo.mark_comparison_partial(comparison_id, str(errors))
-        else:
-            self._compute_and_save_comparison_metrics(comparison_id)
-
-    def _compute_and_save_comparison_metrics(self, comparison_id: str) -> None:
-        """从两个子回测的 metrics JSON 汇总对比指标。
-
-        读取两个 backtest_run 的 metrics 字段，
-        逐指标提取 A/B 值并计算差值，写入 comparison_metrics。
-        """
-        comp = self._backtest_repo.find_comparison_by_id(comparison_id)
-        if comp is None:
-            return
-
-        bt_a = self._backtest_repo.find_by_id(comp.backtest_a_id)
-        bt_b = self._backtest_repo.find_by_id(comp.backtest_b_id)
-        if bt_a is None or bt_b is None:
-            return
-
-        ma = bt_a.metrics or {}
-        mb = bt_b.metrics or {}
-
-        def _get(key: str, metrics: dict, default: Any = 0.0) -> Any:
-            return metrics.get(key, default)
-
-        # 读取各项指标并计算差值。
-        # 指标值经 _sanitize_metric_value 可能为 None，复制项统一回退 0.0
-        # 保证 ComparisonMetrics 必需 float 字段可解析；差值用 _safe_metric_diff 容错。
-        a_cum = _get("cumulative_return_pct", ma) or 0.0
-        b_cum = _get("cumulative_return_pct", mb) or 0.0
-        a_ann = _get("annualized_return_pct", ma) or 0.0
-        b_ann = _get("annualized_return_pct", mb) or 0.0
-        a_dd = _get("max_drawdown_pct", ma) or 0.0
-        b_dd = _get("max_drawdown_pct", mb) or 0.0
-        a_sharpe = _get("sharpe_ratio", ma) or 0.0
-        b_sharpe = _get("sharpe_ratio", mb) or 0.0
-        a_sortino = _get("sortino_ratio", ma) or 0.0
-        b_sortino = _get("sortino_ratio", mb) or 0.0
-        a_calmar = _get("calmar_ratio", ma) or 0.0
-        b_calmar = _get("calmar_ratio", mb) or 0.0
-        a_win = _get("win_rate_pct", ma) or 0.0
-        b_win = _get("win_rate_pct", mb) or 0.0
-        a_sig = _get("signal_accuracy_pct", ma) or 0.0
-        b_sig = _get("signal_accuracy_pct", mb) or 0.0
-        a_days = _get("total_trading_days", ma, 0)
-        b_days = _get("total_trading_days", mb, 0)
-        a_active = _get("active_days", ma, 0)
-        b_active = _get("active_days", mb, 0)
-
-        comparison_metrics = {
-            "a_cumulative_return_pct": a_cum,
-            "b_cumulative_return_pct": b_cum,
-            "a_annualized_return_pct": a_ann,
-            "b_annualized_return_pct": b_ann,
-            "a_max_drawdown_pct": a_dd,
-            "b_max_drawdown_pct": b_dd,
-            "a_sharpe_ratio": a_sharpe,
-            "b_sharpe_ratio": b_sharpe,
-            "a_sortino_ratio": a_sortino,
-            "b_sortino_ratio": b_sortino,
-            "a_calmar_ratio": a_calmar,
-            "b_calmar_ratio": b_calmar,
-            "a_win_rate_pct": a_win,
-            "b_win_rate_pct": b_win,
-            "a_signal_accuracy_pct": a_sig,
-            "b_signal_accuracy_pct": b_sig,
-            "a_total_trading_days": a_days,
-            "b_total_trading_days": b_days,
-            "a_active_days": a_active,
-            "b_active_days": b_active,
-            # 差值
-            "cumulative_return_diff_pct": _safe_metric_diff(a_cum, b_cum),
-            "annualized_return_diff_pct": _safe_metric_diff(a_ann, b_ann),
-            "max_drawdown_diff_pct": _safe_metric_diff(a_dd, b_dd),
-            "sharpe_diff": _safe_metric_diff(a_sharpe, b_sharpe, 4),
-            "sortino_diff": _safe_metric_diff(a_sortino, b_sortino, 4),
-            "calmar_diff": _safe_metric_diff(a_calmar, b_calmar, 4),
-            "win_rate_diff_pct": _safe_metric_diff(a_win, b_win),
-            "signal_accuracy_diff_pct": _safe_metric_diff(a_sig, b_sig),
-            # 基准对比
-            "a_benchmark_return_pct": _get("benchmark_return_pct", ma),
-            "b_benchmark_return_pct": _get("benchmark_return_pct", mb),
-            "a_excess_return_pct": _get("excess_return_pct", ma),
-            "b_excess_return_pct": _get("excess_return_pct", mb),
-            "a_alpha": _get("alpha", ma),
-            "b_alpha": _get("alpha", mb),
-            "a_beta": _get("beta", ma),
-            "b_beta": _get("beta", mb),
-            "a_information_ratio": _get("information_ratio", ma),
-            "b_information_ratio": _get("information_ratio", mb),
-        }
-
-        self._backtest_repo.mark_comparison_success(comparison_id, comparison_metrics)
-
-    def _comp_row_to_summary(self, row: BacktestComparisonModel) -> BacktestComparisonSummary:
-        """将 ORM 行转换为 BacktestComparisonSummary。"""
-        comp_metrics = None
-        if row.comparison_metrics:
-            try:
-                comp_metrics = ComparisonMetrics(**row.comparison_metrics)
-            except Exception:
-                pass
-        return BacktestComparisonSummary(
-            comparison_id=row.comparison_id,
-            name=row.name,
-            strategy_a_id=row.strategy_a_id,
-            strategy_b_id=row.strategy_b_id,
-            backtest_a_id=row.backtest_a_id,
-            backtest_b_id=row.backtest_b_id,
-            start_date=row.start_date,
-            end_date=row.end_date,
-            status=row.status,
-            comparison_metrics=comp_metrics,
-            created_at=row.created_at,
-            started_at=row.started_at,
-            finished_at=row.finished_at,
-            error_message=row.error_message,
-            progress=row.progress or 0,
         )
 
 

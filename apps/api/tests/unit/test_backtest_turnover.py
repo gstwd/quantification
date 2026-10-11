@@ -134,13 +134,12 @@ class TestTurnoverInLoop:
         svc, ctx = _stub_loop_service([{"000300": 1.0}, {}, {}])
         svc._run_backtest_loop("bt-turnover", ctx["row"], _config())
         rows = ctx["collected"]
-        assert len(rows) == len(DATES)
+        # 最后一个交易日没有收益窗口，不落终端行
+        assert len(rows) == len(DATES) - 1
         # 第 1 日：空仓 → 满仓（建仓腿）
         assert rows[0].turnover == 0.5
         # 第 2 日：满仓 → 空仓（清仓腿，旧口径为 None）
         assert rows[1].turnover == 0.5
-        # 第 3 日：仍旧空仓 → 无换手
-        assert rows[2].turnover is None
 
 
 class TestTurnoverModelFingerprint:

@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -39,12 +39,21 @@ from quant_etf_api.services.backtest_service import BacktestService
 DATES = [date(2025, 1, 2), date(2025, 1, 3), date(2025, 1, 6)]
 
 
+def _window_dates() -> list[date]:
+    """回测窗口交易日：``DATES`` 为决策日，末尾追加一个只用于结算收益的交易日。
+
+    最后一个交易日没有收益窗口、不落逐日行，因此需要多一个交易日才能让
+    ``DATES`` 中的每一天都产生一行结果。
+    """
+    return list(DATES) + [DATES[-1] + timedelta(days=1)]
+
+
 class _SnapshotCalendar:
     """测试区间的明确交易日快照，避免单元测试依赖外部日历请求。"""
 
     def is_trading_day(self, day: date) -> bool:
         """按测试快照判断，不以周末近似交易日。"""
-        return day in DATES
+        return day in _window_dates()
 
 
 @pytest.fixture(autouse=True)
@@ -229,6 +238,7 @@ def _stub_loop_service(
     svc._ensure_market_scope_bars = MagicMock()
     svc._get_lookback_days = MagicMock(return_value=90)
     svc._write_index_results = MagicMock(return_value=(0, 0))
+    window = _window_dates()
     bars = {
         ("000300", d): SimpleNamespace(
             close_price=100.0 + i,
@@ -236,15 +246,15 @@ def _stub_loop_service(
             high_price=100.0 + i,
             low_price=100.0 + i,
         )
-        for i, d in enumerate(DATES)
+        for i, d in enumerate(window)
     }
     universe = [{"index_code": "000300", "name_cn": "000300", "category": "broad_index"}]
     svc._prepare_backtest_data = MagicMock(
-        return_value=(universe, ["000300"], list(DATES), bars, {}, {})
+        return_value=(universe, ["000300"], window, bars, {}, {})
     )
     svc._factor_provider = MagicMock()
     svc._factor_provider.precompute_backtest_factors.return_value = FactorMatrix(values={
-        d: {("000300", "return_5d"): 1.0} for d in DATES
+        d: {("000300", "return_5d"): 1.0} for d in window
     })
     svc._context_builder = MagicMock()
     svc._context_builder.build.side_effect = lambda config, trade_date, **kw: EngineContext(
@@ -287,8 +297,8 @@ def _stub_loop_service(
     row = BacktestRunModel(
         backtest_id="bt-two-leg",
         strategy_id="t_two_leg",
-        start_date=DATES[0],
-        end_date=DATES[-1],
+        start_date=window[0],
+        end_date=window[-1],
         universe_filter={"mode": "subset", "index_codes": ["000300"]},
         params={"_execution_model": "t_plus_1_open", "_data_quality_mode": "warn"},
         status="running",

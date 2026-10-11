@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from quant_etf_api.infra.job_queue.handlers import handle_backtest, handle_comparison
-from quant_etf_api.services.backtest_service import BacktestService
+from quant_etf_api.services.backtest_comparison_service import BacktestComparisonService
 
 
 def _make_backtest_row(status: str = "pending") -> SimpleNamespace:
@@ -66,11 +66,11 @@ class FakeComparisonRepo:
         self.calls.append(("partial", error_message))
 
 
-def _make_svc(repo: FakeComparisonRepo) -> BacktestService:
-    """构建注入 fake 仓库的 BacktestService。"""
-    svc = BacktestService(db=MagicMock())
-    svc._backtest_repo = repo
-    return svc
+def _make_svc(repo: FakeComparisonRepo) -> BacktestComparisonService:
+    """构建注入 fake 仓库的 BacktestComparisonService。"""
+    return BacktestComparisonService(
+        db=MagicMock(), backtest_service=MagicMock(), backtest_repo=repo
+    )
 
 
 class TestFinalizeComparison:
@@ -163,6 +163,10 @@ class TestComparisonHandlers:
         monkeypatch.setattr(
             "quant_etf_api.services.backtest_service.BacktestService", lambda db: fake_svc
         )
+        monkeypatch.setattr(
+            "quant_etf_api.services.backtest_comparison_service.BacktestComparisonService",
+            lambda db: fake_svc,
+        )
         fake_queue = MagicMock()
         monkeypatch.setattr(
             "quant_etf_api.infra.job_queue.queue.get_job_queue", lambda: fake_queue
@@ -189,6 +193,10 @@ class TestComparisonHandlers:
         monkeypatch.setattr(
             "quant_etf_api.services.backtest_service.BacktestService", lambda db: fake_svc
         )
+        monkeypatch.setattr(
+            "quant_etf_api.services.backtest_comparison_service.BacktestComparisonService",
+            lambda db: fake_svc,
+        )
 
         handle_backtest({"backtest_id": "bt-a", "comparison_id": "comp-1"})
 
@@ -204,6 +212,10 @@ class TestComparisonHandlers:
         )
         monkeypatch.setattr(
             "quant_etf_api.services.backtest_service.BacktestService", lambda db: fake_svc
+        )
+        monkeypatch.setattr(
+            "quant_etf_api.services.backtest_comparison_service.BacktestComparisonService",
+            lambda db: fake_svc,
         )
 
         handle_backtest({"backtest_id": "bt-a"})

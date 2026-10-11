@@ -47,7 +47,7 @@ class BacktestCreateRequest(BaseModel):
             validation=验证期验收，monitor=上线后监控。
         purpose_reason: 用途说明与触发来源（如优化会话 ID、生命周期刷新），
             用于验证期数据的留痕审计。
-        cost_bps: 净口径指标使用的单边交易成本（基点），留空时取系统默认值。
+        cost_bps: 净口径指标使用的往返交易成本（基点，按单边换手折算），留空时取系统默认值。
         基准统一按所选指数的买入持有收益计算，不再区分模式。
     """
 
@@ -135,7 +135,7 @@ class BacktestStability(BaseModel):
     执行模型或数据质量口径的指标被相互比较。
 
     Attributes:
-        cost_bps: 成本折算使用的单边成本（基点）。
+        cost_bps: 成本折算使用的往返交易成本（基点，按单边换手折算）。
         execution_model: 该回测使用的执行模型。
         data_quality_mode: 数据缺口提示口径。
         benchmark_index_code: 基准指数代码，未启用基准时为 None。
@@ -143,6 +143,9 @@ class BacktestStability(BaseModel):
             None 表示该回测早于 C1 口径指纹引入（无法判定）。
         turnover_model: 换手口径（delta_w_v2=计入清仓/建仓腿；
             legacy_v1=历史口径，未计入）。
+        accounting_model: 记账口径（drift_v1=持仓随行情漂移、调仓日两段复利、
+            收益行情前向填充、无终端 0 收益行；constant_mix_v0=历史口径，
+            等价于每日再平衡到目标权重）。不同记账口径的指标不可直接比较。
         cost_ladder: 多档成本并列的净口径指标（C3）。
         candidate_pool: 逐日有效候选池时间线（C6），存量回测为 None。
         warmup_trading_days: 回测前段因子预热交易日数（长周期因子数据不足），
@@ -176,6 +179,7 @@ class BacktestStability(BaseModel):
     benchmark_index_code: str | None = None
     calendar_source: str | None = None
     turnover_model: str | None = None
+    accounting_model: str | None = None
     cost_ladder: list[CostLadderEntry] = Field(default_factory=list)
     candidate_pool: BacktestCandidatePool | None = None
     warmup_trading_days: int = 0
@@ -206,7 +210,7 @@ class CostLadderEntry(BaseModel):
     """单个成本档位下的净口径指标（C3）。
 
     Attributes:
-        cost_bps: 该档位的单边交易成本（基点），0 表示毛口径。
+        cost_bps: 该档位的往返交易成本（基点，按单边换手折算），0 表示毛口径。
         net_cumulative_return_pct: 扣成本后累计收益率（%）。
         net_annualized_return_pct: 扣成本后年化收益率（%）。
         net_sharpe_ratio: 扣成本后年化夏普比率。

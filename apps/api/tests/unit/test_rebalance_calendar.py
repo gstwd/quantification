@@ -251,7 +251,7 @@ class TestResolveRebalanceCalendar:
         """未解析日历却走到调仓判断时显式报错（防止静默改为每日调仓）。"""
         svc = _service()
         with pytest.raises(ValueError):
-            svc._check_rebalance(_config("weekly"), DATES[0], None)
+            svc._select_legs(_config("weekly"), DATES[0])
 
 
 def _stub_loop_service(calendar_source: str) -> tuple[BacktestService, dict[str, Any]]:

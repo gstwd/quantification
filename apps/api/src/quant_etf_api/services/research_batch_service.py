@@ -598,6 +598,7 @@ def _caliber_digest(
         ),
         "calendar_source": params.get("_calendar_source"),
         "turnover_model": params.get("_turnover_model"),
+        "accounting_model": params.get("_accounting_model"),
         "cost_bps": cost_bps,
         "start_date": windows_list[0]["start"] if windows_list else None,
         "end_date": windows_list[-1]["end"] if windows_list else None,

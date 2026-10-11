@@ -161,6 +161,10 @@ def compute_rebalance_day_return(
     旧仓位持有至 T+1 开盘（吃隔夜段），新仓位自 T+1 开盘买入（吃日内段）；
     某段价格缺失时该仓位该段按 0 处理（与 B10 缺口语义一致）。
 
+    两段按**复利**衔接：``(1 + R_隔夜) × (1 + R_日内) - 1``。新仓位权重是开盘时
+    净值的占比，日内段作用在隔夜段之后的净值上；历史实现直接相加两段，
+    漏掉交叉项 ``R_隔夜 × R_日内``，每日调仓的策略会逐日累积该误差。
+
     Args:
         old_positions: 调仓前持仓权重。
         new_positions: 调仓后目标权重。
@@ -173,7 +177,8 @@ def compute_rebalance_day_return(
     """
     if next_date is None:
         return 0.0
-    total_return = 0.0
+    overnight_return = 0.0
+    intraday_return = 0.0
     # 按代码排序遍历：集合迭代顺序随进程哈希种子变化，浮点累加顺序不同会让
     # 四舍五入后的第 4 位小数在两次运行间不一致（同配置回测不可逐日复现）
     for code in sorted(set(old_positions) | set(new_positions)):
@@ -181,10 +186,11 @@ def compute_rebalance_day_return(
             code, trade_date, next_date, all_bars
         )
         if overnight is not None and code in old_positions:
-            total_return += old_positions[code] * overnight
+            overnight_return += old_positions[code] * overnight
         if intraday is not None and code in new_positions:
-            total_return += new_positions[code] * intraday
-    return round(total_return, 4)
+            intraday_return += new_positions[code] * intraday
+    total = ((1 + overnight_return / 100) * (1 + intraday_return / 100) - 1) * 100
+    return round(total, 4)
 
 
 def count_missing_allocation_assets(

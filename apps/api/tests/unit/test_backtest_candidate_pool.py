@@ -404,7 +404,8 @@ class TestQualityModeDoesNotChangeDecisions:
 
         warn_rows = ctx_warn["collected"]
         strict_rows = ctx_strict["collected"]
-        assert len(warn_rows) == len(strict_rows) == len(DATES)
+        # 最后一个交易日没有收益窗口，不落终端行
+        assert len(warn_rows) == len(strict_rows) == len(DATES) - 1
         for a, b in zip(warn_rows, strict_rows):
             assert a.trade_date == b.trade_date
             assert a.portfolio_return == b.portfolio_return
@@ -414,19 +415,16 @@ class TestQualityModeDoesNotChangeDecisions:
 
         # 两种口径必须使用同一候选池（缺开盘价的 000905 一律不参与选股）
         assert ctx_warn["universes"] == ctx_strict["universes"]
-        # 除最后一日（无次日要求）外，缺次日开盘价的 000905 都不参与选股
-        assert all(
-            "000905" not in codes for codes in ctx_warn["universes"][:-1]
-        )
+        # 每个决策日都有次日，缺次日开盘价的 000905 都不参与选股
+        assert all("000905" not in codes for codes in ctx_warn["universes"])
 
     def test_warn_mode_uses_same_candidate_pool(self) -> None:
         """宽松口径下候选池同样是"可执行池"，不再包含缺次日开盘价的标的。"""
         svc_warn, ctx_warn = _stub_service_for_loop("warn")
         svc_warn._run_backtest_loop("bt-warn", ctx_warn["row"], _config())
 
-        assert ctx_warn["universes"][0] == ["000300"]
-        # 最后一日无次日要求，两个标的都入池
-        assert ctx_warn["universes"][-1] == ["000300", "000905"]
+        # 决策日不含最后一个交易日：每个决策日都要求次日开盘价可成交
+        assert ctx_warn["universes"] == [["000300"]] * (len(DATES) - 1)
 
     def test_warn_mode_emits_aggregated_exclusion_warning(self) -> None:
         """宽松口径输出一条汇总 DATA_EXCLUDED 提示，严格口径逐指数输出。"""

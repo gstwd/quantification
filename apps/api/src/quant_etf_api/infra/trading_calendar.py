@@ -45,6 +45,9 @@ __all__ = [
 _CACHE_TTL = timedelta(days=1)
 # 负缓存 TTL：60 秒（失败），避免瞬时故障冻结日历一整天
 _NEGATIVE_CACHE_TTL = timedelta(seconds=60)
+# A 股最长连续休市（春节长假含前后周末）的自然日上界：校验本地快照覆盖区间时，
+# 区间端点落在长假里也不应误判为"未覆盖"
+_MAX_MARKET_CLOSURE = timedelta(days=14)
 
 # 进程级缓存
 _cache: dict[str, Any] = {
@@ -505,8 +508,15 @@ def resolve_trading_calendar(
     if db_days:
         if required_range is not None:
             start, end = required_range
-            if not any(start <= day <= end for day in db_days):
-                raise _unavailable(f"本地 trading_calendar 表未覆盖所需区间 {start}~{end}")
+            # 快照必须完整覆盖所需区间：只要求"区间内存在任一交易日"时，快照尾部
+            # 之后的真实交易日会被当成非交易日——回测交易日被静默剔除、周/月调仓
+            # 永不触发。区间端点可能落在长假里，因此按最长休市天数放宽端点
+            first_day, last_day = min(db_days), max(db_days)
+            if first_day > start + _MAX_MARKET_CLOSURE or last_day < end - _MAX_MARKET_CLOSURE:
+                raise _unavailable(
+                    f"本地 trading_calendar 表快照 {first_day}~{last_day} "
+                    f"未完整覆盖所需区间 {start}~{end}"
+                )
         return DbTradingCalendar(db_days), "database"
 
     raise _unavailable("Tushare 与 AkShare 均加载失败，且本地 trading_calendar 表无数据")

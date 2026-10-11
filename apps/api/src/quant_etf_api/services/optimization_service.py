@@ -993,7 +993,7 @@ class OptimizationService:
 
         Args:
             backtest_id: 回测 ID。
-            cost_bps: 单边成本（基点）。
+            cost_bps: 往返交易成本（基点，按单边换手折算）。
 
         Returns:
             净口径年化夏普；回测缺失或失败时返回 None。

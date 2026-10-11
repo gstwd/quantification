@@ -227,7 +227,9 @@ def _calc_max_drawdown_details(daily_returns: list[float]) -> tuple[float, int]:
 
     for r in daily_returns:
         cumulative *= 1 + r / 100
-        if cumulative > peak:
+        # 持平于峰值（如创新高后空仓的 0 收益日）不是水下：用 >= 重置持续天数，
+        # 否则回撤 0% 时也会累计"回撤持续天数"
+        if cumulative >= peak:
             peak = cumulative
             current_dd_days = 0
         else:
