@@ -103,14 +103,14 @@ def test_alias_params_out_of_range_rejected() -> None:
 
 def test_alias_custom_params_accepted() -> None:
     """合法自定义参数通过校验，同一模板可多次以不同参数出现。"""
-    rows = [_meta_row("sma", usage=["score", "filter", "rank", "timing"])]
+    rows = [_meta_row("return", usage=["score", "filter", "rank", "timing"])]
     svc = _make_service(rows)
     config = {
-        "score": {"factors": {"trend_fast": 0.35, "trend_slow": 0.25}},
+        "score": {"factors": {"momentum_fast": 0.35, "momentum_slow": 0.25}},
         "portfolio": {"method": "equal_weight"},
         "factor_aliases": {
-            "trend_fast": {"template_id": "sma", "params": {"period": 10}},
-            "trend_slow": {"template_id": "sma", "params": {"period": 30}},
+            "momentum_fast": {"template_id": "return", "params": {"period": 10}},
+            "momentum_slow": {"template_id": "return", "params": {"period": 30}},
         },
     }
     result = svc.validate_config(config)
@@ -119,12 +119,12 @@ def test_alias_custom_params_accepted() -> None:
 
 def test_alias_declared_but_unused_warns() -> None:
     """已声明但未被引用的别名给出非阻塞提示。"""
-    rows = [_meta_row("close_price", usage=["score", "filter", "rank", "timing"])]
+    rows = [_meta_row("change_pct", usage=["score", "filter", "rank", "timing"])]
     svc = _make_service(rows)
     config = {
-        "score": {"factors": {"close_price": 1.0}},
+        "score": {"factors": {"change_pct": 1.0}},
         "portfolio": {"method": "equal_weight"},
-        "factor_aliases": {"unused_alias": {"template_id": "close_price"}},
+        "factor_aliases": {"unused_alias": {"template_id": "change_pct"}},
     }
     result = svc.validate_config(config)
     assert result.valid, result.errors
@@ -144,3 +144,15 @@ def test_template_parameter_spec_coercion() -> None:
         template.resolve_params({"period": 251})
     with pytest.raises(FactorParameterError):
         template.resolve_params({"unknown": 1})
+
+
+def test_absolute_level_templates_rejected_in_score() -> None:
+    """均线等绝对点位模板不允许进入评分（跨指数比较无意义）。"""
+    rows = [_meta_row("sma", usage=["score", "filter", "rank", "timing"])]
+    svc = _make_service(rows)
+    config = {
+        "score": {"factors": {"sma": 1.0}},
+        "portfolio": {"method": "equal_weight"},
+    }
+    result = svc.validate_config(config)
+    assert not result.valid

@@ -5,14 +5,69 @@ ERP = 盈利收益率 - 无风险利率
 
 ERP 越高表示股票相对债券越有吸引力，常用于判断市场整体估值水平。
 数据来源：PE 来自 index_valuation 表，LPR 来自 macro_indicator 表。
+
+两个计算器都实现批量接口，且只使用截止目标日已公布的数据：估值按目标日
+精确取行，LPR 按发布可见日二分取「截止当日的最近一期」。批量路径不经过逐日
+时点化上下文，因此时点安全由计算器自身保证。
 """
 
 from __future__ import annotations
 
-from datetime import date
+import bisect
+from datetime import date, timedelta
+from typing import Any
 
 from quant_etf_api.factors.base import FactorContext, FactorSpec, FactorValue
-from quant_etf_api.factors.macro_period import latest_value_as_of
+
+# ERP 百分位的历史窗口（自然日）：固定为目标日前 2 年，与上下文实际加载
+# 多少历史无关，保证实时（固定回望）与回测（长预加载）口径一致。
+_ERP_HISTORY_DAYS = 730
+# ERP 百分位所需的最少历史样本数
+_ERP_MIN_HISTORY = 10
+_LPR_CODE = "lpr1y"
+
+
+class _LprLookup:
+    """按发布可见日二分查询「截止某日已公布的最近一期 LPR」。"""
+
+    def __init__(self, ctx: FactorContext) -> None:
+        """从上下文的宏观序列构建查询表。
+
+        Args:
+            ctx: FactorContext，需包含 macro_indicators["lpr1y"]。
+        """
+        records = ctx.macro_series(_LPR_CODE)
+        self._available = [record[0] for record in records]
+        self._records = records
+
+    def __bool__(self) -> bool:
+        """是否存在任何 LPR 记录。"""
+        return bool(self._records)
+
+    def as_of(self, trade_date: date) -> tuple[str, float] | None:
+        """返回截止 trade_date 已公布的最近一期 (period, value)。
+
+        Args:
+            trade_date: 目标日期。
+
+        Returns:
+            (period 原文, 数值)；截止当日无已公布记录时为 None。
+        """
+        idx = bisect.bisect_right(self._available, trade_date) - 1
+        if idx < 0:
+            return None
+        _, _, period, value = self._records[idx]
+        return period, value
+
+
+def _valid_pe(row: Any) -> float | None:
+    """返回估值行中可用于计算盈利收益率的 PE，非正或缺失时为 None。"""
+    if row is None:
+        return None
+    pe = getattr(row, "pe", None)
+    if pe is None or pe <= 0:
+        return None
+    return float(pe)
 
 
 class ERPComputer:
@@ -20,7 +75,7 @@ class ERPComputer:
 
     计算公式：ERP = (1 / PE × 100) - LPR 1年期。
     PE 来自 index_valuation 表（当日），LPR 来自 macro_indicator 表
-    （截止 trade_date 的最近一期报价，避免使用未来才公布的 LPR）。
+    （截止 trade_date 已公布的最近一期报价，避免使用未来才公布的 LPR）。
     ERP 为正表示股票预期收益高于无风险利率，越高越有吸引力。
     """
 
@@ -42,65 +97,67 @@ class ERPComputer:
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算股权风险溢价。
+        """计算股权风险溢价（委托批量实现）。"""
+        return self.compute_batch(index_code, [trade_date], ctx)[trade_date]
+
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext
+    ) -> dict[date, FactorValue]:
+        """批量计算各交易日的股权风险溢价。
 
         Args:
             index_code: 指数代码。
-            trade_date: 目标交易日。
+            dates: 需要计算的交易日列表（升序）。
             ctx: FactorContext，需包含 index_valuation 和 macro_indicators。
 
         Returns:
-            FactorValue，PE 或 LPR 数据缺失时 numeric 为 None。
+            key=交易日, value=FactorValue 的字典；PE 或 LPR 缺失时 numeric 为 None。
         """
-        # 获取当日 PE
-        val_row = ctx.index_valuation.get((index_code, trade_date))
-        if val_row is None or val_row.pe is None or val_row.pe <= 0:
-            return FactorValue(
+        lpr = _LprLookup(ctx)
+        result: dict[date, FactorValue] = {}
+        for trade_date in dates:
+            row = ctx.index_valuation.get((index_code, trade_date))
+            pe = _valid_pe(row)
+            if pe is None:
+                result[trade_date] = self._missing(index_code, "无有效 PE 数据")
+                continue
+            if not lpr:
+                result[trade_date] = self._missing(index_code, "无 LPR 数据")
+                continue
+            latest = lpr.as_of(trade_date)
+            if latest is None:
+                result[trade_date] = self._missing(index_code, "截止当日无有效 LPR 数据")
+                continue
+            latest_period, latest_lpr = latest
+            earnings_yield = 1.0 / pe * 100.0
+            result[trade_date] = FactorValue(
                 factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"index_code": index_code, "reason": "无有效 PE 数据"},
+                numeric=round(earnings_yield - latest_lpr, 4),
+                payload={
+                    "index_code": index_code,
+                    "pe": round(pe, 2),
+                    "earnings_yield": round(earnings_yield, 4),
+                    "lpr_1y": latest_lpr,
+                    "lpr_period": latest_period,
+                },
             )
+        return result
 
-        # 获取截止 trade_date 的最近一期 LPR 1年期
-        lpr_data = ctx.macro_indicators.get("lpr1y")
-        if not lpr_data:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"index_code": index_code, "reason": "无 LPR 数据"},
-            )
-        # 取截止 trade_date 的最近一期 LPR（period <= trade_date 中 period 最大者）
-        latest = latest_value_as_of(lpr_data, trade_date)
-        if latest is None:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"index_code": index_code, "reason": "截止当日无有效 LPR 数据"},
-            )
-        latest_period, latest_lpr = latest
-
-        pe = val_row.pe
-        earnings_yield = 1.0 / pe * 100.0
-        erp = round(earnings_yield - latest_lpr, 4)
-
+    def _missing(self, index_code: str, reason: str) -> FactorValue:
+        """构造缺失值结果。"""
         return FactorValue(
             factor_id=self.spec.factor_id,
-            numeric=erp,
-            payload={
-                "index_code": index_code,
-                "pe": round(pe, 2),
-                "earnings_yield": round(earnings_yield, 4),
-                "lpr_1y": latest_lpr,
-                "lpr_period": latest_period,
-            },
+            numeric=None,
+            payload={"index_code": index_code, "reason": reason},
         )
 
 
 class ERPPercentileComputer:
     """ERP 历史百分位因子计算器。
 
-    计算当前 ERP 值在近 2 年历史分布中的百分位排名（0-100）。
-    需要 FactorContext.index_valuation 包含多日历史数据（lookback_days=730）。
+    计算当前 ERP 在目标日前 2 年（730 自然日）历史 ERP 分布中的百分位（0-100）。
+    历史上每个估值日的 ERP 使用**该日已公布**的 LPR，而不是统一套用当前 LPR——
+    后者等价于 1/PE 的百分位，利率变化完全不起作用。
     ERP 百分位 > 80 表示股票相对债券极具吸引力，常用于熊市超跌判断。
     """
 
@@ -111,79 +168,84 @@ class ERPPercentileComputer:
             factor_id="erp_percentile",
             name="ERP 历史百分位",
             category="valuation",
-            version="2.0.0",
+            version="3.0.0",
             description=(
-                "当前 ERP 在近 2 年历史分布中的百分位排名（0-100）。"
+                "当前 ERP 在目标日前 2 年历史 ERP 分布中的百分位排名（0-100），"
+                "历史各日 ERP 使用当日已公布的 LPR。"
                 "ERP 百分位 > 80 表示股票相对债券极具吸引力，用于熊市超跌判断。"
-                "依赖 FactorContext.index_valuation 包含多日历史数据。"
             ),
             required_data=["index_valuation", "macro_indicators"],
-            lookback_days=730,
+            lookback_days=_ERP_HISTORY_DAYS,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 ERP 在历史分布中的百分位排名。
+        """计算 ERP 历史百分位（委托批量实现）。"""
+        return self.compute_batch(index_code, [trade_date], ctx)[trade_date]
+
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext
+    ) -> dict[date, FactorValue]:
+        """批量计算各交易日的 ERP 历史百分位。
+
+        先按估值日一次性算出每日 ERP（各用当日已公布 LPR），再对每个目标日
+        二分截取 (trade_date − 730 天, trade_date] 窗口统计百分位。
 
         Args:
             index_code: 指数代码。
-            trade_date: 目标交易日。
-            ctx: FactorContext，index_valuation 需包含 730 天历史数据。
+            dates: 需要计算的交易日列表（升序）。
+            ctx: FactorContext，index_valuation 需覆盖目标日前 730 天。
 
         Returns:
-            FactorValue，数据不足（< 10 个历史数据点）时 numeric 为 None。
+            key=交易日, value=FactorValue 的字典；历史样本不足 10 个时 numeric 为 None。
         """
-        # 获取 LPR（与 ERPComputer 保持一致，取截止 trade_date 的最近一期）
-        lpr_data = ctx.macro_indicators.get("lpr1y", {})
-        latest = latest_value_as_of(lpr_data, trade_date)
-        if latest is None:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"index_code": index_code, "reason": "截止当日无有效 LPR 数据"},
-            )
-        latest_period, latest_lpr = latest
-
-        # 获取当日 PE（用于计算当日 ERP）
-        current_row = ctx.index_valuation.get((index_code, trade_date))
-        if current_row is None or current_row.pe is None or current_row.pe <= 0:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"index_code": index_code, "reason": "无当日有效 PE 数据"},
-            )
-        current_erp = 1.0 / current_row.pe * 100.0 - latest_lpr
-
-        # 遍历历史估值数据，计算各历史日期的 ERP
-        erp_history: list[float] = []
-        for (code, _dt), val_row in ctx.index_valuation.items():
-            if code != index_code:
+        lpr = _LprLookup(ctx)
+        valuation_dates, rows = ctx.valuation_for(index_code)
+        erp_dates: list[date] = []
+        erp_values: list[float] = []
+        for row_date, row in zip(valuation_dates, rows):
+            pe = _valid_pe(row)
+            latest = lpr.as_of(row_date) if pe is not None else None
+            if pe is None or latest is None:
                 continue
-            if val_row.pe is None or val_row.pe <= 0:
-                continue
-            erp_history.append(1.0 / val_row.pe * 100.0 - latest_lpr)
+            erp_dates.append(row_date)
+            erp_values.append(1.0 / pe * 100.0 - latest[1])
 
-        if len(erp_history) < 10:
-            return FactorValue(
+        result: dict[date, FactorValue] = {}
+        for trade_date in dates:
+            latest = lpr.as_of(trade_date)
+            if latest is None:
+                result[trade_date] = self._missing(index_code, "截止当日无有效 LPR 数据")
+                continue
+            end = bisect.bisect_right(erp_dates, trade_date)
+            if end == 0 or erp_dates[end - 1] != trade_date:
+                result[trade_date] = self._missing(index_code, "无当日有效 PE 数据")
+                continue
+            current_erp = erp_values[end - 1]
+            window_start = trade_date - timedelta(days=_ERP_HISTORY_DAYS)
+            start = bisect.bisect_left(erp_dates, window_start)
+            history = erp_values[start:end]
+            if len(history) < _ERP_MIN_HISTORY:
+                result[trade_date] = self._missing(index_code, f"历史数据不足（{len(history)} 点）")
+                continue
+            count_below = sum(1 for value in history if value <= current_erp)
+            result[trade_date] = FactorValue(
                 factor_id=self.spec.factor_id,
-                numeric=None,
+                numeric=round(count_below / len(history) * 100, 2),
                 payload={
                     "index_code": index_code,
-                    "reason": f"历史数据不足（{len(erp_history)} 点）",
+                    "current_erp": round(current_erp, 4),
+                    "history_count": len(history),
+                    "history_start": str(erp_dates[start]),
+                    "lpr_1y": latest[1],
+                    "lpr_period": latest[0],
                 },
             )
+        return result
 
-        # 计算百分位：历史中有多少比例的 ERP <= 当前 ERP
-        count_below = sum(1 for v in erp_history if v <= current_erp)
-        percentile = round(count_below / len(erp_history) * 100, 2)
-
+    def _missing(self, index_code: str, reason: str) -> FactorValue:
+        """构造缺失值结果。"""
         return FactorValue(
             factor_id=self.spec.factor_id,
-            numeric=percentile,
-            payload={
-                "index_code": index_code,
-                "current_erp": round(current_erp, 4),
-                "history_count": len(erp_history),
-                "lpr_1y": latest_lpr,
-                "lpr_period": latest_period,
-            },
+            numeric=None,
+            payload={"index_code": index_code, "reason": reason},
         )

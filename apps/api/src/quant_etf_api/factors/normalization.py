@@ -16,13 +16,14 @@ def normalize_zscore(values: dict[str, float]) -> dict[str, float | None]:
         values: key=资产代码, value=原始因子值。
 
     Returns:
-        标准化后的因子值，标准差为零时全部返回 0.0。
+        标准化后的因子值；有效样本不足 2 个或标准差为零时有效键取 0.0，
+        缺失键始终为 None。
     """
     if not values:
         return {}
     valid = {k: v for k, v in values.items() if v is not None}
     if len(valid) < 2:
-        return {k: 0.0 for k in values}
+        return {k: (0.0 if k in valid else None) for k in values}
 
     n = len(valid)
     mean = sum(valid.values()) / n
@@ -30,7 +31,7 @@ def normalize_zscore(values: dict[str, float]) -> dict[str, float | None]:
     std = math.sqrt(variance)
 
     if std == 0:
-        return {k: 0.0 for k in values}
+        return {k: (0.0 if k in valid else None) for k in values}
 
     result: dict[str, float | None] = {}
     for k in values:
@@ -44,7 +45,8 @@ def normalize_zscore(values: dict[str, float]) -> dict[str, float | None]:
 def normalize_rank(values: dict[str, float]) -> dict[str, float | None]:
     """横截面百分位排名标准化：rank_i = rank(x_i) / N × 100。
 
-    值域 [0, 100]，越大表示在横截面上越靠前。
+    值域 (0, 100]，越大表示在横截面上越靠前。并列值取平均秩，
+    保证取值相同的资产得分相同，不受输入顺序影响。
 
     Args:
         values: key=资产代码, value=原始因子值。
@@ -55,23 +57,22 @@ def normalize_rank(values: dict[str, float]) -> dict[str, float | None]:
     if not values:
         return {}
     valid_items = [(k, v) for k, v in values.items() if v is not None]
+    result: dict[str, float | None] = {k: None for k in values}
     if not valid_items:
-        return {k: None for k in values}
+        return result
 
-    # 升序排列，rank 从 1 开始
+    # 升序排列，rank 从 1 开始；并列区间 [start, end) 共享平均秩
     valid_items.sort(key=lambda x: x[1])
     n = len(valid_items)
-    valid_keys = {item[0] for item in valid_items}
-
-    result: dict[str, float | None] = {}
-    for k in values:
-        if k not in valid_keys:
-            result[k] = None
-            continue
-
-    for rank_idx, (code, _) in enumerate(valid_items, 1):
-        result[code] = round(rank_idx / n * 100, 2)
-
+    start = 0
+    while start < n:
+        end = start + 1
+        while end < n and valid_items[end][1] == valid_items[start][1]:
+            end += 1
+        average_rank = (start + 1 + end) / 2
+        for code, _ in valid_items[start:end]:
+            result[code] = round(average_rank / n * 100, 2)
+        start = end
     return result
 
 
@@ -84,20 +85,21 @@ def normalize_minmax(values: dict[str, float]) -> dict[str, float | None]:
         values: key=资产代码, value=原始因子值。
 
     Returns:
-        Min-Max 标准化后的因子值。
+        Min-Max 标准化后的因子值；有效样本不足 2 个或无离散时有效键取 50.0，
+        缺失键始终为 None。
     """
     if not values:
         return {}
     valid = {k: v for k, v in values.items() if v is not None}
     if len(valid) < 2:
-        return {k: 50.0 for k in values}
+        return {k: (50.0 if k in valid else None) for k in values}
 
     vmin = min(valid.values())
     vmax = max(valid.values())
     rng = vmax - vmin
 
     if rng == 0:
-        return {k: 50.0 for k in values}
+        return {k: (50.0 if k in valid else None) for k in values}
 
     result: dict[str, float | None] = {}
     for k in values:

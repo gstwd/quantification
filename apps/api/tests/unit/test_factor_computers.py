@@ -1060,8 +1060,8 @@ class TestBreadthMAComputer:
             bars[("000300", dt)] = MockBar(close_price=round(close, 4))
             close = close * 1.005
         bars[("000300", trade_date)] = MockBar(close_price=round(close, 4))
-        # 指数 B 横盘（接近 MA20 但略低）
-        bars[("399673", trade_date)] = MockBar(close_price=100.0)
+        # 指数 B 横盘后当日小跌（当日收盘低于 MA20）
+        bars[("399673", trade_date)] = MockBar(close_price=98.0)
         for i in range(25, 0, -1):
             dt = trade_date - timedelta(days=i)
             bars[("399673", dt)] = MockBar(close_price=99.0)

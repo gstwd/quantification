@@ -77,7 +77,7 @@ from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.orchestrator import StrategyEngine
 from quant_etf_api.engine.rebalance import DefaultRebalanceScheduler
-from quant_etf_api.factors.catalog import FactorTemplateRegistry
+from quant_etf_api.factors.catalog import OHLC_DEPENDENT_TEMPLATE_IDS, FactorTemplateRegistry
 from quant_etf_api.infra.db.models.core import (
     BacktestComparisonModel,
     BacktestDailyResultModel,
@@ -2304,12 +2304,7 @@ class BacktestService:
         }
         required_template_ids = template_ids & asset_template_ids
         # 这些模板依赖 high/low 价格：缺失时因子无法计算，需在候选池阶段剔除
-        needs_high_low = any(
-            template_id.startswith(
-                ("atr", "donchian_", "monthly_", "rsrs", "price_position_ir")
-            )
-            for template_id in required_template_ids
-        )
+        needs_high_low = bool(required_template_ids & OHLC_DEPENDENT_TEMPLATE_IDS)
         result: list[str] = []
         reasons: dict[str, set[str]] = {}
         for code in index_codes:

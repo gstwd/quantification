@@ -23,6 +23,7 @@ from quant_etf_api.factors.base import (
     FactorContext,
     FactorSpec,
     FactorValue,
+    index_on,
     period_lookback_days,
 )
 from quant_etf_api.factors.builtins.volatility import annualized_volatility
@@ -92,32 +93,23 @@ def _calc_nd_return(
         n: 回望交易日数，需要历史数据中至少有 n 条 trade_date 之前的记录。
 
     Returns:
-        收益率（%），历史数据不足 n 条时返回 None。
+        收益率（%），当日无收盘价或历史数据不足 n 条时返回 None。
     """
-    today_bar = ctx.index_bars.get((index_code, trade_date))
-    if today_bar is None or today_bar.close_price is None:
+    close_dates, close_prices = ctx.closes(index_code)
+    idx = index_on(close_dates, trade_date)
+    if idx is None or idx < n:
         return None
-    past_closes = sorted(
-        [
-            (dt, v.close_price)
-            for (code, dt), v in ctx.index_bars.items()
-            if code == index_code and dt < trade_date and v.close_price is not None
-        ],
-        key=lambda x: x[0],
-    )
-    if len(past_closes) < n:
-        return None
-    base_close = past_closes[-n][1]
+    base_close = close_prices[idx - n]
     if base_close <= 0:
         return None
-    return round((today_bar.close_price / base_close - 1) * 100, 4)
+    return round((close_prices[idx] / base_close - 1) * 100, 4)
 
 
 def _build_sorted_closes(
     index_code: str,
     ctx: FactorContext,
 ) -> tuple[list[date], list[float]]:
-    """从 FactorContext 提取指定指数的有效收盘价序列（升序）。
+    """从 FactorContext 提取指定指数的有效收盘价序列（升序，复用上下文缓存）。
 
     Args:
         index_code: 指数代码。
@@ -126,17 +118,7 @@ def _build_sorted_closes(
     Returns:
         (close_dates, close_prices) 元组，已按日期升序排列。
     """
-    closes = sorted(
-        [
-            (dt, v.close_price)
-            for (code, dt), v in ctx.index_bars.items()
-            if code == index_code and v.close_price is not None
-        ],
-        key=lambda x: x[0],
-    )
-    if not closes:
-        return [], []
-    return [d for d, _ in closes], [p for _, p in closes]
+    return ctx.closes(index_code)
 
 
 def _calc_batch_returns(
@@ -253,12 +235,7 @@ class ReturnComputer:
         Returns:
             FactorValue，历史数据不足 N 条时 numeric 为 None。
         """
-        value = _calc_nd_return(index_code, trade_date, ctx, n=self._period)
-        return FactorValue(
-            factor_id=self.spec.factor_id,
-            numeric=value,
-            payload={"lookback_days": self._period},
-        )
+        return self.compute_batch(index_code, [trade_date], ctx)[trade_date]
 
     def compute_batch(
         self, index_code: str, dates: list[date], ctx: FactorContext
@@ -338,21 +315,7 @@ class SharpeComputer:
         Returns:
             FactorValue，数据不足或波动率为 0 时 numeric 为 None。
         """
-        ret = _calc_nd_return(index_code, trade_date, ctx, n=self._period)
-        closes = sorted(
-            [
-                (dt, v.close_price)
-                for (code, dt), v in ctx.index_bars.items()
-                if code == index_code and dt <= trade_date and v.close_price is not None
-            ],
-            key=lambda x: x[0],
-        )
-        close_dates = [d for d, _ in closes]
-        close_prices = [p for _, p in closes]
-        vol = _calc_nd_annualized_vol(
-            close_dates, close_prices, trade_date, n=self._volatility_period
-        )
-        return self._build_value(ret, vol)
+        return self.compute_batch(index_code, [trade_date], ctx)[trade_date]
 
     def compute_batch(
         self, index_code: str, dates: list[date], ctx: FactorContext
@@ -460,18 +423,14 @@ class LowAmplitudeMomentumComputer:
         self, index_code: str, dates: list[date], ctx: FactorContext
     ) -> dict[date, FactorValue]:
         """批量计算低振幅条件动量，逐日口径与 ``compute`` 完全一致。"""
-        bars = sorted(
-            [
-                (dt, v.high_price, v.low_price, v.close_price)
-                for (code, dt), v in ctx.index_bars.items()
-                if code == index_code
-                and v.high_price is not None
-                and v.low_price is not None
-                and v.close_price is not None
-                and v.low_price > 0
-            ],
-            key=lambda x: x[0],
+        series_dates, series_values = ctx.series(
+            index_code, ("high_price", "low_price", "close_price")
         )
+        bars = [
+            (bar_date, high, low, close)
+            for bar_date, (high, low, close) in zip(series_dates, series_values)
+            if low > 0
+        ]
         bar_dates = [bar[0] for bar in bars]
         result: dict[date, FactorValue] = {}
 
@@ -545,19 +504,8 @@ def _build_sorted_high_low(
     Returns:
         (dates, lows, highs) 三元组，均按日期升序排列。
     """
-    bars = sorted(
-        [
-            (dt, v.low_price, v.high_price)
-            for (code, dt), v in ctx.index_bars.items()
-            if code == index_code
-            and v.low_price is not None
-            and v.high_price is not None
-        ],
-        key=lambda x: x[0],
-    )
-    if not bars:
-        return [], [], []
-    return [d for d, _, _ in bars], [lo for _, lo, _ in bars], [hi for _, _, hi in bars]
+    bar_dates, values = ctx.series(index_code, ("low_price", "high_price"))
+    return list(bar_dates), [low for low, _ in values], [high for _, high in values]
 
 
 def _build_sorted_ohlc(
@@ -575,18 +523,10 @@ def _build_sorted_ohlc(
     Returns:
         [(date, open, high, low, close), ...] 列表，按日期升序排列。
     """
-    return sorted(
-        [
-            (dt, v.open_price, v.high_price, v.low_price, v.close_price)
-            for (code, dt), v in ctx.index_bars.items()
-            if code == index_code
-            and v.close_price is not None
-            and v.high_price is not None
-            and v.low_price is not None
-            and v.open_price is not None
-        ],
-        key=lambda x: x[0],
+    bar_dates, values = ctx.series(
+        index_code, ("open_price", "high_price", "low_price", "close_price")
     )
+    return [(bar_date, *value) for bar_date, value in zip(bar_dates, values)]
 
 
 def _ols_slope_r2(

@@ -204,13 +204,13 @@
 **变体**：
 - 不同周期均线：替换 `ma_5d`/`ma_20d` 为 `ma_10d`/`ma_60d` 等
 - 价格与均线：`{"factor": "close_price", "op": "gt", "compare_to": "ma_20d"}`
-- 通道突破：`{"factor": "close_price", "op": "gt", "compare_to": "donchian_20d_high"}`
+- 通道突破：`{"factor": "close_price", "op": "gt", "compare_to": "donchian_20d_high"}`（通道取当日之前 N 日极值，不含当日，突破才可能成立）
 
 **注意**：跨因子比较的两个因子应属于同一维度（价格/百分比），跨维度比较（如 `ma_5d > volume_ratio_20d`）无实际意义。
 
 ## 反模式与常见错误
 
 1. **filter 中检查变换后的得分**：filter 检查的是因子原始值，不是变换后的得分。`"factor": "score"` 不会工作。
-2. **用负权重 + rank 模式**：rank 模式先算加权原始值再做排名，负权重会导致低值排名高，通常不符合直觉。建议统一用正权重 + 合适的 transform。
+2. **误解负权重**：rank/zscore 模式下负权重表示「该因子越低越好」（逐因子标准化后反向计入），需确认这正是想要的方向。
 3. **winner_take_all 但 top_n > 1**：浪费了排名逻辑，winner_take_all 只用第一名。
-4. **遗漏 transforms 导致量纲不统一**：动量和估值原始值量纲差距大（% vs 0-100），不统一会导致某一因子主导评分。
+4. **absolute 模式遗漏 transforms 导致量纲不统一**：absolute 模式直接加权原始值，动量和估值量纲差距大（% vs 0-100）会导致某一因子主导评分；rank/zscore 模式已逐因子标准化，无需为量纲额外变换。

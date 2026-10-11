@@ -276,10 +276,10 @@ class TestComputeMatrix:
 class TestBuildContext:
     """上下文装配行为。"""
 
-    def test_market_scope_loads_all_active_indexes(
+    def test_market_scope_loads_point_in_time_indexes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """引用市场级模板时日线扩展到全部活跃指数。"""
+        """引用市场级模板时日线扩展到区间起点仍存续的全部指数（PIT 口径）。"""
         requested: list[list[str] | None] = []
 
         class _BarRepo:
@@ -315,12 +315,19 @@ class TestBuildContext:
         monkeypatch.setattr("quant_etf_api.factors.compute.MacroIndicatorRepository", _MacroRepo)
 
         service = _service()
-        monkeypatch.setattr(service, "active_index_codes", lambda: ["000300", "399001"])
+        universe_starts: list[date] = []
+
+        def _market_codes(start: date) -> list[str]:
+            universe_starts.append(start)
+            return ["000300", "399001"]
+
+        monkeypatch.setattr(service, "market_index_codes", _market_codes)
         breadth = service.resolve("breadth_ma_pct", {})
 
         service.build_context([breadth], ["000300"], [DATES[0]])
 
         assert requested == [["000300", "399001"]]
+        assert universe_starts == [DATES[0]]
 
     def test_scope_only_without_market_template(
         self, monkeypatch: pytest.MonkeyPatch

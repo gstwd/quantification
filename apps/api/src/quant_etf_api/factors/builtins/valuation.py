@@ -66,6 +66,12 @@ class PEPercentileComputer:
             },
         )
 
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext
+    ) -> dict[date, FactorValue]:
+        """批量读取各交易日估值百分位（只读当日估值行，天然无前视）。"""
+        return {trade_date: self.compute(index_code, trade_date, ctx) for trade_date in dates}
+
 
 class PBPercentileComputer:
     """PB 百分位因子计算器。
@@ -117,3 +123,9 @@ class PBPercentileComputer:
                 "pb": val_row.pb,
             },
         )
+
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext
+    ) -> dict[date, FactorValue]:
+        """批量读取各交易日估值百分位（只读当日估值行，天然无前视）。"""
+        return {trade_date: self.compute(index_code, trade_date, ctx) for trade_date in dates}

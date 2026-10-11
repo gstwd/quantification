@@ -18,7 +18,8 @@ def calc_volume_ratio(
     """计算量比：当日成交量 / 近 N 个交易日平均成交量。
 
     取 trade_date 之前按日期最近的 N 个有成交量的交易日作为分母；
-    可用历史不足 N 个交易日时按实际条数平均。
+    可用历史不足 N 个交易日时返回 None（与 volume_ratio 因子口径一致，
+    不用不完整窗口输出数值）。
 
     Args:
         code: 指数代码。
@@ -37,7 +38,7 @@ def calc_volume_ratio(
         for (c, dt), v in all_bars.items()
         if c == code and dt < trade_date and v.volume is not None
     )
-    if not past:
+    if len(past) < period:
         return None
     recent = [volume for _dt, volume in past[-period:]]
     avg = sum(recent) / len(recent)

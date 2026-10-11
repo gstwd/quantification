@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
 from datetime import date
 from typing import NamedTuple
 
@@ -59,19 +58,94 @@ def _is_price_missing(value: float | None) -> bool:
     return value is None or (isinstance(value, float) and math.isnan(value))
 
 
+_OHLC_FIELDS = ("open_price", "high_price", "low_price", "close_price")
+
+
+def _complete_daily_ohlc(
+    index_code: str, ctx: FactorContext
+) -> tuple[list[date], list[tuple[float, float, float, float]]]:
+    """返回指定指数 OHLC 四价均有效（非 None、非 NaN）的有序日线（上下文内缓存）。
+
+    Args:
+        index_code: 指数代码。
+        ctx: 因子上下文。
+
+    Returns:
+        (dates, [(open, high, low, close), ...])，按日期升序。
+    """
+
+    def _build() -> tuple[list[date], list[tuple[float, float, float, float]]]:
+        bar_dates, values = ctx.series(index_code, _OHLC_FIELDS)
+        kept_dates: list[date] = []
+        kept: list[tuple[float, float, float, float]] = []
+        for bar_date, ohlc in zip(bar_dates, values):
+            if any(_is_price_missing(price) for price in ohlc):
+                continue
+            kept_dates.append(bar_date)
+            kept.append(ohlc)
+        return kept_dates, kept
+
+    return ctx.memo(("monthly_ohlc", index_code), _build)
+
+
+def _monthly_bars_by_date(
+    index_code: str,
+    dates: list[date],
+    ctx: FactorContext,
+    lookback_months: int,
+) -> dict[date, list[MonthlyBar]]:
+    """一次顺序扫描日线，为每个目标日期给出截至当日的最近 N 根月线。
+
+    按年月分组，取每组首个交易日开盘价、最高/最低价、最后交易日收盘价。
+    OHLC 四价任一缺失（None/NaN）的日线直接跳过，避免空 high/low 记为 0
+    污染月线极值；若某月首个/末个交易日被跳过，则开盘/收盘取该月首个/末个
+    数据完整的交易日（B14）。当月月线只聚合到目标日期为止（不使用未来日线）。
+
+    Args:
+        index_code: 指数代码。
+        dates: 目标日期列表。
+        ctx: 因子上下文。
+        lookback_months: 每个日期返回的月数（含当月）。
+
+    Returns:
+        日期 → 按年月升序的月线列表（最多 lookback_months 根）。
+    """
+    bar_dates, values = _complete_daily_ohlc(index_code, ctx)
+    completed: list[MonthlyBar] = []
+    current_month: str | None = None
+    current: list[float] = []
+    position = 0
+    result: dict[date, list[MonthlyBar]] = {}
+    for trade_date in sorted(set(dates)):
+        while position < len(bar_dates) and bar_dates[position] <= trade_date:
+            bar_date = bar_dates[position]
+            open_price, high_price, low_price, close_price = values[position]
+            year_month = f"{bar_date.year:04d}-{bar_date.month:02d}"
+            if year_month != current_month:
+                if current_month is not None:
+                    completed.append(MonthlyBar(current_month, *current))
+                current_month = year_month
+                current = [open_price, high_price, low_price, close_price]
+            else:
+                current[1] = max(current[1], high_price)
+                current[2] = min(current[2], low_price)
+                current[3] = close_price
+            position += 1
+        if current_month is None:
+            result[trade_date] = []
+            continue
+        prior = completed[-(lookback_months - 1) :] if lookback_months > 1 else []
+        result[trade_date] = [*prior, MonthlyBar(current_month, *current)]
+    return result
+
+
 def _aggregate_monthly_bars(
     index_code: str,
     trade_date: date,
     ctx: FactorContext,
     lookback_months: int = 13,
 ) -> list[MonthlyBar]:
-    """从日线 OHLC 聚合月线 OHLC 数据。
-
-    按年月分组，取每组首个交易日开盘价、最高/最低价、最后交易日收盘价。
-    OHLC 四价任一缺失（None/NaN）的日线直接跳过，避免空 high/low 记为 0
-    污染月线极值；若某月首个/末个交易日被跳过，则开盘/收盘取该月首个/末个
-    数据完整的交易日（B14）。
-    只返回 trade_date 所在月及之前 lookback_months 个月的数据。
+    """从日线 OHLC 聚合截至 trade_date 的最近 lookback_months 根月线。
 
     Args:
         index_code: 指数代码。
@@ -82,50 +156,7 @@ def _aggregate_monthly_bars(
     Returns:
         月线 OHLC 列表，按年月升序排列。
     """
-    # 收集 trade_date 及之前的日线数据
-    bars_by_month: dict[str, list[tuple[date, float, float, float, float]]] = defaultdict(list)
-    cutoff_year_month = f"{trade_date.year:04d}-{trade_date.month:02d}"
-
-    for (code, dt), bar in ctx.index_bars.items():
-        if code != index_code or dt > trade_date:
-            continue
-        if (
-            _is_price_missing(bar.open_price)
-            or _is_price_missing(bar.high_price)
-            or _is_price_missing(bar.low_price)
-            or _is_price_missing(bar.close_price)
-        ):
-            continue
-        ym = f"{dt.year:04d}-{dt.month:02d}"
-        bars_by_month[ym].append(
-            (dt, bar.open_price, bar.high_price, bar.low_price, bar.close_price)
-        )
-
-    if not bars_by_month:
-        return []
-
-    # 按年月排序，取最近 lookback_months 个月
-    sorted_months = sorted(bars_by_month.keys())
-    # 只保留 cutoff_year_month 及之前的月份
-    sorted_months = [m for m in sorted_months if m <= cutoff_year_month]
-    sorted_months = sorted_months[-lookback_months:]
-
-    result: list[MonthlyBar] = []
-    for ym in sorted_months:
-        month_bars = sorted(bars_by_month[ym], key=lambda x: x[0])
-        if not month_bars:
-            continue
-        open_price = month_bars[0][1]  # 首个交易日开盘价
-        high_price = max(b[2] for b in month_bars)  # 最高价
-        low_price = min(b[3] for b in month_bars)  # 最低价
-        close_price = month_bars[-1][4]  # 最后交易日收盘价
-        result.append(
-            MonthlyBar(
-                year_month=ym, open=open_price, high=high_price, low=low_price, close=close_price
-            )
-        )
-
-    return result
+    return _monthly_bars_by_date(index_code, [trade_date], ctx, lookback_months)[trade_date]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -136,8 +167,8 @@ def _aggregate_monthly_bars(
 class MonthlyMAComputer:
     """月线均线因子计算器。
 
-    计算指定月数的简单移动平均（SMA），从日线实时聚合月线数据。
-    用于沪深300波段策略的牛熊状态判断（10 月均线方向）。
+    计算指定月数的简单移动平均（SMA），从日线实时聚合月线数据（当月月线
+    聚合到目标日为止）。用于沪深300波段策略的牛熊状态判断（10 月均线方向）。
 
     Attributes:
         _months: 均线周期（月数）。
@@ -170,19 +201,27 @@ class MonthlyMAComputer:
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算月线均线。
+        """计算月线均线（委托批量实现）。"""
+        return self.compute_batch(index_code, [trade_date], ctx)[trade_date]
+
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的月线均线。
 
         Args:
             index_code: 指数代码。
-            trade_date: 目标交易日。
+            dates: 需要计算的交易日列表（升序）。
             ctx: 因子上下文。
 
         Returns:
-            FactorValue，月线数据不足时 numeric 为 None。
+            key=交易日, value=FactorValue 的字典。
         """
-        monthly_bars = _aggregate_monthly_bars(
-            index_code, trade_date, ctx, lookback_months=self._months + 1
-        )
+        snapshots = _monthly_bars_by_date(index_code, dates, ctx, self._months + 1)
+        return {trade_date: self._build_value(snapshots[trade_date]) for trade_date in dates}
+
+    def _build_value(self, monthly_bars: list[MonthlyBar]) -> FactorValue:
+        """由月线序列构造月线均线因子值。"""
         if len(monthly_bars) < self._months:
             return FactorValue(
                 factor_id=self.spec.factor_id,
@@ -192,12 +231,10 @@ class MonthlyMAComputer:
                     "available_months": len(monthly_bars),
                 },
             )
-
         closes = [bar.close for bar in monthly_bars[-self._months :]]
-        ma = round(sum(closes) / len(closes), 4)
         return FactorValue(
             factor_id=self.spec.factor_id,
-            numeric=ma,
+            numeric=round(sum(closes) / len(closes), 4),
             payload={"months": self._months, "sample_count": len(closes)},
         )
 
@@ -210,7 +247,7 @@ class MonthlyMAComputer:
 class MonthlyReturnComputer:
     """月线动量因子计算器。
 
-    计算近 N 个月的收益率（%），基于月线收盘价。
+    计算近 N 个月的收益率（%），基于月线收盘价（当月取目标日收盘）。
     用于沪深300波段策略的动量确认（近 2 月/3 月收益率）。
 
     Attributes:
@@ -244,19 +281,27 @@ class MonthlyReturnComputer:
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算月线动量。
+        """计算月线动量（委托批量实现）。"""
+        return self.compute_batch(index_code, [trade_date], ctx)[trade_date]
+
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的月线动量。
 
         Args:
             index_code: 指数代码。
-            trade_date: 目标交易日。
+            dates: 需要计算的交易日列表（升序）。
             ctx: 因子上下文。
 
         Returns:
-            FactorValue，月线数据不足时 numeric 为 None。
+            key=交易日, value=FactorValue 的字典。
         """
-        monthly_bars = _aggregate_monthly_bars(
-            index_code, trade_date, ctx, lookback_months=self._months + 1
-        )
+        snapshots = _monthly_bars_by_date(index_code, dates, ctx, self._months + 1)
+        return {trade_date: self._build_value(snapshots[trade_date]) for trade_date in dates}
+
+    def _build_value(self, monthly_bars: list[MonthlyBar]) -> FactorValue:
+        """由月线序列构造月线动量因子值。"""
         if len(monthly_bars) < self._months + 1:
             return FactorValue(
                 factor_id=self.spec.factor_id,
@@ -266,7 +311,6 @@ class MonthlyReturnComputer:
                     "available_months": len(monthly_bars),
                 },
             )
-
         current_close = monthly_bars[-1].close
         base_close = monthly_bars[-(self._months + 1)].close
         if base_close <= 0:
@@ -275,11 +319,9 @@ class MonthlyReturnComputer:
                 numeric=None,
                 payload={"reason": "基准月收盘价异常"},
             )
-
-        ret = round((current_close / base_close - 1) * 100, 4)
         return FactorValue(
             factor_id=self.spec.factor_id,
-            numeric=ret,
+            numeric=round((current_close / base_close - 1) * 100, 4),
             payload={
                 "months": self._months,
                 "current_close": round(current_close, 2),
@@ -296,14 +338,15 @@ class MonthlyReturnComputer:
 class MonthlyStreakComputer:
     """连续收阳/收阴月数因子计算器。
 
-    统计截至 trade_date 所在月的连续同方向月数。
-    正值表示连续收阳月数，负值表示连续收阴月数，0 表示本月无涨跌。
+    统计截至 trade_date 所在月（含未走完的当月）的连续同方向月数。
+    正值表示连续收阳月数，负值表示连续收阴月数，0 表示最近一月收平。
+    月线不足 2 个月时返回 None（与"收平"区分）。
     用于沪深300波段策略的熊市反弹确认（连续2月收阳）。
 
     示例：
         +2 = 连续 2 个月收阳（close > open）
         -3 = 连续 3 个月收阴（close < open）
-        0 = 当月收平或数据不足
+        0 = 最近一月收平
     """
 
     @property
@@ -313,10 +356,10 @@ class MonthlyStreakComputer:
             factor_id="monthly_up_streak",
             name="连续收阳月数",
             category="momentum",
-            version="1.0.0",
+            version="1.1.0",
             description=(
                 "截至当月的连续收阳/收阴月数。"
-                "正值=连续收阳，负值=连续收阴，0=收平或数据不足。"
+                "正值=连续收阳，负值=连续收阴，0=最近一月收平；月线不足 2 个月时为空。"
                 "用于熊市反弹确认（连续2月收阳）。"
             ),
             required_data=["index_bars"],
@@ -324,50 +367,43 @@ class MonthlyStreakComputer:
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算连续收阳/收阴月数。
+        """计算连续收阳/收阴月数（委托批量实现）。"""
+        return self.compute_batch(index_code, [trade_date], ctx)[trade_date]
+
+    def compute_batch(
+        self, index_code: str, dates: list[date], ctx: FactorContext
+    ) -> dict[date, FactorValue]:
+        """批量计算所有交易日的连续收阳/收阴月数。
 
         Args:
             index_code: 指数代码。
-            trade_date: 目标交易日。
+            dates: 需要计算的交易日列表（升序）。
             ctx: 因子上下文。
 
         Returns:
-            FactorValue，月线数据不足时 numeric 为 0。
+            key=交易日, value=FactorValue 的字典。
         """
-        monthly_bars = _aggregate_monthly_bars(index_code, trade_date, ctx, lookback_months=13)
+        snapshots = _monthly_bars_by_date(index_code, dates, ctx, 13)
+        return {trade_date: self._build_value(snapshots[trade_date]) for trade_date in dates}
+
+    def _build_value(self, monthly_bars: list[MonthlyBar]) -> FactorValue:
+        """由月线序列构造连续收阳/收阴因子值。"""
         if len(monthly_bars) < 2:
             return FactorValue(
                 factor_id=self.spec.factor_id,
-                numeric=0,
-                payload={"reason": "月线数据不足", "available_months": len(monthly_bars)},
+                numeric=None,
+                payload={"reason": "月线数据不足 2 个月", "available_months": len(monthly_bars)},
             )
 
-        # 从最后一月（不含当月，因当月可能未结束）向前遍历
-        # 使用倒数第二月作为起始（当月可能数据不完整）
-        # 但策略文档要求"连续2个月成立"，所以包含当月
+        # 从最近一月（含未走完的当月）向前统计同方向月数，收平即中断
         streak = 0
         direction = 0  # 1=收阳, -1=收阴
-
         for bar in reversed(monthly_bars):
-            if bar.close > bar.open:
-                if direction == 0:
-                    direction = 1
-                    streak = 1
-                elif direction == 1:
-                    streak += 1
-                else:
-                    break
-            elif bar.close < bar.open:
-                if direction == 0:
-                    direction = -1
-                    streak = -1
-                elif direction == -1:
-                    streak -= 1
-                else:
-                    break
-            else:
-                # 收平，中断连续
+            bar_direction = 1 if bar.close > bar.open else -1 if bar.close < bar.open else 0
+            if bar_direction == 0 or (direction != 0 and bar_direction != direction):
                 break
+            direction = bar_direction
+            streak += bar_direction
 
         return FactorValue(
             factor_id=self.spec.factor_id,

@@ -8,13 +8,12 @@
 usage=[timing, filter]——配置校验会拒绝将其放入 score/rank。
 
 由于该因子需要全市场行情，FactorSpec.market_scope=True，
-回测服务会额外加载全市场活跃指数的日线数据作为因子上下文，
-保证回测与实时预计算（全量活跃指数）口径一致。
+实时与回测都会按 point-in-time 口径（区间起点仍存续的指数）额外加载全市场
+日线数据作为因子上下文。
 """
 
 from __future__ import annotations
 
-import bisect
 from datetime import date
 
 from quant_etf_api.factors.base import (
@@ -24,6 +23,7 @@ from quant_etf_api.factors.base import (
     USAGE_FILTER,
     USAGE_TIMING,
     VALUE_SHAPE_MARKET,
+    index_on,
     period_lookback_days,
 )
 
@@ -74,47 +74,8 @@ class BreadthMAComputer:
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
-        """计算 MA 市场宽度。
-
-        Args:
-            index_code: 指数代码（市场级因子，不参与计算）。
-            trade_date: 目标交易日。
-            ctx: FactorContext，需包含全市场行情数据。
-
-        Returns:
-            FactorValue，全市场无足够数据时 numeric 为 None。
-        """
-        # 按指数分组收集截止 trade_date 的收盘价
-        closes_by_code: dict[str, list[float]] = {}
-        for (code, dt), v in ctx.index_bars.items():
-            if dt <= trade_date and v.close_price is not None:
-                closes_by_code.setdefault(code, []).append(v.close_price)
-
-        above_count = 0
-        valid_count = 0
-        for closes in closes_by_code.values():
-            if len(closes) < self._period:
-                continue
-            ma = sum(closes[-self._period :]) / self._period
-            valid_count += 1
-            if closes[-1] > ma:
-                above_count += 1
-
-        if valid_count == 0:
-            return FactorValue(
-                factor_id=self.spec.factor_id,
-                numeric=None,
-                payload={"reason": "全市场无足够数据", "period": self._period},
-            )
-        return FactorValue(
-            factor_id=self.spec.factor_id,
-            numeric=round(above_count / valid_count * 100, 2),
-            payload={
-                "period": self._period,
-                "above_count": above_count,
-                "valid_indexes": valid_count,
-            },
-        )
+        """计算 MA 市场宽度（委托批量实现，保证与批量口径一致）。"""
+        return self.compute_batch(index_code, [trade_date], ctx)[trade_date]
 
     def compute_batch(
         self,
@@ -124,36 +85,37 @@ class BreadthMAComputer:
     ) -> dict[date, FactorValue]:
         """批量计算所有交易日的 MA 市场宽度。
 
-        市场宽度为市场级因子，对传入的任一指数返回相同序列；
-        一次遍历全量数据即可覆盖所有交易日，避免逐日重复构建收盘价分组。
+        市场宽度为市场级因子，对传入的任一指数返回相同序列（现算服务对市场级
+        模板只计算一次再广播）。只统计当日有收盘价且此前收盘价足够 N 条的指数，
+        均线用前缀和 O(1) 求得。
 
         Args:
             index_code: 指数代码（市场级因子，不参与计算）。
             dates: 需要计算的交易日列表（升序）。
-            ctx: FactorContext，包含全量回望数据。
+            ctx: FactorContext，包含全市场回望数据。
 
         Returns:
             key=交易日, value=FactorValue 的字典。
         """
-        # 构建每个指数的 (日期, 收盘价) 有序序列
-        rows_by_code: dict[str, list[tuple[date, float]]] = {}
-        for (code, dt), v in ctx.index_bars.items():
-            if v.close_price is not None:
-                rows_by_code.setdefault(code, []).append((dt, v.close_price))
-        per_code: dict[str, tuple[list[date], list[float]]] = {}
-        for code, rows in rows_by_code.items():
-            rows.sort(key=lambda x: x[0])
-            per_code[code] = ([d for d, _ in rows], [p for _, p in rows])
+        per_code: list[tuple[list[date], list[float], list[float]]] = []
+        for code in ctx.bar_codes():
+            code_dates, code_prices = ctx.closes(code)
+            if len(code_dates) < self._period:
+                continue
+            prefix = [0.0]
+            for price in code_prices:
+                prefix.append(prefix[-1] + price)
+            per_code.append((code_dates, code_prices, prefix))
 
         result: dict[date, FactorValue] = {}
         for trade_date in dates:
             above_count = 0
             valid_count = 0
-            for code_dates, code_prices in per_code.values():
-                idx = bisect.bisect_right(code_dates, trade_date) - 1
-                if idx < 0 or code_dates[idx] != trade_date or idx < self._period - 1:
+            for code_dates, code_prices, prefix in per_code:
+                idx = index_on(code_dates, trade_date)
+                if idx is None or idx < self._period - 1:
                     continue
-                ma = sum(code_prices[idx - self._period + 1 : idx + 1]) / self._period
+                ma = (prefix[idx + 1] - prefix[idx + 1 - self._period]) / self._period
                 valid_count += 1
                 if code_prices[idx] > ma:
                     above_count += 1

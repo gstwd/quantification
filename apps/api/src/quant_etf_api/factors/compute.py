@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import bisect
 import logging
 import time
 from collections.abc import Mapping, Sequence
@@ -20,6 +21,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from quant_etf_api.factors.base import (
+    VALUE_SHAPE_MARKET,
     BatchFactorComputer,
     FactorComputer,
     FactorContext,
@@ -27,6 +29,7 @@ from quant_etf_api.factors.base import (
 from quant_etf_api.factors.catalog import FactorInstance, FactorTemplateRegistry
 from quant_etf_api.factors.macro_period import macro_indicators_as_of
 from quant_etf_api.infra.db.models.core import BenchmarkIndexModel
+from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
 from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
@@ -124,6 +127,21 @@ class FactorComputeService:
         """返回全部指数日线中的最新交易日。"""
         return IndexDailyBarRepository(self._db).get_latest_trade_date()
 
+    def market_index_codes(self, start_date: date) -> list[str]:
+        """返回市场级因子统计用的 point-in-time 指数集合（升序）。
+
+        与回测 ``_ensure_market_scope_bars`` 同口径：区间起点仍存续的指数
+        （含此后才退市的指数），避免历史日期只统计活到今天的指数（幸存者偏差）。
+
+        Args:
+            start_date: 计算区间首日。
+
+        Returns:
+            指数代码列表。
+        """
+        rows = BenchmarkIndexRepository(self._db).find_for_period(start_date)
+        return sorted(row.index_code for row in rows)
+
     def active_index_codes(self) -> list[str]:
         """返回全部活跃指数代码（升序）。"""
         rows = (
@@ -150,7 +168,7 @@ class FactorComputeService:
         """按本次实际参数装配因子计算上下文。
 
         回望窗口由本次实例的最大 lookback 推导；出现市场级模板（如市场宽度）时，
-        日线数据额外加载全部活跃指数，保证实时与回测口径一致。
+        日线数据额外加载区间起点仍存续的全部指数（与回测同口径）。
 
         Args:
             instances: 本次计算的因子实例。
@@ -171,7 +189,7 @@ class FactorComputeService:
 
         bar_codes = list(index_codes)
         if any(instance.template.market_scope for instance in instance_list):
-            bar_codes = sorted(set(bar_codes) | set(self.active_index_codes()))
+            bar_codes = sorted(set(bar_codes) | set(self.market_index_codes(min(dates))))
 
         ctx = FactorContext(
             index_bars=IndexDailyBarRepository(self._db).find_all_date_range(
@@ -193,7 +211,11 @@ class FactorComputeService:
         if not panel_instances:
             return ctx
 
-        axis = list(panel_dates) if panel_dates else self._panel_calculation_dates(end_date)
+        axis = (
+            list(panel_dates)
+            if panel_dates
+            else self._panel_calculation_dates(min(dates), end_date)
+        )
         ctx.panels = self.build_panel_context(instance_list, index_codes, axis, lookback_days)
         return ctx
 
@@ -248,21 +270,26 @@ class FactorComputeService:
             indicators.setdefault(code, {})[str(row.period_date or row.period)] = row.value
         return indicators
 
-    def _panel_calculation_dates(self, end_date: date) -> list[date]:
+    def _panel_calculation_dates(self, start_date: date, end_date: date) -> list[date]:
         """获取复合因子所需的连续交易日计算轴。
 
+        计算轴覆盖 [start_date, end_date] 的全部交易日，并向前预留
+        ``_PANEL_FACTOR_WINDOW_DAYS - 1`` 个交易日作为预热，保证区间首日起即可
+        产出完整窗口的复合因子值（单日请求时等价于截止日及此前 332 个交易日）。
         交易日以已落库的指数日线为准，避免请求线程调用外部交易日历。
 
         Args:
+            start_date: 需要产出因子值的首个交易日。
             end_date: 计算轴的截止交易日。
 
         Returns:
-            升序交易日列表，最多包含截止日及此前 333 个交易日。
+            升序交易日列表。
         """
         dates = IndexDailyBarRepository(self._db).find_all_trading_dates(
-            end_date - timedelta(days=_PANEL_LOOKBACK_CALENDAR_DAYS), end_date
+            start_date - timedelta(days=_PANEL_LOOKBACK_CALENDAR_DAYS), end_date
         )
-        return dates[-_PANEL_FACTOR_WINDOW_DAYS:]
+        first_target = bisect.bisect_left(dates, start_date)
+        return dates[max(0, first_target - (_PANEL_FACTOR_WINDOW_DAYS - 1)) :]
 
     def _build_panels(
         self,
@@ -361,14 +388,22 @@ class FactorComputeService:
         panel_axis = list(context.panels.get("calculation_dates") or [])
         start = time.perf_counter()
 
+        market_ids = {
+            instance.instance_id
+            for instance in instance_list
+            if instance.template.value_shape == VALUE_SHAPE_MARKET
+        }
         if batch_groups:
-            for code in index_codes:
-                for _key, computer, instance_ids in batch_groups:
-                    axis = (
-                        panel_axis
-                        if _needs_panels(instance_list, instance_ids) and panel_axis
-                        else base_axis
-                    )
+            for _key, computer, instance_ids in batch_groups:
+                axis = (
+                    panel_axis
+                    if _needs_panels(instance_list, instance_ids) and panel_axis
+                    else base_axis
+                )
+                # 市场级模板对任一指数返回同一序列：只算一次，再广播到全部指数
+                is_market = bool(market_ids.intersection(instance_ids))
+                compute_codes = list(index_codes)[:1] if is_market else list(index_codes)
+                for code in compute_codes:
                     try:
                         results = computer.compute_batch(code, axis, batch_ctx)
                     except Exception:
@@ -380,10 +415,14 @@ class FactorComputeService:
                         )
                         matrix.failed.update(instance_ids)
                         continue
+                    target_codes = list(index_codes) if is_market else [code]
                     for trade_date, value in results.items():
-                        if trade_date in target_set:
+                        if trade_date not in target_set:
+                            continue
+                        day_values = matrix.values[trade_date]
+                        for target_code in target_codes:
                             for instance_id in instance_ids:
-                                matrix.values[trade_date][(code, instance_id)] = value.numeric
+                                day_values[(target_code, instance_id)] = value.numeric
 
         if point_groups:
             for trade_date in target_dates:
@@ -644,7 +683,9 @@ def _group_instances(
 def _as_of_context(ctx: FactorContext, trade_date: date) -> FactorContext:
     """构建截止 trade_date 的时点化上下文，避免历史日期使用未来数据。
 
-    估值与宏观指标按公布/落库日期过滤；日线保留（计算器自行按日期切片）。
+    仅供未实现批量协议的计算器兜底使用（内置模板均已实现批量协议，并在批量
+    实现内自行保证只用截止目标日的数据）。估值与宏观指标按公布可见日过滤；
+    日线保留（计算器自行按日期切片）。
 
     Args:
         ctx: 全量上下文。

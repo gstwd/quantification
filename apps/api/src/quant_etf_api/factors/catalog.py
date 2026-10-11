@@ -18,7 +18,12 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from quant_etf_api.factors.base import FactorComputer, period_lookback_days
+from quant_etf_api.factors.base import (
+    USAGE_FILTER,
+    USAGE_TIMING,
+    FactorComputer,
+    period_lookback_days,
+)
 from quant_etf_api.factors.templates import FactorTemplate, ParameterSpec, build_template
 
 # ── 可调参模板的参数声明 ────────────────────────────────────────────────
@@ -50,6 +55,26 @@ _RSRS_M = ParameterSpec("integer", 20, 400, 250, "修正斜率标准化窗口（
 _MONTHLY_MA_MONTHS = ParameterSpec("integer", 2, 12, 10, "月线均线周期（月）")
 _MONTHLY_RETURN_MONTHS = ParameterSpec("integer", 1, 12, 2, "月线动量回望月数")
 _PMI_MONTHS = ParameterSpec("integer", 1, 12, 3, "PMI 动量回看月数")
+
+# 绝对点位类因子（均线、ATR、通道、月线均线、收盘价）只适合与同一指数的价格
+# 比较，跨指数横截面比较没有意义，适用位置收敛为择时与过滤。
+_LEVEL_USAGE = (USAGE_TIMING, USAGE_FILTER)
+
+
+# 依赖最高/最低价的模板：当日高低价缺失时这些因子无法计算，回测候选池需提前剔除。
+OHLC_DEPENDENT_TEMPLATE_IDS: frozenset[str] = frozenset(
+    {
+        "atr",
+        "donchian_high",
+        "donchian_low",
+        "low_amplitude_momentum",
+        "monthly_ma",
+        "monthly_return",
+        "monthly_up_streak",
+        "price_position_ir",
+        "rsrs",
+    }
+)
 
 
 class FactorResolutionError(ValueError):
@@ -430,6 +455,7 @@ def build_default_templates() -> list[FactorTemplate]:
             name="简单移动平均线",
             description="收盘价的 N 日简单移动平均，用于趋势判定与均线比较。",
             category="technical",
+            usage=_LEVEL_USAGE,
         ),
         build_template(
             "return",
@@ -458,7 +484,10 @@ def build_default_templates() -> list[FactorTemplate]:
             compute_lookback_days=_period_lookback,
             instance_label=_period_label("日RSI"),
             name="相对强弱指标",
-            description="近 N 日上涨与下跌幅度之比映射到 0-100 的相对强弱指标。",
+            description=(
+                "近 N 日平均涨幅与平均跌幅之比映射到 0-100 的相对强弱指标"
+                "（简单平均口径，无涨跌时为 50）。"
+            ),
             category="technical",
         ),
         build_template(
@@ -470,6 +499,7 @@ def build_default_templates() -> list[FactorTemplate]:
             name="平均真实波幅",
             description="近 N 日真实波幅均值，衡量价格波动幅度。",
             category="technical",
+            usage=_LEVEL_USAGE,
         ),
         build_template(
             "volatility",
@@ -491,7 +521,10 @@ def build_default_templates() -> list[FactorTemplate]:
             compute_lookback_days=_period_lookback,
             instance_label=_period_label("日量比"),
             name="N 日量比",
-            description="当日成交量与近 N 个交易日平均成交量的比值，量比>1 表示相对放量。",
+            description=(
+                "当日成交量与此前 N 个交易日平均成交量的比值，量比>1 表示相对放量；"
+                "历史不足 N 日时为空。"
+            ),
             category="volume",
         ),
         build_template(
@@ -502,8 +535,8 @@ def build_default_templates() -> list[FactorTemplate]:
             instance_label=_period_label("日成交额量比"),
             name="N 日成交额量比",
             description=(
-                "当日成交额与近 N 个交易日平均成交额的比值，"
-                "量比>1 表示相对放量，反映资金参与度变化。"
+                "当日成交额与此前 N 个交易日平均成交额的比值，"
+                "量比>1 表示相对放量，反映资金参与度变化；历史不足 N 日时为空。"
             ),
             category="volume",
         ),
@@ -527,8 +560,9 @@ def build_default_templates() -> list[FactorTemplate]:
             compute_lookback_days=_period_lookback,
             instance_label=_period_label("日通道上轨"),
             name="Donchian 通道上轨",
-            description="近 N 个交易日的最高价，用于突破策略。",
+            description="当日之前 N 个交易日（不含当日）的最高价，用于突破策略。",
             category="technical",
+            usage=_LEVEL_USAGE,
         ),
         build_template(
             "donchian_low",
@@ -537,8 +571,9 @@ def build_default_templates() -> list[FactorTemplate]:
             compute_lookback_days=_period_lookback,
             instance_label=_period_label("日通道下轨"),
             name="Donchian 通道下轨",
-            description="近 N 个交易日的最低价，用于止损策略。",
+            description="当日之前 N 个交易日（不含当日）的最低价，用于止损策略。",
             category="technical",
+            usage=_LEVEL_USAGE,
         ),
         build_template(
             "drawdown",
@@ -663,6 +698,7 @@ def build_default_templates() -> list[FactorTemplate]:
             name="月线均线",
             description="指数近 N 个月线收盘价的简单移动平均，从日线实时聚合。",
             category="technical",
+            usage=_LEVEL_USAGE,
         ),
         build_template(
             "monthly_return",
@@ -682,7 +718,8 @@ def build_default_templates() -> list[FactorTemplate]:
             instance_label=_months_label("个月PMI动量"),
             name="PMI 动量",
             description=(
-                "最新制造业 PMI 与约 N 个月前 PMI 的差值，衡量经济扩张/收缩趋势变化。"
+                "截止当日已公布的最新制造业 PMI 与约 N 个月前 PMI 的差值"
+                "（参考月 PMI 次月起可见），衡量经济扩张/收缩趋势变化。"
             ),
             category="macro",
         ),

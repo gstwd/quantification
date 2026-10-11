@@ -225,7 +225,8 @@ class FactorProvider:
             all_bars: 预加载的指数日线数据，key=(index_code, trade_date)。
             all_valuation: 预加载的估值数据，key=(index_code, trade_date)。
             all_macro: 预加载的宏观指标数据，key=indicator_code, value={period: value}。
-                逐点因子计算时按 period <= trade_date 做时点过滤，避免前视偏差。
+                计算器按发布可见日（月度指标叠加发布滞后）只取截止目标日已公布的记录，
+                避免前视偏差。
 
         Returns:
             三维映射：date → (index_code, 引用名) → 因子数值。

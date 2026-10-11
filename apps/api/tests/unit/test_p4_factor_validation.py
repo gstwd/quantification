@@ -108,10 +108,16 @@ def _valid_config_json() -> dict:
     return {
         "schema_version": "2",
         "score": {
-            "factors": {"return_20d": 1.0, "ma_20d": 0.5, "pe_percentile": 0.8},
+            "factors": {"return_20d": 1.0, "pe_percentile": 0.8},
             "transforms": {"pe_percentile": "invert_percentile"},
         },
-        "filters": {"rules": [{"factor": "return_20d", "op": "gt", "value": 0.0}]},
+        "filters": {
+            "rules": [
+                {"factor": "return_20d", "op": "gt", "value": 0.0},
+                # 均线是绝对点位，只能用于择时/过滤比较
+                {"factor": "close_price", "op": "gt", "compare_to": "ma_20d"},
+            ]
+        },
         "rank": {"momentum_factor": "return_20d", "valuation_factor": "pe_percentile"},
         "timing": {"factors": {"return_60d": 1.0}, "proxy_index_codes": ["000300"]},
         "portfolio": {"method": "equal_weight"},

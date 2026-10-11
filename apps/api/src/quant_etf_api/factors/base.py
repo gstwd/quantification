@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import bisect
+from collections.abc import Callable
 from enum import Enum
 from dataclasses import dataclass, field
 from datetime import date
@@ -121,6 +123,174 @@ class FactorContext:
     index_valuation: dict[tuple[str, date], Any] = field(default_factory=dict)
     macro_indicators: dict[str, dict[str, float]] = field(default_factory=dict)
     panels: dict[str, Any] = field(default_factory=dict)
+    # 按指数分组的有序序列缓存：同一上下文内多个计算器、多个指数共享，
+    # 避免每个 (指数, 因子) 都全量扫描 index_bars。上下文装配完成后不应再修改原始映射。
+    _cache: dict[Any, Any] = field(default_factory=dict, init=False, repr=False, compare=False)
+
+    def memo(self, key: tuple[Any, ...], factory: Callable[[], Any]) -> Any:
+        """按键缓存派生数据（同一上下文内共享），首次访问时调用 factory 计算。
+
+        供计算器缓存按指数派生的序列（如月线所需的完整 OHLC），键需带上
+        计算器专属前缀，避免与内置缓存冲突。
+
+        Args:
+            key: 缓存键。
+            factory: 无参构造函数。
+
+        Returns:
+            缓存值。
+        """
+        cache_key = ("memo", *key)
+        if cache_key not in self._cache:
+            self._cache[cache_key] = factory()
+        return self._cache[cache_key]
+
+    def _grouped(self, source: str) -> dict[str, list[tuple[date, Any]]]:
+        """把 (index_code, date) 键的原始映射按指数分组并按日期升序排序（结果缓存）。
+
+        Args:
+            source: 字段名，index_bars 或 index_valuation。
+
+        Returns:
+            {index_code: [(date, row), ...]}，每个列表按日期升序。
+        """
+        key = ("grouped", source)
+        grouped = self._cache.get(key)
+        if grouped is None:
+            grouped = {}
+            for (code, row_date), row in getattr(self, source).items():
+                grouped.setdefault(code, []).append((row_date, row))
+            for rows in grouped.values():
+                rows.sort(key=lambda item: item[0])
+            self._cache[key] = grouped
+        return grouped
+
+    def bar_codes(self) -> list[str]:
+        """返回上下文日线中出现的全部指数代码（升序）。"""
+        return sorted(self._grouped("index_bars"))
+
+    def bars_for(self, index_code: str) -> tuple[list[date], list[Any]]:
+        """返回指定指数按日期升序的全部日线（不过滤缺失字段）。
+
+        Args:
+            index_code: 指数代码。
+
+        Returns:
+            (dates, bars) 二元组，两者等长且按日期升序。
+        """
+        return self._split("bars", index_code, "index_bars")
+
+    def valuation_for(self, index_code: str) -> tuple[list[date], list[Any]]:
+        """返回指定指数按日期升序的全部估值行。
+
+        Args:
+            index_code: 指数代码。
+
+        Returns:
+            (dates, rows) 二元组，两者等长且按日期升序。
+        """
+        return self._split("valuation", index_code, "index_valuation")
+
+    def _split(self, kind: str, index_code: str, source: str) -> tuple[list[date], list[Any]]:
+        """把分组序列拆成日期列表与行列表（结果缓存）。"""
+        key = (kind, index_code)
+        cached = self._cache.get(key)
+        if cached is None:
+            rows = self._grouped(source).get(index_code) or []
+            cached = ([row_date for row_date, _ in rows], [row for _, row in rows])
+            self._cache[key] = cached
+        return cached
+
+    def series(
+        self, index_code: str, fields: tuple[str, ...]
+    ) -> tuple[list[date], list[tuple[Any, ...]]]:
+        """返回指定指数中给定字段全部非空的日线序列（结果缓存）。
+
+        Args:
+            index_code: 指数代码。
+            fields: 需要的日线字段，如 ("close_price",) 或 ("high_price", "low_price")。
+
+        Returns:
+            (dates, values) 二元组；values 每项是按 fields 顺序的取值元组。
+        """
+        key = ("series", index_code, fields)
+        cached = self._cache.get(key)
+        if cached is None:
+            dates_out: list[date] = []
+            values_out: list[tuple[Any, ...]] = []
+            for bar_date, bar in zip(*self.bars_for(index_code)):
+                values = tuple(getattr(bar, name, None) for name in fields)
+                if any(value is None for value in values):
+                    continue
+                dates_out.append(bar_date)
+                values_out.append(values)
+            cached = (dates_out, values_out)
+            self._cache[key] = cached
+        return cached
+
+    def closes(self, index_code: str) -> tuple[list[date], list[float]]:
+        """返回指定指数收盘价非空的有序收盘价序列（结果缓存）。
+
+        Args:
+            index_code: 指数代码。
+
+        Returns:
+            (dates, closes) 二元组，按日期升序。
+        """
+        key = ("closes", index_code)
+        cached = self._cache.get(key)
+        if cached is None:
+            dates_out, values = self.series(index_code, ("close_price",))
+            cached = (dates_out, [value[0] for value in values])
+            self._cache[key] = cached
+        return cached
+
+    def macro_series(self, indicator_code: str) -> list[tuple[date, date, str, float]]:
+        """返回宏观指标按「可见日」升序的记录（结果缓存）。
+
+        可见日按指标发布滞后推导（见 macro_period.macro_available_date），
+        调用方据此二分取「截止 trade_date 已公布」的记录，避免前视偏差。
+
+        Args:
+            indicator_code: 宏观指标代码，如 pmi / lpr1y。
+
+        Returns:
+            [(可见日, 参考期日期, period 原文, 数值), ...]，按可见日、参考期升序。
+        """
+        key = ("macro", indicator_code)
+        cached = self._cache.get(key)
+        if cached is None:
+            from quant_etf_api.factors.macro_period import (
+                macro_available_date,
+                parse_macro_period,
+            )
+
+            cached = []
+            for period, value in (self.macro_indicators.get(indicator_code) or {}).items():
+                period_date = parse_macro_period(period)
+                available = macro_available_date(indicator_code, period)
+                if period_date is None or available is None or value is None:
+                    continue
+                cached.append((available, period_date, period, float(value)))
+            cached.sort(key=lambda item: (item[0], item[1]))
+            self._cache[key] = cached
+        return cached
+
+
+def index_on(dates: list[date], trade_date: date) -> int | None:
+    """在升序日期列表中定位 trade_date 的下标，未精确命中时返回 None。
+
+    Args:
+        dates: 升序日期列表。
+        trade_date: 目标日期。
+
+    Returns:
+        trade_date 在列表中的下标；列表中没有该日期时为 None。
+    """
+    idx = bisect.bisect_right(dates, trade_date) - 1
+    if idx < 0 or dates[idx] != trade_date:
+        return None
+    return idx
 
 
 @dataclass

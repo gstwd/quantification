@@ -314,7 +314,7 @@ class TestFactorTemplateRegistry:
         """实例载荷包含模板版本与规范化参数。"""
         payload = build_default_registry().resolve("rsi").to_payload()
         assert payload["template_id"] == "rsi"
-        assert payload["template_version"] == "1.0.0"
+        assert payload["template_version"] == "1.1.0"
         assert payload["params"] == {"period": 14}
 
 

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import bisect
 import logging
 import threading
 from datetime import date, timedelta
@@ -30,12 +31,17 @@ from quant_etf_api.infra.db.models.core import IndexMemberEventModel
 from quant_etf_api.infra.db.models.industry import IndustryMembershipEventModel
 from quant_etf_api.infra.db.repositories.index_member import IndexMemberEventRepository
 from quant_etf_api.infra.db.repositories.industry import (
+    IndustryDailyBarRepository,
     StockDailyCloseRepository,
 )
 
 logger = logging.getLogger(__name__)
 
+# 行业选择进程内缓存：交易日 → 选中行业（None 表示该日确定无有效信号）。
+# 缓存绑定行业日线的数据版本（最新交易日），版本变化即整体清空；
+# 晚于最新行业日线的日期不缓存空结果，避免数据同步前的请求把"缺失"永久固化。
 _INDUSTRY_SELECTION_CACHE: dict[date, dict[str, float] | None] = {}
+_INDUSTRY_SELECTION_CACHE_STAMP: list[date | None] = [None]
 _INDUSTRY_SELECTION_CACHE_LOCK = threading.Lock()
 
 
@@ -119,11 +125,16 @@ class IndexFactorPanelService:
         selection = (
             self._build_industry_selection_from_source(dates) if include_industry_panels else {}
         )
+        industry_events = self._load_industry_events(dates) if include_industry_panels else {}
         exposure = (
-            self._build_industry_exposure(membership, dates) if include_industry_panels else {}
+            self._build_industry_exposure(membership, industry_events)
+            if include_industry_panels
+            else {}
         )
         exposure_meta = (
-            self._build_industry_exposure_meta(membership, dates) if include_industry_panels else {}
+            self._build_industry_exposure_meta(membership, industry_events)
+            if include_industry_panels
+            else {}
         )
         membership_rows = sum(
             len(members) for daily in membership.values() for members in daily.values()
@@ -167,26 +178,34 @@ class IndexFactorPanelService:
             ends: dict[date, date | None] = {}
             for i, start in enumerate(starts):
                 ends[start] = starts[i + 1] - timedelta(days=1) if i + 1 < len(starts) else None
+            # 同一生效起点的成员列表只构造一次，各交易日共享（只读）
+            merged_by_start: dict[date, list[dict[str, Any]]] = {}
             effective: dict[date, list[dict[str, Any]]] = {}
             for trade_date in dates:
-                members: list[dict[str, Any]] = []
-                for start in starts:
-                    if start > trade_date:
-                        break
-                    end = ends.get(start)
-                    if end is not None and trade_date > end:
-                        continue
-                    for event in by_start[start]:
-                        members.append(
+                # 区间按起始日首尾相接，命中的只能是不晚于交易日的最后一个起点
+                position = bisect.bisect_right(starts, trade_date) - 1
+                if position < 0:
+                    continue
+                start = starts[position]
+                end = ends.get(start)
+                if end is not None and trade_date > end:
+                    continue
+                members = merged_by_start.get(start)
+                if members is None:
+                    members = _merge_members_by_stock(
+                        [
                             {
                                 "stock_code": event.stock_code,
                                 "weight": event.weight,
                                 "start_date": event.start_date,
                                 "snapshot_type": event.snapshot_type,
                             }
-                        )
+                            for event in by_start[start]
+                        ]
+                    )
+                    merged_by_start[start] = members
                 if members:
-                    effective[trade_date] = _merge_members_by_stock(members)
+                    effective[trade_date] = members
             result[index_code] = effective
         return result
 
@@ -232,31 +251,56 @@ class IndexFactorPanelService:
         if not requested_dates:
             return {}
 
+        stamp = self._industry_data_stamp()
         with _INDUSTRY_SELECTION_CACHE_LOCK:
-            missing_dates = [
-                trade_date
+            if _INDUSTRY_SELECTION_CACHE_STAMP[0] != stamp:
+                # 行业日线有更新：历史选择可能基于旧数据，整体失效
+                _INDUSTRY_SELECTION_CACHE.clear()
+                _INDUSTRY_SELECTION_CACHE_STAMP[0] = stamp
+            cached = {
+                trade_date: _INDUSTRY_SELECTION_CACHE[trade_date]
                 for trade_date in requested_dates
-                if trade_date not in _INDUSTRY_SELECTION_CACHE
-            ]
-            if missing_dates:
-                computed = self._compute_industry_selection_from_source(missing_dates)
-                for trade_date in missing_dates:
-                    # 缓存无有效选中行业的日期，避免 warm-up/缺失日期反复触发重算。
-                    selected = computed.get(trade_date)
-                    _INDUSTRY_SELECTION_CACHE[trade_date] = dict(selected) if selected else None
-                logger.debug(
-                    "RRG行业选择缓存写入: requested=%d computed=%d",
-                    len(missing_dates),
-                    len(computed),
-                )
-            else:
-                logger.debug("RRG行业选择缓存命中: dates=%d", len(requested_dates))
-
-            return {
-                trade_date: dict(_INDUSTRY_SELECTION_CACHE[trade_date])
-                for trade_date in requested_dates
-                if _INDUSTRY_SELECTION_CACHE[trade_date]
+                if trade_date in _INDUSTRY_SELECTION_CACHE
             }
+        missing_dates = [trade_date for trade_date in requested_dates if trade_date not in cached]
+
+        if missing_dates:
+            # 重算在锁外进行，避免一个长区间计算阻塞其它请求
+            computed = self._compute_industry_selection_from_source(missing_dates)
+            with _INDUSTRY_SELECTION_CACHE_LOCK:
+                cache_writable = _INDUSTRY_SELECTION_CACHE_STAMP[0] == stamp
+                for trade_date in missing_dates:
+                    selected = computed.get(trade_date)
+                    value = dict(selected) if selected else None
+                    cached[trade_date] = value
+                    # 空结果只在行业日线已覆盖该日时缓存（warm-up 等永久缺失）；
+                    # 晚于最新行业日线的日期可能只是尚未同步，不能固化为缺失。
+                    if not cache_writable:
+                        continue
+                    if value is not None or (stamp is not None and trade_date <= stamp):
+                        _INDUSTRY_SELECTION_CACHE[trade_date] = value
+            logger.debug(
+                "RRG行业选择缓存写入: requested=%d computed=%d",
+                len(missing_dates),
+                len(computed),
+            )
+        else:
+            logger.debug("RRG行业选择缓存命中: dates=%d", len(requested_dates))
+
+        return {
+            trade_date: dict(selected)
+            for trade_date in requested_dates
+            if (selected := cached.get(trade_date))
+        }
+
+    def _industry_data_stamp(self) -> date | None:
+        """返回行业日线的数据版本（最新交易日），用于行业选择缓存失效判定。
+
+        Returns:
+            最新行业日线交易日；无数据或查询结果不可用时为 None。
+        """
+        latest = IndustryDailyBarRepository(self._db).latest_trade_date()
+        return latest if isinstance(latest, date) else None
 
     def _compute_industry_selection_from_source(
         self,
@@ -275,12 +319,18 @@ class IndexFactorPanelService:
 
         from quant_etf_api.services.industry_factor_service import IndustryFactorService
 
-        panels = IndustryFactorService(self._db).build_panels(
-            start=dates[0],
-            end=dates[-1],
-            # 默认信号 diffusion_rrg 先按扩散 top_n，再按 RRG 象限过滤，必须同时构建两类面板。
-            need_diffusion=True,
-        )
+        try:
+            panels = IndustryFactorService(self._db).build_panels(
+                start=dates[0],
+                end=dates[-1],
+                # 默认信号 diffusion_rrg 先按扩散 top_n，再按 RRG 象限过滤，必须同时构建两类面板。
+                need_diffusion=True,
+            )
+        except ValueError as exc:
+            # 行业日线缺失时让 RRG 匹配因子结构化缺失（selection_missing），
+            # 而不是让整次实时/回测因子计算失败。
+            logger.warning("RRG行业选择面板不可用，按缺失处理: %s", exc)
+            return {}
         logger.debug(
             "RRG行业选择面板完成: dates=%d industries=%d",
             len(panels.get("trading_dates", [])),
@@ -318,12 +368,15 @@ class IndexFactorPanelService:
                 result[trade_date] = weights
         return result
 
-    def _build_industry_exposure(
-        self,
-        membership: dict[str, dict[date, list[dict[str, Any]]]],
-        dates: list[date],
-    ) -> dict[str, dict[date, dict[str, float]]]:
-        """按指数成分（权重可选）聚合申万一级行业暴露。"""
+    def _load_industry_events(self, dates: list[date]) -> dict[str, list[tuple[date, str]]]:
+        """一次性加载截止区间终点的个股申万行业归属事件（按起始日升序）。
+
+        Args:
+            dates: 面板交易日轴（升序）。
+
+        Returns:
+            {stock_code: [(start_date, industry_code), ...]}。
+        """
         stock_rows = (
             self._db.query(IndustryMembershipEventModel)
             .filter(IndustryMembershipEventModel.start_date <= dates[-1])
@@ -336,15 +389,24 @@ class IndexFactorPanelService:
             )
         for events in industry_by_stock.values():
             events.sort(key=lambda item: item[0])
+        return industry_by_stock
+
+    def _build_industry_exposure(
+        self,
+        membership: dict[str, dict[date, list[dict[str, Any]]]],
+        industry_by_stock: dict[str, list[tuple[date, str]]],
+    ) -> dict[str, dict[date, dict[str, float]]]:
+        """按指数成分（权重可选）聚合申万一级行业暴露。"""
+        starts_by_stock = {
+            stock: [start for start, _ in events] for stock, events in industry_by_stock.items()
+        }
 
         def industry_asof(stock_code: str, trade_date: date) -> str | None:
-            events = industry_by_stock.get(stock_code) or []
-            hit = None
-            for start, industry in events:
-                if start > trade_date:
-                    break
-                hit = industry
-            return hit
+            starts = starts_by_stock.get(stock_code)
+            if not starts:
+                return None
+            position = bisect.bisect_right(starts, trade_date) - 1
+            return industry_by_stock[stock_code][position][1] if position >= 0 else None
 
         exposure: dict[str, dict[date, dict[str, float]]] = {}
         for index_code, daily in membership.items():
@@ -373,25 +435,20 @@ class IndexFactorPanelService:
     def _build_industry_exposure_meta(
         self,
         membership: dict[str, dict[date, list[dict[str, Any]]]],
-        dates: list[date],
+        industry_by_stock: dict[str, list[tuple[date, str]]],
     ) -> dict[str, dict[date, dict[str, int | float | str]]]:
         """统计指数成分行业归属覆盖与权重口径，供匹配因子解释。"""
-        stock_rows = (
-            self._db.query(IndustryMembershipEventModel)
-            .filter(IndustryMembershipEventModel.start_date <= dates[-1])
-            .all()
-        )
-        by_stock: dict[str, list[date]] = {}
-        for row in stock_rows:
-            by_stock.setdefault(row.stock_code, []).append(row.start_date)
+        first_start = {stock: events[0][0] for stock, events in industry_by_stock.items() if events}
         result: dict[str, dict[date, dict[str, int | float | str]]] = {}
         for index_code, daily in membership.items():
             result[index_code] = {}
             for trade_date, members in daily.items():
                 member_count = len(members)
                 mapped = sum(
-                    any(start <= trade_date for start in by_stock.get(member["stock_code"], []))
+                    1
                     for member in members
+                    if (start := first_start.get(member["stock_code"])) is not None
+                    and start <= trade_date
                 )
                 result[index_code][trade_date] = {
                     "member_count": member_count,

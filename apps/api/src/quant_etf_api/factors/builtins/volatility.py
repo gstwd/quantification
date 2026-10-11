@@ -29,7 +29,7 @@ def _sorted_closes_for_code(
     index_code: str,
     ctx: FactorContext,
 ) -> tuple[list[date], list[float]]:
-    """提取指定指数的有序收盘价序列，供批量计算复用。
+    """提取指定指数的有序收盘价序列（复用上下文缓存）。
 
     Args:
         index_code: 指数代码。
@@ -38,17 +38,7 @@ def _sorted_closes_for_code(
     Returns:
         (close_dates, close_prices) 元组，均按日期升序排列。
     """
-    closes = sorted(
-        [
-            (dt, v.close_price)
-            for (code, dt), v in ctx.index_bars.items()
-            if code == index_code and v.close_price is not None
-        ],
-        key=lambda x: x[0],
-    )
-    if not closes:
-        return [], []
-    return [d for d, _ in closes], [p for _, p in closes]
+    return ctx.closes(index_code)
 
 
 def _sample_std(values: list[float]) -> float | None:

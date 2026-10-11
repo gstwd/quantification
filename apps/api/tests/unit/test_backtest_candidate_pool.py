@@ -163,8 +163,8 @@ class TestBuildCandidatePool:
         assert reasons["000300"] == {"MISSING_HIGH_LOW"}
 
     def test_requires_high_low_for_rsrs_and_price_position_factors(self) -> None:
-        """引用 rsrs / price_position_ir 因子时，最高/最低价缺失应报 MISSING_HIGH_LOW。"""
-        for factor_id in ("rsrs", "price_position_ir"):
+        """引用 rsrs / price_position_ir / 低振幅动量因子时，最高/最低价缺失应报 MISSING_HIGH_LOW。"""
+        for factor_id in ("rsrs", "price_position_ir", "low_amplitude_momentum"):
             svc = _make_service(template_ids=[factor_id])
             bars = {
                 ("000300", DATES[0]): SimpleNamespace(

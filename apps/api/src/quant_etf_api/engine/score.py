@@ -265,18 +265,20 @@ _default_scorer = DefaultScoreCalculator()
 
 
 class CrossSectionScorer:
-    """横截面评分器：在所有资产间比较加权综合值进行评分。
+    """横截面评分器：逐因子横截面标准化后加权合成，再在资产间统一评分。
 
     支持两种模式：
-    - rank：加权综合值的横截面百分位排名（0-100）
-    - zscore：加权综合值的横截面 Z-Score 标准化
+    - rank：每个因子先转为横截面百分位排名（并列取平均秩），加权合成后
+      再对综合值做百分位排名（0-100）；
+    - zscore：每个因子先做横截面 Z-Score，加权合成后再对综合值做 Z-Score，
+      映射到 0-100（均值 50，每个标准差 10 分）。
 
-    因子先应用配置的变换，再按原有尺度加权；横截面变换只作用于综合值，
-    不会消除不同因子在加权阶段的量纲差异，配置权重时需要考虑因子尺度。
+    逐因子标准化消除了不同因子的量纲差异：配置权重即各因子在综合分中的
+    相对重要性，不再被因子自身的横截面离散度放大或压缩。
 
     与 DefaultScoreCalculator 的区别：
     DefaultScoreCalculator 每资产独立评分（加权平均自身因子值），
-    CrossSectionScorer 在横截面上比较所有资产的加权综合值后统一评分，
+    CrossSectionScorer 在横截面上比较所有资产后统一评分，
     适用于轮动策略、相对强弱策略等需要资产间比较的场景。
     """
 
@@ -300,87 +302,78 @@ class CrossSectionScorer:
         from quant_etf_api.factors.normalization import normalize_rank, normalize_zscore
 
         mode = config.scoring_mode
+        if mode == "rank":
+            normalize = normalize_rank
+        elif mode == "zscore":
+            normalize = normalize_zscore
+        else:
+            raise ValueError(
+                f"CrossSectionScorer 不支持 scoring_mode='{mode}'，"
+                f"absolute 模式应使用 DefaultScoreCalculator"
+            )
 
-        # 第一步：对每资产计算加权原始值
-        raw_scores: dict[str, float] = {}
-        # 调试收集：每资产的评分分解
+        # 第一步：逐资产收集变换后的因子值，处理缺失策略
+        asset_values: dict[str, dict[str, float]] = {}
         asset_breakdowns: dict[str, list[FactorScoreBreakdown]] = {}
+        names: dict[str, str] = {}
         for item in context.universe:
             code = item["index_code"]
             name_cn = item.get("name_cn", code)
-            weighted_sum = 0.0
-            total_weight = 0.0
-            skip_asset = False
+            names[code] = name_cn
+            values: dict[str, float] = {}
             breakdown: list[FactorScoreBreakdown] = []
+            skip_asset = False
             for factor_id, weight in config.factors.items():
                 raw_value = context.asset_factors.get((code, factor_id))
                 if raw_value is None:
                     if config.missing_factor_strategy == "exclude":
                         skip_asset = True
-                        if debug is not None:
-                            breakdown.append(
-                                FactorScoreBreakdown(
-                                    factor_id=factor_id,
-                                    raw_value=None,
-                                    transformed_value=None,
-                                    weight=weight,
-                                    contribution=0.0,
-                                    status="missing_excluded",
-                                )
+                        breakdown.append(
+                            FactorScoreBreakdown(
+                                factor_id=factor_id,
+                                raw_value=None,
+                                transformed_value=None,
+                                weight=weight,
+                                contribution=0.0,
+                                status="missing_excluded",
                             )
+                        )
                         break
-                    if config.missing_factor_strategy == "zero":
-                        raw_value = 0.0
-                        status = "missing_zero"
-                    else:
-                        if debug is not None:
-                            breakdown.append(
-                                FactorScoreBreakdown(
-                                    factor_id=factor_id,
-                                    raw_value=None,
-                                    transformed_value=None,
-                                    weight=weight,
-                                    contribution=0.0,
-                                    status="missing_ignored",
-                                )
+                    if config.missing_factor_strategy != "zero":
+                        breakdown.append(
+                            FactorScoreBreakdown(
+                                factor_id=factor_id,
+                                raw_value=None,
+                                transformed_value=None,
+                                weight=weight,
+                                contribution=0.0,
+                                status="missing_ignored",
                             )
+                        )
                         continue
+                    raw_value = 0.0
+                    status = "missing_zero"
                 else:
                     status = "ok"
 
                 transform_name = config.transforms.get(factor_id)
-                if transform_name:
-                    transform_fn = get_transform(transform_name)
-                    transformed = transform_fn(raw_value)
-                else:
-                    transformed = raw_value
-
-                weighted_sum += transformed * weight
-                total_weight += abs(weight)
-
-                if debug is not None:
-                    breakdown.append(
-                        FactorScoreBreakdown(
-                            factor_id=factor_id,
-                            raw_value=raw_value,
-                            transformed_value=round(transformed, 1)
-                            if isinstance(transformed, float)
-                            else transformed,
-                            weight=weight,
-                            contribution=0.0,
-                            status=status,
-                        )
+                transformed = (
+                    get_transform(transform_name)(raw_value) if transform_name else raw_value
+                )
+                values[factor_id] = transformed
+                breakdown.append(
+                    FactorScoreBreakdown(
+                        factor_id=factor_id,
+                        raw_value=raw_value,
+                        transformed_value=None,
+                        weight=weight,
+                        contribution=0.0,
+                        status=status,
                     )
+                )
 
             if skip_asset:
                 if debug is not None:
-                    # 回填 contribution
-                    total_abs = sum(abs(b.weight) for b in breakdown if b.status == "ok")
-                    for b in breakdown:
-                        if b.status == "ok" and total_abs > 0:
-                            b.contribution = round(
-                                (b.transformed_value or 0) * b.weight / total_abs, 2
-                            )
                     debug.append(
                         AssetScoreDetail(
                             index_code=code,
@@ -393,8 +386,7 @@ class CrossSectionScorer:
                         )
                     )
                 continue
-
-            if total_weight <= 0:
+            if not any(abs(config.factors[factor_id]) > 0 for factor_id in values):
                 # 所有因子缺失（ignore 策略）时与 absolute 模式一致：视为排除，
                 # 避免假 0 分污染横截面排名/标准化分布，防止被 bottom_n 反向选入
                 if debug is not None:
@@ -410,55 +402,71 @@ class CrossSectionScorer:
                         )
                     )
                 continue
+            asset_values[code] = values
+            asset_breakdowns[code] = breakdown
 
-            raw_score = weighted_sum / total_weight
-            raw_scores[code] = raw_score
+        if not asset_values:
+            return {}
 
+        # 第二步：逐因子在参与评分的资产间做横截面标准化，消除量纲差异
+        normalized_by_factor: dict[str, dict[str, float | None]] = {}
+        for factor_id in config.factors:
+            column = {
+                code: values[factor_id]
+                for code, values in asset_values.items()
+                if factor_id in values
+            }
+            if column:
+                normalized_by_factor[factor_id] = normalize(column)
+
+        # 第三步：按权重合成综合值（只计入该资产可用的因子）
+        raw_scores: dict[str, float] = {}
+        for code, values in asset_values.items():
+            weighted_sum = 0.0
+            total_weight = 0.0
+            for factor_id in values:
+                weight = config.factors[factor_id]
+                standardized = normalized_by_factor[factor_id].get(code)
+                if standardized is None:
+                    continue
+                weighted_sum += standardized * weight
+                total_weight += abs(weight)
+            if total_weight <= 0:
+                continue
+            raw_scores[code] = weighted_sum / total_weight
             if debug is not None:
-                # 回填 contribution
-                total_abs = sum(abs(b.weight) for b in breakdown if b.status == "ok")
-                for b in breakdown:
-                    if b.status == "ok" and total_abs > 0:
-                        b.contribution = round((b.transformed_value or 0) * b.weight / total_abs, 2)
-                asset_breakdowns[code] = breakdown
+                for entry in asset_breakdowns[code]:
+                    standardized = normalized_by_factor.get(entry.factor_id, {}).get(code)
+                    if entry.factor_id not in values or standardized is None:
+                        continue
+                    entry.transformed_value = round(standardized, 2)
+                    entry.contribution = round(standardized * entry.weight / total_weight, 2)
 
         if not raw_scores:
             return {}
 
-        # 第二步：横截面变换
+        # 第四步：综合值的横截面变换（映射到 0-100）
         if mode == "rank":
             normalized = normalize_rank(raw_scores)
-        elif mode == "zscore":
-            z_scores = normalize_zscore(raw_scores)
-            # 将 Z-Score 映射到 0-100（均值为 50）
-            normalized = {}
-            for k, v in z_scores.items():
-                if v is not None:
-                    normalized[k] = round(max(0.0, min(100.0, 50.0 + v * 10.0)), 1)
-                else:
-                    normalized[k] = 50.0
         else:
-            raise ValueError(
-                f"CrossSectionScorer 不支持 scoring_mode='{mode}'，"
-                f"absolute 模式应使用 DefaultScoreCalculator"
-            )
+            normalized = {
+                code: (round(max(0.0, min(100.0, 50.0 + z * 10.0)), 1) if z is not None else 50.0)
+                for code, z in normalize_zscore(raw_scores).items()
+            }
 
-        # 第三步：填充调试数据
+        # 第五步：填充调试数据
         if debug is not None:
-            for item in context.universe:
-                code = item["index_code"]
-                name_cn = item.get("name_cn", code)
-                if code in raw_scores:
-                    debug.append(
-                        AssetScoreDetail(
-                            index_code=code,
-                            name_cn=name_cn,
-                            raw_score=round(raw_scores[code], 2),
-                            final_score=normalized.get(code),
-                            factors=asset_breakdowns.get(code, []),
-                            excluded=False,
-                        )
+            for code in raw_scores:
+                debug.append(
+                    AssetScoreDetail(
+                        index_code=code,
+                        name_cn=names.get(code, code),
+                        raw_score=round(raw_scores[code], 2),
+                        final_score=normalized.get(code),
+                        factors=asset_breakdowns.get(code, []),
+                        excluded=False,
                     )
+                )
 
         return normalized
 
