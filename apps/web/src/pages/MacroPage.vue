@@ -14,7 +14,9 @@
           <span class="card-title">CPI 居民消费价格指数（同比）<HelpTip :text="macroHelp('cpi')" /></span>
           <span v-if="cpi.length" class="card-badge">{{ cpi[cpi.length - 1].period }}: {{ cpi[cpi.length - 1].value.toFixed(2) }}%</span>
         </div>
-        <div v-if="cpi.length === 0" class="chart-placeholder">暂无 CPI 数据</div>
+        <div v-if="cpi.length === 0" class="chart-placeholder">
+          暂无 CPI 数据，请到<router-link to="/data-management">数据管理页</router-link>执行同步
+        </div>
         <div v-else ref="cpiChartEl" class="chart-container"></div>
       </div>
 
@@ -24,7 +26,9 @@
           <span class="card-title">PMI 制造业采购经理指数 <HelpTip :text="macroHelp('pmi')" /></span>
           <span v-if="pmi.length" class="card-badge">{{ pmi[pmi.length - 1].period }}: {{ pmi[pmi.length - 1].value.toFixed(1) }}%</span>
         </div>
-        <div v-if="pmi.length === 0" class="chart-placeholder">暂无 PMI 数据</div>
+        <div v-if="pmi.length === 0" class="chart-placeholder">
+          暂无 PMI 数据，请到<router-link to="/data-management">数据管理页</router-link>执行同步
+        </div>
         <div v-else ref="pmiChartEl" class="chart-container"></div>
       </div>
 
@@ -37,7 +41,9 @@
             <span v-if="lpr5y.length" class="card-badge">5Y: {{ lpr5y[lpr5y.length - 1].value.toFixed(2) }}%</span>
           </div>
         </div>
-        <div v-if="lpr1y.length === 0 && lpr5y.length === 0" class="chart-placeholder">暂无 LPR 数据</div>
+        <div v-if="lpr1y.length === 0 && lpr5y.length === 0" class="chart-placeholder">
+          暂无 LPR 数据，请到<router-link to="/data-management">数据管理页</router-link>执行同步
+        </div>
         <div v-else ref="lprChartEl" class="chart-container"></div>
       </div>
     </template>

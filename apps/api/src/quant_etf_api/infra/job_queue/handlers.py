@@ -198,21 +198,17 @@ def handle_comparison(payload: dict) -> None:
 
 
 def handle_data_fill(payload: dict) -> None:
-    """执行 GET 查询未命中触发的后台补数任务。"""
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.services.ingest_service import IngestService
+    """已下线的 GET 读穿透补数任务（墓碑处理器）。
 
-    resource = payload.get("resource") or ""
-    code = payload.get("code")
-    db = SessionLocal()
-    try:
-        count = IngestService(db).fill_resource(resource, code)
-        logger.info("后台补数完成: resource=%s code=%s records=%s", resource, code, count)
-    except Exception:
-        logger.exception("后台补数失败: resource=%s code=%s", resource, code)
-        raise
-    finally:
-        db.close()
+    外部数据只能经 ``POST /api/data-management/operations`` 统一入口写入，
+    GET 查询未命中不再入队补数。保留该处理器只为消化升级前已排队的存量
+    任务，避免其因"未知任务类型"反复失败；不执行任何抓取或写库。
+    """
+    logger.info(
+        "忽略已下线的 data_fill 任务: resource=%s code=%s；请通过数据管理页同步",
+        payload.get("resource"),
+        payload.get("code"),
+    )
 
 
 def handle_data_management_operation(payload: dict) -> dict[str, Any]:

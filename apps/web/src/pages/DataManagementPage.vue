@@ -458,6 +458,7 @@ const REASON_LABELS: Record<string, string> = {
   stale: '数据已过期',
   missing_dates: '存在日期缺口',
   invalid_values: '存在异常值',
+  non_trading_rows: '存在非交易日行情',
   warnings: '存在数据告警',
 }
 
@@ -500,6 +501,14 @@ interface HealthIssueSummary {
   error_partitions?: number
   warning_partitions?: number
   warning_count?: number
+  /** 同步阶段失败的分区数（汇总行） */
+  failed_partitions?: number
+  /** 落在非交易日的行数（计入异常） */
+  non_trading_count?: number
+  /** 已确认上游仅提供收盘价、从异常中豁免的行数（计入告警） */
+  close_only_count?: number
+  /** 成交量为 0 的行数（仅提示，不影响健康状态） */
+  volume_zero_count?: number
   reasons?: string[]
   missing_dates_sample?: string[]
   missing_dates_truncated?: boolean
@@ -656,6 +665,10 @@ function readIssue(item: DataSetHealthSummary): HealthIssueSummary {
   if (typeof raw.error_partitions === 'number') result.error_partitions = raw.error_partitions
   if (typeof raw.warning_partitions === 'number') result.warning_partitions = raw.warning_partitions
   if (typeof raw.warning_count === 'number') result.warning_count = raw.warning_count
+  if (typeof raw.failed_partitions === 'number') result.failed_partitions = raw.failed_partitions
+  if (typeof raw.non_trading_count === 'number') result.non_trading_count = raw.non_trading_count
+  if (typeof raw.close_only_count === 'number') result.close_only_count = raw.close_only_count
+  if (typeof raw.volume_zero_count === 'number') result.volume_zero_count = raw.volume_zero_count
   if (typeof raw.last_error === 'string') result.last_error = raw.last_error
   if (typeof raw.reason === 'string') result.reason = raw.reason
   if (typeof raw.missing_dates_truncated === 'boolean') {
@@ -720,10 +733,51 @@ function partitionSummary(item: DataSetHealthSummary): string {
   return `${issue.partition_count} 个${problems ? `（异常/关注 ${problems}）` : ''}`
 }
 
+/**
+ * 汇总质量数字与原因码为一行文案（数据集级与分区级共用）。
+ *
+ * @param item - 数据集或分区摘要
+ * @param issue - 归一化后的问题摘要
+ * @returns 以「·」分隔的文案，没有问题时为空串
+ */
+function qualityText(item: DataSetHealthSummary, issue: HealthIssueSummary): string {
+  const numbers: string[] = []
+  if (issue.failed_partitions) numbers.push(`维护失败分区 ${issue.failed_partitions}`)
+  if (item.missing_count > 0) numbers.push(`缺口 ${item.missing_count.toLocaleString()}`)
+  if (item.invalid_count > 0) numbers.push(`异常 ${item.invalid_count.toLocaleString()}`)
+  if (issue.non_trading_count) numbers.push(`非交易日行 ${issue.non_trading_count.toLocaleString()}`)
+  if (issue.warning_count) numbers.push(`告警 ${issue.warning_count.toLocaleString()}`)
+  if (issue.close_only_count) {
+    numbers.push(`上游仅收盘价 ${issue.close_only_count.toLocaleString()}`)
+  }
+  if (issue.volume_zero_count) {
+    numbers.push(`成交量为 0：${issue.volume_zero_count.toLocaleString()}（仅提示）`)
+  }
+  const reasons = (issue.reasons ?? []).map((reason) => REASON_LABELS[reason] ?? reason)
+  return [...numbers, ...reasons].join(' · ')
+}
+
+/**
+ * 维护失败提示：区分整体失败与部分分区失败。
+ *
+ * @param item - 数据集或分区摘要
+ * @param issue - 归一化后的问题摘要
+ * @returns 失败提示文案；最近一次维护未失败时返回空串
+ */
+function failureText(item: DataSetHealthSummary, issue: HealthIssueSummary): string {
+  if (!issue.last_error) return ''
+  const prefix = item.last_run_status === 'partial_success' ? '部分维护失败' : '最近维护失败'
+  return `${prefix}：${issue.last_error}`
+}
+
 /** 数据集级问题说明行。 */
 function datasetIssueText(item: DataSetHealthSummary): string {
   const issue = readIssue(item)
-  if (issue.last_error) return `最近维护失败：${issue.last_error}`
+  const failure = failureText(item, issue)
+  if (failure) {
+    const quality = qualityText(item, issue)
+    return quality ? `${failure}（${quality}）` : failure
+  }
   if (issue.reason) {
     // 汇总行在没有任何分区行时由后端写入 {"reason": "尚未检查"}
     return issue.reason === '尚未检查'
@@ -731,26 +785,16 @@ function datasetIssueText(item: DataSetHealthSummary): string {
       : issue.reason
   }
   if (!item.last_checked_at) return '尚未执行统一检查，可点击「检查」生成该数据集的健康快照。'
-  const numbers: string[] = []
-  if (item.missing_count > 0) numbers.push(`缺口 ${item.missing_count.toLocaleString()}`)
-  if (item.invalid_count > 0) numbers.push(`异常 ${item.invalid_count.toLocaleString()}`)
-  if (issue.warning_count) numbers.push(`告警 ${issue.warning_count.toLocaleString()}`)
-  const reasons = (issue.reasons ?? []).map((reason) => REASON_LABELS[reason] ?? reason)
-  const text = [...numbers, ...reasons].join(' · ')
-  return text || '最近一次检查未发现缺口或异常字段。'
+  return qualityText(item, issue) || '最近一次检查未发现缺口或异常字段。'
 }
 
 /** 分区级问题说明文案。 */
 function partitionIssueText(item: DataSetHealthSummary): string {
   const issue = readIssue(item)
-  if (issue.last_error) return issue.last_error
-  const numbers: string[] = []
-  if (item.missing_count > 0) numbers.push(`缺口 ${item.missing_count.toLocaleString()}`)
-  if (item.invalid_count > 0) numbers.push(`异常 ${item.invalid_count.toLocaleString()}`)
-  if (issue.warning_count) numbers.push(`告警 ${issue.warning_count}`)
-  const reasons = (issue.reasons ?? []).map((reason) => REASON_LABELS[reason] ?? reason)
-  const text = [...numbers, ...reasons].join(' · ')
-  return text || (item.last_checked_at ? '正常' : '尚未检查')
+  const failure = failureText(item, issue)
+  const quality = qualityText(item, issue)
+  if (failure) return quality ? `${failure}（${quality}）` : failure
+  return quality || (item.last_checked_at ? '正常' : '尚未检查')
 }
 
 /** 缺口样例（最多展示 5 个）。 */

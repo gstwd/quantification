@@ -47,6 +47,37 @@ from quant_etf_api.schemas.market_data import (
 logger = logging.getLogger(__name__)
 
 
+def _affected_rows(result: Any, fallback: int) -> int:
+    """返回语句实际影响的行数；驱动未提供有效 rowcount 时回退为提交行数。
+
+    ``ON CONFLICT DO NOTHING`` 跳过的行不计入 rowcount，用于让运行指标反映
+    真实写入量，而不是把每天全量拉取的行数都记为"写入"。
+
+    Args:
+        result: ``Session.execute`` 的返回值。
+        fallback: rowcount 不可用时使用的行数。
+
+    Returns:
+        实际影响行数。
+    """
+    rowcount = getattr(result, "rowcount", None)
+    return rowcount if isinstance(rowcount, int) and rowcount >= 0 else fallback
+
+
+# 成交量缺失容忍度：允许个别交易日（如基日行）成交量为 0
+_VOLUME_MISSING_TOLERANCE = 0.01
+
+
+def _volume_missing_count(bars: list[Any]) -> int:
+    """统计成交量缺失或为 0 的交易日数量。"""
+    count = 0
+    for bar in bars:
+        volume = _clean_price(getattr(bar, "volume", None))
+        if volume is None or volume <= 0:
+            count += 1
+    return count
+
+
 def _clean_price(value: Any) -> float | None:
     """将 NaN 价格清洗为 None，避免 PostgreSQL float 列存 NaN 污染收益链。
 
@@ -133,45 +164,6 @@ class IngestService:
         self._macro_repo = MacroIndicatorRepository(db)
         self._last_fallbacks: list[dict[str, str]] = []
 
-    def _enqueue_data_fill(self, resource: str, code: str | None = None) -> None:
-        """查询未命中时入队后台补数任务，不在请求线程同步抓取。
-
-        相同资源在 pending/running 状态下通过 job_key 幂等去重，
-        避免并发 GET 重复触发同一资源的抓取。
-
-        Args:
-            resource: 资源类型：index_bars/index_valuation/macro。
-            code: 标的代码，macro 类型为空。
-        """
-        from quant_etf_api.infra.job_queue.queue import get_job_queue
-
-        payload: dict = {"resource": resource}
-        if code:
-            payload["code"] = code
-        job_key = f"{resource}:{code}" if code else resource
-        get_job_queue().enqueue("data_fill", payload, job_key=job_key, max_attempts=2)
-
-    def fill_resource(self, resource: str, code: str | None = None) -> int:
-        """按资源类型执行后台补数（data_fill 处理器调用）。
-
-        Args:
-            resource: 资源类型：index_bars/index_valuation/macro。
-            code: 标的代码，macro 类型为空。
-
-        Returns:
-            写入的记录数。
-
-        Raises:
-            ValueError: 未知的资源类型。
-        """
-        if resource == "index_bars":
-            return self._fetch_and_upsert_index_bars(code or "")
-        if resource == "index_valuation":
-            return self._fetch_and_upsert_index_valuation(code or "")
-        if resource == "macro":
-            return self._fetch_and_upsert_macro()
-        raise ValueError(f"未知补数资源类型: {resource}")
-
     # ==================================================================
     # 指数日线（多数据源）
     # ==================================================================
@@ -194,9 +186,10 @@ class IngestService:
             source: 实际提供数据的数据源标识（如 akshare/tickflow/tushare/baostock）。
 
         Returns:
-            写入记录数。
+            数据库实际插入/更新的行数（冲突跳过的行不计入）。
         """
         batch_size = 5000
+        written = 0
         values = [
             {
                 "trade_date": b.trade_date,
@@ -235,8 +228,8 @@ class IngestService:
                 )
             else:
                 stmt = stmt.on_conflict_do_nothing(constraint="uq_index_daily_bar")
-            self._db.execute(stmt)
-        return len(bars)
+            written += _affected_rows(self._db.execute(stmt), len(batch))
+        return written
 
     def _build_index_daily_sources(self) -> list[tuple[str, Any]]:
         """按配置优先级构建指数日线数据源列表。
@@ -277,14 +270,16 @@ class IngestService:
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> tuple[list[IndexDailyBar], str]:
-        """多数据源拉取指数日线：OHLC 任一缺失即不合格，最终采用缺失最少的数据源。
+        """多数据源拉取指数日线：OHLC 与成交量都完整才直接采用，否则取缺失最少的来源。
 
         切换规则（与 AkShareIndexClient.fetch_index_daily 内部降级链口径一致）：
         - 按配置优先级依次调用各 SDK 客户端，任一源抛错或返回空数据时继续降级；
-        - 请求窗口内开盘/最高/最低/收盘任一缺失（NaN/非正值）即视为该源不合格，
-          记录其缺失交易日数量后继续拉取下一数据源；
-        - 首个 OHLC 完全完整的数据源直接采用（缺失 0 为理论最小值，无需再试后续源）；
-        - 所有源均不合格时回退缺失交易日最少的数据源并告警（尽量保证有数据可用）；
+        - 请求窗口内开盘/最高/最低/收盘任一缺失（NaN/非正值）即视为该源不合格；
+        - 成交量缺失或为 0 的交易日超过 1% 也视为不合格（AkShare 历史行情不提供
+          成交量，曾导致主要指数整段成交量为 0）；
+        - 首个 OHLC 完整且成交量基本完整的数据源直接采用；
+        - 所有源均不合格时按 (OHLC 缺失日数, 成交量缺失日数) 取最少者，同分时
+          保持配置优先级，并告警（尽量保证有数据可用）；
         - 命中候选源时与前一候选对比共同交易日收盘点位，记录跨源一致性日志。
 
         Args:
@@ -305,7 +300,7 @@ class IngestService:
         last_error: Exception | None = None
         best_source = ""
         best_bars: list[IndexDailyBar] = []
-        best_missing = -1
+        best_missing: tuple[int, int] = (-1, -1)
         for source, client in sources:
             try:
                 bars = client.fetch_index_daily(index_code, start_date, end_date)
@@ -323,10 +318,15 @@ class IngestService:
                 attempts.append((source, "empty_response"))
                 logger.info("指数 %s 日线源 %s 返回空数据，降级到下一源", index_code, source)
                 continue
-            missing = ohlc_missing_count(bars)
-            if missing:
+            ohlc_missing = ohlc_missing_count(bars)
+            volume_missing = _volume_missing_count(bars)
+            volume_ok = volume_missing <= len(bars) * _VOLUME_MISSING_TOLERANCE
+            missing = (ohlc_missing, volume_missing)
+            if ohlc_missing:
                 attempts.append((source, "invalid_ohlc"))
-            if missing == 0:
+            elif not volume_ok:
+                attempts.append((source, "missing_volume"))
+            if ohlc_missing == 0 and volume_ok:
                 # 与前一非空候选（若有）对比收盘点位，核对跨源数据一致性
                 if best_bars:
                     common, max_diff = compare_index_bar_overlap(best_bars, bars)
@@ -358,18 +358,21 @@ class IngestService:
                 best_bars = bars
                 best_missing = missing
             logger.warning(
-                "指数 %s 日线源 %s OHLC 缺失 %d 日，视为不合格，继续降级",
+                "指数 %s 日线源 %s OHLC 缺失 %d 日、成交量缺失 %d 日，视为不合格，继续降级",
                 index_code,
                 source,
-                missing,
+                ohlc_missing,
+                volume_missing,
             )
 
         if best_bars:
             logger.warning(
-                "指数 %s 所有日线源 OHLC 均不完整，回退到缺失最少的数据源 %s（缺失 %d 日，共 %d 条）",
+                "指数 %s 所有日线源均不完整，回退到缺失最少的数据源 %s"
+                "（OHLC 缺失 %d 日、成交量缺失 %d 日，共 %d 条）",
                 index_code,
                 best_source,
-                best_missing,
+                best_missing[0],
+                best_missing[1],
                 len(best_bars),
             )
             self._record_fallbacks(index_code, best_source, attempts)
@@ -583,15 +586,15 @@ class IngestService:
         start_date: date | None = None,
         end_date: date | None = None,
     ) -> list[DailyBar]:
-        """指数日线读穿透缓存。
+        """读取指数日线（只读）。
 
-        未命中时入队后台补数任务，不再在请求线程同步抓取外部 API。
+        未命中时直接返回空列表，不再入队后台补数：外部数据只能经由
+        ``POST /api/data-management/operations`` 统一入口同步，前端提示用户
+        到数据管理页执行同步。
         """
         try:
             rows = self._query_index_bars(index_code, limit, start_date, end_date)
-            if rows:
-                return [_index_bar_row_to_schema(r) for r in rows]
-            self._enqueue_data_fill("index_bars", index_code)
+            return [_index_bar_row_to_schema(r) for r in rows]
         except Exception:
             logger.warning(
                 "get_index_daily_bars failed for %s, returning []", index_code, exc_info=True
@@ -601,7 +604,7 @@ class IngestService:
         return []
 
     # ==================================================================
-    # 指数估值 PE/PB（Tushare 优先，AkShare 兜底）
+    # 指数估值 PE/PB（乐咕乐股/中证官网优先，Tushare 仅兜底）
     # ==================================================================
 
     def _insert_index_valuations(
@@ -610,6 +613,7 @@ class IngestService:
         valuations: list[Any],
         *,
         overwrite: bool = False,
+        replace_sources: set[str] | None = None,
     ) -> int:
         """将估值数据批量幂等写入 index_valuation（不提交，由调用方统一提交）。
 
@@ -619,11 +623,15 @@ class IngestService:
         Args:
             index_code: 指数代码。
             valuations: 待写入的估值数据列表（Tushare/AkShare 客户端返回）。
+            overwrite: 冲突时无条件覆盖（修复/重建使用）。
+            replace_sources: 冲突时仅覆盖来源属于该集合的已有行。用于主来源
+                恢复后，把兜底来源写入的行改回主来源口径，避免序列按天交替来源。
 
         Returns:
-            写入记录数。
+            数据库实际插入/更新的行数（冲突跳过的行不计入）。
         """
         batch_size = 7000
+        written = 0
         values = [
             {
                 "trade_date": v.trade_date,
@@ -654,49 +662,68 @@ class IngestService:
                         "ingested_at": stmt.excluded.ingested_at,
                     },
                 )
+            elif replace_sources:
+                stmt = stmt.on_conflict_do_update(
+                    constraint="uq_index_valuation",
+                    set_={
+                        "pe": stmt.excluded.pe,
+                        "pe_percentile": stmt.excluded.pe_percentile,
+                        "pb": stmt.excluded.pb,
+                        "pb_percentile": stmt.excluded.pb_percentile,
+                        "dividend_yield": stmt.excluded.dividend_yield,
+                        "source": stmt.excluded.source,
+                        "ingested_at": stmt.excluded.ingested_at,
+                    },
+                    where=IndexValuationModel.source.in_(sorted(replace_sources)),
+                )
             else:
                 stmt = stmt.on_conflict_do_nothing(constraint="uq_index_valuation")
-            self._db.execute(stmt)
-        return len(valuations)
+            written += _affected_rows(self._db.execute(stmt), len(batch))
+        return written
 
     def _fetch_index_valuation_preferred(self, index_code: str) -> list[Any]:
-        """按“Tushare 优先、AkShare 兜底”拉取指数估值。
+        """按“AkShare（乐咕乐股 → 中证官网）优先、Tushare 兜底”拉取指数估值。
 
-        Tushare index_dailybasic 仅覆盖 000300/000016/000905 等少数指数；
-        覆盖范围外的指数直接走 AkShare（乐咕乐股 → 中证官网降级链）。Tushare
-        拉取失败或返回空时同样回退 AkShare，保证多源容错。
+        全部基准指数统一以乐咕乐股口径为主：Tushare index_dailybasic 只覆盖
+        000300/000016/000905，且 PE 取 pe_ttm、百分位按自身历史计算，与乐咕乐股
+        口径不同，两者按天混用会让 PE 与百分位序列出现锯齿。因此 Tushare
+        只在 AkShare 抛错或返回空时兜底，写入的行 source 为 "tushare"，主来源
+        恢复后由 ``_fetch_and_upsert_index_valuation`` 覆盖回主来源口径。
 
         Args:
             index_code: 指数代码，如 000300。
 
         Returns:
             按日期升序排列的估值列表；两个来源都无数据时返回空列表。
+
+        Raises:
+            Exception: AkShare 失败且没有可用的 Tushare 兜底时，抛出 AkShare 的原始异常。
         """
-        tushare_client = TushareIndexValuationClient()
         attempts: list[tuple[str, str]] = []
+        akshare_error: Exception | None = None
+        try:
+            values = AkShareIndexClient().fetch_index_valuation(index_code)
+            if values:
+                self._record_fallbacks(index_code, "akshare", attempts)
+                return values
+            attempts.append(("akshare", "empty_response"))
+        except Exception as exc:
+            akshare_error = exc
+            attempts.append(("akshare", type(exc).__name__))
+            logger.warning("指数 %s AkShare 估值拉取失败，尝试 Tushare 兜底: %s", index_code, exc)
+        tushare_client = TushareIndexValuationClient()
         if tushare_client.is_configured() and tushare_client.supports(index_code):
-            try:
-                values = tushare_client.fetch_index_valuation(index_code)
-                if values:
-                    self._record_fallbacks(index_code, "tushare", attempts)
-                    logger.info(
-                        "指数 %s 估值由 tushare 提供，共 %d 条",
-                        index_code,
-                        len(values),
-                    )
-                    return values
-                attempts.append(("tushare", "empty_response"))
-                logger.info("指数 %s tushare 估值返回空，回退 AkShare", index_code)
-            except Exception as exc:
-                attempts.append(("tushare", type(exc).__name__))
-                logger.warning(
-                    "指数 %s tushare 估值拉取失败，回退 AkShare: %s",
-                    index_code,
-                    exc,
-                )
-        values = AkShareIndexClient().fetch_index_valuation(index_code)
+            values = tushare_client.fetch_index_valuation(index_code)
+            if values:
+                self._record_fallbacks(index_code, "tushare", attempts)
+                logger.info("指数 %s 估值由 tushare 兜底提供，共 %d 条", index_code, len(values))
+                return values
+            attempts.append(("tushare", "empty_response"))
+        if akshare_error is not None:
+            self._last_fallbacks = []
+            raise akshare_error
         self._record_fallbacks(index_code, "akshare", attempts)
-        return values
+        return []
 
     def _fetch_and_upsert_index_valuation(
         self,
@@ -704,16 +731,24 @@ class IngestService:
         *,
         overwrite: bool = False,
     ) -> int:
-        """拉取指数 PE/PB 估值（Tushare 优先）并幂等写入 index_valuation。
+        """拉取指数 PE/PB 估值（乐咕乐股优先）并幂等写入 index_valuation。
+
+        主来源（非 Tushare）返回时，同时覆盖历史上由 Tushare 兜底写入的行，
+        让同一指数的估值序列回到单一来源口径。
 
         Returns:
-            写入记录数
+            数据库实际写入行数
         """
         valuations = self._fetch_index_valuation_preferred(index_code)
         if not valuations:
             return 0
+        primary = getattr(valuations[0], "source", None) != "tushare"
         if overwrite:
             count = self._insert_index_valuations(index_code, valuations, overwrite=True)
+        elif primary:
+            count = self._insert_index_valuations(
+                index_code, valuations, replace_sources={"tushare"}
+            )
         else:
             count = self._insert_index_valuations(index_code, valuations)
         self._db.commit()
@@ -738,16 +773,14 @@ class IngestService:
         start_date: date | None = None,
         end_date: date | None = None,
     ) -> list[IndexValuation]:
-        """指数估值读穿透缓存。
+        """读取指数估值（只读）。
 
         提供 start_date/end_date 时使用日期范围查询，否则使用 limit。
-        未命中时入队后台补数任务，不再在请求线程同步抓取外部 API。
+        未命中时直接返回空列表，不入队补数（统一入口原则）。
         """
         try:
             rows = self._query_index_valuation(index_code, limit, start_date, end_date)
-            if rows:
-                return [_index_valuation_row_to_schema(r) for r in rows]
-            self._enqueue_data_fill("index_valuation", index_code)
+            return [_index_valuation_row_to_schema(r) for r in rows]
         except Exception:
             logger.warning(
                 "get_index_valuation failed for %s, returning []", index_code, exc_info=True
@@ -823,7 +856,7 @@ class IngestService:
         """拉取所有宏观指标（Tushare 优先）并幂等写入 macro_indicator。
 
         Returns:
-            写入记录数
+            数据库实际写入行数（冲突跳过的行不计入）
         """
         indicators = self._fetch_macro_indicators_preferred()
         if not indicators:
@@ -857,22 +890,20 @@ class IngestService:
             )
         else:
             stmt = stmt.on_conflict_do_nothing(constraint="uq_macro_indicator")
-        self._db.execute(stmt)
+        count = _affected_rows(self._db.execute(stmt), len(indicators))
         self._db.commit()
-        return len(indicators)
+        return count
 
     def get_macro_indicators(
         self, indicator_code: str, limit: int = 60
     ) -> list[MacroIndicatorSchema]:
-        """宏观指标读穿透缓存。
+        """读取宏观指标（只读）。
 
-        未命中时入队后台补数任务，不再在请求线程同步抓取外部 API。
+        未命中时直接返回空列表，不入队补数（统一入口原则）。
         """
         try:
             rows = self._macro_repo.find_by_code_limit(indicator_code, limit)
-            if rows:
-                return [_macro_row_to_schema(r) for r in reversed(rows)]
-            self._enqueue_data_fill("macro")
+            return [_macro_row_to_schema(r) for r in reversed(rows)]
         except Exception:
             logger.warning(
                 "get_macro_indicators failed for %s, returning []", indicator_code, exc_info=True

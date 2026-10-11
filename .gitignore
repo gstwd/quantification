@@ -261,3 +261,5 @@ TrendRadar/
 daily_stock_analysis/
 data_provider/
 docs/research/
+/.optlogs/
+/candidates/

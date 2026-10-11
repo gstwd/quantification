@@ -173,40 +173,55 @@ def _window_cache_key(row: BacktestRunModel) -> str:
     return f"{row.start_date.isoformat()}~{row.end_date.isoformat()}|{universe_filter}"
 
 
+# 因行情价格字段缺失被剔除的原因 → 展示用标签（F-8）
+_PRICE_EXCLUSION_LABELS: dict[str, str] = {
+    "MISSING_OPEN": "缺开盘价",
+    "MISSING_HIGH_LOW": "缺最高/最低价",
+    "MISSING_NEXT_HIGH_LOW": "缺最高/最低价",
+}
+
+
 def _execution_price_warning(
     exclusion_dates: dict[str, list[date]],
     exclusion_reasons: dict[str, set[str]],
 ) -> BacktestWarning | None:
-    """构造"缺开盘价被剔除"的警告（F-8）。
+    """构造"缺开盘价或最高/最低价被剔除"的警告（F-8）。
 
-    执行模型是 T+1 开盘价，缺开盘价的指数当期无法建仓，会被静默排除在
-    候选池之外。旧实现只有一条 info 级的池缩水提示，很容易被读成
-    "资产池正常波动"，实际上配置 21 只指数时 2016-2024 只有 10~14 只可交易。
+    执行模型是 T+1 开盘价时，缺开盘价的指数当期无法建仓；策略使用 ATR、
+    唐奇安、RSRS 等需要最高/最低价的因子时，缺最高/最低价的指数同样会被
+    排除在候选池之外。部分指数上游长期只提供收盘价，被剔除的天数可达数年，
+    因此这里列出全部受影响指数及其天数与原因，不再只列前 5 只。
 
     Args:
         exclusion_dates: 指数 → 被剔除的交易日列表。
         exclusion_reasons: 指数 → 剔除原因集合。
 
     Returns:
-        结构化警告；没有被"缺开盘价"剔除的指数时返回 None。
+        结构化警告；没有因价格字段缺失被剔除的指数时返回 None。
     """
-    missing_open_days = {
-        code: len(dates)
-        for code, dates in exclusion_dates.items()
-        if "MISSING_OPEN" in exclusion_reasons.get(code, set())
-    }
-    if not missing_open_days:
+    affected: dict[str, tuple[int, list[str]]] = {}
+    for code, dates in exclusion_dates.items():
+        labels = sorted(
+            {
+                label
+                for reason, label in _PRICE_EXCLUSION_LABELS.items()
+                if reason in exclusion_reasons.get(code, set())
+            }
+        )
+        if labels:
+            affected[code] = (len(dates), labels)
+    if not affected:
         return None
-    ranked = sorted(missing_open_days.items(), key=lambda item: (-item[1], item[0]))
-    detail = "、".join(f"{code} {days} 天" for code, days in ranked[:5])
+    ranked = sorted(affected.items(), key=lambda item: (-item[1][0], item[0]))
+    detail = "、".join(f"{code} {days} 天（{'/'.join(labels)}）" for code, (days, labels) in ranked)
     return BacktestWarning(
         level="warning",
         code="EXECUTION_PRICE_MISSING",
         message=(
-            f"{len(missing_open_days)} 个指数因缺开盘价被排除在候选池之外"
-            f"（合计 {sum(missing_open_days.values())} 个交易日）：{detail}"
-            f"{' 等' if len(ranked) > 5 else ''}；"
-            "执行模型为 T+1 开盘价，缺开盘价当期无法建仓，实际可交易资产域小于配置资产池"
+            f"{len(affected)} 个指数因行情价格字段缺失被排除在候选池之外"
+            f"（合计 {sum(days for days, _ in affected.values())} 个交易日）：{detail}；"
+            "缺开盘价时 T+1 开盘执行无法建仓，缺最高/最低价时相关因子无法计算，"
+            "实际可交易资产域小于配置资产池"
         ),
     )
 
@@ -1810,9 +1825,10 @@ class BacktestService:
         if exclusion_dates:
             exclusion_warning_started = perf_counter()
             excluded_days_total = sum(len(dates) for dates in exclusion_dates.values())
-            # 缺失开盘价导致的剔除单列（F-8）：执行模型是 t_plus_1_open，
-            # 缺开盘价的指数会被静默排除在候选池之外，实际资产域可能远小于
-            # 配置的资产池；这里显式给出"哪些资产、被排除了多少天"
+            # 价格字段缺失导致的剔除单列（F-8）：t_plus_1_open 下缺开盘价、
+            # 使用高低价因子时缺最高/最低价的指数会被静默排除在候选池之外，
+            # 实际资产域可能远小于配置的资产池；这里显式列出全部受影响资产、
+            # 被排除的天数与原因
             execution_warning = _execution_price_warning(exclusion_dates, exclusion_reasons)
             if execution_warning is not None:
                 run_warnings.append(execution_warning)

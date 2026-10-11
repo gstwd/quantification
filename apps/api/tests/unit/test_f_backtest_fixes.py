@@ -206,9 +206,23 @@ class TestExecutionPriceWarning:
         assert warning is not None
         assert warning.code == "EXECUTION_PRICE_MISSING"
         assert "2 个指数" in warning.message
-        assert "931994 3 天" in warning.message
+        assert "931994 3 天（缺开盘价）" in warning.message
         # 只缺收盘价的指数不算执行价缺失
         assert "000905" not in warning.message
+
+    def test_lists_all_assets_and_high_low_reason(self) -> None:
+        """列出全部受影响指数（不截断前 5 只），并单独标注缺最高/最低价。"""
+        codes = [f"93{index:04d}" for index in range(7)]
+        warning = _execution_price_warning(
+            {code: [date(2024, 1, 2)] for code in codes},
+            {code: {"MISSING_HIGH_LOW"} for code in codes},
+        )
+
+        assert warning is not None
+        assert "7 个指数" in warning.message
+        assert all(code in warning.message for code in codes)
+        assert "缺最高/最低价" in warning.message
+        assert " 等；" not in warning.message
 
     def test_returns_none_without_missing_open(self) -> None:
         """没有缺开盘价的剔除时不产生警告。"""

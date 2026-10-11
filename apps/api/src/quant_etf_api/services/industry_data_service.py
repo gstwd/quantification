@@ -27,7 +27,7 @@ from quant_etf_api.infra.db.repositories.industry import (
     IndustryUniverseRepository,
 )
 from quant_etf_api.infra.db.repositories.stock import StockUniverseRepository
-from quant_etf_api.infra.trading_calendar import TradingCalendar
+from quant_etf_api.infra.trading_calendar import TradingCalendar, load_db_trading_days
 from quant_etf_api.infra.time import today_cn
 from quant_etf_api.schemas.industry import IndustrySummaryItem
 
@@ -160,7 +160,11 @@ class IndustryDataService:
         if not rows:
             return 0
         ordered = sorted(
-            (row for row in rows if row.get("close_price") is not None),
+            (
+                row
+                for row in self._drop_non_trading_rows(code, rows)
+                if row.get("close_price") is not None
+            ),
             key=lambda row: row["trade_date"],
         )
         if not ordered:
@@ -189,6 +193,40 @@ class IndustryDataService:
                 }
             )
         return self._bar_repo.bulk_upsert(values)
+
+    def _drop_non_trading_rows(self, code: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """剔除落在非交易日的行业日线行（口径与指数日线入库一致）。
+
+        日历优先取上游，其次取本地 trading_calendar 快照；两者都不可用时
+        保留原行并告警，不阻断摄取。晚于日历覆盖范围的日期无从判断，保留。
+
+        Args:
+            code: 申万一级行业代码（仅用于日志）。
+            rows: 待写入的日线字典列表。
+
+        Returns:
+            剔除非交易日后的行列表。
+        """
+        if not rows:
+            return rows
+        trading_days = self._calendar.get_trading_days_set() or load_db_trading_days(self._db)
+        if not trading_days:
+            logger.warning("交易日历不可用，跳过行业 %s 日线的非交易日校验", code)
+            return rows
+        horizon = max(trading_days)
+        kept = [
+            row for row in rows if row["trade_date"] > horizon or row["trade_date"] in trading_days
+        ]
+        if len(kept) != len(rows):
+            kept_dates = {row["trade_date"] for row in kept}
+            dropped = [row["trade_date"] for row in rows if row["trade_date"] not in kept_dates]
+            logger.warning(
+                "剔除行业非交易日行情: industry_code=%s 条数=%d 日期=%s",
+                code,
+                len(dropped),
+                [str(day) for day in dropped[:5]],
+            )
+        return kept
 
     def fill_industry(self, industry_code: str) -> dict[str, Any]:
         """补全单个行业日线（全历史重拉，幂等 upsert）。
@@ -249,8 +287,13 @@ class IndustryDataService:
         """
         code = self._ensure_universe_row(industry_code)
         rows = self._sw_client.fetch_daily(code)
+        # 先剔除非交易日行再派生前收，避免假日行情成为下一交易日的前收
         ordered = sorted(
-            (row for row in rows if row.get("close_price") is not None),
+            (
+                row
+                for row in self._drop_non_trading_rows(code, rows)
+                if row.get("close_price") is not None
+            ),
             key=lambda row: row["trade_date"],
         )
         derived = derive_prev_close_change(ordered)

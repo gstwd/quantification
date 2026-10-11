@@ -186,6 +186,60 @@ class TestFetchIndexDailyMultiSource:
         assert source == "tickflow"  # 缺失 1 日 < 缺失 2 日
         assert len(bars) == 3
 
+    def test_zero_volume_source_falls_through(self, monkeypatch) -> None:
+        """OHLC 完整但成交量全为 0 的来源不直接采用，降级到有成交量的来源。"""
+        svc = _make_service()
+        zero_volume = [
+            IndexDailyBar(
+                trade_date=bar.trade_date,
+                open_price=bar.open_price,
+                close_price=bar.close_price,
+                high_price=bar.high_price,
+                low_price=bar.low_price,
+                volume=0.0,
+                turnover=bar.turnover,
+            )
+            for bar in _complete_bars()
+        ]
+        sources = [
+            ("akshare", _FakeClient(zero_volume)),
+            ("tushare", _FakeClient(_complete_bars())),
+        ]
+        monkeypatch.setattr(svc, "_build_index_daily_sources", lambda: sources)
+        _, source = svc._fetch_index_daily_multi_source("000300")
+        assert source == "tushare"
+        assert svc._last_fallbacks[0]["reason"] == "missing_volume"
+
+    def test_ohlc_completeness_outranks_volume(self, monkeypatch) -> None:
+        """都不合格时先比 OHLC 缺失、再比成交量缺失：OHLC 完整但缺成交量优于缺开盘价。"""
+        svc = _make_service()
+        zero_volume = [
+            IndexDailyBar(
+                trade_date=bar.trade_date,
+                open_price=bar.open_price,
+                close_price=bar.close_price,
+                high_price=bar.high_price,
+                low_price=bar.low_price,
+                volume=None,
+                turnover=bar.turnover,
+            )
+            for bar in _complete_bars()
+        ]
+        sources = [
+            ("tushare", _FakeClient(_incomplete_bars(1))),
+            ("akshare", _FakeClient(zero_volume)),
+        ]
+        monkeypatch.setattr(svc, "_build_index_daily_sources", lambda: sources)
+        _, source = svc._fetch_index_daily_multi_source("000300")
+        assert source == "akshare"
+
+    def test_insert_counts_affected_rows_not_input_rows(self) -> None:
+        """写入计数取数据库 rowcount：冲突跳过的行不计为写入。"""
+        db = MagicMock()
+        db.execute.return_value = MagicMock(rowcount=1)
+        svc = IngestService(db)
+        assert svc._insert_index_bars("000300", _complete_bars(3), source="tushare") == 1
+
     def test_all_fail_raises_last_error(self, monkeypatch) -> None:
         """全部源抛错时抛出最后一个异常。"""
         svc = _make_service()

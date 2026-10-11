@@ -184,6 +184,19 @@ def test_legacy_index_macro_ingest_entries_removed() -> None:
         "incremental_fill_index_data",
     ):
         assert not hasattr(IngestService, method_name)
-    # GET 未命中触发的后台补数链路仍保留（与批量编排无关）
+    # GET 读穿透补数已下线：外部数据只经统一数据管理入口写入；
+    # data_fill 仅保留墓碑处理器消化存量排队任务，不再执行任何抓取。
     assert "data_fill" in JOB_HANDLERS
-    assert hasattr(IngestService, "fill_resource")
+    assert not hasattr(IngestService, "fill_resource")
+    assert not hasattr(IngestService, "_enqueue_data_fill")
+
+
+def test_retired_data_fill_job_is_a_noop(monkeypatch) -> None:
+    """存量 data_fill 任务到达 worker 时只记日志，不调用任何摄取逻辑。"""
+    from quant_etf_api.infra.job_queue import handlers
+
+    def _fail_session() -> None:
+        raise AssertionError("墓碑处理器不应打开数据库会话")
+
+    monkeypatch.setattr("quant_etf_api.infra.db.base.SessionLocal", _fail_session)
+    handlers.JOB_HANDLERS["data_fill"]({"resource": "index_bars", "code": "000300"})

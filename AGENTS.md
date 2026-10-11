@@ -82,7 +82,7 @@ HTTP → api/routers → services → engine
 
 - 时间戳使用 UTC；新增时间戳列使用 `DateTime(timezone=True)` 与 `utcnow_aware()`。交易日和业务日期使用 `Asia/Shanghai` 与 `today_cn()`；前端必须用 `src/utils/date.ts`。
 - 交易日历必须是真实上游日历或本地 `trading_calendar` 快照。不可用时抛 `TradingCalendarUnavailableError`，HTTP 返回 503；禁止按周末近似。
-- 数据质量唯一口径为 `data_health_snapshot`。外部数据同步、检查、补缺口和重拉统一从 `POST /api/data-management/operations` 发起；不要新增平行质量规则或旧同步入口。
+- 数据质量唯一口径为 `data_health_snapshot`。外部数据同步、检查、补缺口和重拉统一从 `POST /api/data-management/operations` 发起；不要新增平行质量规则或旧同步入口，GET 查询未命中只返回空，不得入队补数。
 - 外部客户端只负责拉取、归一化和幂等写入；编排放在 `DataManagementService`。上游失败不得覆盖已有有效数据。
 
 ### 策略、因子与回测

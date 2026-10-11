@@ -38,6 +38,7 @@ __all__ = [
     "TradingCalendarUnavailableError",
     "load_db_trading_days",
     "resolve_trading_calendar",
+    "validate_calendar_completeness",
 ]
 
 # 缓存 TTL：1 天（成功）
@@ -51,6 +52,54 @@ _cache: dict[str, Any] = {
     "loaded_at": None,  # datetime | None
     "source": None,  # "tushare" | "akshare" | None
 }
+
+# 完整性校验：沪深交易所 1991 年起每个完整年度的开市天数（实测 237~257 天）
+_CALENDAR_FIRST_FULL_YEAR = 1991
+_CALENDAR_MIN_DAYS_PER_YEAR = 220
+_CALENDAR_MAX_DAYS_PER_YEAR = 260
+
+
+def validate_calendar_completeness(days: set[date], *, today: date | None = None) -> None:
+    """校验交易日集合是否完整，防止带空洞的日历被当作有效日历。
+
+    1991 年至去年每个完整年度的交易日数都必须落在合理区间内；任何一年缺失
+    或数量异常都说明上游分段拉取不完整（例如某个 5 年分段返回空）。
+
+    Args:
+        days: 交易日集合。
+        today: 业务日期，缺省为北京时间今天（测试可注入）。
+
+    Raises:
+        TradingCalendarUnavailableError: 日历为空或任一完整年度天数异常时抛出。
+    """
+    if not days:
+        raise TradingCalendarUnavailableError("交易日历为空")
+    current_year = (today or today_cn()).year
+    counts: dict[int, int] = {}
+    for day in days:
+        counts[day.year] = counts.get(day.year, 0) + 1
+    abnormal = [
+        f"{year}={counts.get(year, 0)}"
+        for year in range(_CALENDAR_FIRST_FULL_YEAR, current_year)
+        if not _CALENDAR_MIN_DAYS_PER_YEAR <= counts.get(year, 0) <= _CALENDAR_MAX_DAYS_PER_YEAR
+    ]
+    if abnormal:
+        raise TradingCalendarUnavailableError(
+            f"交易日历不完整，以下年度交易日数异常：{', '.join(abnormal[:10])}"
+        )
+
+
+def _validated(days: set[date] | None, source: str) -> set[date] | None:
+    """完整性校验通过时原样返回，否则记录告警并返回 None。"""
+    if not days:
+        return None
+    try:
+        validate_calendar_completeness(days)
+    except TradingCalendarUnavailableError as exc:
+        logger.warning("%s 交易日历未通过完整性校验，不予采用: %s", source, exc)
+        return None
+    return days
+
 
 # 缓存加载锁：防止多线程并发调用 akshare → mini_racer（V8），
 # V8 在 Windows 上非线程安全，并发初始化会触发 partition_address_space 崩溃。
@@ -119,7 +168,14 @@ def _load_from_tushare() -> set[date] | None:
                 fields="cal_date",
             )
             if df is None or df.empty:
-                continue
+                # 任一分段为空都意味着日历出现空洞，整体判为失败并回退 AkShare，
+                # 不能把缺了 5 年的日历当作有效日历使用。
+                logger.warning(
+                    "Tushare 交易日历分段 %s-%s 返回空，本次加载判为失败",
+                    year_start,
+                    year_end,
+                )
+                return None
             for _, row in df.iterrows():
                 try:
                     trading_days.add(datetime.strptime(str(row["cal_date"]), "%Y%m%d").date())
@@ -143,10 +199,10 @@ def _load_from_upstream() -> tuple[set[date] | None, str | None]:
     Returns:
         (交易日集合, 来源名) 元组；两者均失败时返回 (None, None)。
     """
-    days = _load_from_tushare()
+    days = _validated(_load_from_tushare(), "Tushare")
     if days:
         return days, "tushare"
-    days = _load_from_akshare()
+    days = _validated(_load_from_akshare(), "AkShare")
     if days:
         return days, "akshare"
     return None, None

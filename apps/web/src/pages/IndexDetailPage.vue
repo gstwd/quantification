@@ -118,7 +118,9 @@
           <br />
           <button class="retry-btn" @click="loadBars()">重试</button>
         </div>
-        <div v-else-if="bars.length === 0" class="chart-placeholder">暂无行情数据</div>
+        <div v-else-if="bars.length === 0" class="chart-placeholder">
+          暂无行情数据，请到<router-link to="/data-management">数据管理页</router-link>执行同步
+        </div>
         <div v-else ref="chartEl" class="chart-container"></div>
       </div>
 
@@ -145,7 +147,9 @@
           <br />
           <button class="retry-btn" @click="loadValuation(currentValuationRange)">重试</button>
         </div>
-        <div v-else-if="valuation.length === 0" class="chart-placeholder">暂无估值数据（仅沪深300/上证50/中证500 支持）</div>
+        <div v-else-if="valuation.length === 0" class="chart-placeholder">
+          暂无估值数据：部分指数上游不提供估值；可到<router-link to="/data-management">数据管理页</router-link>执行同步
+        </div>
         <div v-else ref="valuationChartEl" class="chart-container"></div>
       </div>
     </template>

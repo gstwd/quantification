@@ -41,6 +41,22 @@ def _inspect_payload(status: str = "healthy") -> dict:
     }
 
 
+def _bar(trade_date: date, **overrides: float | None) -> IndexDailyBar:
+    """构造一根完整的指数日线，字段可按需覆盖。"""
+    values: dict[str, float | None] = {
+        "open_price": 100.0,
+        "high_price": 101.0,
+        "low_price": 99.0,
+        "close_price": 100.0,
+        "prev_close_price": 100.0,
+        "change_pct": 0.0,
+        "volume": 1000.0,
+        "turnover": 100000.0,
+    }
+    values.update(overrides)
+    return IndexDailyBar(trade_date=trade_date, **values)
+
+
 def _make_service() -> DataManagementService:
     """构造注入 MagicMock 会话的服务实例。"""
     svc = DataManagementService(MagicMock())
@@ -52,8 +68,8 @@ def _capture_save_calls(svc: DataManagementService) -> list[tuple[str, dict]]:
     """将 _save_snapshot 替换为记录调用参数的空实现。"""
     calls: list[tuple[str, dict]] = []
 
-    def fake_save(definition, partition_key, run_id, operation, payload, existing=None):
-        """记录 key 与载荷。"""
+    def fake_save(definition, partition_key, run_id, operation, payload, existing=None, **_kwargs):
+        """记录 key 与载荷（运行状态等关键字参数忽略）。"""
         calls.append((partition_key, dict(payload)))
         return MagicMock(partition_key=partition_key)
 
@@ -485,11 +501,30 @@ def test_safe_replace_index_bars_uses_multi_source() -> None:
     ]
     ingest = MagicMock()
     ingest._fetch_index_daily_multi_source.return_value = (bars, "tickflow")
+    ingest._drop_non_trading_bars.side_effect = lambda items: (items, [])
+    ingest._insert_index_bars.return_value = 3
 
     assert svc._safe_replace_index_bars(ingest, "000300") == 3
 
     ingest._fetch_index_daily_multi_source.assert_called_once_with("000300")
     ingest._insert_index_bars.assert_called_once_with("000300", bars, source="tickflow")
+
+
+def test_safe_replace_index_bars_drops_non_trading_days() -> None:
+    """重建写回前必须剔除非交易日行，不能把基日/假日行情重新带回库内。"""
+    db = MagicMock()
+    db.query.return_value.filter.return_value.one.return_value = (0, None, None)
+    svc = DataManagementService(db)
+    trading = _bar(date(2026, 1, 5))
+    holiday = _bar(date(2026, 1, 1))
+    ingest = MagicMock()
+    ingest._fetch_index_daily_multi_source.return_value = ([holiday, trading], "tushare")
+    ingest._drop_non_trading_bars.return_value = ([trading], [holiday])
+    ingest._insert_index_bars.return_value = 1
+
+    assert svc._safe_replace_index_bars(ingest, "000300") == 1
+
+    ingest._insert_index_bars.assert_called_once_with("000300", [trading], source="tushare")
 
 
 def test_overview_reports_zero_snapshot_count_before_first_check() -> None:
@@ -543,3 +578,321 @@ def test_overview_reports_existing_snapshot_count() -> None:
 
     assert overview.snapshot_count == 17
     assert overview.healthy_count == len(DATASETS)
+
+
+# ---------------------------------------------------------------------------
+# 数据层修复回归（规则清单、涨跌幅分级、失败可见、下线分区、仅收盘价、日历重建）
+# ---------------------------------------------------------------------------
+
+
+def test_quality_rules_are_tuples_of_strings() -> None:
+    """规则清单必须是字符串元组，单条规则漏写逗号会让接口返回逐字拆分的列表。"""
+    for definition in DATASETS:
+        assert isinstance(definition.quality_rules, tuple), definition.key
+        assert all(isinstance(rule, str) and len(rule) > 1 for rule in definition.quality_rules)
+
+
+@pytest.mark.parametrize(
+    ("change_pct", "valid"),
+    [(0.0, True), (17.88, True), (-18.5, True), (30.0, True), (30.5, False), (-100.0, False)],
+)
+def test_repair_validation_uses_graded_change_limit(change_pct: float, valid: bool) -> None:
+    """修复校验以 30% 为错误线：2024 年科创50 +17.88% 等真实行情不能被拒收。"""
+    item = _bar(date(2024, 9, 30), change_pct=change_pct)
+    assert DataManagementService._valid_repair_item("index_daily_bar", item) is valid
+
+
+def test_daily_bar_quality_conditions_grade_change_pct() -> None:
+    """硬错误只认 >30% 或 -100%；15%~30% 进入告警；成交量为 0 不再产生告警。"""
+    from sqlalchemy.dialects import postgresql
+
+    svc = DataManagementService(MagicMock())
+    hard, warning = svc._quality_conditions("index_daily_bar")
+    options = {"literal_binds": True}
+    hard_sql = str(hard.compile(dialect=postgresql.dialect(), compile_kwargs=options))
+    warning_sql = str(warning.compile(dialect=postgresql.dialect(), compile_kwargs=options))
+    assert "> 30" in hard_sql and "<= -99.99" in hard_sql
+    assert "> 15" not in hard_sql
+    assert "> 15" in warning_sql and "<= 30" in warning_sql
+    assert "volume" not in warning_sql
+
+
+def _capture_save_kwargs(svc: DataManagementService) -> dict[str, dict]:
+    """把 _save_snapshot 替换为记录分区运行状态的空实现。"""
+    calls: dict[str, dict] = {}
+
+    def fake_save(definition, partition_key, run_id, operation, payload, existing=None, **kwargs):
+        """记录分区键对应的载荷与运行状态参数。"""
+        calls[partition_key] = {"payload": dict(payload), **kwargs}
+        return MagicMock(partition_key=partition_key)
+
+    svc._save_snapshot = fake_save
+    return calls
+
+
+def test_failed_partition_is_written_as_failed() -> None:
+    """同步阶段单分区失败时，该分区快照必须记为 failed 并带上错误信息。"""
+    svc = _make_service()
+    svc._inspect_many = lambda definition, partitions, **_kwargs: {
+        "000300": _inspect_payload()[""],
+        "000903": _inspect_payload()[""],
+    }
+    svc._aggregate = MagicMock()
+    calls = _capture_save_kwargs(svc)
+
+    svc._check(
+        _definition("index_valuation"),
+        "000903",
+        "run-1",
+        "sync_latest",
+        run_status="partial_success",
+        run_errors=["000903: AttributeError: 'NoneType' object has no attribute 'attrs'"],
+    )
+
+    assert calls["000903"]["run_status"] == "failed"
+    assert "AttributeError" in calls["000903"]["last_error"]
+    assert calls["000300"]["run_status"] == "success"
+
+
+def test_repair_error_prefix_with_source_maps_to_partition() -> None:
+    """修复路径错误形如 "代码/来源: ..."，同样应定位到分区。"""
+    svc = _make_service()
+    svc._inspect_many = lambda definition, partitions, **_kwargs: {"399673": _inspect_payload()[""]}
+    calls = _capture_save_kwargs(svc)
+
+    svc._check(
+        _definition("index_daily_bar"),
+        "399673",
+        "run-1",
+        "repair_gaps",
+        run_status="partial_success",
+        run_errors=["399673/akshare: upstream error"],
+    )
+
+    assert calls["399673"]["run_status"] == "failed"
+
+
+def test_save_snapshot_failure_keeps_last_success_time() -> None:
+    """失败运行写入 last_error 与 failed，且不刷新 last_success_at。"""
+    svc = DataManagementService(MagicMock())
+    row = MagicMock(issue_summary=None, last_success_at="previous")
+    svc._save_snapshot(
+        _definition("index_valuation"),
+        "000903",
+        "run-1",
+        "sync_latest",
+        {"issue_summary": {"warning_count": 0}},
+        row,
+        run_status="failed",
+        last_error="boom",
+    )
+    assert row.last_run_status == "failed"
+    assert row.issue_summary["last_error"] == "boom"
+    assert row.last_success_at == "previous"
+
+
+def test_full_check_deletes_snapshots_of_inactive_partitions() -> None:
+    """整集检查删除已不在可维护分区列表中的快照（退市证券、移除的指数）。"""
+    db = MagicMock()
+    stale = MagicMock(partition_key="931594", upstream_missing_ranges=[])
+    active = MagicMock(partition_key="000300", upstream_missing_ranges=[])
+    summary = MagicMock(partition_key="", upstream_missing_ranges=[])
+    db.query.return_value.filter.return_value.all.return_value = [stale, active, summary]
+    svc = DataManagementService(db)
+    svc._partitions = lambda _key: ["000300"]
+    svc._inspect_many = lambda definition, partitions, **_kwargs: {"000300": _inspect_payload()[""]}
+    svc._aggregate = MagicMock()
+    _capture_save_kwargs(svc)
+
+    svc._check(_definition("index_daily_bar"), None, "run-1", "check")
+
+    db.delete.assert_called_once_with(stale)
+
+
+def test_close_only_ranges_are_kept_out_of_missing_logic_and_preserved() -> None:
+    """仅收盘价区间单独传给检查器，并在写回时原样保留。"""
+    close_only = {
+        "start_date": "2016-01-04",
+        "end_date": "2016-01-05",
+        "trading_day_count": 2,
+        "source": "close_only",
+        "confirmed_at": "2026-10-11T00:00:00Z",
+    }
+    missing = {**close_only, "source": "index_multi_source"}
+    db = MagicMock()
+    db.query.return_value.filter.return_value.all.return_value = [
+        MagicMock(partition_key="931994", upstream_missing_ranges=[close_only, missing])
+    ]
+    svc = DataManagementService(db)
+    seen: dict = {}
+
+    def fake_inspect(definition, partitions, **kwargs):
+        """记录检查器收到的区间并返回剩余缺失区间。"""
+        seen.update(kwargs)
+        return {"931994": {**_inspect_payload()[""], "upstream_missing_ranges": [missing]}}
+
+    svc._inspect_many = fake_inspect
+    calls = _capture_save_kwargs(svc)
+
+    svc._check(_definition("index_daily_bar"), "931994", "run-1", "check", local_calendar=True)
+
+    assert seen["upstream_missing_by_partition"] == {"931994": [missing]}
+    assert seen["close_only_by_partition"] == {"931994": [close_only]}
+    assert calls["931994"]["payload"]["upstream_missing_ranges"] == [missing, close_only]
+
+
+def _close_only_repair_service(sources: list) -> tuple[DataManagementService, MagicMock, date]:
+    """构造只有一个缺口目标的指数修复服务。"""
+    service = DataManagementService(MagicMock())
+    day = date(2016, 1, 4)
+    service._partitions = lambda _: ["931994"]
+    service._latest_trading_day = lambda **_kwargs: day
+    service._calendar_days_until = lambda *_args, **_kwargs: [day]
+    service._delete_non_trading_rows = MagicMock(return_value=0)
+    service._daily_gap_targets_for_repair = MagicMock(return_value={"931994": {day}})
+    service._record_upstream_missing_dates_batch = MagicMock()
+    ingest = MagicMock(_build_index_daily_sources=MagicMock(return_value=sources))
+    ingest._insert_index_bars.return_value = 1
+    return service, ingest, day
+
+
+def test_index_repair_records_close_only_dates() -> None:
+    """所有来源都只给收盘价时写入收盘价，并登记为上游仅收盘价而非上游缺失。"""
+    day = date(2016, 1, 4)
+    close_only_bar = _bar(day, open_price=None, high_price=None, low_price=None)
+    client = MagicMock(fetch_index_daily=MagicMock(return_value=[close_only_bar]))
+    service, ingest, _ = _close_only_repair_service([("akshare", client)])
+
+    result = service._repair_index_daily_gaps(None, ingest, force=False)
+
+    assert result["close_only_confirmed"] == 1
+    assert result["upstream_missing_confirmed"] == 0
+    ingest._insert_index_bars.assert_called_once_with(
+        "931994", [close_only_bar], source="akshare", overwrite=True
+    )
+    service._record_upstream_missing_dates_batch.assert_called_once_with(
+        "index_daily_bar", {"931994": {day}}, [day], source="close_only"
+    )
+
+
+def test_index_repair_does_not_confirm_close_only_when_a_source_fails() -> None:
+    """任一来源请求失败时，仅收盘价不是可信结论，不登记也不写入。"""
+    day = date(2016, 1, 4)
+    close_only_client = MagicMock(
+        fetch_index_daily=MagicMock(
+            return_value=[_bar(day, open_price=None, high_price=None, low_price=None)]
+        )
+    )
+    failing = MagicMock(fetch_index_daily=MagicMock(side_effect=RuntimeError("timeout")))
+    service, ingest, _ = _close_only_repair_service(
+        [("akshare", close_only_client), ("tushare", failing)]
+    )
+
+    result = service._repair_index_daily_gaps(None, ingest, force=False)
+
+    assert result["close_only_confirmed"] == 0
+    ingest._insert_index_bars.assert_not_called()
+    service._record_upstream_missing_dates_batch.assert_not_called()
+
+
+def test_calendar_rebuild_replaces_wrong_dates_within_threshold(monkeypatch) -> None:
+    """日历重建删除上游没有的本地日期、补入新增日期。"""
+    monkeypatch.setattr(
+        data_management_module, "validate_calendar_completeness", lambda _days: None
+    )
+    db = MagicMock()
+    svc = DataManagementService(db)
+    upstream = {date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7)}
+    existing = {date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 3)}
+
+    # 2026-01-03 早于上游最早日期，不在覆盖范围内，不删除；只补 01-07
+    assert svc._rebuild_calendar(upstream, existing) == 1
+    db.query.return_value.filter.return_value.delete.assert_not_called()
+
+    existing_with_wrong_day = existing | {date(2026, 1, 4)}
+    db.reset_mock()
+    upstream_wide = upstream | {date(2026, 1, 2)}
+    # 删除 01-03、01-04（覆盖范围内上游没有），补入 01-02、01-07
+    assert svc._rebuild_calendar(upstream_wide, existing_with_wrong_day) == 4
+    db.query.return_value.filter.return_value.delete.assert_called_once()
+
+
+def test_calendar_rebuild_aborts_when_too_many_removals(monkeypatch) -> None:
+    """待删除日期超过阈值视为上游异常，中止并保留本地日历。"""
+    monkeypatch.setattr(
+        data_management_module, "validate_calendar_completeness", lambda _days: None
+    )
+    db = MagicMock()
+    svc = DataManagementService(db)
+    upstream = {date(2026, 1, 2), date(2026, 1, 30)}
+    existing = {date(2026, 1, day) for day in range(5, 15)}
+
+    with pytest.raises(RuntimeError, match="已中止重建"):
+        svc._rebuild_calendar(upstream, existing)
+    db.add.assert_not_called()
+    db.query.return_value.filter.return_value.delete.assert_not_called()
+
+
+def test_membership_repair_isolates_single_index_failure(monkeypatch) -> None:
+    """成分修补逐指数隔离：一只失败不影响其余指数。"""
+    calls: list[str] = []
+
+    class FakeMembershipService:
+        def __init__(self, _db) -> None:
+            pass
+
+        def backfill_pit(self, codes, _start, _end):
+            """第一只指数抛错，其余正常返回。"""
+            calls.append(codes[0])
+            if codes[0] == "000300":
+                raise RuntimeError("csindex down")
+            return {"items": {codes[0]: 3}, "errors": []}
+
+    monkeypatch.setattr(
+        "quant_etf_api.services.index_membership_data_service.IndexMembershipDataService",
+        FakeMembershipService,
+    )
+    svc = _make_service()
+    svc._partitions = lambda _key: ["000300", "000905"]
+    svc._latest_trading_day = lambda **_kwargs: date(2026, 9, 30)
+
+    result = svc._sync("index_membership", None, "repair_gaps", False)
+
+    assert calls == ["000300", "000905"]
+    assert result["records"] == 3
+    assert result["failed_partitions"] == ["000300"]
+
+
+def test_partition_names_are_loaded_in_one_query() -> None:
+    """分区名称按数据集一次批量查询，查不到时回退为代码本身。"""
+    db = MagicMock()
+    db.query.return_value.filter.return_value.all.return_value = [("000001", "平安银行")]
+    svc = DataManagementService(db)
+
+    names = svc._partition_names("stock_daily_close", ["", "000001", "000002"])
+
+    assert names == {"": None, "000001": "平安银行", "000002": "000002"}
+    assert db.query.call_count == 1
+
+
+def test_execute_uses_thread_lock_outside_postgresql() -> None:
+    """非 PostgreSQL 方言回退为进程内线程锁，不建立 advisory lock 连接。"""
+    db = MagicMock()
+    db.get_bind.return_value.dialect.name = "sqlite"
+    svc = DataManagementService(db)
+    with svc._exclusive_operation():
+        assert data_management_module._operation_lock.locked()
+    assert not data_management_module._operation_lock.locked()
+    db.get_bind.return_value.engine.connect.assert_not_called()
+
+
+def test_nan_prices_are_not_valid_repair_items() -> None:
+    """上游以 NaN 表示缺价时不能视为完整行；只有收盘价时应识别为仅收盘价。"""
+    nan = float("nan")
+    close_only = _bar(date(2016, 1, 4), open_price=nan, high_price=nan, low_price=nan)
+    assert DataManagementService._valid_repair_item("index_daily_bar", close_only) is False
+    assert DataManagementService._close_only_repair_item(close_only) is True
+    nan_close = _bar(date(2016, 1, 4), close_price=nan)
+    assert DataManagementService._close_only_repair_item(nan_close) is False
+    nan_change = _bar(date(2016, 1, 4), change_pct=nan)
+    assert DataManagementService._valid_repair_item("index_daily_bar", nan_change) is True

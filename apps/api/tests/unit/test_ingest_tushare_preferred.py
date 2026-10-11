@@ -62,59 +62,117 @@ class _FakeTushareValuation:
 class _FakeAkShareValuation:
     """假 AkShare 估值客户端。"""
 
-    def __init__(self, values: list[IndexValuation] | None = None) -> None:
+    def __init__(
+        self, values: list[IndexValuation] | None = None, error: Exception | None = None
+    ) -> None:
         self.values = values
+        self.error = error
 
     def fetch_index_valuation(self, index_code: str) -> list[IndexValuation]:
-        """返回预设数据。"""
+        """返回预设数据或抛错。"""
+        if self.error is not None:
+            raise self.error
         return self.values or []
 
 
 class TestValuationPreferred:
-    """指数估值 Tushare 优先编排。"""
+    """指数估值以乐咕乐股（AkShare）为主、Tushare 兜底的编排。"""
 
-    def test_tushare_success_used(self, monkeypatch) -> None:
-        """Tushare 覆盖且成功时直接采用 tushare 结果。"""
-        ts_values = _valuation("tushare")
+    def _patch(self, monkeypatch, *, tushare: _FakeTushareValuation, akshare: _FakeAkShareValuation) -> None:
+        """替换两个估值客户端。"""
         monkeypatch.setattr(
-            "quant_etf_api.services.ingest_service.TushareIndexValuationClient",
-            lambda: _FakeTushareValuation(values=ts_values),
+            "quant_etf_api.services.ingest_service.TushareIndexValuationClient", lambda: tushare
         )
         monkeypatch.setattr(
-            "quant_etf_api.services.ingest_service.AkShareIndexClient",
-            lambda: _FakeAkShareValuation(values=_valuation("legulegu")),
+            "quant_etf_api.services.ingest_service.AkShareIndexClient", lambda: akshare
         )
-        result = _service()._fetch_index_valuation_preferred("000300")
-        assert result[0].source == "tushare"
 
-    def test_tushare_empty_falls_back(self, monkeypatch) -> None:
-        """Tushare 返回空时回退 AkShare。"""
-        monkeypatch.setattr(
-            "quant_etf_api.services.ingest_service.TushareIndexValuationClient",
-            lambda: _FakeTushareValuation(values=[]),
-        )
-        ak_values = _valuation("legulegu")
-        monkeypatch.setattr(
-            "quant_etf_api.services.ingest_service.AkShareIndexClient",
-            lambda: _FakeAkShareValuation(values=ak_values),
+    def test_akshare_preferred_even_when_tushare_available(self, monkeypatch) -> None:
+        """AkShare 成功时采用乐咕乐股，即使 Tushare 覆盖该指数（避免按天混用口径）。"""
+        self._patch(
+            monkeypatch,
+            tushare=_FakeTushareValuation(values=_valuation("tushare")),
+            akshare=_FakeAkShareValuation(values=_valuation("legulegu")),
         )
         result = _service()._fetch_index_valuation_preferred("000300")
         assert result[0].source == "legulegu"
 
-    def test_unsupported_skips_tushare(self, monkeypatch) -> None:
-        """Tushare 未覆盖的指数直接走 AkShare。"""
-        monkeypatch.setattr(
-            "quant_etf_api.services.ingest_service.TushareIndexValuationClient",
-            lambda: _FakeTushareValuation(
-                values=_valuation("tushare"), supported=False
-            ),
+    def test_akshare_empty_falls_back_to_tushare(self, monkeypatch) -> None:
+        """AkShare 返回空时由 Tushare 兜底，并记录降级。"""
+        self._patch(
+            monkeypatch,
+            tushare=_FakeTushareValuation(values=_valuation("tushare")),
+            akshare=_FakeAkShareValuation(values=[]),
         )
-        monkeypatch.setattr(
-            "quant_etf_api.services.ingest_service.AkShareIndexClient",
-            lambda: _FakeAkShareValuation(values=_valuation("csindex")),
+        svc = _service()
+        result = svc._fetch_index_valuation_preferred("000300")
+        assert result[0].source == "tushare"
+        assert svc._last_fallbacks[0]["from"] == "akshare"
+        assert svc._last_fallbacks[0]["to"] == "tushare"
+
+    def test_akshare_error_falls_back_to_tushare(self, monkeypatch) -> None:
+        """AkShare 抛错时由 Tushare 兜底。"""
+        self._patch(
+            monkeypatch,
+            tushare=_FakeTushareValuation(values=_valuation("tushare")),
+            akshare=_FakeAkShareValuation(error=RuntimeError("legulegu down")),
         )
-        result = _service()._fetch_index_valuation_preferred("000852")
-        assert result[0].source == "csindex"
+        result = _service()._fetch_index_valuation_preferred("000300")
+        assert result[0].source == "tushare"
+
+    def test_akshare_error_without_fallback_raises(self, monkeypatch) -> None:
+        """Tushare 不覆盖该指数时，AkShare 的错误原样抛出，由调用方记为分区失败。"""
+        import pytest
+
+        self._patch(
+            monkeypatch,
+            tushare=_FakeTushareValuation(values=_valuation("tushare"), supported=False),
+            akshare=_FakeAkShareValuation(error=RuntimeError("legulegu down")),
+        )
+        with pytest.raises(RuntimeError, match="legulegu down"):
+            _service()._fetch_index_valuation_preferred("000852")
+
+    def test_primary_source_replaces_tushare_fallback_rows(self, monkeypatch) -> None:
+        """主来源恢复后写入时只覆盖 Tushare 兜底写入的行。"""
+        svc = _service()
+        monkeypatch.setattr(
+            svc, "_fetch_index_valuation_preferred", lambda _code: _valuation("legulegu")
+        )
+        insert = MagicMock(return_value=1)
+        monkeypatch.setattr(svc, "_insert_index_valuations", insert)
+
+        assert svc._fetch_and_upsert_index_valuation("000300") == 1
+        assert insert.call_args.kwargs == {"replace_sources": {"tushare"}}
+
+    def test_fallback_rows_do_not_replace_existing(self, monkeypatch) -> None:
+        """Tushare 兜底数据只补新日期，不覆盖已有主来源行。"""
+        svc = _service()
+        monkeypatch.setattr(
+            svc, "_fetch_index_valuation_preferred", lambda _code: _valuation("tushare")
+        )
+        insert = MagicMock(return_value=1)
+        monkeypatch.setattr(svc, "_insert_index_valuations", insert)
+
+        svc._fetch_and_upsert_index_valuation("000300")
+        assert insert.call_args.kwargs == {}
+
+    def test_replace_sources_compiles_to_conditional_upsert(self) -> None:
+        """replace_sources 生成带 WHERE 的 ON CONFLICT DO UPDATE，并按 rowcount 计数。"""
+        from sqlalchemy.dialects import postgresql
+
+        db = MagicMock()
+        db.execute.return_value = MagicMock(rowcount=1)
+        svc = IngestService(db)
+
+        assert (
+            svc._insert_index_valuations(
+                "000300", _valuation("legulegu"), replace_sources={"tushare"}
+            )
+            == 1
+        )
+        sql = str(db.execute.call_args.args[0].compile(dialect=postgresql.dialect()))
+        assert "ON CONFLICT ON CONSTRAINT uq_index_valuation DO UPDATE" in sql
+        assert "WHERE index_valuation.source IN" in sql
 
 
 class _FakeMacroClient:

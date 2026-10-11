@@ -54,6 +54,7 @@ def test_targeted_repair_does_not_rederive_full_response_values() -> None:
     from quant_etf_api.services.industry_data_service import IndustryDataService
 
     service = IndustryDataService(MagicMock())
+    service._calendar = MagicMock(get_trading_days_set=MagicMock(return_value={date(2026, 9, 15)}))
     service._bar_repo.bulk_upsert = MagicMock(return_value=1)
     row = {
         "trade_date": date(2026, 9, 15),
@@ -86,3 +87,27 @@ def test_membership_counts_dedupe_latest_and_filter_future() -> None:
     ]
     counts = current_membership_counts(events, end_date=date(2024, 12, 31))
     assert counts == {"801120": 1, "801780": 1, "801080": 1}
+
+
+def test_industry_upsert_drops_non_trading_rows() -> None:
+    """行业日线写入前剔除非交易日行；晚于日历覆盖范围的日期保留。"""
+    from unittest.mock import MagicMock
+
+    from quant_etf_api.services.industry_data_service import IndustryDataService
+
+    service = IndustryDataService(MagicMock())
+    trading = date(2026, 9, 30)
+    holiday = date(2026, 10, 1)
+    service._calendar = MagicMock(
+        get_trading_days_set=MagicMock(return_value={date(2026, 9, 29), trading, date(2026, 10, 9)})
+    )
+    service._bar_repo.bulk_upsert = MagicMock(side_effect=lambda values: len(values))
+    rows = [
+        {"trade_date": day, "close_price": 100.0, "source": "akshare_sw"}
+        for day in (trading, holiday, date(2027, 1, 4))
+    ]
+
+    assert service._upsert_bars("801010", rows) == 2
+
+    persisted = service._bar_repo.bulk_upsert.call_args.args[0]
+    assert [item["trade_date"] for item in persisted] == [trading, date(2027, 1, 4)]

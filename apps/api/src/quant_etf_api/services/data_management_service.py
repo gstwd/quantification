@@ -7,13 +7,16 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from bisect import bisect_left
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
-from sqlalchemy import Date, and_, case, cast, func, not_, or_
+from sqlalchemy import Date, and_, case, cast, func, literal, not_, or_, select
 from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.db.base import utcnow
@@ -40,7 +43,7 @@ from quant_etf_api.infra.db.models.stock import (
     StockUniverseModel,
 )
 from quant_etf_api.infra.time import today_cn
-from quant_etf_api.infra.trading_calendar import TradingCalendar
+from quant_etf_api.infra.trading_calendar import TradingCalendar, validate_calendar_completeness
 from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
 from quant_etf_api.schemas.data_management import (
     DataManagementOverview,
@@ -52,10 +55,14 @@ from quant_etf_api.services.run_service import RunService
 
 logger = logging.getLogger(__name__)
 
-# 数据管理操作可能跨多个既有服务；同一进程内串行化可避免与旧入口重复写入。
+# 数据管理操作可能跨多个既有服务，必须全局串行化，避免并发写同一批表。
+# API 进程内 worker 与独立 worker 进程可能同时存在，因此 PostgreSQL 下使用
+# 跨进程的会话级 advisory lock；其他方言（单元测试）回退为进程内线程锁。
 # 不同作用域的任务入队后各自到达 worker，用阻塞锁排队而不是直接失败，
 # 避免"全局同步进行中用户点单数据集检查"被当作运行失败。
 _operation_lock = threading.Lock()
+# advisory lock 键：固定的 64 位整数，标识"数据管理写操作"这一把全局锁
+_ADVISORY_LOCK_KEY = 7_320_114_201_660_211
 # 低频数据集（成分/目录）在同步时按此天数判断是否需要再次拉取上游
 _LOW_FREQ_REFRESH_DAYS = 7
 # 个股 Tushare 回填统一起点，与 StockDataService._STOCK_FETCH_EPOCH 保持一致
@@ -73,6 +80,13 @@ _UPSTREAM_EXEMPT_DAILY_DATASETS = _STOCK_DAILY_DATASETS | {
 _STOCK_REPAIR_COMMIT_BATCH_SIZE = 20
 _DAILY_REPAIR_COMMIT_BATCH_SIZE = 8
 _INDEX_REPAIR_WINDOW_GAP_DAYS = 10
+# 指数/行业日线涨跌幅分级：超过告警线需人工确认，超过错误线视为脏数据
+_CHANGE_PCT_WARNING_LIMIT = 15
+_CHANGE_PCT_ERROR_LIMIT = 30
+# "上游仅提供收盘价"确认区间的来源标识，与上游缺失区间共用存储但语义不同
+_CLOSE_ONLY_SOURCE = "close_only"
+# 日历安全重建时允许删除的本地多余日期上限，超过视为上游异常而中止
+_CALENDAR_REBUILD_MAX_REMOVALS = 5
 _VALUATION_SUPPORTED_CODES = {
     "000016",
     "000300",
@@ -132,7 +146,7 @@ DATASETS: tuple[DataSetDefinition, ...] = (
         "Tushare / AkShare 兜底",
         None,
         ("sync_latest", "check", "repair_gaps", "rebuild"),
-        ("日期连续性", "最近交易日可用性"),
+        ("最近交易日可用性",),
     ),
     DataSetDefinition(
         "index_daily_bar",
@@ -141,7 +155,7 @@ DATASETS: tuple[DataSetDefinition, ...] = (
         "Tushare 优先 · 多源兜底",
         "指数",
         ("sync_latest", "check", "repair_gaps", "rebuild"),
-        ("交易日连续性", "OHLC 与收盘价合法性", "最近交易日覆盖"),
+        ("交易日连续性", "OHLC 与涨跌幅合法性", "非交易日行", "最近交易日覆盖"),
     ),
     DataSetDefinition(
         "index_valuation",
@@ -186,7 +200,7 @@ DATASETS: tuple[DataSetDefinition, ...] = (
         "申万官网 / AkShare",
         "行业",
         ("sync_latest", "check", "repair_gaps", "rebuild"),
-        ("交易日连续性", "OHLC 与涨跌幅完整性", "最近交易日覆盖"),
+        ("交易日连续性", "OHLC 与涨跌幅合法性", "非交易日行", "最近交易日覆盖"),
     ),
     DataSetDefinition(
         "industry_membership",
@@ -204,7 +218,7 @@ DATASETS: tuple[DataSetDefinition, ...] = (
         "Tushare",
         None,
         ("sync_latest", "check"),
-        ("代码、名称、ts_code 与状态完整性"),
+        ("代码与名称完整性",),
     ),
     DataSetDefinition(
         "stock_daily_close",
@@ -213,7 +227,7 @@ DATASETS: tuple[DataSetDefinition, ...] = (
         "Tushare",
         "股票",
         ("sync_latest", "check", "repair_gaps", "rebuild"),
-        ("交易日连续性", "OHLC 与量额完整性", "复权因子可用性", "最近交易日覆盖"),
+        ("交易日连续性", "OHLC 合法性", "最近交易日覆盖"),
     ),
     DataSetDefinition(
         "stock_daily_basic",
@@ -366,7 +380,7 @@ class DataManagementService:
         Raises:
             ValueError: 操作范围或数据集键非法时抛出。
         """
-        with _operation_lock:
+        with self._exclusive_operation():
             definitions = [self._definition(dataset_key)] if dataset_key else list(DATASETS)
             result_items: list[dict[str, Any]] = []
             run_service = RunService(self._db)
@@ -412,6 +426,29 @@ class DataManagementService:
                 ),
             }
 
+    @contextmanager
+    def _exclusive_operation(self) -> Iterator[None]:
+        """获取数据管理写操作的全局互斥锁，退出时释放。
+
+        PostgreSQL 下在一条独立连接上持有会话级 ``pg_advisory_lock``：
+        ORM 会话在多次 commit 之间会归还连接，不能把锁挂在会话连接上。
+        其他方言回退为进程内线程锁。
+        """
+        bind = self._db.get_bind()
+        if getattr(getattr(bind, "dialect", None), "name", None) != "postgresql":
+            with _operation_lock:
+                yield
+            return
+        engine = getattr(bind, "engine", bind)
+        with engine.connect() as lock_conn:
+            lock_conn.execute(select(func.pg_advisory_lock(_ADVISORY_LOCK_KEY)))
+            lock_conn.commit()
+            try:
+                yield
+            finally:
+                lock_conn.execute(select(func.pg_advisory_unlock(_ADVISORY_LOCK_KEY)))
+                lock_conn.commit()
+
     def _execute_dataset(
         self,
         definition: DataSetDefinition,
@@ -453,15 +490,20 @@ class DataManagementService:
         }
         if operation != "check":
             sync_result = self._sync(definition.key, partition_key, operation, force)
+        errors = list(sync_result.get("errors") or [])
+        run_status = _dataset_status(
+            {"errors": errors, "records": int(sync_result.get("records") or 0)}
+        )
         snapshots = self._check(
             definition,
             partition_key,
             run_id,
             operation,
             local_calendar=operation == "check",
+            run_status=run_status,
+            run_errors=errors,
         )
         self._db.commit()
-        errors = list(sync_result.get("errors") or [])
         return {
             "checked_partitions": len(snapshots),
             "operation": operation,
@@ -561,10 +603,16 @@ class DataManagementService:
                 existing_dates = {
                     row[0] for row in self._db.query(TradingCalendarModel.trade_date).all()
                 }
-                new_days = sorted(trading_days - existing_dates)
-                for trade_date in new_days:
-                    self._db.add(TradingCalendarModel(trade_date=trade_date, is_trading_day=True))
-                records = len(new_days)
+                if operation == "rebuild":
+                    records = self._rebuild_calendar(trading_days, existing_dates)
+                else:
+                    # 日常同步与补缺只追加新交易日，不删除本地已有日期
+                    new_days = sorted(trading_days - existing_dates)
+                    for trade_date in new_days:
+                        self._db.add(
+                            TradingCalendarModel(trade_date=trade_date, is_trading_day=True)
+                        )
+                    records = len(new_days)
                 self._db.commit()
             except Exception as exc:  # noqa: PERF203
                 _fail("trading_calendar", exc)
@@ -577,6 +625,10 @@ class DataManagementService:
                     errors.extend(str(error) for error in result.get("errors", []))
                     stats["gaps_found"] += int(result.get("gaps_found") or 0)
                     stats["gaps_repaired"] += int(result.get("upstream_missing_confirmed") or 0)
+                    # 非交易日行被删除、仅收盘价日期被确认，都等价于修复了一条异常
+                    stats["invalid_repaired"] += int(result.get("non_trading_removed") or 0) + int(
+                        result.get("close_only_confirmed") or 0
+                    )
                 except Exception as exc:  # noqa: PERF203
                     _fail(partition_key or dataset_key, exc)
             else:
@@ -681,16 +733,17 @@ class DataManagementService:
                     except Exception as exc:  # noqa: PERF203
                         _fail(code, exc)
             elif operation == "repair_gaps":
-                try:
-                    service = IndexMembershipDataService(self._db)
-                    for code in codes:
+                service = IndexMembershipDataService(self._db)
+                for code in codes:
+                    # 逐指数隔离失败：单只回填异常不中断其余指数
+                    try:
                         result = service.backfill_pit(
                             [code], date(2013, 1, 1), today_cn()
                         )
                         _add_records(int(result.get("items", {}).get(code) or 0))
                         errors.extend(str(e) for e in result.get("errors", []))
-                except Exception as exc:  # noqa: PERF203
-                    _fail("index_membership", exc)
+                    except Exception as exc:  # noqa: PERF203
+                        _fail(code, exc)
             elif not skipped:
                 try:
                     result = IndexMembershipDataService(self._db).refresh_current_snapshots(codes)
@@ -713,6 +766,7 @@ class DataManagementService:
                     errors.extend(str(error) for error in result.get("errors", []))
                     stats["gaps_found"] += int(result.get("gaps_found") or 0)
                     stats["gaps_repaired"] += int(result.get("upstream_missing_confirmed") or 0)
+                    stats["invalid_repaired"] += int(result.get("non_trading_removed") or 0)
                 except Exception as exc:  # noqa: PERF203
                     _fail(partition_key or dataset_key, exc)
             elif partition_key:
@@ -854,6 +908,44 @@ class DataManagementService:
         stats.update({"records": records, "errors": errors, "skipped": skipped})
         stats["records_skipped"] += 1 if skipped else 0
         return stats
+
+    def _rebuild_calendar(self, upstream_days: set[date], existing_dates: set[date]) -> int:
+        """在上游覆盖范围内用上游交易日集合安全替换本地日历。
+
+        先做完整性校验；本地有、上游没有的日期视为错误日期删除，上游新增的
+        日期补入。删除数量超过阈值时视为上游异常而中止，保留本地日历。
+
+        Args:
+            upstream_days: 上游交易日集合。
+            existing_dates: 本地 trading_calendar 已有日期。
+
+        Returns:
+            新增与删除的日期总数。
+
+        Raises:
+            TradingCalendarUnavailableError: 上游日历未通过完整性校验时抛出。
+            RuntimeError: 待删除日期超过安全阈值时抛出。
+        """
+        validate_calendar_completeness(upstream_days)
+        start, end = min(upstream_days), max(upstream_days)
+        removed = sorted(
+            day for day in existing_dates if start <= day <= end and day not in upstream_days
+        )
+        if len(removed) > _CALENDAR_REBUILD_MAX_REMOVALS:
+            raise RuntimeError(
+                f"上游日历与本地相差 {len(removed)} 个交易日（超过安全阈值 "
+                f"{_CALENDAR_REBUILD_MAX_REMOVALS}），已中止重建并保留本地日历："
+                f"{[day.isoformat() for day in removed[:10]]}"
+            )
+        if removed:
+            self._db.query(TradingCalendarModel).filter(
+                TradingCalendarModel.trade_date.in_(removed)
+            ).delete(synchronize_session=False)
+            logger.warning("日历重建删除本地错误交易日: %s", [d.isoformat() for d in removed])
+        added = sorted(upstream_days - existing_dates)
+        for trade_date in added:
+            self._db.add(TradingCalendarModel(trade_date=trade_date, is_trading_day=True))
+        return len(added) + len(removed)
 
     def _latest_source(self, model: Any, partition_key: str) -> str | None:
         """Return the latest persisted source for a partition, if available."""
@@ -1049,8 +1141,20 @@ class DataManagementService:
             )
 
     def _safe_replace_index_bars(self, service: Any, code: str) -> int:
-        """安全全量重拉单指数日线：先校验覆盖范围再删除写回。"""
+        """安全全量重拉单指数日线：先校验覆盖范围再删除写回。
+
+        与增量同步一致，写回前剔除落在非交易日的行（上游基日/假日行情），
+        否则重建会把这些行重新带回库内。
+        """
         bars, source = service._fetch_index_daily_multi_source(code)
+        bars, dropped = service._drop_non_trading_bars(bars)
+        if dropped:
+            logger.warning(
+                "重建剔除非交易日行情: index_code=%s 条数=%d 日期=%s",
+                code,
+                len(dropped),
+                [str(b.trade_date) for b in dropped[:5]],
+            )
         if not bars:
             raise RuntimeError(f"指数 {code} 未获取到可替换日线")
         existing_count, existing_min, existing_max = (
@@ -1112,12 +1216,31 @@ class DataManagementService:
         operation: str,
         *,
         local_calendar: bool = False,
+        run_status: str = "success",
+        run_errors: list[str] | None = None,
     ) -> list[DataHealthSnapshotModel]:
         """重算指定数据集范围的健康快照并持久化。
 
         无分区数据集（partition_label is None）的检查结果本身就是汇总行，
         直接以 "" 分区保存，不再二次聚合覆盖；只有分区数据集在整集检查时
         才重算汇总行，单分区检查只更新对应分区。
+
+        同步阶段的失败会如实写回：错误前缀命中分区键的分区标记为 failed，
+        汇总行记录数据集级运行状态（success/partial_success/failed）。
+        整集检查时，已不在当前可维护分区列表中的快照行（退市证券、移除的
+        指数）会被删除，不再拖累汇总状态；只删快照，不删行情数据。
+
+        Args:
+            definition: 数据集定义。
+            partition_key: 可选单分区。
+            run_id: 父运行 ID。
+            operation: 维护操作。
+            local_calendar: 是否只用本地日历快照。
+            run_status: 同步阶段的数据集级运行状态。
+            run_errors: 同步阶段收集的错误（形如 "分区: 错误信息"）。
+
+        Returns:
+            本次写入的分区快照。
         """
         partitions = [partition_key] if partition_key else self._partitions(definition.key)
         exact_missing = not (
@@ -1131,18 +1254,41 @@ class DataManagementService:
             .all()
         )
         existing = {row.partition_key: row for row in existing_rows}
-        upstream_ranges = (
-            {
-                key: list(getattr(row, "upstream_missing_ranges", None) or [])
-                for key, row in existing.items()
-                if key
-            }
-            if definition.key in _UPSTREAM_EXEMPT_DAILY_DATASETS
-            else None
-        )
+        if partition_key is None and definition.partition_label is not None and partitions:
+            active = set(partitions)
+            for key in [key for key in existing if key and key not in active]:
+                self._db.delete(existing.pop(key))
+        errors = list(run_errors or [])
+        partition_failures: dict[str, str] = {}
+        for error in errors:
+            scope, _, message = error.partition(":")
+            # 修复路径的错误形如 "000903/akshare: ..."，分区键取斜杠前的部分
+            scope = scope.split("/", 1)[0].strip()
+            if scope in existing or scope in partitions:
+                partition_failures.setdefault(scope, message.strip() or error)
+        upstream_ranges: dict[str, list[dict[str, Any]]] | None = None
+        close_only_ranges: dict[str, list[dict[str, Any]]] = {}
+        if definition.key in _UPSTREAM_EXEMPT_DAILY_DATASETS:
+            # "上游仅收盘价"区间与上游缺失区间共用存储，但只用于豁免字段异常；
+            # 不能交给缺口逻辑，否则会因日期"并不缺失"而被当作过期豁免清掉。
+            upstream_ranges = {}
+            for key, row in existing.items():
+                if not key:
+                    continue
+                ranges = list(getattr(row, "upstream_missing_ranges", None) or [])
+                close_only = [
+                    item
+                    for item in ranges
+                    if isinstance(item, dict) and item.get("source") == _CLOSE_ONLY_SOURCE
+                ]
+                upstream_ranges[key] = [item for item in ranges if item not in close_only]
+                if close_only:
+                    close_only_ranges[key] = close_only
         inspect_kwargs: dict[str, Any] = {}
         if upstream_ranges:
             inspect_kwargs["upstream_missing_by_partition"] = upstream_ranges
+        if close_only_ranges:
+            inspect_kwargs["close_only_by_partition"] = close_only_ranges
         if local_calendar:
             payloads = self._inspect_many(definition, partitions, local_calendar=True, **inspect_kwargs)
         elif not exact_missing:
@@ -1160,8 +1306,28 @@ class DataManagementService:
             payloads = self._inspect_many(definition, partitions, **inspect_kwargs)
         result: list[DataHealthSnapshotModel] = []
         for key, payload in payloads.items():
+            if close_only_ranges.get(key) and "upstream_missing_ranges" in payload:
+                payload = {
+                    **payload,
+                    "upstream_missing_ranges": list(payload["upstream_missing_ranges"] or [])
+                    + close_only_ranges[key],
+                }
+            if key:
+                failure = partition_failures.get(key)
+                status, last_error = ("failed", failure) if failure else ("success", None)
+            else:
+                # 无分区数据集的 "" 行就是汇总行，直接反映数据集级运行状态
+                status = run_status
+                last_error = "; ".join(errors[:5]) if errors else None
             snapshot = self._save_snapshot(
-                definition, key, run_id, operation, payload, existing.get(key)
+                definition,
+                key,
+                run_id,
+                operation,
+                payload,
+                existing.get(key),
+                run_status=status,
+                last_error=last_error,
             )
             result.append(snapshot)
         self._db.flush()
@@ -1175,7 +1341,15 @@ class DataManagementService:
             )
             .all()
         )
-        self._aggregate(definition, aggregate_rows, run_id, operation, existing.get(""))
+        self._aggregate(
+            definition,
+            aggregate_rows,
+            run_id,
+            operation,
+            existing.get(""),
+            run_status=run_status,
+            run_errors=errors,
+        )
         return result
 
     def _partitions(self, dataset_key: str) -> list[str]:
@@ -1221,6 +1395,7 @@ class DataManagementService:
         local_calendar: bool = False,
         exact_missing: bool = True,
         upstream_missing_by_partition: dict[str, list[dict[str, Any]]] | None = None,
+        close_only_by_partition: dict[str, list[dict[str, Any]]] | None = None,
     ) -> dict[str, dict[str, Any]]:
         """用聚合 SQL 一次计算一个数据集的所有分区健康指标。
 
@@ -1228,6 +1403,10 @@ class DataManagementService:
         由数据库完成行数、日期边界和字段异常计数。``exact_missing=False``
         用于日常同步：保留聚合缺口计数，但跳过每个问题分区的精确日历反
         连接；手动检查与修复仍使用精确模式。
+
+        指数/行业日线额外统计：非交易日行（计入字段异常）、成交量为 0 的行
+        （只提示不影响状态），以及落在"上游仅收盘价"确认区间内、仅因开高低
+        缺失而判错的行（从硬错误中豁免，改计为告警）。
         """
         model, partition_column, date_column, source_column = self._model_columns(definition.key)
         date_expression = cast(date_column, Date) if date_column is not None else None
@@ -1246,7 +1425,17 @@ class DataManagementService:
                     func.max(date_expression).label("latest_date"),
                 ]
             )
-        if source_column is not None:
+        is_bar_dataset = definition.key in {"index_daily_bar", "industry_daily_bar"}
+        if is_bar_dataset:
+            # 成交量为 0 多为来源不提供成交量（如 AkShare 历史），只作提示
+            columns.append(
+                func.coalesce(func.sum(case((model.volume == 0, 1), else_=0)), 0).label(
+                    "volume_zero_count"
+                )
+            )
+        if source_column is not None and definition.key in _STOCK_DAILY_DATASETS:
+            # 个股三张大表固定为 Tushare 单一来源，取最新行来源需再扫一次千万级
+            # 历史，这里沿用聚合最大值即可得到同一结论。
             columns.append(func.max(source_column).label("source_name"))
 
         if definition.partition_label is None:
@@ -1279,6 +1468,24 @@ class DataManagementService:
             if definition.key in _UPSTREAM_EXEMPT_DAILY_DATASETS and exact_missing
             else None
         )
+        latest_sources = (
+            self._latest_sources(definition.key, partitions)
+            if source_column is not None and definition.key not in _STOCK_DAILY_DATASETS
+            else {}
+        )
+        non_trading_counts = (
+            self._non_trading_counts(definition.key, partitions, calendar_days)
+            if is_bar_dataset
+            else {}
+        )
+        close_only_exempt = (
+            self._close_only_exempt_counts(
+                definition.key, close_only_by_partition or {}, calendar_days
+            )
+            if is_bar_dataset
+            else {}
+        )
+        partition_names = self._partition_names(definition.key, keys)
         result: dict[str, dict[str, Any]] = {}
         for key in keys:
             row = raw_rows.get(key)
@@ -1287,8 +1494,14 @@ class DataManagementService:
                 row.earliest_date if row is not None and date_expression is not None else None
             )
             latest = row.latest_date if row is not None and date_expression is not None else None
-            hard_errors = int(row.error_count) if row is not None else 0
-            warnings = int(row.warning_count) if row is not None else 0
+            raw_errors = int(row.error_count) if row is not None else 0
+            close_only_count = min(close_only_exempt.get(key, 0), raw_errors)
+            non_trading_count = non_trading_counts.get(key, 0)
+            hard_errors = raw_errors - close_only_count + non_trading_count
+            warnings = (int(row.warning_count) if row is not None else 0) + close_only_count
+            volume_zero_count = (
+                int(row.volume_zero_count) if row is not None and is_bar_dataset else 0
+            )
             range_start, range_end = self._coverage_bounds(
                 definition.key, earliest, latest, expected
             )
@@ -1356,23 +1569,34 @@ class DataManagementService:
                 reasons.append("missing_dates")
             if hard_errors:
                 reasons.append("invalid_values")
+            if non_trading_count:
+                reasons.append("non_trading_rows")
             if warnings:
                 reasons.append("warnings")
-            issues = {
+            issues: dict[str, Any] = {
                 "missing_count": missing,
                 "error_count": hard_errors,
                 "warning_count": warnings,
                 "reasons": reasons,
             }
+            if non_trading_count:
+                issues["non_trading_count"] = non_trading_count
+            if close_only_count:
+                issues["close_only_count"] = close_only_count
+            if volume_zero_count:
+                # 仅提示：不进入 reasons，也不影响健康状态
+                issues["volume_zero_count"] = volume_zero_count
             if missing_sample:
                 issues["missing_dates_sample"] = missing_sample
                 issues["missing_dates_truncated"] = missing > len(missing_sample)
+            if definition.key in _STOCK_DAILY_DATASETS:
+                source_name = row.source_name if row is not None else None
+            else:
+                source_name = latest_sources.get(key)
             result[key] = {
-                "partition_name": self._partition_name(definition.key, key),
+                "partition_name": partition_names.get(key),
                 "health_status": status,
-                "source_name": row.source_name
-                if row is not None and source_column is not None
-                else None,
+                "source_name": source_name,
                 "earliest_date": earliest,
                 "latest_date": latest,
                 "expected_date": expected,
@@ -1385,6 +1609,93 @@ class DataManagementService:
                 else None,
             }
         return result
+
+    def _latest_sources(self, dataset_key: str, partitions: list[str]) -> dict[str, str | None]:
+        """返回每个分区最新日期那一行的来源（即最近一次实际抓取的来源）。
+
+        Args:
+            dataset_key: 数据集键。
+            partitions: 分区列表；无分区数据集返回 {"": 来源}。
+
+        Returns:
+            {分区键: 来源}，无数据的分区不出现。
+        """
+        model, partition_column, date_column, source_column = self._model_columns(dataset_key)
+        if source_column is None or date_column is None:
+            return {}
+        if partition_column is None:
+            row = self._db.query(source_column).order_by(date_column.desc()).first()
+            return {"": row[0]} if row else {}
+        latest_by_key = self._db.query(
+            partition_column.label("partition_key"),
+            func.max(date_column).label("latest_date"),
+        )
+        if partitions:
+            latest_by_key = latest_by_key.filter(partition_column.in_(partitions))
+        latest_subquery = latest_by_key.group_by(partition_column).subquery()
+        rows = (
+            self._db.query(partition_column, func.max(source_column))
+            .join(
+                latest_subquery,
+                and_(
+                    partition_column == latest_subquery.c.partition_key,
+                    date_column == latest_subquery.c.latest_date,
+                ),
+            )
+            .group_by(partition_column)
+            .all()
+        )
+        return {str(key): source for key, source in rows}
+
+    def _non_trading_counts(
+        self, dataset_key: str, partitions: list[str], calendar_days: list[date]
+    ) -> dict[str, int]:
+        """统计指数/行业日线中落在非交易日的行数（只看本地日历覆盖范围内）。"""
+        if not calendar_days:
+            return {}
+        model, partition_column, date_column, _ = self._model_columns(dataset_key)
+        is_trading = (
+            select(TradingCalendarModel.trade_date)
+            .where(
+                TradingCalendarModel.trade_date == date_column,
+                TradingCalendarModel.is_trading_day.is_(True),
+            )
+            .exists()
+        )
+        query = self._db.query(partition_column, func.count()).filter(
+            date_column <= calendar_days[-1], ~is_trading
+        )
+        if partitions:
+            query = query.filter(partition_column.in_(partitions))
+        return {str(key): int(count) for key, count in query.group_by(partition_column).all()}
+
+    def _close_only_exempt_counts(
+        self,
+        dataset_key: str,
+        close_only_by_partition: dict[str, list[dict[str, Any]]],
+        calendar_days: list[date],
+    ) -> dict[str, int]:
+        """统计落在"上游仅收盘价"确认区间内、仅因开高低缺失判错的行数。"""
+        ranges_by_key = {key: ranges for key, ranges in close_only_by_partition.items() if ranges}
+        if not ranges_by_key:
+            return {}
+        _, partition_column, date_column, _ = self._model_columns(dataset_key)
+        dates_by_key = {
+            key: self._range_dates(ranges, calendar_days) for key, ranges in ranges_by_key.items()
+        }
+        rows = (
+            self._db.query(partition_column, date_column)
+            .filter(
+                partition_column.in_(list(ranges_by_key)),
+                self._ohlc_only_error_condition(dataset_key),
+            )
+            .all()
+        )
+        counts: dict[str, int] = {}
+        for key, trade_date in rows:
+            if trade_date in dates_by_key.get(str(key), set()):
+                counts[str(key)] = counts.get(str(key), 0) + 1
+        return counts
 
     @staticmethod
     def _coverage_bounds(
@@ -1658,8 +1969,15 @@ class DataManagementService:
             .all()
         )
         error_condition, _ = self._quality_conditions(dataset_key)
+        is_bar_dataset = dataset_key in {"index_daily_bar", "industry_daily_bar"}
+        # 指数/行业日线额外带出"仅因开高低缺失判错"标记，用于跳过已确认仅收盘价的行
+        ohlc_only_flag = (
+            case((self._ohlc_only_error_condition(dataset_key), True), else_=False)
+            if is_bar_dataset
+            else literal(False)
+        )
         invalid_rows = (
-            self._db.query(partition_column, date_column)
+            self._db.query(partition_column, date_column, ohlc_only_flag)
             .join(
                 bounds,
                 partition_column == bounds.c.partition_key,
@@ -1680,13 +1998,30 @@ class DataManagementService:
             )
             .all()
         }
+        # 每个分区的豁免区间只展开一次，避免逐行对整本日历重复展开
+        missing_exempt_by_key: dict[str, set[date]] = {}
+        close_only_by_key: dict[str, set[date]] = {}
+        for key, ranges in exemptions.items():
+            close_only = [
+                item
+                for item in ranges
+                if isinstance(item, dict) and item.get("source") == _CLOSE_ONLY_SOURCE
+            ]
+            missing_exempt_by_key[key] = self._range_dates(
+                [item for item in ranges if item not in close_only], calendar_days
+            )
+            close_only_by_key[key] = self._range_dates(close_only, calendar_days)
         targets: dict[str, set[date]] = {}
         for partition_key, trade_date in rows:
-            if force or trade_date not in self._range_dates(
-                exemptions.get(partition_key, []), calendar_days
-            ):
+            if force or trade_date not in missing_exempt_by_key.get(partition_key, set()):
                 targets.setdefault(partition_key, set()).add(trade_date)
-        for partition_key, trade_date in invalid_rows:
+        for partition_key, trade_date, ohlc_only in invalid_rows:
+            if (
+                not force
+                and ohlc_only
+                and trade_date in close_only_by_key.get(partition_key, set())
+            ):
+                continue
             targets.setdefault(partition_key, set()).add(trade_date)
         return targets
 
@@ -1915,10 +2250,21 @@ class DataManagementService:
         if dataset_key in {"index_daily_bar", "industry_daily_bar"}:
             prices = ("open_price", "high_price", "low_price", "close_price")
             try:
-                if any(getattr(item, name, None) is None or float(getattr(item, name)) <= 0 for name in prices):
+                # 上游缺价常以 NaN 表示：NaN <= 0 为 False，必须显式按非有限值判为无效，
+                # 否则"仅收盘价"的行会被当成完整行写回（入库时 NaN 清洗为 NULL）。
+                if any(
+                    getattr(item, name, None) is None
+                    or not math.isfinite(float(getattr(item, name)))
+                    or float(getattr(item, name)) <= 0
+                    for name in prices
+                ):
                     return False
                 change = getattr(item, "change_pct", None)
-                return change is None or abs(float(change)) <= 15
+                return (
+                    change is None
+                    or math.isnan(float(change))
+                    or abs(float(change)) <= _CHANGE_PCT_ERROR_LIMIT
+                )
             except (TypeError, ValueError):
                 return False
         if dataset_key == "index_valuation":
@@ -1935,20 +2281,50 @@ class DataManagementService:
                 return False
         return True
 
+    @staticmethod
+    def _close_only_repair_item(item: Any) -> bool:
+        """判断上游返回行是否"只有可用收盘价"：收盘价与涨跌幅合法但开高低缺失。
+
+        这类行可写入本地补足收盘价，并登记"上游仅收盘价"区间，
+        避免同一批日期在每次修复时被反复判为硬错误。
+        """
+        try:
+            close = getattr(item, "close_price", None)
+            if close is None or not math.isfinite(float(close)) or float(close) <= 0:
+                return False
+            change = getattr(item, "change_pct", None)
+            if change is not None and math.isfinite(float(change)) and (
+                abs(float(change)) > _CHANGE_PCT_ERROR_LIMIT or float(change) <= -99.99
+            ):
+                return False
+        except (TypeError, ValueError):
+            return False
+        return not DataManagementService._valid_repair_item("index_daily_bar", item)
+
     def _repair_index_daily_gaps(
         self, partition_key: str | None, service: Any, *, force: bool
     ) -> dict[str, Any]:
-        """按真实缺口窗口复验所有指数源，只写回目标日期。"""
+        """按真实缺口窗口复验所有指数源，只写回目标日期。
+
+        先删除分区内落在非交易日的行（上游把假期/基日打成行情），再复验缺口。
+        所有来源都只提供收盘价的日期，写入收盘价并登记为"上游仅收盘价"区间，
+        不再记为上游缺失，也不再在每次检查中判为硬错误。
+        """
         codes = [partition_key] if partition_key else self._partitions("index_daily_bar")
         calendar_days = self._calendar_days_until(self._latest_trading_day(local_only=True), local_calendar=True)
+        non_trading_removed = self._delete_non_trading_rows("index_daily_bar", codes, calendar_days)
+        # 清理单独提交，避免后续分区失败的回滚把它一起撤销
+        self._db.commit()
         targets_by_code = self._daily_gap_targets_for_repair(
             "index_daily_bar", codes, calendar_days, force=force
         )
-        records = confirmed = 0
+        records = confirmed = close_only_confirmed = 0
         errors: list[str] = []
         confirmed_by_code: dict[str, set[date]] = {}
+        close_only_by_code: dict[str, set[date]] = {}
         for index, (code, targets) in enumerate(sorted(targets_by_code.items()), start=1):
             selected: dict[date, tuple[Any, str]] = {}
+            close_only: dict[date, tuple[Any, str]] = {}
             request_failed = False
             sources = service._build_index_daily_sources()
             if not sources:
@@ -1965,12 +2341,29 @@ class DataManagementService:
                         errors.append(f"{code}/{source}: {type(exc).__name__}: {exc}")
                         continue
                     for bar in bars:
-                        if bar.trade_date in targets and self._valid_repair_item("index_daily_bar", bar):
+                        if bar.trade_date not in targets:
+                            continue
+                        if self._valid_repair_item("index_daily_bar", bar):
                             selected.setdefault(bar.trade_date, (bar, source))
-            for source in {source for _, source in selected.values()}:
-                bars = [bar for bar, row_source in selected.values() if row_source == source]
+                        elif self._close_only_repair_item(bar):
+                            close_only.setdefault(bar.trade_date, (bar, source))
+            # 只有全部来源都成功响应时，"仅收盘价"才是可信的上游结论
+            close_only = (
+                {}
+                if request_failed
+                else {day: item for day, item in close_only.items() if day not in selected}
+            )
+            for source in {source for _, source in [*selected.values(), *close_only.values()]}:
+                bars = [
+                    bar
+                    for bar, row_source in [*selected.values(), *close_only.values()]
+                    if row_source == source
+                ]
                 records += service._insert_index_bars(code, bars, source=source, overwrite=True)
-            absent = targets - set(selected)
+            if close_only:
+                close_only_by_code[code] = set(close_only)
+                close_only_confirmed += len(close_only)
+            absent = targets - set(selected) - set(close_only)
             if absent and not request_failed:
                 confirmed_by_code[code] = absent
                 confirmed += len(absent)
@@ -1980,12 +2373,56 @@ class DataManagementService:
             self._record_upstream_missing_dates_batch(
                 "index_daily_bar", confirmed_by_code, calendar_days, source="index_multi_source"
             )
+        if close_only_by_code:
+            self._record_upstream_missing_dates_batch(
+                "index_daily_bar", close_only_by_code, calendar_days, source=_CLOSE_ONLY_SOURCE
+            )
         return {
             "records": records,
             "errors": errors,
             "gaps_found": sum(len(days) for days in targets_by_code.values()),
             "upstream_missing_confirmed": confirmed,
+            "close_only_confirmed": close_only_confirmed,
+            "non_trading_removed": non_trading_removed,
         }
+
+    def _delete_non_trading_rows(
+        self, dataset_key: str, partition_keys: list[str], calendar_days: list[date]
+    ) -> int:
+        """删除指数/行业日线中落在非交易日的行，返回删除行数。
+
+        只处理本地日历覆盖范围内（不晚于最近交易日）的日期，避免日历尚未
+        同步到的新交易日被误删。
+
+        Args:
+            dataset_key: index_daily_bar 或 industry_daily_bar。
+            partition_keys: 需要清理的分区。
+            calendar_days: 本地交易日列表（升序）。
+
+        Returns:
+            删除的行数。
+        """
+        if not partition_keys or not calendar_days:
+            return 0
+        model, partition_column, date_column, _ = self._model_columns(dataset_key)
+        is_trading = (
+            select(TradingCalendarModel.trade_date)
+            .where(
+                TradingCalendarModel.trade_date == date_column,
+                TradingCalendarModel.is_trading_day.is_(True),
+            )
+            .exists()
+        )
+        deleted = (
+            self._db.query(model)
+            .filter(
+                partition_column.in_(partition_keys),
+                date_column <= calendar_days[-1],
+                ~is_trading,
+            )
+            .delete(synchronize_session=False)
+        )
+        return deleted if isinstance(deleted, int) else 0
 
     @staticmethod
     def _coalesce_repair_windows(
@@ -2008,7 +2445,7 @@ class DataManagementService:
     def _repair_index_valuation_gaps(
         self, partition_key: str | None, service: Any, *, force: bool
     ) -> dict[str, Any]:
-        """对缺口日期独立验证 Tushare/AkShare，避免首选源掩盖可用回退数据。"""
+        """对缺口日期独立验证 AkShare/Tushare，避免首选源掩盖可用回退数据。"""
         codes = [partition_key] if partition_key else self._partitions("index_valuation")
         calendar_days = self._calendar_days_until(self._latest_trading_day(local_only=True), local_calendar=True)
         targets_by_code = self._daily_gap_targets_for_repair(
@@ -2018,11 +2455,11 @@ class DataManagementService:
         errors: list[str] = []
         confirmed_by_code: dict[str, set[date]] = {}
         for index, (code, targets) in enumerate(sorted(targets_by_code.items()), start=1):
-            clients: list[tuple[str, Any]] = []
+            # 与日常同步一致：乐咕乐股（AkShare）为主来源，Tushare 只补主来源缺失的日期
+            clients: list[tuple[str, Any]] = [("akshare", AkShareIndexClient())]
             tushare = TushareIndexValuationClient()
             if tushare.is_configured() and tushare.supports(code):
                 clients.append(("tushare", tushare))
-            clients.append(("akshare", AkShareIndexClient()))
             selected: dict[date, Any] = {}
             request_failed = False
             for source, client in clients:
@@ -2056,9 +2493,17 @@ class DataManagementService:
     def _repair_industry_daily_gaps(
         self, partition_key: str | None, service: Any, *, force: bool
     ) -> dict[str, Any]:
-        """申万完整响应只对缺口目标写入，成功缺失则记录上游豁免。"""
+        """申万完整响应只对缺口目标写入，成功缺失则记录上游豁免。
+
+        复验前先删除分区内落在非交易日的行，口径与指数日线一致。
+        """
         codes = [partition_key] if partition_key else self._partitions("industry_daily_bar")
         calendar_days = self._calendar_days_until(self._latest_trading_day(local_only=True), local_calendar=True)
+        non_trading_removed = self._delete_non_trading_rows(
+            "industry_daily_bar", codes, calendar_days
+        )
+        # 清理单独提交，避免后续单行业失败的回滚把它一起撤销
+        self._db.commit()
         targets_by_code = self._daily_gap_targets_for_repair(
             "industry_daily_bar", codes, calendar_days, force=force
         )
@@ -2089,6 +2534,7 @@ class DataManagementService:
             "errors": errors,
             "gaps_found": sum(len(days) for days in targets_by_code.values()),
             "upstream_missing_confirmed": confirmed,
+            "non_trading_removed": non_trading_removed,
         }
 
     def _model_columns(self, dataset_key: str) -> tuple[type[Any], Any, Any, Any]:
@@ -2204,21 +2650,17 @@ class DataManagementService:
         """返回可由数据库执行的硬错误与告警条件。"""
         false = False
         if dataset_key in {"index_daily_bar", "industry_daily_bar"}:
-            model = (
-                IndexDailyBarModel if dataset_key == "index_daily_bar" else IndustryDailyBarModel
-            )
+            model = self._daily_bar_model(dataset_key)
             hard_error = or_(
-                func.abs(model.change_pct) > 15,
-                model.close_price.is_(None),
-                model.close_price <= 0,
-                model.open_price.is_(None),
-                model.open_price <= 0,
-                model.high_price.is_(None),
-                model.high_price <= 0,
-                model.low_price.is_(None),
-                model.low_price <= 0,
+                self._close_error_condition(model),
+                self._ohlc_error_condition(model),
             )
-            warning = (model.volume == 0) & (func.abs(model.change_pct) > 0.01)
+            # 2024-09/10 科创50、创业板50 等真实单日涨幅超过 15%，A 股指数
+            # 成分最大涨跌停为 30%；15%~30% 只作告警提示人工确认，不判为错误。
+            warning = and_(
+                func.abs(model.change_pct) > _CHANGE_PCT_WARNING_LIMIT,
+                func.abs(model.change_pct) <= _CHANGE_PCT_ERROR_LIMIT,
+            )
             return hard_error, warning
         if dataset_key == "index_valuation":
             return (
@@ -2288,6 +2730,41 @@ class DataManagementService:
                 IndustryMembershipEventModel.start_date.is_(None),
             ), false
         return false, false
+
+    @staticmethod
+    def _daily_bar_model(dataset_key: str) -> type[Any]:
+        """返回指数/行业日线数据集对应的 ORM 模型。"""
+        return IndexDailyBarModel if dataset_key == "index_daily_bar" else IndustryDailyBarModel
+
+    @staticmethod
+    def _close_error_condition(model: type[Any]) -> Any:
+        """收盘价或涨跌幅不可用的硬错误条件（无论是否有开高低价都成立）。"""
+        return or_(
+            model.close_price.is_(None),
+            model.close_price <= 0,
+            func.abs(model.change_pct) > _CHANGE_PCT_ERROR_LIMIT,
+            model.change_pct <= -99.99,
+        )
+
+    @staticmethod
+    def _ohlc_error_condition(model: type[Any]) -> Any:
+        """开盘/最高/最低价缺失或非正的硬错误条件。"""
+        return or_(
+            model.open_price.is_(None),
+            model.open_price <= 0,
+            model.high_price.is_(None),
+            model.high_price <= 0,
+            model.low_price.is_(None),
+            model.low_price <= 0,
+        )
+
+    def _ohlc_only_error_condition(self, dataset_key: str) -> Any:
+        """仅因开高低缺失而判错的行：收盘价与涨跌幅本身合法。
+
+        这类行若落在"上游仅收盘价"确认区间内，可从硬错误中豁免。
+        """
+        model = self._daily_bar_model(dataset_key)
+        return and_(self._ohlc_error_condition(model), not_(self._close_error_condition(model)))
 
     def _is_daily(self, dataset_key: str) -> bool:
         """判断数据集是否按交易日连续性统计缺口。"""
@@ -2377,8 +2854,29 @@ class DataManagementService:
         operation: str,
         payload: dict[str, Any],
         existing: DataHealthSnapshotModel | None = None,
+        *,
+        run_status: str = "success",
+        last_error: str | None = None,
     ) -> DataHealthSnapshotModel:
-        """写入或更新一条当前分区健康快照。"""
+        """写入或更新一条当前分区健康快照。
+
+        质量指标总是按本次检查结果重算；运行状态按同步结果写入：失败或部分
+        成功时把错误摘要写入 ``issue_summary.last_error``，且只有完全成功才
+        刷新 ``last_success_at``，避免把失败的抓取显示成"最近一次成功"。
+
+        Args:
+            definition: 数据集定义。
+            partition_key: 分区键（空串为汇总行）。
+            run_id: 运行 ID。
+            operation: 维护操作。
+            payload: 质量检查结果字段。
+            existing: 已加载的快照行。
+            run_status: success/partial_success/failed。
+            last_error: 失败时的错误摘要。
+
+        Returns:
+            快照 ORM 行。
+        """
         row = existing
         if row is None:
             row = (
@@ -2391,13 +2889,18 @@ class DataManagementService:
             self._db.add(row)
         for key, value in payload.items():
             setattr(row, key, value)
+        if last_error and run_status != "success":
+            summary = dict(row.issue_summary) if isinstance(row.issue_summary, dict) else {}
+            summary["last_error"] = last_error
+            row.issue_summary = summary
         now = utcnow()
         row.last_run_id = run_id
-        row.last_run_status = "success"
+        row.last_run_status = run_status
         row.last_checked_at = now
         if operation != "check":
             row.last_synced_at = now
-            row.last_success_at = now
+            if run_status == "success":
+                row.last_success_at = now
         return row
 
     def _aggregate(
@@ -2407,8 +2910,15 @@ class DataManagementService:
         run_id: str,
         operation: str,
         existing: DataHealthSnapshotModel | None = None,
+        *,
+        run_status: str = "success",
+        run_errors: list[str] | None = None,
     ) -> DataHealthSnapshotModel:
-        """按分区快照生成数据集级汇总行。"""
+        """按分区快照生成数据集级汇总行。
+
+        汇总行的运行状态取数据集级同步结果；分区失败数量与错误摘要写入
+        ``issue_summary``，便于在数据集层面直接看到部分失败。
+        """
         sources = {row.source_name for row in rows if row.source_name}
         status = "healthy"
         if any(row.health_status == "error" for row in rows):
@@ -2443,10 +2953,11 @@ class DataManagementService:
             reasons.add("invalid_values")
         if warning_count:
             reasons.add("warnings")
-        issue_summary = {
+        issue_summary: dict[str, Any] = {
             "partition_count": len(rows),
             "error_partitions": sum(row.health_status == "error" for row in rows),
             "warning_partitions": sum(row.health_status == "warning" for row in rows),
+            "failed_partitions": sum(row.last_run_status == "failed" for row in rows),
             "missing_count": missing_count,
             "missing_dates_sample": missing_dates_sample,
             "missing_dates_truncated": missing_count > len(missing_dates_sample),
@@ -2472,7 +2983,17 @@ class DataManagementService:
             "upstream_missing_ranges": [],
             "issue_summary": issue_summary if rows else {"reason": "尚未检查"},
         }
-        return self._save_snapshot(definition, "", run_id, operation, payload, existing)
+        errors = list(run_errors or [])
+        return self._save_snapshot(
+            definition,
+            "",
+            run_id,
+            operation,
+            payload,
+            existing,
+            run_status=run_status,
+            last_error="; ".join(errors[:5]) if errors else None,
+        )
 
     def _mark_failure(
         self, definition: DataSetDefinition, partition_key: str | None, run_id: str, message: str
@@ -2581,21 +3102,43 @@ class DataManagementService:
             raise ValueError(f"未知数据集: {dataset_key}")
         return _DATASET_BY_KEY[dataset_key]
 
-    def _partition_name(self, dataset_key: str, partition_key: str) -> str | None:
-        """解析可读的分区名称。"""
-        if not partition_key:
-            return None
-        if dataset_key in {"index_daily_bar", "index_valuation", "index_membership"}:
-            row = self._db.get(BenchmarkIndexModel, partition_key)
-            return row.name_cn if row else partition_key
-        if dataset_key in {"industry_daily_bar", "industry_membership"}:
-            row = self._db.get(IndustryUniverseModel, partition_key)
-            return row.name_cn if row else partition_key
-        if dataset_key in {
-            "stock_daily_close",
-            "stock_daily_basic",
-            "stock_moneyflow",
-        }:
-            row = self._db.get(StockUniverseModel, partition_key)
-            return row.name_cn if row else partition_key
-        return partition_key
+    def _partition_names(
+        self, dataset_key: str, partition_keys: list[str]
+    ) -> dict[str, str | None]:
+        """批量解析可读的分区名称。
+
+        按数据集一次查询名称字典，避免个股数据集逐分区 ``get`` 退化为上万次查询。
+
+        Args:
+            dataset_key: 数据集键。
+            partition_keys: 分区键列表（空串表示汇总行）。
+
+        Returns:
+            {分区键: 名称}；汇总行为 None，查不到名称时回退为分区键本身。
+        """
+        name_columns: dict[str, tuple[Any, Any]] = {
+            "index_daily_bar": (BenchmarkIndexModel.index_code, BenchmarkIndexModel.name_cn),
+            "index_valuation": (BenchmarkIndexModel.index_code, BenchmarkIndexModel.name_cn),
+            "index_membership": (BenchmarkIndexModel.index_code, BenchmarkIndexModel.name_cn),
+            "industry_daily_bar": (
+                IndustryUniverseModel.industry_code,
+                IndustryUniverseModel.name_cn,
+            ),
+            "industry_membership": (
+                IndustryUniverseModel.industry_code,
+                IndustryUniverseModel.name_cn,
+            ),
+        }
+        for key in _STOCK_DAILY_DATASETS:
+            name_columns[key] = (StockUniverseModel.stock_code, StockUniverseModel.name_cn)
+        keys = [key for key in partition_keys if key]
+        names: dict[str, str | None] = {}
+        if keys and dataset_key in name_columns:
+            code_column, name_column = name_columns[dataset_key]
+            names = {
+                str(code): name
+                for code, name in self._db.query(code_column, name_column)
+                .filter(code_column.in_(keys))
+                .all()
+            }
+        return {key: (names.get(key) or key) if key else None for key in partition_keys}
