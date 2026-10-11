@@ -87,7 +87,7 @@
               <input type="radio" v-model="scoreMissingStrategy" value="ignore" /> 忽略（重新归一化权重）
             </label>
             <label class="radio-opt">
-              <input type="radio" v-model="scoreMissingStrategy" value="zero" /> 按零处理
+              <input type="radio" v-model="scoreMissingStrategy" value="zero" /> 按最差处理（该因子记最低分）
             </label>
             <label class="radio-opt">
               <input type="radio" v-model="scoreMissingStrategy" value="exclude" /> 排除资产
@@ -323,11 +323,7 @@
         <div class="rank-grid">
           <div class="sub-field">
             <label class="sub-label">排序字段</label>
-            <select v-model="rankSortBy" class="fp-select">
-              <option value="score">综合得分</option>
-              <option value="momentum_rank">动量排名</option>
-              <option value="valuation_rank">估值排名</option>
-            </select>
+            <span class="threshold-hint">固定按综合得分排序；如需按某个因子排序，请把该因子加入评分模块。</span>
           </div>
           <div class="sub-field">
             <label class="sub-label">排序方向</label>
@@ -360,19 +356,19 @@
               placeholder="留空=不启用"
             />
           </div>
-          <div v-if="rankSortBy === 'momentum_rank'" class="sub-field">
-            <label class="sub-label">动量子因子</label>
+          <div class="sub-field">
+            <label class="sub-label">动量子排名因子（仅展示，可选）</label>
             <select v-model="rankMomentumFactor" class="fp-select">
-              <option value="" disabled>选择动量子因子</option>
+              <option value="">不展示</option>
               <option v-for="alias in declaredAliases" :key="alias" :value="alias">
                 {{ alias }}
               </option>
             </select>
           </div>
-          <div v-if="rankSortBy === 'valuation_rank'" class="sub-field">
-            <label class="sub-label">估值子因子</label>
+          <div class="sub-field">
+            <label class="sub-label">估值子排名因子（仅展示，可选，数值越低越靠前）</label>
             <select v-model="rankValuationFactor" class="fp-select">
-              <option value="" disabled>选择估值子因子</option>
+              <option value="">不展示</option>
               <option v-for="alias in declaredAliases" :key="alias" :value="alias">
                 {{ alias }}
               </option>
@@ -595,10 +591,10 @@
         <div v-if="selectionFrequency === 'biweekly'" class="sub-field">
           <label class="sub-label">选股腿周次</label>
           <select v-model="selectionWeekParity" class="fp-select">
-            <option value="odd">奇数周（ISO 周序）</option>
-            <option value="even">偶数周（ISO 周序）</option>
+            <option value="odd">奇数周（以 2016-01-04 所在周为第 1 周）</option>
+            <option value="even">偶数周（以 2016-01-04 所在周为第 1 周）</option>
           </select>
-          <span class="threshold-hint">双周必须指定奇/偶周：按 ISO 周序的奇偶决定哪一周调仓（第 1 周起算）。</span>
+          <span class="threshold-hint">双周必须指定奇/偶周：以 2016-01-04 所在周为第 1 周连续计数，奇偶决定哪一周调仓（不受跨年第 53 周影响）。</span>
         </div>
 
         <div v-if="selectionFrequency === 'monthly'" class="sub-field">
@@ -645,8 +641,8 @@
           <div v-if="riskFrequency === 'biweekly'" class="sub-field">
             <label class="sub-label">风险腿周次</label>
             <select v-model="riskWeekParity" class="fp-select">
-              <option value="odd">奇数周（ISO 周序）</option>
-              <option value="even">偶数周（ISO 周序）</option>
+              <option value="odd">奇数周（以 2016-01-04 所在周为第 1 周）</option>
+              <option value="even">偶数周（以 2016-01-04 所在周为第 1 周）</option>
             </select>
           </div>
           <div v-if="riskFrequency === 'monthly'" class="sub-field">
@@ -654,7 +650,7 @@
             <input v-model.number="riskDayOfMonth" type="number" min="1" max="28" class="fp-input" placeholder="1-28" />
           </div>
           <div class="threshold-hint">
-            提示：两腿日程不同时，选股腿日只替换成分、维持当前总仓位；总仓位仅在风险腿日按择时目标调整。
+            提示：两腿日程不同时，选股腿日只替换成分、维持当前总仓位；总仓位仅在风险腿日按择时目标调整。两种情况都会按风控单资产上限裁剪。
           </div>
         </template>
 
@@ -998,7 +994,6 @@ function removeFilterRule(i: number): void {
 }
 
 // ── 排名模块 ──────────────────────────────────────────────────────
-const rankSortBy = ref('score')
 const rankOrder = ref('desc')
 const rankTopN = ref<string>('')
 const rankBottomN = ref<string>('')
@@ -1008,7 +1003,6 @@ const rankValuationFactor = ref('')
 function initRank(): void {
   const rank = props.modelValue.rank as Record<string, unknown> | undefined
   if (!rank) return
-  rankSortBy.value = (rank.sort_by as string) || 'score'
   rankOrder.value = (rank.order as string) || 'desc'
   rankTopN.value = rank.top_n != null ? String(rank.top_n) : ''
   rankBottomN.value = rank.bottom_n != null ? String(rank.bottom_n) : ''
@@ -1145,12 +1139,6 @@ const errors = computed((): string[] => {
       }
     }
   }
-  if (rankSortBy.value === 'momentum_rank' && !rankMomentumFactor.value) {
-    errs.push('排名模块：按动量排名排序时必须选择动量子因子')
-  }
-  if (rankSortBy.value === 'valuation_rank' && !rankValuationFactor.value) {
-    errs.push('排名模块：按估值排名排序时必须选择估值子因子')
-  }
   return errs
 })
 
@@ -1256,17 +1244,13 @@ function buildConfig(): Record<string, unknown> {
 
   // 排名
   const rank: Record<string, unknown> = {
-    sort_by: rankSortBy.value,
     order: rankOrder.value,
   }
   if (rankTopN.value !== '') rank.top_n = parseInt(rankTopN.value, 10)
   if (rankBottomN.value !== '') rank.bottom_n = parseInt(rankBottomN.value, 10)
-  if (rankSortBy.value === 'momentum_rank' && rankMomentumFactor.value) {
-    rank.momentum_factor = rankMomentumFactor.value
-  }
-  if (rankSortBy.value === 'valuation_rank' && rankValuationFactor.value) {
-    rank.valuation_factor = rankValuationFactor.value
-  }
+  // 子排名因子仅用于结果展示，不参与排序
+  if (rankMomentumFactor.value) rank.momentum_factor = rankMomentumFactor.value
+  if (rankValuationFactor.value) rank.valuation_factor = rankValuationFactor.value
   config.rank = rank
 
   // 组合
@@ -1331,7 +1315,7 @@ watch(
     scoreFactors, scoreMissingStrategy, scoreScoringMode,
     timingEnabled, timingFactors, timingOffensive, timingDefensive, timingProxyIndexCodes,
     filterEnabled, filterLogic, filterRules,
-    rankSortBy, rankOrder, rankTopN, rankBottomN, rankMomentumFactor, rankValuationFactor,
+    rankOrder, rankTopN, rankBottomN, rankMomentumFactor, rankValuationFactor,
     portfolioMethod, portfolioDefaultExposure, exposureOffensive, exposureNeutral, exposureDefensive,
     riskEnabled, riskMaxAssetWeight, riskMaxPortfolioExposure, riskMinCashRatio,
     rebalanceEnabled, selectionFrequency, selectionDayOfWeek, selectionWeekParity, selectionDayOfMonth,

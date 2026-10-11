@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from quant_etf_api.factors.compute import FactorMatrix
 from quant_etf_api.engine.base import EngineContext, EngineResult
 from quant_etf_api.engine.config import (
     PortfolioConfig,
@@ -176,9 +177,9 @@ def _stub_loop_service(positions_by_index: list[dict[str, float]]) -> tuple[Back
         return_value=(universe, ["000300"], list(DATES), bars, {}, {})
     )
     svc._factor_provider = MagicMock()
-    svc._factor_provider.precompute_backtest_factors.return_value = {
+    svc._factor_provider.precompute_backtest_factors.return_value = FactorMatrix(values={
         d: {("000300", "return_5d"): 1.0} for d in DATES
-    }
+    })
     svc._context_builder = MagicMock()
     svc._context_builder.build.side_effect = lambda config, trade_date, **kw: EngineContext(
         trade_date=trade_date,
@@ -335,7 +336,7 @@ class TestPersistFalse:
         )
 
         svc._factor_provider.precompute_backtest_factors = MagicMock(
-            return_value={d: {("000300", "mom"): 1.0} for d in DATES}
+            return_value=FactorMatrix(values={d: {("000300", "mom"): 1.0} for d in DATES})
         )
         svc._run_backtest_loop("bt-1", ctx["row"], _variant(17), persist=False, caches=caches)
         assert svc._factor_provider.precompute_backtest_factors.call_count == 1

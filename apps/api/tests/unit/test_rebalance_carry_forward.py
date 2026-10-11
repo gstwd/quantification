@@ -234,46 +234,82 @@ class TestLegNormalization:
 
 
 class TestBiweeklySchedule:
-    """双周频率的奇偶周命中与顺延。"""
+    """双周频率的奇偶周命中与顺延。
 
-    def test_only_matching_iso_week_triggers(self) -> None:
-        """只有命中奇/偶 ISO 周的交易日才触发。"""
+    周次按锚点 2016-01-04 所在周为第 1 周连续计数（不使用 ISO 周号）。2020 年有
+    ISO 第 53 周，此后锚点周序与 ISO 周序奇偶相反：2025-01-10 是 ISO 第 2 周，
+    但按锚点计数为奇数周。
+    """
+
+    def test_only_matching_week_triggers(self) -> None:
+        """只有命中奇/偶周（锚点连续计数）的交易日才触发。"""
         scheduler = DefaultRebalanceScheduler(_Calendar(set()))
-        # 2025-01-10 是 ISO 第 2 周（偶）；2025-01-17 是第 3 周（奇）
+        # 2025-01-10 按锚点计数为奇数周；2025-01-17 为偶数周
         even = RebalanceScheduleConfig(frequency="biweekly", week_parity="even", day_of_week=4)
         odd = RebalanceScheduleConfig(frequency="biweekly", week_parity="odd", day_of_week=4)
-        assert scheduler.should_rebalance(even, date(2025, 1, 10))
-        assert not scheduler.should_rebalance(even, date(2025, 1, 17))
-        assert not scheduler.should_rebalance(odd, date(2025, 1, 10))
-        assert scheduler.should_rebalance(odd, date(2025, 1, 17))
+        assert scheduler.should_rebalance(odd, date(2025, 1, 10))
+        assert not scheduler.should_rebalance(odd, date(2025, 1, 17))
+        assert not scheduler.should_rebalance(even, date(2025, 1, 10))
+        assert scheduler.should_rebalance(even, date(2025, 1, 17))
+
+    def test_matches_iso_parity_before_2020_week53(self) -> None:
+        """锚点计数在 2020-W53 之前与 ISO 周序奇偶一致（历史研究期口径不变）。"""
+        scheduler = DefaultRebalanceScheduler(_Calendar(set()))
+        odd = RebalanceScheduleConfig(frequency="biweekly", week_parity="odd", day_of_week=4)
+        # 2019-01-11 是 ISO 第 2 周（偶），2019-01-18 是第 3 周（奇）
+        assert not scheduler.should_rebalance(odd, date(2019, 1, 11))
+        assert scheduler.should_rebalance(odd, date(2019, 1, 18))
+
+    def test_iso_week53_does_not_trigger_two_weeks_in_a_row(self) -> None:
+        """跨 2026-W53 年末时仍严格隔周触发（ISO 周号会让 W53 与次年 W1 同为奇数）。"""
+        scheduler = DefaultRebalanceScheduler(_Calendar(set()))
+        for parity in ("odd", "even"):
+            config = RebalanceScheduleConfig(
+                frequency="biweekly", week_parity=parity, day_of_week=4
+            )
+            fridays = [date(2026, 12, 25), date(2027, 1, 1), date(2027, 1, 8), date(2027, 1, 15)]
+            fired = [scheduler.should_rebalance(config, day) for day in fridays]
+            # 相邻两个周五恰有一个命中
+            assert all(a != b for a, b in zip(fired, fired[1:]))
 
     def test_holiday_target_carries_into_next_week(self) -> None:
         """命中周的周五休市 → 顺延到下周一（跨周顺延），且此后不再重复触发。"""
         scheduler = DefaultRebalanceScheduler(_Calendar({date(2025, 1, 10)}))
-        even = RebalanceScheduleConfig(frequency="biweekly", week_parity="even", day_of_week=4)
+        odd = RebalanceScheduleConfig(frequency="biweekly", week_parity="odd", day_of_week=4)
 
         # 01-13（周一）是 01-10（目标日）之后的第一个交易日 → 触发
-        assert scheduler.should_rebalance(even, date(2025, 1, 13)) is True
+        assert scheduler.should_rebalance(odd, date(2025, 1, 13)) is True
         # 此后 01-16 仍落在同一目标周窗口内但已非"之后第一个交易日" → 不触发；
         # 01-16 是交易日，因此顺延窗口在 01-16 关闭
-        assert scheduler.should_rebalance(even, date(2025, 1, 16)) is False
-        assert scheduler.should_rebalance(even, date(2025, 1, 14)) is False
-        # 下一个（奇数）周的周四不触发
-        assert scheduler.should_rebalance(even, date(2025, 1, 23)) is False
+        assert scheduler.should_rebalance(odd, date(2025, 1, 16)) is False
+        assert scheduler.should_rebalance(odd, date(2025, 1, 14)) is False
+        # 下一个（偶数）周的周四不触发
+        assert scheduler.should_rebalance(odd, date(2025, 1, 23)) is False
+
+    def test_long_holiday_carries_to_target_weekday_of_next_week(self) -> None:
+        """命中周目标日起连续休市一整周 → 顺延到下一周的目标 weekday 仍触发。
+
+        历史缺陷：非命中周回退 14 天会落到同奇偶的非命中周，顺延调仓被整体跳过。
+        """
+        holidays = {date(2025, 1, 10)} | {date(2025, 1, d) for d in range(13, 17)}
+        scheduler = DefaultRebalanceScheduler(_Calendar(holidays))
+        odd = RebalanceScheduleConfig(frequency="biweekly", week_parity="odd", day_of_week=4)
+        # 01-17（偶数周周五）是 01-10 之后第一个交易日
+        assert scheduler.should_rebalance(odd, date(2025, 1, 17)) is True
 
     def test_skipped_cycle_is_not_retriggered(self) -> None:
         """未命中周期的目标日即使休市也不在下个周期补触发。"""
-        # 2025-01-17（奇数周周五）休市 → 01-20（周一，仍是奇数周）顺延触发；
-        # 偶周配置不应在 01-20 触发（历史缺陷：跨周期误补触发）
+        # 2025-01-17（偶数周周五）休市 → 01-20（周一，奇数周）为偶周配置的顺延日；
+        # 奇周配置不应在 01-20 触发（历史缺陷：跨周期误补触发）
         scheduler = DefaultRebalanceScheduler(_Calendar({date(2025, 1, 17)}))
         even = RebalanceScheduleConfig(frequency="biweekly", week_parity="even", day_of_week=4)
         odd = RebalanceScheduleConfig(frequency="biweekly", week_parity="odd", day_of_week=4)
 
-        assert scheduler.should_rebalance(even, date(2025, 1, 20)) is False
-        assert scheduler.should_rebalance(odd, date(2025, 1, 20)) is True
-        # 下一个偶周（2025-01-24 周五）正常触发
-        assert scheduler.should_rebalance(even, date(2025, 1, 24)) is True
-        assert scheduler.should_rebalance(even, date(2025, 1, 27)) is False
+        assert scheduler.should_rebalance(odd, date(2025, 1, 20)) is False
+        assert scheduler.should_rebalance(even, date(2025, 1, 20)) is True
+        # 下一个奇周（2025-01-24 周五）正常触发
+        assert scheduler.should_rebalance(odd, date(2025, 1, 24)) is True
+        assert scheduler.should_rebalance(odd, date(2025, 1, 27)) is False
 
 
 class TestSelectActiveLegs:

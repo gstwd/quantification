@@ -23,7 +23,7 @@
 |------|------|------|--------|------|
 | `factors` | dict[str,float] | **是** | - | 因子权重，正=正向贡献，负=反向贡献 |
 | `transforms` | dict[str,str] | 否 | `{}` | 每因子的变换函数名 |
-| `missing_factor_strategy` | str | 否 | `"ignore"` | `ignore`(跳过)/`zero`(视为0)/`exclude`(排除资产) |
+| `missing_factor_strategy` | str | 否 | `"ignore"` | `ignore`(跳过)/`zero`(按最差处理)/`exclude`(评分前排除资产) |
 | `scoring_mode` | str | 否 | `"absolute"` | 评分模式 |
 
 ### 评分模式详解
@@ -80,7 +80,8 @@
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `sort_by` | str | 否 | `"score"` | 排序字段 |
+| `sort_by` | str | 否 | `"score"` | 仅支持 `score`；要按某因子排序就把它放进 `score.factors` |
+| `momentum_factor` / `valuation_factor` | str | 否 | null | 仅用于展示子排名，不参与排序 |
 | `order` | str | 否 | `"desc"` | `desc`(降序)/`asc`(升序) |
 | `top_n` | int | 否 | null | 取前 N 名，null = 全选 |
 | `bottom_n` | int | 否 | null | 取后 N 名（与 top_n 互斥） |

@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from quant_etf_api.factors.compute import FactorMatrix
 from quant_etf_api.domain.portfolio.scaling import (
     compose_two_leg_positions,
     scale_to_exposure,
@@ -104,6 +105,19 @@ class TestScaleToExposure:
         positions = {f"c{i}": 1.0 for i in range(7)}
         scaled = scale_to_exposure(positions, 0.5)
         assert sum(scaled.values()) <= 0.5
+
+
+class TestScaleToExposureCap:
+    """缩放后的单资产上限裁剪。"""
+
+    def test_scaling_up_respects_max_asset_weight(self) -> None:
+        """放大仓位时单资产不得越过上限，超出部分留作现金。"""
+        scaled = scale_to_exposure({"a": 0.1, "b": 0.1}, 0.8, max_asset_weight=0.3)
+        assert scaled == {"a": 0.3, "b": 0.3}
+
+    def test_no_cap_keeps_legacy_behavior(self) -> None:
+        """未配置上限时与历史口径一致。"""
+        assert scale_to_exposure({"a": 0.1, "b": 0.1}, 0.8) == {"a": 0.4, "b": 0.4}
 
 
 class TestComposeTwoLegPositions:
@@ -229,9 +243,9 @@ def _stub_loop_service(
         return_value=(universe, ["000300"], list(DATES), bars, {}, {})
     )
     svc._factor_provider = MagicMock()
-    svc._factor_provider.precompute_backtest_factors.return_value = {
+    svc._factor_provider.precompute_backtest_factors.return_value = FactorMatrix(values={
         d: {("000300", "return_5d"): 1.0} for d in DATES
-    }
+    })
     svc._context_builder = MagicMock()
     svc._context_builder.build.side_effect = lambda config, trade_date, **kw: EngineContext(
         trade_date=trade_date,
@@ -257,9 +271,10 @@ def _stub_loop_service(
             scores={"000300": 1.0},
             rankings=[],
             positions=positions,
-            total_exposure=exposure,
+            total_exposure=round(sum(positions.values()), 4),
             cash_ratio=round(1.0 - exposure, 4),
             strategy_results=[],
+            timing_target_exposure=exposure,
         )
 
     svc._engine = MagicMock()
@@ -293,6 +308,45 @@ def _config(rebalance: RebalanceConfig | None) -> StrategyConfig:
         risk=RiskConfig(max_asset_weight=1.0),
         rebalance=rebalance,
     )
+
+
+class TestComposeTwoLegFixes:
+    """双腿单独到期时的择时目标仓位与风控上限（审查问题 2、3 的回归）。"""
+
+    def test_risk_only_ignores_empty_selection(self) -> None:
+        """仅风险腿到期且当日无入选资产：按择时目标缩放现有持仓，不清仓。"""
+        positions = compose_two_leg_positions(
+            previous={"a": 0.4, "b": 0.4},
+            selection_target={},
+            timing_target_exposure=0.6,
+            should_select=False,
+            should_scale_risk=True,
+        )
+        assert positions == {"a": 0.3, "b": 0.3}
+
+    def test_risk_only_respects_max_asset_weight(self) -> None:
+        """仅风险腿把仓位放大时同样遵守单资产上限。"""
+        positions = compose_two_leg_positions(
+            previous={"a": 0.1, "b": 0.1},
+            selection_target={"c": 0.3},
+            timing_target_exposure=0.8,
+            should_select=False,
+            should_scale_risk=True,
+            max_asset_weight=0.3,
+        )
+        assert positions == {"a": 0.3, "b": 0.3}
+
+    def test_selection_only_respects_max_asset_weight(self) -> None:
+        """仅选股腿把新成分放大到旧仓位时不得越过单资产上限。"""
+        positions = compose_two_leg_positions(
+            previous={"a": 0.3, "b": 0.3, "c": 0.2},
+            selection_target={"d": 0.2},
+            timing_target_exposure=0.2,
+            should_select=True,
+            should_scale_risk=False,
+            max_asset_weight=0.3,
+        )
+        assert positions == {"d": 0.3}
 
 
 class TestLoopLegs:
@@ -379,6 +433,23 @@ class TestLoopLegs:
         assert rows[2].positions == {"a": 0.15, "b": 0.05}
         # 换手 = Σ|Δw|/2 = 上一日总仓位的一半（按 0.8→0.4→0.2 等比缩减）
         assert [row.turnover for row in rows] == [0.4, 0.2, 0.1]
+
+    def test_risk_only_day_keeps_holdings_when_engine_selects_nothing(self) -> None:
+        """风险腿日引擎无入选资产时，按择时目标仓位缩放现有成分而不是清仓。"""
+        config = _config(
+            RebalanceConfig(
+                selection={"frequency": "weekly", "day_of_week": 3},  # 周四
+                risk={"frequency": "daily"},
+            )
+        )
+        engine_positions = [{"a": 0.4, "b": 0.4}, {}, {}]
+        exposures = [0.8, 0.8, 0.4]
+        svc, ctx = _stub_loop_service(engine_positions, exposures)
+        svc._run_backtest_loop("bt-two-leg", ctx["row"], config)
+
+        rows = ctx["collected"]
+        assert rows[1].positions == {"a": 0.4, "b": 0.4}
+        assert rows[2].positions == {"a": 0.2, "b": 0.2}
 
     def test_identical_legs_follow_engine_components_every_day(self) -> None:
         """两腿同频（每日）时成分每日随引擎更新（等价改造前行为）。"""

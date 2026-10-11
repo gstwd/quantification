@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+from quant_etf_api.factors.compute import FactorMatrix
 from quant_etf_api.domain.portfolio.turnover import (
     TURNOVER_MODEL_DELTA_W,
     TURNOVER_MODEL_LEGACY,
@@ -78,9 +79,9 @@ def _stub_loop_service(positions_by_index: list[dict[str, float]]) -> tuple[Back
         return_value=(universe, ["000300"], list(DATES), bars, {}, {})
     )
     svc._factor_provider = MagicMock()
-    svc._factor_provider.precompute_backtest_factors.return_value = {
-        d: {("000300", "return_5d"): 1.0} for d in DATES
-    }
+    svc._factor_provider.precompute_backtest_factors.return_value = FactorMatrix(
+        values={d: {("000300", "return_5d"): 1.0} for d in DATES}
+    )
     svc._context_builder = MagicMock()
     svc._context_builder.build.side_effect = lambda config, trade_date, **kw: EngineContext(
         trade_date=trade_date,

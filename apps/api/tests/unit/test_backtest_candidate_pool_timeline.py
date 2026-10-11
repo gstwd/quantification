@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+from quant_etf_api.factors.compute import FactorMatrix
 from quant_etf_api.engine.base import EngineContext, EngineResult
 from quant_etf_api.engine.config import (
     PortfolioConfig,
@@ -131,9 +132,9 @@ def _stub_loop_service() -> tuple[BacktestService, Any]:
         return_value=(universe, ["000300", "000905"], list(DATES), bars, {}, {})
     )
     svc._factor_provider = MagicMock()
-    svc._factor_provider.precompute_backtest_factors.return_value = {
-        d: {("000300", "return_5d"): 1.0, ("000905", "return_5d"): 2.0} for d in DATES
-    }
+    svc._factor_provider.precompute_backtest_factors.return_value = FactorMatrix(
+        values={d: {("000300", "return_5d"): 1.0, ("000905", "return_5d"): 2.0} for d in DATES}
+    )
     seen: list[list[str]] = []
 
     def _build_context(config: StrategyConfig, trade_date: date, **kwargs: Any) -> EngineContext:

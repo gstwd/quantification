@@ -9,7 +9,7 @@ import logging
 from typing import Protocol
 
 from quant_etf_api.domain.strategies.models import AssetRanking, TimingSignal
-from quant_etf_api.engine.config import PortfolioConfig
+from quant_etf_api.engine.config import PortfolioConfig, RiskConfig
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,45 @@ _DEFAULT_TIMING_EXPOSURE: dict[str, float] = {
     "neutral": 0.50,
     "defensive": 0.20,
 }
+
+
+def resolve_target_exposure(config: PortfolioConfig, timing: TimingSignal | None) -> float:
+    """根据择时信号确定总仓位上限（各分配器共用的唯一实现）。
+
+    Args:
+        config: 组合配置。
+        timing: 择时信号，None 表示未配置择时。
+
+    Returns:
+        目标总仓位（0-1）：配置了 timing_exposure 时按 regime 取值，否则使用默认
+        regime 仓位表；未配置择时使用 default_exposure。
+    """
+    if timing and config.timing_exposure:
+        return config.timing_exposure.get(timing.regime, config.default_exposure)
+    if timing:
+        return _DEFAULT_TIMING_EXPOSURE.get(timing.regime, config.default_exposure)
+    return config.default_exposure
+
+
+def cap_target_exposure(exposure: float, risk: RiskConfig | None) -> float:
+    """按组合级风控上限裁剪目标总仓位。
+
+    只施加组合级约束（总仓位上限与最低现金比例）；单资产上限依赖具体成分，
+    由调用方在持仓层面裁剪。
+
+    Args:
+        exposure: 择时决定的目标总仓位。
+        risk: 风控配置，None 表示未配置。
+
+    Returns:
+        裁剪后的目标总仓位（4 位小数）。
+    """
+    if risk is None:
+        return round(exposure, 4)
+    return round(
+        min(exposure, risk.max_portfolio_exposure, 1.0 - risk.min_cash_ratio),
+        4,
+    )
 
 
 class WeightAllocator(Protocol):
@@ -56,19 +95,11 @@ class EqualWeightAllocator:
         if not rankings:
             return {}
 
-        total_exposure = self._get_total_exposure(config, timing)
+        total_exposure = resolve_target_exposure(config, timing)
         n = len(rankings)
         weight = total_exposure / n
 
         return {r.index_code: round(weight, 4) for r in rankings}
-
-    def _get_total_exposure(self, config: PortfolioConfig, timing: TimingSignal | None) -> float:
-        """根据择时信号确定总仓位上限。"""
-        if timing and config.timing_exposure:
-            return config.timing_exposure.get(timing.regime, config.default_exposure)
-        if timing:
-            return _DEFAULT_TIMING_EXPOSURE.get(timing.regime, config.default_exposure)
-        return config.default_exposure
 
 
 class ScoreWeightAllocator:
@@ -84,7 +115,7 @@ class ScoreWeightAllocator:
         if not rankings:
             return {}
 
-        total_exposure = self._get_total_exposure(config, timing)
+        total_exposure = resolve_target_exposure(config, timing)
 
         # 过滤得分为 0 或负数的
         eligible = [r for r in rankings if r.score > 0]
@@ -101,14 +132,6 @@ class ScoreWeightAllocator:
             positions[r.index_code] = round(weight, 4)
 
         return positions
-
-    def _get_total_exposure(self, config: PortfolioConfig, timing: TimingSignal | None) -> float:
-        """根据择时信号确定总仓位上限。"""
-        if timing and config.timing_exposure:
-            return config.timing_exposure.get(timing.regime, config.default_exposure)
-        if timing:
-            return _DEFAULT_TIMING_EXPOSURE.get(timing.regime, config.default_exposure)
-        return config.default_exposure
 
 
 class WinnerTakeAllAllocator:
@@ -136,18 +159,10 @@ class WinnerTakeAllAllocator:
         if not rankings:
             return {}
 
-        total_exposure = self._get_total_exposure(config, timing)
+        total_exposure = resolve_target_exposure(config, timing)
         winner = rankings[0]
 
         return {winner.index_code: round(total_exposure, 4)}
-
-    def _get_total_exposure(self, config: PortfolioConfig, timing: TimingSignal | None) -> float:
-        """根据择时信号确定总仓位上限。"""
-        if timing and config.timing_exposure:
-            return config.timing_exposure.get(timing.regime, config.default_exposure)
-        if timing:
-            return _DEFAULT_TIMING_EXPOSURE.get(timing.regime, config.default_exposure)
-        return config.default_exposure
 
 
 def build_allocator(method: str) -> WeightAllocator:

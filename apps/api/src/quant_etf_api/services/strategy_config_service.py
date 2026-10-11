@@ -9,7 +9,14 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from quant_etf_api.engine.config import SUPPORTED_SCHEMA_VERSIONS, StrategyConfig
+from quant_etf_api.engine.config import (
+    SUPPORTED_SCHEMA_VERSIONS,
+    FilterConfig,
+    PortfolioConfig,
+    RankConfig,
+    StrategyConfig,
+    iter_factor_refs,
+)
 from quant_etf_api.engine.transforms import list_transform_names
 from quant_etf_api.factors.catalog import (
     FactorResolutionError,
@@ -519,68 +526,29 @@ class StrategyConfigService:
             and config.timing.thresholds.defensive > config.timing.thresholds.offensive
         ):
             errors.append("timing.thresholds.defensive 不能大于 offensive")
-        portfolio_configs = [("portfolio", config.portfolio)]
-        portfolio_configs.extend(
-            (f"regime_rules.{regime}.portfolio", rule.portfolio)
+
+        # 顶层与各 regime 覆盖块共用同一套模块校验（枚举取值已由 Pydantic Literal 约束，
+        # 此处只做跨字段规则），避免"regime 覆盖里写错只在运行时才暴露"
+        blocks: list[tuple[str, FilterConfig | None, RankConfig | None, PortfolioConfig | None]] = [
+            ("", config.filters, config.rank, config.portfolio)
+        ]
+        blocks.extend(
+            (f"regime_rules.{regime}.", rule.filters, rule.rank, rule.portfolio)
             for regime, rule in config.regime_rules.items()
-            if rule.portfolio is not None
         )
-        valid_regimes = {"offensive", "neutral", "defensive"}
-        for path, portfolio in portfolio_configs:
-            if not portfolio.timing_exposure:
-                continue
-            unknown_regimes = set(portfolio.timing_exposure) - valid_regimes
-            if unknown_regimes:
-                errors.append(
-                    f"{path}.timing_exposure 包含未知 regime: " + ", ".join(sorted(unknown_regimes))
-                )
-            for regime, exposure in portfolio.timing_exposure.items():
-                if not 0.0 <= exposure <= 1.0:
-                    errors.append(f"{path}.timing_exposure.{regime} 必须在 [0, 1] 范围内")
+        for prefix, filters, rank, portfolio in blocks:
+            errors.extend(StrategyConfigService._filter_block_errors(prefix, filters))
+            errors.extend(StrategyConfigService._rank_block_errors(prefix, rank))
+            errors.extend(StrategyConfigService._portfolio_block_errors(prefix, portfolio))
+        if config.regime_rules and config.timing is None:
+            warnings.append(
+                "已配置 regime_rules 但未配置择时（timing）：regime 覆盖永远不会生效"
+            )
 
         # 评分权重校验
         for factor_id, weight in config.score.factors.items():
             if weight == 0:
                 warnings.append(f"因子 {factor_id} 权重为 0，将不参与评分")
-
-        # 过滤规则校验
-        valid_ops = {"gt", "lt", "gte", "lte", "eq", "neq", "between"}
-        valid_missing_strategies = {"pass", "fail", "exclude"}
-        if config.filters:
-            for rule in config.filters.rules:
-                if rule.op not in valid_ops:
-                    errors.append(f"过滤规则操作符 '{rule.op}' 不合法，可用: {valid_ops}")
-                if rule.missing_strategy not in valid_missing_strategies:
-                    errors.append(
-                        f"过滤规则 missing_strategy '{rule.missing_strategy}' 不合法，"
-                        f"可用: {sorted(valid_missing_strategies)}"
-                    )
-                # 跨因子比较校验：compare_to 与 value 二选一
-                has_value = rule.value is not None
-                has_compare = bool(rule.compare_to)
-                if has_value and has_compare:
-                    errors.append("过滤规则不能同时设置 value 和 compare_to，只能二选一")
-                if not has_value and not has_compare:
-                    errors.append("过滤规则必须设置 value 或 compare_to 其中之一")
-                if has_compare:
-                    if rule.op == "between":
-                        errors.append("between 操作符不支持跨因子比较（compare_to）")
-                else:
-                    if rule.op == "between" and not isinstance(rule.value, list):
-                        errors.append("between 操作符需要 list 类型的 value")
-
-        # 排名配置校验
-        if config.rank.top_n is not None and config.rank.bottom_n is not None:
-            errors.append("top_n 和 bottom_n 不能同时设置")
-        if config.rank.sort_by == "momentum_rank" and not config.rank.momentum_factor:
-            errors.append("rank.sort_by=momentum_rank 时必须设置 rank.momentum_factor")
-        if config.rank.sort_by == "valuation_rank" and not config.rank.valuation_factor:
-            errors.append("rank.sort_by=valuation_rank 时必须设置 rank.valuation_factor")
-
-        # 组合配置校验
-        valid_methods = {"equal_weight", "score_weight", "winner_take_all"}
-        if config.portfolio.method not in valid_methods:
-            errors.append(f"权重分配方法 '{config.portfolio.method}' 不合法，可用: {valid_methods}")
 
         # 风控配置校验
         if config.risk:
@@ -590,6 +558,26 @@ class StrategyConfigService:
                 errors.append("min_cash_ratio 必须在 [0, 1) 范围内")
             if config.risk.max_portfolio_exposure > 1 - config.risk.min_cash_ratio:
                 errors.append("max_portfolio_exposure 不能大于 1 - min_cash_ratio")
+            # 赢家通吃把全部仓位给一个资产：单资产上限低于择时仓位时会被静默裁剪
+            portfolios = [config.portfolio] + [
+                rule.portfolio for rule in config.regime_rules.values() if rule.portfolio
+            ]
+            for portfolio in portfolios:
+                if portfolio.method != "winner_take_all":
+                    continue
+                exposures = [portfolio.default_exposure]
+                if config.timing:
+                    exposures.extend(
+                        (portfolio.timing_exposure or {}).values()
+                        or (0.80, 0.50, 0.20)  # 与 portfolio._DEFAULT_TIMING_EXPOSURE 一致
+                    )
+                if config.risk.max_asset_weight < max(exposures):
+                    warnings.append(
+                        f"winner_take_all 的目标仓位最高 {max(exposures):.0%}，但 "
+                        f"risk.max_asset_weight={config.risk.max_asset_weight:.0%}："
+                        "单一持仓会被裁剪，超出部分留作现金"
+                    )
+                    break
 
         # 调仓配置校验（warning 级）：不阻塞历史配置，但显式提示口径歧义
         if config.rebalance:
@@ -619,6 +607,84 @@ class StrategyConfigService:
                 )
 
         return errors, warnings
+
+    @staticmethod
+    def _filter_block_errors(prefix: str, filters: FilterConfig | None) -> list[str]:
+        """校验一个过滤配置块的跨字段规则。
+
+        Args:
+            prefix: 配置路径前缀（顶层为空串，regime 覆盖为 ``regime_rules.<regime>.``）。
+            filters: 过滤配置，None 表示未配置。
+
+        Returns:
+            错误信息列表。
+        """
+        if filters is None:
+            return []
+        errors: list[str] = []
+        for index, rule in enumerate(filters.rules):
+            where = f"{prefix}filters.rules[{index}]"
+            # 跨因子比较校验：compare_to 与 value 二选一
+            has_value = rule.value is not None
+            has_compare = bool(rule.compare_to)
+            if has_value and has_compare:
+                errors.append(f"{where} 不能同时设置 value 和 compare_to，只能二选一")
+            if not has_value and not has_compare:
+                errors.append(f"{where} 必须设置 value 或 compare_to 其中之一")
+            if has_compare:
+                if rule.op == "between":
+                    errors.append(f"{where}：between 操作符不支持跨因子比较（compare_to）")
+            elif rule.op == "between":
+                if not isinstance(rule.value, list) or len(rule.value) != 2:
+                    errors.append(f"{where}：between 操作符需要 [min, max] 两元素 list")
+                elif rule.value[0] > rule.value[1]:
+                    errors.append(f"{where}：between 的下限不能大于上限")
+            elif isinstance(rule.value, list):
+                errors.append(f"{where}：{rule.op} 操作符需要单个数值 value")
+        return errors
+
+    @staticmethod
+    def _rank_block_errors(prefix: str, rank: RankConfig | None) -> list[str]:
+        """校验一个排名配置块的跨字段规则。
+
+        Args:
+            prefix: 配置路径前缀。
+            rank: 排名配置，None 表示未覆盖。
+
+        Returns:
+            错误信息列表。
+        """
+        if rank is None:
+            return []
+        if rank.top_n is not None and rank.bottom_n is not None:
+            return [f"{prefix}rank：top_n 和 bottom_n 不能同时设置"]
+        return []
+
+    @staticmethod
+    def _portfolio_block_errors(prefix: str, portfolio: PortfolioConfig | None) -> list[str]:
+        """校验一个组合配置块的择时仓位映射。
+
+        Args:
+            prefix: 配置路径前缀。
+            portfolio: 组合配置，None 表示未覆盖。
+
+        Returns:
+            错误信息列表。
+        """
+        if portfolio is None or not portfolio.timing_exposure:
+            return []
+        errors: list[str] = []
+        valid_regimes = {"offensive", "neutral", "defensive"}
+        unknown_regimes = set(portfolio.timing_exposure) - valid_regimes
+        if unknown_regimes:
+            errors.append(
+                f"{prefix}portfolio.timing_exposure 包含未知 regime: "
+                + ", ".join(sorted(unknown_regimes))
+            )
+        for regime, exposure in portfolio.timing_exposure.items():
+            if not 0.0 <= exposure <= 1.0:
+                errors.append(f"{prefix}portfolio.timing_exposure.{regime} 必须在 [0, 1] 范围内")
+        return errors
 
     def _factor_alias_errors(
         self,
@@ -672,26 +738,7 @@ class StrategyConfigService:
         Returns:
             去重后的引用名列表。
         """
-        refs: set[str] = set(config.score.factors or {})
-        if config.timing:
-            refs.update(config.timing.factors)
-        if config.filters:
-            for rule in config.filters.rules:
-                refs.add(rule.factor)
-                if rule.compare_to:
-                    refs.add(rule.compare_to)
-        if config.rank.momentum_factor:
-            refs.add(config.rank.momentum_factor)
-        if config.rank.valuation_factor:
-            refs.add(config.rank.valuation_factor)
-        for regime_rule in config.regime_rules.values():
-            if regime_rule.score:
-                refs.update(regime_rule.score.factors)
-            if regime_rule.filters:
-                for rule in regime_rule.filters.rules:
-                    refs.add(rule.factor)
-                    if rule.compare_to:
-                        refs.add(rule.compare_to)
+        refs = {ref for _module_key, _label, ref in iter_factor_refs(config)}
         return sorted(refs)
 
     def _factor_reference_errors(
@@ -710,58 +757,30 @@ class StrategyConfigService:
         Returns:
             错误信息列表。
         """
-        # 各消费点 → 因子引用列表；usage 校验按消费点匹配
-        module_refs: list[tuple[str, str, list[str]]] = [
-            ("score", "评分", list((config.score.factors or {}).keys())),
-        ]
-        if config.timing:
-            module_refs.append(("timing", "择时", list(config.timing.factors.keys())))
-        if config.filters:
-            rule_ids: list[str] = []
-            for rule in config.filters.rules:
-                rule_ids.append(rule.factor)
-                if rule.compare_to:
-                    rule_ids.append(rule.compare_to)
-            module_refs.append(("filter", "过滤", rule_ids))
-        rank_refs = [
-            ref for ref in (config.rank.momentum_factor, config.rank.valuation_factor) if ref
-        ]
-        module_refs.append(("rank", "排名子因子", rank_refs))
-        for regime_rule in config.regime_rules.values():
-            if regime_rule.score:
-                module_refs.append(("score", "regime 评分", list(regime_rule.score.factors.keys())))
-            if regime_rule.filters:
-                regime_ids: list[str] = []
-                for rule in regime_rule.filters.rules:
-                    regime_ids.append(rule.factor)
-                    if rule.compare_to:
-                        regime_ids.append(rule.compare_to)
-                module_refs.append(("filter", "regime 过滤", regime_ids))
-
+        # 各消费点 → 因子引用；usage 校验按消费点匹配（引用清单与因子加载同源）
         errors: list[str] = []
         seen: set[tuple[str, str]] = set()
-        for module_key, module_label, factor_refs in module_refs:
-            for ref in factor_refs:
-                if (module_key, ref) in seen:
-                    continue
-                seen.add((module_key, ref))
-                try:
-                    instance = registry.resolve(ref, config.factor_aliases)
-                except FactorResolutionError as exc:
-                    errors.append(str(exc))
-                    continue
-                template = instance.template
-                usage = list(template.usage)
-                if usage and module_key not in usage:
-                    errors.append(
-                        f"因子 {ref}（模板 {template.template_id}）不适用于{module_label}位置"
-                        f"（usage={usage}），请调整配置或选择其他因子"
-                    )
-                if template.template_id not in active_by_id:
-                    errors.append(
-                        f"因子 {ref} 指向的模板 {template.template_id} 已停用或未同步："
-                        "请运行 POST /factors/init 同步并确保 is_active=true"
-                    )
+        for module_key, module_label, ref in iter_factor_refs(config):
+            if (module_key, ref) in seen:
+                continue
+            seen.add((module_key, ref))
+            try:
+                instance = registry.resolve(ref, config.factor_aliases)
+            except FactorResolutionError as exc:
+                errors.append(str(exc))
+                continue
+            template = instance.template
+            usage = list(template.usage)
+            if usage and module_key not in usage:
+                errors.append(
+                    f"因子 {ref}（模板 {template.template_id}）不适用于{module_label}位置"
+                    f"（usage={usage}），请调整配置或选择其他因子"
+                )
+            if template.template_id not in active_by_id:
+                errors.append(
+                    f"因子 {ref} 指向的模板 {template.template_id} 已停用或未同步："
+                    "请运行 POST /factors/init 同步并确保 is_active=true"
+                )
         return errors
 
     @staticmethod
@@ -827,7 +846,8 @@ class StrategyConfigService:
         """从回测配置快照重建 StrategyConfig 对象。
 
         快照包含 strategy_id/display_name/version/frequency 等元数据与
-        config_json；解析失败（如快照损坏）时返回 None，由调用方回退到实时配置。
+        config_json；解析失败（如快照损坏）时返回 None。调用方必须把 None 视为
+        错误，不得回退到当前配置——否则结果与快照哈希记录的配置不一致。
 
         Args:
             snapshot: 回测快照字典。

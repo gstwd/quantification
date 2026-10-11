@@ -43,7 +43,8 @@ class TestBacktestPartialResults:
         """回测中途失败时，失败信息携带已保存的部分结果截止日期。"""
         db = mock.MagicMock()
         repo = mock.MagicMock()
-        repo.find_by_id.return_value = mock.MagicMock()
+        # 无配置快照的旧回测行：回退到当前配置（快照存在但损坏时必须报错）
+        repo.find_by_id.return_value = mock.MagicMock(config_snapshot=None)
         repo.find_latest_daily_date.return_value = date(2024, 6, 30)
         svc = BacktestService(db=db, backtest_repo=repo)
 

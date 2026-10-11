@@ -223,6 +223,21 @@ class StrategyDecisionService:
                 strategy_id,
                 missing,
             )
+        # 引擎在评分前剔除"决策所需因子缺失"的资产（与回测候选池同一口径）
+        if result.excluded:
+            excluded_codes = sorted(result.excluded)
+            warnings.append(
+                BacktestWarning(
+                    level="info",
+                    code="CANDIDATE_EXCLUDED",
+                    message=(
+                        f"{len(excluded_codes)} 个指数因决策所需因子缺失未参与本次决策："
+                        f"{'、'.join(excluded_codes[:5])}"
+                        f"{' 等' if len(excluded_codes) > 5 else ''}"
+                    ),
+                    trade_date=context.trade_date,
+                )
+            )
 
         elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
         logger.info(
@@ -241,6 +256,7 @@ class StrategyDecisionService:
                 "total_exposure": result.total_exposure,
                 "cash_ratio": result.cash_ratio,
                 "method": config.portfolio.method,
+                "timing_target_exposure": result.timing_target_exposure,
             },
             data_date=context.trade_date,
             pipeline_detail=asdict(result.pipeline_detail) if result.pipeline_detail else None,
@@ -377,6 +393,10 @@ class StrategyDecisionService:
                         is_rebalance_day=legs.selection or legs.risk,
                         is_selection_rebalance_day=legs.selection,
                         is_risk_rebalance_day=legs.risk,
+                        plan_mode=_plan_mode(legs.selection, legs.risk),
+                        timing_target_exposure=float(
+                            allocation.plan.get("timing_target_exposure", 0.0)
+                        ),
                         rebalance_frequency=selection_schedule.frequency,
                         rebalance_day_of_week=selection_schedule.day_of_week,
                         rebalance_day_of_month=selection_schedule.day_of_month,
@@ -393,3 +413,25 @@ class StrategyDecisionService:
                 continue
 
         return StarredSummaryResponse(trade_date=effective_date, items=items)
+
+
+def _plan_mode(selection_due: bool, risk_due: bool) -> str:
+    """把两腿到期情况映射为星标摘要的计划类型。
+
+    与回测 ``compose_two_leg_positions`` 的四象限一致：两腿同日为完整重建，
+    单腿到期时引擎给出的 plan 只代表"新成分"或"目标总仓位"中的一半信息。
+
+    Args:
+        selection_due: 选股腿当日是否到期。
+        risk_due: 风险腿当日是否到期。
+
+    Returns:
+        full / selection_only / risk_only / hold。
+    """
+    if selection_due and risk_due:
+        return "full"
+    if selection_due:
+        return "selection_only"
+    if risk_due:
+        return "risk_only"
+    return "hold"

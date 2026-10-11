@@ -185,7 +185,7 @@
             <div v-if="rankConfig" class="config-section">
               <div class="config-row">
                 <span class="config-key">排序</span>
-                <span class="config-val">{{ rankConfig.sort_by || 'score' }} {{ rankConfig.order || 'desc' }}</span>
+                <span class="config-val">综合得分 {{ rankConfig.order === 'asc' ? '升序' : '降序' }}</span>
               </div>
               <div v-if="rankConfig.top_n" class="config-row">
                 <span class="config-key">Top N</span>
@@ -590,7 +590,7 @@
                   <td class="mono">{{ r.index_code }}</td>
                   <td>{{ r.name_cn }}</td>
                   <td class="mono">{{ r.score?.toFixed(1) }}</td>
-                  <td>{{ r.category }}</td>
+                  <td>{{ r.category || '—' }}</td>
                 </tr>
               </tbody>
             </table>
@@ -961,7 +961,7 @@ const indexCodesList = computed(() => store.current?.index_codes ?? [])
 const scoreConfig = computed(() => configJson.value.score as { factors?: Record<string, number>; transforms?: Record<string, string>; missing_factor_strategy?: string; scoring_mode?: string } | undefined)
 const timingConfig = computed(() => configJson.value.timing as { factors?: Record<string, number>; transforms?: Record<string, string>; thresholds?: { offensive?: number; defensive?: number }; proxy_index_codes?: string[] } | undefined)
 const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string; missing_strategy?: string }> } | undefined)
-const rankConfig = computed(() => configJson.value.rank as { sort_by?: string; order?: string; top_n?: number; bottom_n?: number; momentum_factor?: string; valuation_factor?: string } | undefined)
+const rankConfig = computed(() => configJson.value.rank as { order?: string; top_n?: number; bottom_n?: number; momentum_factor?: string; valuation_factor?: string } | undefined)
 
 /** 因子别名声明：别名 → 模板与参数 */
 const factorAliasMap = computed(

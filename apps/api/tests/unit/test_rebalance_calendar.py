@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from quant_etf_api.factors.compute import FactorMatrix
 from quant_etf_api.domain.common.trading_calendar import (
     TradingCalendarUnavailableError,
 )
@@ -270,9 +271,9 @@ def _stub_loop_service(calendar_source: str) -> tuple[BacktestService, dict[str,
         return_value=(universe, ["000300"], list(DATES), bars, {}, {})
     )
     svc._factor_provider = MagicMock()
-    svc._factor_provider.precompute_backtest_factors.return_value = {
+    svc._factor_provider.precompute_backtest_factors.return_value = FactorMatrix(values={
         d: {("000300", "return_5d"): 1.0} for d in DATES
-    }
+    })
     svc._context_builder = MagicMock()
     svc._context_builder.build.side_effect = lambda config, trade_date, **kw: EngineContext(
         trade_date=trade_date,

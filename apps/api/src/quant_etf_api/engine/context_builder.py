@@ -58,6 +58,7 @@ class ContextBuilder:
         precomputed_factors: dict[tuple[str, str], float | None] | None = None,
         cached_universe: list[dict[str, Any]] | None = None,
         cached_metadata: dict[str, dict[str, Any]] | None = None,
+        market_shape_refs: set[str] | None = None,
     ) -> EngineContext:
         """构建引擎上下文（实时和回测统一入口）。
 
@@ -72,6 +73,8 @@ class ContextBuilder:
             precomputed_factors: 预计算的因子值字典（回测模式）。
             cached_universe: 预构建的 universe 列表（回测模式复用，避免每日重构）。
             cached_metadata: 预构建的 asset_metadata 字典（回测模式复用）。
+            market_shape_refs: 市场级因子引用（回测模式由调用方一次性解析后传入，
+                避免逐日重复解析）；实时模式自动解析。
 
         Returns:
             填充完成的 EngineContext。
@@ -85,6 +88,7 @@ class ContextBuilder:
                 precomputed_factors,
                 cached_universe,
                 cached_metadata,
+                market_shape_refs,
             )
         return self._build_live(config, trade_date)
 
@@ -92,6 +96,7 @@ class ContextBuilder:
         """识别本次决策中数据不足或计算失败的因子，供服务层生成结构化告警。
 
         引用无法解析属于配置错误，由配置校验期快速失败，不在此处报告。
+        覆盖资产级因子与择时（市场级）因子；仅用于展示的排名子因子缺失不告警。
 
         Args:
             context: 已构建的引擎上下文。
@@ -99,16 +104,23 @@ class ContextBuilder:
         Returns:
             {引用名: MissingReason 值} 映射，仅含未取到完整值的因子。
         """
-        index_codes = [item["index_code"] for item in context.universe]
-        if not index_codes:
-            return {}
-        if not context.asset_factors and not context.factor_failures:
-            return {}
-
         missing: dict[str, str] = {}
+        # 择时因子：代理指数口径取不到值时 regime 会降级，必须显式告警
+        for factor_ref, value in context.market_factors.items():
+            if value is None:
+                missing[factor_ref] = MissingReason.INSUFFICIENT_DATA.value
+
+        index_codes = [item["index_code"] for item in context.universe]
+        if not index_codes or (not context.asset_factors and not context.factor_failures):
+            if missing:
+                logger.info(
+                    "因子值不完整: trade_date=%s missing=%s", context.trade_date, missing
+                )
+            return missing
+
         failed = context.factor_failures
         keys = {factor_ref for _code, factor_ref in context.asset_factors}
-        for factor_ref in keys | failed:
+        for factor_ref in (keys | failed) - context.display_only_refs:
             if factor_ref in failed:
                 missing[factor_ref] = MissingReason.COMPUTE_FAILED.value
                 continue
@@ -138,8 +150,9 @@ class ContextBuilder:
         index_codes = self._filter_by_scope(indexes, config.index_codes)
 
         universe = build_universe_items(indexes, index_codes)
+        # benchmark_index 无分类字段：不再伪造 category，排名展示留空
         asset_metadata = {
-            idx.index_code: {"name_cn": idx.name_cn, "category": "broad_index"}
+            idx.index_code: {"name_cn": idx.name_cn}
             for idx in indexes
             if idx.index_code in index_codes
         }
@@ -156,6 +169,8 @@ class ContextBuilder:
             market_factors=market_factors,
             asset_metadata=asset_metadata,
             factor_failures=set(asset_matrix.failed),
+            market_shape_refs=set(self._factor_provider.market_shape_refs(config)),
+            display_only_refs=set(self._factor_provider.display_only_factor_ids(config)),
         )
 
     # ==================================================================
@@ -171,6 +186,7 @@ class ContextBuilder:
         precomputed_factors: dict[tuple[str, str], float | None] | None,
         cached_universe: list[dict[str, Any]] | None = None,
         cached_metadata: dict[str, dict[str, Any]] | None = None,
+        market_shape_refs: set[str] | None = None,
     ) -> EngineContext:
         """回测模式：使用当日预计算的因子值构建上下文。
 
@@ -192,7 +208,7 @@ class ContextBuilder:
         if cached_metadata is not None:
             asset_metadata = cached_metadata
         else:
-            asset_metadata = {code: {"name_cn": code, "category": "broad_index"} for code in codes}
+            asset_metadata = {code: {"name_cn": code} for code in codes}
 
         asset_factors: dict[tuple[str, str], float | None] = (
             dict(precomputed_factors) if precomputed_factors else {}
@@ -216,6 +232,7 @@ class ContextBuilder:
             asset_factors=asset_factors,
             market_factors=market_factors,
             asset_metadata=asset_metadata,
+            market_shape_refs=set(market_shape_refs or ()),
         )
 
     # ==================================================================

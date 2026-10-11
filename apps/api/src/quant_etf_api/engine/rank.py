@@ -65,7 +65,8 @@ class DefaultRankEngine:
         rankings: list[AssetRanking] = []
         for code, score in assets.items():
             meta = context.asset_metadata.get(code, {})
-            category_raw = meta.get("category", "broad_index")
+            # benchmark_index 没有分类字段：未提供分类时留空，不再伪造"宽基"标签
+            category_raw = meta.get("category") or ""
             category = _CATEGORY_LABELS.get(category_raw, category_raw)
             rankings.append(
                 AssetRanking(
@@ -76,9 +77,11 @@ class DefaultRankEngine:
                 )
             )
 
-        # 排序
-        reverse = config.order == "desc"
-        rankings.sort(key=lambda r: r.score, reverse=reverse)
+        # 排序：得分相同时按指数代码升序决定先后，结果不依赖 universe 的输入顺序
+        if config.order == "desc":
+            rankings.sort(key=lambda r: (-r.score, r.index_code))
+        else:
+            rankings.sort(key=lambda r: (r.score, r.index_code))
 
         # 截取
         if config.top_n is not None:
@@ -111,15 +114,15 @@ class DefaultRankEngine:
         for sub_rank, (idx, r) in enumerate(with_momentum, 1):
             rankings[idx].momentum_rank = sub_rank
 
-        # 估值排名（按估值吸引力降序，吸引力 = 100 - 因子值）
+        # 估值排名（按因子原值升序：数值越低越便宜，排名越前）。不再假设因子是
+        # 0-100 百分位并计算"100 - 值"；对百分位因子两者排序完全一致
         with_valuation = [
             (i, r)
             for i, r in enumerate(rankings)
             if context.asset_factors.get((r.index_code, valuation_factor)) is not None
         ]
         with_valuation.sort(
-            key=lambda x: 100 - (context.asset_factors.get((x[1].index_code, valuation_factor)) or 0),
-            reverse=True,
+            key=lambda x: context.asset_factors.get((x[1].index_code, valuation_factor)) or 0,
         )
         for sub_rank, (idx, r) in enumerate(with_valuation, 1):
             rankings[idx].valuation_rank = sub_rank

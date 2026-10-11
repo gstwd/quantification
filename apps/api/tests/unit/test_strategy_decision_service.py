@@ -53,6 +53,8 @@ class TestInsufficientFactorWarnings:
             total_exposure=0.0,
             cash_ratio=1.0,
             pipeline_detail=None,
+            excluded={},
+            timing_target_exposure=0.0,
         )
         svc.run = mock.MagicMock(return_value=fake_result)
 
@@ -80,6 +82,8 @@ class TestInsufficientFactorWarnings:
                 total_exposure=0.0,
                 cash_ratio=1.0,
                 pipeline_detail=None,
+                excluded={},
+                timing_target_exposure=0.0,
             )
         )
 
@@ -103,6 +107,8 @@ class TestInsufficientFactorWarnings:
                 total_exposure=0.0,
                 cash_ratio=1.0,
                 pipeline_detail=None,
+                excluded={},
+                timing_target_exposure=0.0,
             )
         )
 
@@ -146,6 +152,8 @@ class TestRunAllocation:
             total_exposure=0.0,
             cash_ratio=1.0,
             pipeline_detail=None,
+            excluded={},
+            timing_target_exposure=0.0,
         )
         svc.run = mock.MagicMock(return_value=fake_result)
 

@@ -132,6 +132,11 @@
             </span>
           </div>
 
+          <!-- 双腿计划说明：仅选股腿/仅风险腿到期时，下方持仓不是完整重建目标 -->
+          <div v-if="item.plan_mode === 'selection_only' || item.plan_mode === 'risk_only'" class="starred-row">
+            <span class="rebalance-detail">{{ formatPlanMode(item) }}</span>
+          </div>
+
           <!-- 择时信号 -->
           <div v-if="item.timing?.regime" class="starred-row">
             <span class="starred-label">择时</span>
@@ -582,6 +587,25 @@ function formatRebalanceLabel(
     return `每月${dayOfMonth}日调仓`
   }
   return '每日调仓'
+}
+
+/**
+ * 生成双腿单独到期时的操作说明。
+ *
+ * 系统不跟踪实盘持仓，仅风险腿到期时无法给出具体成分权重，只能说明目标总仓位；
+ * 仅选股腿到期时引擎给出的是新成分，实际应维持当前总仓位。
+ *
+ * @param item - 星标策略执行摘要
+ * @returns 面向用户的计划说明文字
+ */
+function formatPlanMode(item: StarredStrategyItem): string {
+  if (item.plan_mode === 'risk_only') {
+    return `仅风险腿到期：维持现有成分，总仓位调至 ${(item.timing_target_exposure * 100).toFixed(0)}%`
+  }
+  if (item.plan_mode === 'selection_only') {
+    return '仅选股腿到期：替换为下列成分，维持当前总仓位（按单资产上限裁剪）'
+  }
+  return ''
 }
 
 /** 格式化择时 regime */

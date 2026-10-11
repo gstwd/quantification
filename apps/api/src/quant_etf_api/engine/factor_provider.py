@@ -23,6 +23,8 @@ from quant_etf_api.factors.base import FactorContext
 from quant_etf_api.factors.catalog import FactorInstance, FactorTemplateRegistry
 from quant_etf_api.factors.compute import FactorComputeService, FactorMatrix
 
+from quant_etf_api.engine.config import iter_factor_refs
+
 if TYPE_CHECKING:
     from quant_etf_api.engine.config import StrategyConfig
 
@@ -57,60 +59,53 @@ class FactorProvider:
         )
 
     @staticmethod
-    def collect_required_factor_ids(config: "StrategyConfig") -> list[str]:
+    def collect_required_factor_ids(
+        config: "StrategyConfig", include_display: bool = False
+    ) -> list[str]:
         """从策略配置中收集所有需要的因子引用。
 
-        遍历 timing.factors、score.factors、filters.rules，
-        排名模块的动量/估值子因子（rank.momentum_factor / rank.valuation_factor），
-        以及 regime_rules 中所有 regime 的 score/filters 配置，
-        去重后返回完整的引用名列表。
+        引用清单统一来自 :func:`iter_factor_refs`（评分、择时、过滤及 regime 覆盖）。
+        排名模块的动量/估值子因子只用于结果展示，默认不收集：回测不展示子排名，
+        也不应把展示字段缺失误报为策略因子缺失；实时模式需要展示时传
+        ``include_display=True``。
+
+        Args:
+            config: 策略配置。
+            include_display: 是否包含仅用于展示的排名子因子。
+
+        Returns:
+            去重后的因子引用名列表（别名或模板 ID）。
+        """
+        return sorted(
+            {
+                ref
+                for module_key, _label, ref in iter_factor_refs(config)
+                if include_display or module_key != "rank"
+            }
+        )
+
+    @staticmethod
+    def display_only_factor_ids(config: "StrategyConfig") -> set[str]:
+        """返回仅用于展示（不参与决策）的因子引用。
 
         Args:
             config: 策略配置。
 
         Returns:
-            去重后的因子引用名列表（别名或模板 ID）。
+            只出现在排名子因子位置的引用集合。
         """
-        factor_ids: set[str] = set()
+        decision_refs = set(FactorProvider.collect_required_factor_ids(config))
+        display_refs = set(FactorProvider.collect_required_factor_ids(config, include_display=True))
+        return display_refs - decision_refs
 
-        # 评分因子
-        factor_ids.update(config.score.factors.keys())
-
-        # 择时因子
-        if config.timing:
-            factor_ids.update(config.timing.factors.keys())
-
-        # 过滤规则引用的因子（含跨因子比较的 compare_to）
-        if config.filters:
-            for rule in config.filters.rules:
-                factor_ids.add(rule.factor)
-                if rule.compare_to:
-                    factor_ids.add(rule.compare_to)
-
-        # 只有排名模块实际按子排名排序时，子因子才参与策略决策。
-        # 默认的动量/估值子排名仅用于结果展示，不应把展示字段缺失误报为策略因子缺失。
-        if config.rank.sort_by == "momentum_rank" and config.rank.momentum_factor:
-            factor_ids.add(config.rank.momentum_factor)
-        elif config.rank.sort_by == "valuation_rank" and config.rank.valuation_factor:
-            factor_ids.add(config.rank.valuation_factor)
-
-        # regime 条件化配置中引用的因子
-        for regime_rule in config.regime_rules.values():
-            if regime_rule.score:
-                factor_ids.update(regime_rule.score.factors.keys())
-            if regime_rule.filters:
-                for rule in regime_rule.filters.rules:
-                    factor_ids.add(rule.factor)
-                    if rule.compare_to:
-                        factor_ids.add(rule.compare_to)
-
-        return sorted(factor_ids)
-
-    def resolve_instances(self, config: "StrategyConfig") -> dict[str, FactorInstance]:
+    def resolve_instances(
+        self, config: "StrategyConfig", include_display: bool = False
+    ) -> dict[str, FactorInstance]:
         """把策略中的全部因子引用解析为模板实例。
 
         Args:
             config: 策略配置。
+            include_display: 是否包含仅用于展示的排名子因子。
 
         Returns:
             {引用名: FactorInstance}；引用无法解析时抛 FactorResolutionError。
@@ -118,8 +113,27 @@ class FactorProvider:
         if self._registry is None:
             return {}
         return self._registry.resolve_all(
-            self.collect_required_factor_ids(config), config.factor_aliases
+            self.collect_required_factor_ids(config, include_display=include_display),
+            config.factor_aliases,
         )
+
+    def market_shape_refs(self, config: "StrategyConfig") -> set[str]:
+        """返回解析结果为市场级（非资产级）模板的因子引用。
+
+        引擎按资产检查"因子缺失即剔除"时只针对资产级引用；市场级模板在资产维度
+        没有逐资产取值，不能作为剔除依据（与回测历史候选池口径一致）。
+
+        Args:
+            config: 策略配置。
+
+        Returns:
+            市场级引用名集合；未注入注册表时为空集。
+        """
+        return {
+            ref
+            for ref, instance in self.resolve_instances(config).items()
+            if instance.template.value_shape != "asset"
+        }
 
     def instance_fingerprint(self, config: "StrategyConfig") -> tuple[tuple[str, str, str], ...]:
         """给出「引用名 → 计算实例」的规范化指纹，用于跨变体缓存分区。
@@ -170,9 +184,9 @@ class FactorProvider:
             index_codes: 指数代码列表。
 
         Returns:
-            FactorMatrix，仅含 trade_date 一天。
+            FactorMatrix，仅含 trade_date 一天。实时模式同时计算排名展示子因子。
         """
-        instances = list(self.resolve_instances(config).values())
+        instances = list(self.resolve_instances(config, include_display=True).values())
         if not instances or not index_codes:
             return FactorMatrix()
         return self._service().compute_asset_factors(instances, trade_date, index_codes)
@@ -215,7 +229,7 @@ class FactorProvider:
         all_bars: dict[tuple[str, date], Any],
         all_valuation: dict[tuple[str, date], Any],
         all_macro: dict[str, dict[str, float]] | None = None,
-    ) -> dict[date, dict[tuple[str, str], float | None]]:
+    ) -> FactorMatrix:
         """回测模式：用预加载数据一次性计算区间内全部因子值。
 
         Args:
@@ -229,14 +243,16 @@ class FactorProvider:
                 避免前视偏差。
 
         Returns:
-            三维映射：date → (index_code, 引用名) → 因子数值。
+            FactorMatrix：``values`` 为 date → (index_code, 引用名) → 因子数值，
+            ``failed`` 为计算抛异常的引用名集合（供回测生成"计算失败"告警，
+            与"数据不足"区分）。
         """
         if self._compute is None:
             logger.warning("FactorProvider 未注入 db 或 registry，回测因子计算不可用")
-            return {}
+            return FactorMatrix()
         instances = list(self.resolve_instances(config).values())
         if not instances or not dates or not index_codes:
-            return {}
+            return FactorMatrix()
 
         # 批量因子使用预加载行情的完整交易日历：回测服务会向前预加载预热行情，
         # 若只用回测区间内的日期，复合因子（如 160 日扩散）会从回测首日重新计数。
@@ -276,7 +292,7 @@ class FactorProvider:
             round(filled / total_cells * 100, 2) if total_cells else 0.0,
             len(matrix.failed),
         )
-        return matrix.values
+        return matrix
 
     def _service(self) -> FactorComputeService:
         """返回现算服务。

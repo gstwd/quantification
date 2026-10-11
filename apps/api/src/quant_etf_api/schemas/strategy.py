@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -138,6 +138,13 @@ class StarredStrategyItem(BaseModel):
         display_name: 策略中文名称。
         frequency: 运行频率。
         is_rebalance_day: 是否为调仓日。
+        is_selection_rebalance_day: 选股腿当日是否到期。
+        is_risk_rebalance_day: 风险腿当日是否到期。
+        plan_mode: 当日计划类型。full=两腿同日（按 plan 完整重建）；
+            selection_only=只替换为 plan 中的成分、维持当前总仓位；
+            risk_only=维持现有成分、把总仓位调到 timing_target_exposure；
+            hold=非调仓日。系统不跟踪实盘持仓，单腿到期时 plan 不是完整执行目标。
+        timing_target_exposure: 择时决定的目标总仓位（已过风控上限，与当日选股结果无关）。
         rebalance_frequency: 调仓频率。
         rebalance_day_of_week: 周度调仓的星期几（0=周一）。
         rebalance_day_of_month: 月度调仓的日期（1-31）。
@@ -153,6 +160,8 @@ class StarredStrategyItem(BaseModel):
     is_rebalance_day: bool
     is_selection_rebalance_day: bool = False
     is_risk_rebalance_day: bool = False
+    plan_mode: Literal["full", "selection_only", "risk_only", "hold"] = "full"
+    timing_target_exposure: float = 0.0
     rebalance_frequency: str | None = None
     rebalance_day_of_week: int | None = None
     rebalance_day_of_month: int | None = None

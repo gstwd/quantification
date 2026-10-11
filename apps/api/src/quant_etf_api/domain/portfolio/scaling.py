@@ -23,12 +23,15 @@ _EXPOSURE_EPSILON = 1e-9
 def scale_to_exposure(
     positions: dict[str, float],
     target_exposure: float,
+    max_asset_weight: float | None = None,
 ) -> dict[str, float]:
     """保持成分与相对权重，把总仓位等比缩放到目标暴露。
 
     Args:
         positions: 现有持仓权重，key=index_code，value=权重（非正权重被丢弃）。
         target_exposure: 目标总仓位（0-1）。<=0 表示清仓。
+        max_asset_weight: 单资产仓位上限，None 表示不限制。缩放放大仓位时可能
+            越过风控上限，超出部分留作现金（与引擎风控"裁剪不再分配"的口径一致）。
 
     Returns:
         缩放后的持仓权重（4 位小数，非正权重已剔除）。
@@ -58,7 +61,12 @@ def scale_to_exposure(
         largest = max(scaled, key=lambda code: scaled[code])
         scaled[largest] = round(max(0.0, scaled[largest] - excess), 4)
 
-    # 3. 校正后可能产生 0 权重，顺带清理，避免落库出现 0 持仓
+    # 3. 单资产上限裁剪：只换成分维持旧仓位、或风险腿把仓位放大时，单个资产
+    #    可能越过风控上限；超出部分不再分配给其他资产，留作现金
+    if max_asset_weight is not None:
+        scaled = {code: min(weight, max_asset_weight) for code, weight in scaled.items()}
+
+    # 4. 校正后可能产生 0 权重，顺带清理，避免落库出现 0 持仓
     return {code: weight for code, weight in scaled.items() if weight > 0}
 
 
@@ -69,6 +77,7 @@ def compose_two_leg_positions(
     timing_target_exposure: float,
     should_select: bool,
     should_scale_risk: bool,
+    max_asset_weight: float | None = None,
 ) -> dict[str, float]:
     """按"选股腿换成分、风险腿缩仓位"合成当日目标持仓。
 
@@ -80,15 +89,21 @@ def compose_two_leg_positions(
     2. **仅选股腿到期**：换成新成分，并把总量缩放到调仓前的实际总仓位
        （只换成分、不调整暴露）。
     3. **仅风险腿到期**：保持现有成分与相对权重，等比缩放到择时目标总仓位；
-       现有仓位为空时不建仓（风险腿不负责选股）。
+       现有仓位为空时不建仓（风险腿不负责选股）。择时目标仓位只由 regime 与
+       组合级风控决定——当日过滤后无入选资产、或入选资产被单资产上限裁剪，都
+       不应让风险腿清仓或压低现有组合的仓位。
     4. **两腿都不到期**：维持现有持仓。
+
+    情形 2、3 缩放后都按单资产上限裁剪（超出部分留作现金）。
 
     Args:
         previous: 调仓前的实际持仓权重。
         selection_target: 引擎当日给出的目标持仓权重（已含择时目标仓位）。
-        timing_target_exposure: 引擎当日给出的目标总仓位。
+        timing_target_exposure: 择时目标总仓位（引擎 ``EngineResult.timing_target_exposure``，
+            已过组合级风控上限，与当日选股结果无关）。
         should_select: 选股腿当日是否到期。
         should_scale_risk: 风险腿当日是否到期。
+        max_asset_weight: 生效风控的单资产上限，None 表示未配置风控。
 
     Returns:
         合成后的当日目标持仓权重。
@@ -106,8 +121,8 @@ def compose_two_leg_positions(
             logger.debug("选股腿首次建仓，直接采用引擎目标仓位")
             return dict(selection_target)
         # 只换成分、不调整暴露：把新成分缩放到调仓前的实际总仓位
-        return scale_to_exposure(selection_target, previous_exposure)
+        return scale_to_exposure(selection_target, previous_exposure, max_asset_weight)
     if should_scale_risk:
         # 风险腿只动仓位：现有成分为空时不建仓
-        return scale_to_exposure(previous, timing_target_exposure)
+        return scale_to_exposure(previous, timing_target_exposure, max_asset_weight)
     return dict(previous)

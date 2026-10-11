@@ -26,6 +26,11 @@ from quant_etf_api.engine.config import (
 
 logger = logging.getLogger(__name__)
 
+# 双周奇偶周的计数锚点：2016-01-04（周一，研究期首个自然周）所在周记为第 1 周（奇数周）。
+# 不使用 ISO 周号：53 周年份（如 2020、2026）的第 53 周与次年第 1 周同为奇数周，
+# 会导致双周调仓连续两周触发。连续计数在 2020-W53 之前与 ISO 周序奇偶完全一致。
+_BIWEEKLY_ANCHOR_MONDAY = date(2016, 1, 4)
+
 
 @dataclass(frozen=True)
 class RebalanceLegs:
@@ -41,20 +46,23 @@ class RebalanceLegs:
 
 
 def _matches_week_parity(day: date, week_parity: str | None) -> bool:
-    """判断某个自然日所属的 ISO 周是否命中给定奇偶周。
+    """判断某个自然日所属的周是否命中给定奇偶周。
 
-    以 ISO 周序号跨年稳定锚定：``odd`` 命中奇数周、``even`` 命中偶数周，
-    其余取值按 ``even`` 处理（配置层已做枚举校验，此处为防守）。
+    以固定锚点周（``_BIWEEKLY_ANCHOR_MONDAY`` 所在周为第 1 周）连续计数，跨年
+    严格交替：``odd`` 命中奇数周、``even`` 命中偶数周，其余取值按 ``even`` 处理
+    （配置层已做枚举校验，此处为防守）。
 
     Args:
         day: 待判定的自然日。
         week_parity: ``odd`` / ``even`` / None。
 
     Returns:
-        该自然日所属 ISO 周是否命中。
+        该自然日所属周是否命中。
     """
     expected = 1 if week_parity == "odd" else 0
-    return day.isocalendar().week % 2 == expected
+    # 锚点周记为第 1 周；floor 除法对锚点之前的日期同样连续
+    week_number = (day - _BIWEEKLY_ANCHOR_MONDAY).days // 7 + 1
+    return week_number % 2 == expected
 
 
 class RebalanceScheduler(Protocol):
@@ -115,9 +123,9 @@ class DefaultRebalanceScheduler:
         - weekly：目标 weekday（默认 4=周五）取 current_date 所在自然周内不晚于
           current_date 的那一天，若该周尚未到目标 weekday，则取上一自然周的目标日；
           再判断 current_date 是否为目标日之后（含）的第一个交易日。
-        - biweekly：先按 ISO 周序奇偶判断目标周是否命中（``week_parity``），命中时与
-          weekly 同样顺延；未命中则整体前移一个周期（14 天）后再判定，因此**跳过的
-          周期里休市的目标日不会在下一个周期被补触发**。
+        - biweekly：先按锚点连续周序的奇偶判断目标周是否命中（``week_parity``），
+          命中时与 weekly 同样顺延；未命中则取上一周（即最近一个命中周）的目标日
+          再判定，使命中周目标日休市时仍能顺延到下一个开市日（哪怕跨入非命中周）。
         - monthly：目标 day_of_month（默认 1）同上；目标日超出当月天数时按当月
           最后一日处理。
 
@@ -156,8 +164,9 @@ class DefaultRebalanceScheduler:
             delta = (current_date.weekday() - target_day) % 7
             target_date = current_date - timedelta(days=delta)
             if not _matches_week_parity(target_date, schedule.week_parity):
-                # 非命中周期：整体前移一个双周周期，避免在"空周期"里误触发
-                target_date -= timedelta(days=14)
+                # 非命中周：回到上一周（必为命中周）的目标日。此前前移 14 天会落到
+                # 同奇偶的非命中周，使命中周目标日休市后的顺延调仓被整体跳过
+                target_date -= timedelta(days=7)
             return self._is_carried_target(current_date, target_date)
 
         if schedule.frequency == "monthly":

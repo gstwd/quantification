@@ -573,12 +573,18 @@ class StrategyLifecycleService:
             ``decay_min_required_n`` / ``decay_shortfall_n`` /
             ``decay_shortfall_months``，供前端区分"未确认衰减"与"没有证据"，
             并给出还需要积累多久。
+
+        Raises:
+            ValueError: 传入了冻结快照但解析失败时抛出（不回退到当前配置）。
         """
         config = (
             self._config_svc.parse_snapshot(config_snapshot)
             if config_snapshot is not None
             else self._config_svc.get_parsed_config(strategy_id)
         )
+        if config_snapshot is not None and config is None:
+            # 冻结快照损坏时不能退化为"无因子"分析，否则衰减证据会被静默清空
+            raise ValueError(f"策略 {strategy_id} 的冻结配置快照解析失败，无法计算衰减证据")
         factor_ids = list(config.score.factors) if config is not None else []
         forward_days = _selection_forward_days(config)
         composite = analyze_backtest_score_ic(

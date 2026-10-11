@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 from typing import Any
 
 from quant_etf_api.domain.common.signal_level import determine_signal_level
@@ -19,13 +20,49 @@ from quant_etf_api.domain.strategies.models import (
 from quant_etf_api.engine.base import EngineContext, EngineResult
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.engine.filter import DefaultFilterEngine, FilterEngine
-from quant_etf_api.engine.pipeline_detail import PipelineDetail
-from quant_etf_api.engine.portfolio import build_allocator
+from quant_etf_api.engine.pipeline_detail import AssetScoreDetail, PipelineDetail
+from quant_etf_api.engine.portfolio import (
+    build_allocator,
+    cap_target_exposure,
+    resolve_target_exposure,
+)
 from quant_etf_api.engine.rank import DefaultRankEngine, RankEngine
 from quant_etf_api.engine.risk import DefaultRiskManager, RiskManager
 from quant_etf_api.engine.score import CrossSectionScorer, DefaultScoreCalculator, ScoreCalculator
 
 logger = logging.getLogger(__name__)
+
+# 资产因决策所需因子缺失而在评分前被剔除的原因码（与回测候选池时间线一致）
+MISSING_FACTOR_REASON = "MISSING_FACTOR"
+
+
+def decision_required_refs(config: StrategyConfig) -> set[str]:
+    """推导"缺失即剔除资产"的因子引用（按生效配置，即 regime 覆盖之后）。
+
+    口径与各模块的缺失语义一致，只在缺失必然导致资产出局时提前剔除：
+
+    - 评分 ``missing_factor_strategy=exclude`` 的全部评分因子；
+    - AND 逻辑下 ``missing_strategy`` 为 fail/exclude 的过滤规则因子（含 compare_to）。
+
+    ignore / zero / pass 以及 OR 逻辑下的缺失交给各模块按原语义处理，不能在此
+    一刀切；其他 regime 专用的因子不在生效配置中，不会误伤资产。
+
+    Args:
+        config: 生效策略配置。
+
+    Returns:
+        需逐资产检查是否缺失的因子引用集合。
+    """
+    required: set[str] = set()
+    if config.score.missing_factor_strategy == "exclude":
+        required.update(config.score.factors)
+    if config.filters and config.filters.logic == "AND":
+        for rule in config.filters.rules:
+            if rule.missing_strategy in ("fail", "exclude"):
+                required.add(rule.factor)
+                if rule.compare_to:
+                    required.add(rule.compare_to)
+    return required
 
 
 class StrategyEngine:
@@ -92,8 +129,21 @@ class StrategyEngine:
         # 1.5 regime 条件化配置覆盖
         effective = self._resolve_regime_config(config, timing)
 
-        # 2. 资产评分（根据 scoring_mode 选择评分器）
+        # 1.6 剔除缺失决策必需因子的资产（实时与回测共用同一口径）。必须在横截面
+        #     评分之前进行：被剔除的资产不应参与 z-score/rank 的统计量
         scoring_debug: list[Any] = []
+        # 逐资产结果（StrategyResult）仍覆盖完整 universe：被剔除资产同样需要落一行
+        full_context = context
+        context, excluded = self._eligible_context(effective, context, scoring_debug)
+        if excluded:
+            logger.info(
+                "[pipeline] 因子缺失剔除: %s 剔除 %s 个 %s",
+                strategy_tag,
+                len(excluded),
+                sorted(excluded)[:5],
+            )
+
+        # 2. 资产评分（根据 scoring_mode 选择评分器）
         if effective.score.scoring_mode != "absolute":
             scores = CrossSectionScorer().calculate(effective.score, context, debug=scoring_debug)
         else:
@@ -158,6 +208,11 @@ class StrategyEngine:
 
         total_exposure = round(sum(positions.values()), 4)
         cash_ratio = round(1.0 - total_exposure, 4)
+        # 择时目标仓位：只由 regime 与组合级风控决定，不受当日选股结果（入选数量、
+        # 单资产裁剪）影响，供风险腿单独到期时缩放现有持仓
+        timing_target_exposure = cap_target_exposure(
+            resolve_target_exposure(effective.portfolio, timing), effective.risk
+        )
         logger.info(
             "[pipeline] 组合构建: %s method=%s 持仓数=%s total_exposure=%s cash_ratio=%s",
             strategy_tag,
@@ -176,7 +231,14 @@ class StrategyEngine:
         strategy_results: list[StrategyResult] = []
         if include_details:
             strategy_results = self._build_strategy_results(
-                effective, context, timing, scores, rankings, positions, total_exposure, cash_ratio
+                effective,
+                full_context,
+                timing,
+                scores,
+                rankings,
+                positions,
+                total_exposure,
+                cash_ratio,
             )
 
         # 8. 构建管线调试详情
@@ -204,7 +266,56 @@ class StrategyEngine:
             cash_ratio=cash_ratio,
             strategy_results=strategy_results,
             pipeline_detail=pipeline_detail,
+            timing_target_exposure=timing_target_exposure,
+            max_asset_weight=effective.risk.max_asset_weight if effective.risk else None,
+            effective_scoring_mode=effective.score.scoring_mode,
+            excluded=excluded,
         )
+
+    def _eligible_context(
+        self,
+        config: StrategyConfig,
+        context: EngineContext,
+        scoring_debug: list[Any],
+    ) -> tuple[EngineContext, dict[str, str]]:
+        """剔除决策必需因子缺失的资产，返回收窄 universe 后的上下文。
+
+        只检查资产级引用：市场级模板（``context.market_shape_refs``）没有逐资产
+        取值，不作为剔除依据。
+
+        Args:
+            config: 生效策略配置。
+            context: 原始上下文（不被修改）。
+            scoring_debug: 评分调试列表，被剔除资产的明细追加于此。
+
+        Returns:
+            (收窄后的上下文, {被剔除 index_code: 原因码})。无剔除时返回原上下文。
+        """
+        required = decision_required_refs(config) - context.market_shape_refs
+        if not required:
+            return context, {}
+        excluded: dict[str, str] = {}
+        kept: list[dict[str, Any]] = []
+        for item in context.universe:
+            code = item["index_code"]
+            missing = sorted(
+                ref for ref in required if context.asset_factors.get((code, ref)) is None
+            )
+            if missing:
+                excluded[code] = MISSING_FACTOR_REASON
+                scoring_debug.append(
+                    AssetScoreDetail(
+                        index_code=code,
+                        name_cn=item.get("name_cn", code),
+                        excluded=True,
+                        exclude_reason=f"决策所需因子缺失：{', '.join(missing)}",
+                    )
+                )
+            else:
+                kept.append(item)
+        if not excluded:
+            return context, {}
+        return replace(context, universe=kept), excluded
 
     def _run_timing(self, config: StrategyConfig, context: EngineContext) -> TimingSignal:
         """运行择时评估，返回 TimingSignal。"""
@@ -331,7 +442,7 @@ class StrategyEngine:
                     signal_level=level,
                     signal_label=label,
                     payload=payload,
-                    tags=[ranking.category if ranking else ""],
+                    tags=[ranking.category] if ranking and ranking.category else [],
                 )
             )
 

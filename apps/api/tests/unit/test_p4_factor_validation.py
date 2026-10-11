@@ -146,7 +146,6 @@ class TestCollectRequiredFactorIds:
                 ]
             ),
             rank=RankConfig(
-                sort_by="valuation_rank",
                 momentum_factor="return_120d",
                 valuation_factor="pb_percentile",
             ),
@@ -167,9 +166,11 @@ class TestCollectRequiredFactorIds:
         assert "return_20d" in ids
         assert "ma_20d" in ids
         assert "pe_percentile" in ids
-        # 当前按估值子排名排序，仅估值子因子参与策略决策。
+        # 排名固定按综合得分：子排名因子只用于展示，不参与决策
         assert "return_120d" not in ids
-        assert "pb_percentile" in ids
+        assert "pb_percentile" not in ids
+        display_ids = FactorProvider.collect_required_factor_ids(config, include_display=True)
+        assert {"return_120d", "pb_percentile"} <= set(display_ids)
         # regime 嵌套
         assert "volume_ratio" in ids
         assert "return_17d" in ids
@@ -181,7 +182,6 @@ class TestCollectRequiredFactorIds:
             display_name="测试",
             score=ScoreConfig(factors={"return_5d": 1.0}),
             rank=RankConfig(
-                sort_by="score",
                 momentum_factor="return_120d",
                 valuation_factor="pe_percentile",
             ),
@@ -309,12 +309,12 @@ class TestValidateConfig:
         assert any("未知变换函数 'no_such_transform'" in e for e in result.errors)
 
     def test_structural_errors_still_work(self) -> None:
-        """原有结构校验（非法操作符等）保持有效。"""
+        """原有结构校验（非法操作符等）保持有效：枚举由 schema 在解析阶段拒绝。"""
         cfg = _valid_config_json()
         cfg["filters"] = {"rules": [{"factor": "return_20d", "op": "whatever", "value": 0.0}]}
         result = _make_service().validate_config(cfg)
         assert not result.valid
-        assert any("操作符" in e for e in result.errors)
+        assert any("配置解析失败" in e and "op" in e for e in result.errors)
 
     def test_invalid_missing_strategy_rejected(self) -> None:
         """过滤规则 missing_strategy 非法值时校验失败。"""

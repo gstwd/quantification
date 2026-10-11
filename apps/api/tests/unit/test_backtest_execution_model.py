@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from quant_etf_api.factors.compute import FactorMatrix
 from quant_etf_api.domain.research.metrics import compute_performance_metrics
 from quant_etf_api.engine.base import EngineContext, EngineResult
 from quant_etf_api.engine.config import (
@@ -102,7 +103,7 @@ def _stub_service(
             value = None
         precomputed[d] = {("000300", "return_5d"): value}
     svc._factor_provider = MagicMock()
-    svc._factor_provider.precompute_backtest_factors.return_value = precomputed
+    svc._factor_provider.precompute_backtest_factors.return_value = FactorMatrix(values=precomputed)
 
     def _build_context(config: StrategyConfig, trade_date: date, **kwargs: Any) -> EngineContext:
         """返回最小可用上下文（标的池由候选池决定）。"""

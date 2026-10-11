@@ -174,7 +174,9 @@ def compute_rebalance_day_return(
     if next_date is None:
         return 0.0
     total_return = 0.0
-    for code in set(old_positions) | set(new_positions):
+    # 按代码排序遍历：集合迭代顺序随进程哈希种子变化，浮点累加顺序不同会让
+    # 四舍五入后的第 4 位小数在两次运行间不一致（同配置回测不可逐日复现）
+    for code in sorted(set(old_positions) | set(new_positions)):
         overnight, intraday = get_index_rebalance_legs(
             code, trade_date, next_date, all_bars
         )
@@ -241,7 +243,7 @@ def count_missing_rebalance_assets(
     if next_date is None:
         return 0
     count = 0
-    for code in set(old_positions) | set(new_positions):
+    for code in sorted(set(old_positions) | set(new_positions)):
         overnight, intraday = get_index_rebalance_legs(
             code, trade_date, next_date, all_bars
         )

@@ -221,8 +221,8 @@ class TestDefaultScoreCalculator:
         )
         scores = calc.calculate(config, context)
 
-        # (80*0.6 + 30*(-0.4)) / (0.6+0.4) = (48-12)/1 = 36.0
-        assert scores["000300"] == 36.0
+        # 负权重按 100 − 值参与加权：(80*0.6 + (100-30)*0.4) / (0.6+0.4) = 76.0
+        assert scores["000300"] == 76.0
 
     def test_score_clamped_0_100(self) -> None:
         """得分限制在 0-100 范围。"""
@@ -286,7 +286,7 @@ class TestCrossSectionScorer:
         assert "000300" in scores
 
     def test_zero_strategy_keeps_all_missing_asset(self) -> None:
-        """zero 策略：全部因子缺失仍按 0 参与评分，排除语义不生效。"""
+        """zero 策略：全部因子缺失仍按最差处理参与评分，排除语义不生效。"""
         calc = CrossSectionScorer()
         config = ScoreConfig(
             factors={"a": 0.6, "b": 0.4},
@@ -305,7 +305,7 @@ class TestCrossSectionScorer:
         scores = calc.calculate(config, context)
 
         assert "000905" in scores
-        # 未排除：正常参与排名，因 raw=0 得到最低排名分
+        # 未排除：正常参与排名，按最差处理得到严格最低的排名分
         assert scores["000905"] < scores["000300"]
 
     def test_ignore_partial_missing_keeps_asset(self) -> None:

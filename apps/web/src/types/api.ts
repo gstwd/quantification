@@ -968,6 +968,13 @@ export interface StarredStrategyItem {
   selection_rebalance_schedule: Record<string, unknown> | null
   /** 风险腿日程（两腿日程一致时等价于改造前的单腿口径） */
   risk_rebalance_schedule: Record<string, unknown> | null
+  /**
+   * 当日计划类型：full=两腿同日重建，selection_only=只换成分维持现有总仓位，
+   * risk_only=维持现有成分只把总仓位调到择时目标，hold=非调仓日
+   */
+  plan_mode: 'full' | 'selection_only' | 'risk_only' | 'hold'
+  /** 择时决定的目标总仓位（已过风控上限，与当日选股结果无关） */
+  timing_target_exposure: number
   timing: AllocationTiming | null
   rankings: AllocationRanking[]
   plan: AllocationPlan

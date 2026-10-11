@@ -1,7 +1,9 @@
 """回测候选池口径统一（B11）单元测试。
 
 覆盖：
-- `_build_candidate_pool` 的入池条件与剔除原因（缺收盘/缺因子/缺高低价/缺次日开盘）
+- `_build_candidate_pool` 的入池条件与剔除原因（缺收盘/缺高低价/缺次日开盘）；
+  "决策所需因子缺失"的剔除已移入引擎（实时与回测共用），主循环把引擎剔除合并进
+  候选池时间线，原因码仍为 MISSING_FACTOR
 - 回归：同一策略配置在 warn / strict 两种数据质量口径下逐日结果完全一致
   （历史缺陷：宽松口径把不可交易标的放进横截面 z-score 池，导致选股与绩效分叉）
 """
@@ -13,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+from quant_etf_api.factors.compute import FactorMatrix
 from quant_etf_api.engine.base import EngineContext, EngineResult
 from quant_etf_api.engine.config import (
     FilterConfig,
@@ -79,13 +82,9 @@ class TestBuildCandidatePool:
             ("000905", DATES[0]): _bar(200.0, 200.0),
             ("000905", DATES[1]): _bar(201.0, None),
         }
-        factors = {
-            ("000300", "return_5d"): 1.0,
-            ("000905", "return_5d"): 2.0,
-        }
 
         codes, reasons = svc._build_candidate_pool(
-            _config(), DATES[0], DATES[1], ["000300", "000905"], bars, factors, "t_plus_1_open"
+            _config(), DATES[0], DATES[1], ["000300", "000905"], bars, "t_plus_1_open"
         )
 
         assert codes == ["000300"]
@@ -100,16 +99,15 @@ class TestBuildCandidatePool:
             ("000905", DATES[0]): _bar(200.0, 200.0),
             ("000905", DATES[1]): _bar(201.0, None),
         }
-        factors = {("000300", "return_5d"): 1.0, ("000905", "return_5d"): 2.0}
 
         codes, _ = svc._build_candidate_pool(
-            _config(), DATES[0], DATES[1], ["000300", "000905"], bars, factors, "t_plus_1_close"
+            _config(), DATES[0], DATES[1], ["000300", "000905"], bars, "t_plus_1_close"
         )
 
         assert codes == ["000300", "000905"]
 
-    def test_excludes_missing_factor_and_missing_close(self) -> None:
-        """因子缺失记 MISSING_FACTOR，当日收盘缺失记 MISSING_CLOSE。"""
+    def test_pool_no_longer_checks_factors(self) -> None:
+        """候选池只判定行情：因子缺失不在此剔除（交由引擎），当日收盘缺失记 MISSING_CLOSE。"""
         svc = _make_service()
         bars = {
             ("000300", DATES[0]): _bar(100.0, 100.0),
@@ -118,11 +116,6 @@ class TestBuildCandidatePool:
             ("000905", DATES[1]): _bar(201.0, 201.0),
             ("399001", DATES[1]): _bar(300.0, 300.0),
         }
-        factors = {
-            ("000300", "return_5d"): 1.0,
-            ("000905", "return_5d"): None,
-            ("399001", "return_5d"): 3.0,
-        }
 
         codes, reasons = svc._build_candidate_pool(
             _config(),
@@ -130,12 +123,11 @@ class TestBuildCandidatePool:
             DATES[1],
             ["000300", "000905", "399001"],
             bars,
-            factors,
             "t_plus_1_open",
         )
 
-        assert codes == ["000300"]
-        assert reasons["000905"] == {"MISSING_FACTOR"}
+        assert codes == ["000300", "000905"]
+        assert "000905" not in reasons
         assert reasons["399001"] == {"MISSING_CLOSE"}
 
     def test_requires_high_low_for_atr_like_factors(self) -> None:
@@ -147,7 +139,6 @@ class TestBuildCandidatePool:
             ),
             ("000300", DATES[1]): _bar(101.0, 101.0),
         }
-        factors = {("000300", "atr"): 1.0}
 
         codes, reasons = svc._build_candidate_pool(
             _config(score_factors={"atr": 1.0}),
@@ -155,7 +146,6 @@ class TestBuildCandidatePool:
             DATES[1],
             ["000300"],
             bars,
-            factors,
             "t_plus_1_open",
         )
 
@@ -172,7 +162,6 @@ class TestBuildCandidatePool:
                 ),
                 ("000300", DATES[1]): _bar(101.0, 101.0),
             }
-            factors = {("000300", factor_id): 1.0}
 
             codes, reasons = svc._build_candidate_pool(
                 _config(score_factors={factor_id: 1.0}),
@@ -180,7 +169,6 @@ class TestBuildCandidatePool:
                 DATES[1],
                 ["000300"],
                 bars,
-                factors,
                 "t_plus_1_open",
             )
 
@@ -197,7 +185,6 @@ class TestBuildCandidatePool:
                 ),
                 ("000300", DATES[1]): _bar(101.0, 101.0),
             }
-            factors = {("000300", template_id): 1.0}
 
             codes, reasons = svc._build_candidate_pool(
                 _config(score_factors={template_id: 1.0}),
@@ -205,7 +192,6 @@ class TestBuildCandidatePool:
                 DATES[1],
                 ["000300"],
                 bars,
-                factors,
                 "t_plus_1_close",
             )
 
@@ -237,7 +223,6 @@ class TestBuildCandidatePool:
                 DATES[1],
                 ["000300"],
                 bars,
-                {("000300", template_id): 1.0},
                 "t_plus_1_close",
             )
             assert reasons["000300"] == {"MISSING_HIGH_LOW"}, template_id
@@ -251,10 +236,9 @@ class TestBuildCandidatePool:
             ("000905", DATES[0]): _bar(200.0, 200.0),
             # 000905 次日无行情
         }
-        factors = {("000300", "return_5d"): 1.0, ("000905", "return_5d"): 2.0}
 
         codes, reasons = svc._build_candidate_pool(
-            _config(), DATES[0], DATES[1], ["000300", "000905"], bars, factors, "t_plus_1_open"
+            _config(), DATES[0], DATES[1], ["000300", "000905"], bars, "t_plus_1_open"
         )
 
         assert codes == ["000300"]
@@ -269,7 +253,6 @@ class TestBuildCandidatePool:
                 close_price=101.0, open_price=101.0, high_price=None, low_price=None
             ),
         }
-        factors = {("000300", "atr"): 1.0}
 
         codes, reasons = svc._build_candidate_pool(
             _config(score_factors={"atr": 1.0}),
@@ -277,7 +260,6 @@ class TestBuildCandidatePool:
             DATES[1],
             ["000300"],
             bars,
-            factors,
             "t_plus_1_open",
         )
 
@@ -288,23 +270,21 @@ class TestBuildCandidatePool:
         """回测最后一日无下一交易日，不再校验次日行情。"""
         svc = _make_service()
         bars = {("000300", DATES[0]): _bar(100.0, None)}
-        factors = {("000300", "return_5d"): 1.0}
 
         codes, reasons = svc._build_candidate_pool(
-            _config(), DATES[0], None, ["000300"], bars, factors, "t_plus_1_open"
+            _config(), DATES[0], None, ["000300"], bars, "t_plus_1_open"
         )
 
         assert codes == ["000300"]
         assert reasons == {}
 
-    def test_filter_compare_to_factor_is_required(self) -> None:
-        """过滤规则 compare_to 引用的因子缺失时，标的同样被剔除。"""
+    def test_filter_compare_to_factor_is_not_checked_by_pool(self) -> None:
+        """compare_to 因子缺失不在候选池剔除（由引擎按过滤规则缺失语义处理）。"""
         svc = _make_service(template_ids=["close_price", "sma"])
         bars = {
             ("000300", DATES[0]): _bar(100.0, 100.0),
             ("000300", DATES[1]): _bar(101.0, 101.0),
         }
-        factors = {("000300", "close_price"): 100.0}  # ma_5d 缺失
         filters = FilterConfig(
             logic="AND",
             rules=[FilterRule(factor="close_price", op="gt", compare_to="ma_5d")],
@@ -316,12 +296,11 @@ class TestBuildCandidatePool:
             DATES[1],
             ["000300"],
             bars,
-            factors,
             "t_plus_1_open",
         )
 
-        assert codes == []
-        assert reasons["000300"] == {"MISSING_FACTOR"}
+        assert codes == ["000300"]
+        assert reasons == {}
 
 
 def _stub_service_for_loop(quality_mode: str) -> tuple[BacktestService, dict[str, Any]]:
@@ -352,7 +331,7 @@ def _stub_service_for_loop(quality_mode: str) -> tuple[BacktestService, dict[str
         d: {("000300", "return_5d"): 1.0, ("000905", "return_5d"): 2.0} for d in DATES
     }
     svc._factor_provider = MagicMock()
-    svc._factor_provider.precompute_backtest_factors.return_value = precomputed
+    svc._factor_provider.precompute_backtest_factors.return_value = FactorMatrix(values=precomputed)
 
     seen_universes: list[list[str]] = []
 

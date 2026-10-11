@@ -72,12 +72,17 @@ from quant_etf_api.domain.strategies.rebalance import (
     RebalanceLegs,
     select_active_legs,
 )
-from quant_etf_api.engine.config import RebalanceScheduleConfig, StrategyConfig
+from quant_etf_api.engine.config import (
+    RebalanceScheduleConfig,
+    StrategyConfig,
+    iter_factor_refs,
+)
 from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.orchestrator import StrategyEngine
 from quant_etf_api.engine.rebalance import DefaultRebalanceScheduler
 from quant_etf_api.factors.catalog import OHLC_DEPENDENT_TEMPLATE_IDS, FactorTemplateRegistry
+from quant_etf_api.factors.compute import FactorMatrix
 from quant_etf_api.infra.db.models.core import (
     BacktestComparisonModel,
     BacktestDailyResultModel,
@@ -148,14 +153,15 @@ class BacktestRunCaches:
 
     Attributes:
         data: 窗口键 → ``_prepare_backtest_data`` 结果元组。
-        factors: (窗口键, 计算实例指纹, 参与计算的指数集合) → 逐日预计算因子值。
+        factors: (窗口键, 计算实例指纹, 参与计算的指数集合) → 预计算因子矩阵
+            （逐日因子值 + 计算失败的引用）。
             指纹来自 :meth:`FactorProvider.instance_fingerprint`（模板 ID +
             规范化参数 + 模板版本），**不能只用因子引用名**——参数扰动下
             引用名不变而因子值不同。
     """
 
     data: dict[str, tuple] = field(default_factory=dict)
-    factors: dict[tuple[str, tuple[tuple[str, str, str], ...], str], dict] = field(
+    factors: dict[tuple[str, tuple[tuple[str, str, str], ...], str], FactorMatrix] = field(
         default_factory=dict
     )
 
@@ -1153,12 +1159,17 @@ class BacktestService:
                 self._backtest_repo.mark_running(backtest_id)
 
             # 加载策略配置：优先使用创建时的快照，保证结果可复现；
-            # 旧回测行无快照时回退到实时配置
+            # 旧回测行无快照时回退到实时配置。快照存在但解析失败时必须报错：
+            # 静默改用当前配置会让回测结果与其记录的配置哈希不一致
             config_svc = StrategyConfigService(self._db)
             config = None
             if getattr(row, "config_snapshot", None):
                 config = config_svc.parse_snapshot(row.config_snapshot)
-            if config is None:
+                if config is None:
+                    raise ValueError(
+                        f"回测 {backtest_id} 的配置快照解析失败，拒绝回退到当前配置"
+                    )
+            else:
                 config = config_svc.get_parsed_config(row.strategy_id)
             if config is None:
                 raise ValueError(f"策略 {row.strategy_id} 配置不存在")
@@ -1341,13 +1352,16 @@ class BacktestService:
             else tuple((ref, ref, "") for ref in sorted(required_factor_ids)),
             ",".join(sorted(factor_index_codes)),
         )
-        precomputed = caches.factors.get(factor_cache_key) if caches is not None else None
-        if precomputed is None:
-            precomputed = self._factor_provider.precompute_backtest_factors(
+        factor_matrix = caches.factors.get(factor_cache_key) if caches is not None else None
+        if factor_matrix is None:
+            factor_matrix = self._factor_provider.precompute_backtest_factors(
                 config, trading_dates, factor_index_codes, all_bars, all_valuation, all_macro
             )
             if caches is not None:
-                caches.factors[factor_cache_key] = precomputed
+                caches.factors[factor_cache_key] = factor_matrix
+        precomputed = factor_matrix.values
+        # 资产级"缺失即剔除"豁免市场级引用（与实时路径同一口径，由引擎统一执行）
+        market_shape_refs = set(self._factor_provider.market_shape_refs(config))
 
         # 记录实际回望天数与因子预热期（"前 N 个交易日因子数据不足"提示），
         # 写入回测 params 元数据，随 mark_success 一并持久化
@@ -1439,7 +1453,10 @@ class BacktestService:
         if config.index_codes:
             strategy_codes = set(config.index_codes)
             codes = [c for c in codes if c in strategy_codes]
-        cached_metadata = {code: {"name_cn": code, "category": "broad_index"} for code in codes}
+        # benchmark_index 无分类字段：不再伪造 category，排名展示留空
+        cached_metadata = {code: {"name_cn": code} for code in codes}
+        # 择时降级（择时因子全部缺失 → 按中性运行）的交易日，收尾时生成告警
+        timing_degraded_dates: list[date] = []
 
         for i, trade_date in enumerate(trading_dates):
             # 协作取消检查点（B2）：取消标记有短 TTL 缓存，不会每个交易日都查库
@@ -1453,16 +1470,11 @@ class BacktestService:
             # 候选池"。宽松模式此前把所有标的（含无法交易/因子缺失的标的）放进
             # 横截面 z-score 池，会改变统计量进而改变选股结果——同一配置在两种
             # 口径下得到完全不同的组合与收益，这是需要消除的口径分叉。
+            # 行情可执行性在此判定；"决策所需因子缺失"的剔除由引擎按生效配置执行
+            # （与实时路径同一实现），引擎执行后再合并进剔除记录
             day_codes, day_exclusion_reasons = self._build_candidate_pool(
-                config, trade_date, next_date, index_codes, all_bars, day_factors, execution_model
+                config, trade_date, next_date, index_codes, all_bars, execution_model
             )
-            for excluded_code in set(index_codes) - set(day_codes):
-                exclusion_dates.setdefault(excluded_code, []).append(trade_date)
-                exclusion_reasons.setdefault(excluded_code, set()).update(
-                    day_exclusion_reasons.get(excluded_code, {"DATA_EXCLUDED"})
-                )
-            # 逐日有效候选池规模（C6）：与剔除记录共用同一次池计算，零额外开销
-            pool_sizes.append(len(day_codes))
             day_universe = build_universe_items(
                 [{"index_code": c, "name_cn": c} for c in day_codes]
             )
@@ -1477,6 +1489,7 @@ class BacktestService:
                 precomputed_factors=day_factors,
                 cached_universe=day_universe,
                 cached_metadata=day_metadata,
+                market_shape_refs=market_shape_refs,
             )
 
             # 两条腿独立到期：选股腿改成分，风险腿仅按择时等比缩放总仓位。
@@ -1495,6 +1508,20 @@ class BacktestService:
             # 执行引擎（回测模式跳过详细的 StrategyResult 构建以提升性能）
             result = self._engine.run(config, context, include_details=False)
 
+            # 合并引擎的因子缺失剔除，得到当日最终有效候选池
+            for excluded_code, reason in result.excluded.items():
+                day_exclusion_reasons.setdefault(excluded_code, set()).add(reason)
+            eligible_codes = [code for code in day_codes if code not in result.excluded]
+            for excluded_code in set(index_codes) - set(eligible_codes):
+                exclusion_dates.setdefault(excluded_code, []).append(trade_date)
+                exclusion_reasons.setdefault(excluded_code, set()).update(
+                    day_exclusion_reasons.get(excluded_code, {"DATA_EXCLUDED"})
+                )
+            # 逐日有效候选池规模（C6）：与剔除记录共用同一次池计算，零额外开销
+            pool_sizes.append(len(eligible_codes))
+            if result.timing is not None and result.timing.factors.get("degraded"):
+                timing_degraded_dates.append(trade_date)
+
             target_positions = dict(result.positions) if result.positions else {}
             # 收盘模式先成交昨日指令，再合成今日指令；仅风险腿到期时必须沿用
             # 今日收盘成交后的成分，避免换回旧成分或将已清空的仓位重新建立。
@@ -1506,9 +1533,10 @@ class BacktestService:
             new_positions = compose_two_leg_positions(
                 previous=composition_positions,
                 selection_target=target_positions,
-                timing_target_exposure=result.total_exposure,
+                timing_target_exposure=result.timing_target_exposure,
                 should_select=should_select,
                 should_scale_risk=should_scale_risk,
+                max_asset_weight=result.max_asset_weight,
             )
             executed_positions = dict(prev_positions)
             next_positions = dict(prev_positions)
@@ -1630,8 +1658,9 @@ class BacktestService:
                 result,
                 all_bars,
                 result.positions if result.positions else {},
+                held_positions=executed_positions,
                 timing_regime=result.timing.regime if result.timing else None,
-                scoring_mode=config.score.scoring_mode,
+                scoring_mode=result.effective_scoring_mode,
                 selection_rebalanced=should_select,
                 persist=persist,
             )
@@ -1812,6 +1841,23 @@ class BacktestService:
                 required_factor_ids,
             )
         )
+        run_warnings.extend(
+            self._collect_compute_failure_warnings(
+                set(factor_matrix.failed) & set(required_factor_ids)
+            )
+        )
+        if timing_degraded_dates:
+            run_warnings.append(
+                BacktestWarning(
+                    level="warning",
+                    code="TIMING_DEGRADED",
+                    message=(
+                        f"择时因子在 {len(timing_degraded_dates)} 个交易日全部缺失"
+                        f"（{timing_degraded_dates[0]}~{timing_degraded_dates[-1]}），"
+                        "这些交易日按中性 regime 决定总仓位"
+                    ),
+                )
+            )
         logger.info(
             "[backtest] 缺失因子告警完成: backtest_id=%s factors=%s dates=%s indexes=%s "
             "warnings=%s 耗时=%.3fs",
@@ -2138,6 +2184,7 @@ class BacktestService:
         result: Any,
         all_bars: dict,
         signal_positions: dict[str, float],
+        held_positions: dict[str, float] | None = None,
         timing_regime: str | None = None,
         scoring_mode: str = "absolute",
         selection_rebalanced: bool = True,
@@ -2147,7 +2194,11 @@ class BacktestService:
 
         与实时 `_build_strategy_results` 共用同一 `determine_signal_level` 输入：
         score=当日综合得分、target_weight=当日目标权重（result.positions）、
-        timing_regime=当日择时 regime、scoring_mode=策略评分模式。
+        timing_regime=当日择时 regime、scoring_mode=regime 覆盖后生效的评分模式。
+
+        ``in_portfolio`` 与信号准确率按**当日实际持仓**（``held_positions``）统计，
+        与"持仓资产次日正收益占比"的指标定义一致；非调仓日引擎目标与实际持仓
+        不同，``target_weight`` 列仍记录引擎目标权重供诊断。
 
         落库范围是当日 universe 全量标的，而 `result.scores` 只含通过候选池与
         过滤规则的资产（过滤器会从 scores 中删除未通过的资产）。两者的差集用
@@ -2162,8 +2213,9 @@ class BacktestService:
             result: 引擎执行结果。
             all_bars: 行情数据。
             signal_positions: 当日目标权重。
+            held_positions: 当日实际持仓（None 时退化为目标权重，兼容旧调用）。
             timing_regime: 当日择时 regime。
-            scoring_mode: 策略评分模式。
+            scoring_mode: regime 覆盖后生效的评分模式。
             selection_rebalanced: 当日是否执行选股调仓；组合分数 IC 只评估这类日期。
             persist: False 时只统计持仓命中数（信号准确率），不写指数结果行
                 （D-1 研究批量评估路径）。
@@ -2174,6 +2226,7 @@ class BacktestService:
         score_map = result.scores
         in_pos_count = 0
         in_pos_positive = 0
+        holdings = signal_positions if held_positions is None else held_positions
 
         for item in universe:
             code = item["index_code"]
@@ -2188,7 +2241,7 @@ class BacktestService:
                 timing_regime=timing_regime,
                 scoring_mode=scoring_mode,
             )
-            in_portfolio = target_weight > 0
+            in_portfolio = holdings.get(code, 0.0) > 0
             signal_score = round(score, 2)
 
             idx_ret = None
@@ -2237,7 +2290,6 @@ class BacktestService:
         next_date: date | None,
         index_codes: list[str],
         all_bars: dict,
-        day_factors: dict[tuple[str, str], float | None],
         execution_model: str,
     ) -> tuple[list[str], dict[str, set[str]]]:
         """构建当日"可执行候选池"（横截面评分/排名/过滤与收益口径的唯一入口）。
@@ -2248,7 +2300,8 @@ class BacktestService:
 
         入池条件（全部满足）：
         1. 当日 bar 存在且收盘价有效；
-        2. 策略引用的资产级因子（评分 + 过滤 + compare_to + regime 覆盖）当日均有值；
+        2. （已移至引擎）"决策所需因子缺失"的剔除由 ``StrategyEngine`` 按 regime
+           生效配置与各模块缺失语义统一执行，实时与回测共用；
         3. 若引用 ATR/Donchian/月线等因子，则当日最高/最低价有效；
         4. 存在下一交易日时，次日行情可支撑收益结算：次日 bar 与收盘价有效
            （``MISSING_NEXT_BAR``）、需要高低价时次日高低价有效
@@ -2268,26 +2321,18 @@ class BacktestService:
             next_date: 下一交易日。
             index_codes: 候选指数代码。
             all_bars: 预加载行情。
-            day_factors: 当前日预计算因子值。
             execution_model: 执行模型。
 
         Returns:
             当日可参与策略决策和收益计算的指数代码列表，以及每个被排除指数的原因集合。
         """
-        required_ids = set(config.score.factors)
-        if config.filters:
-            for rule in config.filters.rules:
-                required_ids.add(rule.factor)
-                if rule.compare_to:
-                    required_ids.add(rule.compare_to)
-        for regime_rule in config.regime_rules.values():
-            if regime_rule.score:
-                required_ids.update(regime_rule.score.factors)
-            if regime_rule.filters:
-                for rule in regime_rule.filters.rules:
-                    required_ids.add(rule.factor)
-                    if rule.compare_to:
-                        required_ids.add(rule.compare_to)
+        # 评分 + 过滤（含 compare_to 与 regime 覆盖）引用的因子：仅用于判断是否
+        # 依赖高低价，不再按因子是否有值剔除
+        required_ids = {
+            ref
+            for module_key, _label, ref in iter_factor_refs(config)
+            if module_key in ("score", "filter")
+        }
         # 因子引用 → 模板 ID：别名按声明解析，未声明的引用名本身就是模板 ID
         template_ids = {
             (
@@ -2316,9 +2361,6 @@ class BacktestService:
                 _price_invalid(getattr(bar, field)) for field in ("high_price", "low_price")
             ):
                 reasons.setdefault(code, set()).add("MISSING_HIGH_LOW")
-                continue
-            if any(day_factors.get((code, factor_id)) is None for factor_id in required_ids):
-                reasons.setdefault(code, set()).add("MISSING_FACTOR")
                 continue
             if next_date is None:
                 result.append(code)
@@ -2720,6 +2762,28 @@ class BacktestService:
             key=indicator_code, value={period: value} 的字典。
         """
         return MacroIndicatorRepository(self._db).find_all_as_map()
+
+    @staticmethod
+    def _collect_compute_failure_warnings(failed_refs: set[str]) -> list[BacktestWarning]:
+        """为计算抛异常的因子生成 COMPUTE_FAILED 警告（与"数据不足"区分）。
+
+        Args:
+            failed_refs: 计算失败的因子引用集合。
+
+        Returns:
+            每个失败引用一条警告，按引用名排序。
+        """
+        return [
+            BacktestWarning(
+                level="warning",
+                code="COMPUTE_FAILED",
+                message=(
+                    f"因子 {ref} 现算抛出异常（计算失败，而非数据不足），"
+                    "该因子在回测区间内按缺失处理，请检查服务日志"
+                ),
+            )
+            for ref in sorted(failed_refs)
+        ]
 
     def _collect_missing_factor_warnings(
         self,

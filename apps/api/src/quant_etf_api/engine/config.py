@@ -8,13 +8,16 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # 引擎配置 schema 版本：配置模型演进时递增并做兼容迁移检测（7.4#3）
 #
 # v2 起，策略中的因子引用既可以是 factor_aliases 中声明的别名，
 # 也可以是模板 ID 本身（使用模板默认参数）。
 SUPPORTED_SCHEMA_VERSIONS = {"2"}
+
+# 合法的择时 regime 名称：timing_exposure 与 regime_rules 的 key 均受此约束
+RegimeName = Literal["offensive", "neutral", "defensive"]
 
 
 class TimingThresholds(BaseModel):
@@ -50,17 +53,20 @@ class ScoreConfig(BaseModel):
 
     Attributes:
         factors: 因子权重映射，key=因子引用（别名或模板 ID），value=权重（支持正负权重）。
+            负权重表示"反向"：absolute 模式下按 100 − 得分参与加权，横截面模式下
+            按标准化值取反参与加权。
         transforms: 因子变换函数映射，key=因子引用。
         missing_factor_strategy: 因子值缺失时的处理策略。
-            ignore=忽略该因子重新归一化权重, zero=按 0 处理, exclude=排除该资产。
+            ignore=忽略该因子重新归一化权重, zero=按最差处理（该因子记该方向的最低分）,
+            exclude=排除该资产。
         scoring_mode: 评分模式。
             absolute=每资产独立评分（默认）, rank=横截面排名分, zscore=横截面 Z-Score。
     """
 
     factors: dict[str, float]
     transforms: dict[str, str] = Field(default_factory=dict)
-    missing_factor_strategy: str = "ignore"
-    scoring_mode: str = "absolute"
+    missing_factor_strategy: Literal["ignore", "zero", "exclude"] = "ignore"
+    scoring_mode: Literal["absolute", "rank", "zscore"] = "absolute"
 
 
 class FilterRule(BaseModel):
@@ -82,10 +88,10 @@ class FilterRule(BaseModel):
     """
 
     factor: str
-    op: str
+    op: Literal["gt", "lt", "gte", "lte", "eq", "neq", "between"]
     value: float | list[float] | None = None
     compare_to: str | None = None
-    missing_strategy: str = "fail"
+    missing_strategy: Literal["fail", "pass", "exclude"] = "fail"
 
 
 class FilterConfig(BaseModel):
@@ -96,7 +102,7 @@ class FilterConfig(BaseModel):
         rules: 过滤规则列表。
     """
 
-    logic: str = "AND"
+    logic: Literal["AND", "OR"] = "AND"
     rules: list[FilterRule] = Field(default_factory=list)
 
 
@@ -119,21 +125,45 @@ class FactorAliasConfig(BaseModel):
 class RankConfig(BaseModel):
     """排名配置。
 
+    排名固定按综合得分排序：按单个因子排序与"把该因子放进 score.factors"完全等价，
+    再开一个排序入口只会造成"选股按 A、权重按 B"的口径混用，因此不再支持。
+
     Attributes:
-        sort_by: 排序字段，默认 score。
+        sort_by: 排序字段，仅支持 score（保留字段以兼容既有配置）。
         order: 排序方向，desc / asc。
         top_n: 取前 N 名，None 表示全部。
         bottom_n: 取后 N 名，与 top_n 二选一。
-        momentum_factor: 动量子排名所用因子引用，仅在 sort_by=momentum_rank 时必填。
-        valuation_factor: 估值子排名所用因子引用，仅在 sort_by=valuation_rank 时必填。
+        momentum_factor: 动量子排名所用因子引用，仅用于结果展示（数值越高排名越前）。
+        valuation_factor: 估值子排名所用因子引用，仅用于结果展示（数值越低排名越前）。
     """
 
-    sort_by: str = "score"
-    order: str = "desc"
+    sort_by: Literal["score"] = "score"
+    order: Literal["desc", "asc"] = "desc"
     top_n: int | None = Field(default=None, ge=1)
     bottom_n: int | None = Field(default=None, ge=1)
     momentum_factor: str | None = None
     valuation_factor: str | None = None
+
+    @field_validator("sort_by", mode="before")
+    @classmethod
+    def _reject_non_score_sort(cls, value: Any) -> Any:
+        """拒绝 score 以外的排序字段，并给出可操作的替代方案。
+
+        Args:
+            value: 原始 sort_by 值。
+
+        Returns:
+            原值（仅 score 通过）。
+
+        Raises:
+            ValueError: 传入 score 以外的取值时抛出。
+        """
+        if value is not None and value != "score":
+            raise ValueError(
+                f"rank.sort_by 仅支持 score（收到 {value!r}）；"
+                "如需按某个因子排序，请把该因子加入 score.factors"
+            )
+        return value
 
 
 class PortfolioConfig(BaseModel):
@@ -145,7 +175,7 @@ class PortfolioConfig(BaseModel):
         default_exposure: 无择时信号时的默认总仓位上限，默认 0.50。
     """
 
-    method: str
+    method: Literal["equal_weight", "score_weight", "winner_take_all"]
     timing_exposure: dict[str, float] | None = None
     default_exposure: float = Field(default=0.50, ge=0.0, le=1.0)
 
@@ -172,13 +202,15 @@ class RebalanceScheduleConfig(BaseModel):
       调度器末尾 ``return True``，静默退化为每日调仓（换手与成本最大）；
     - ``day_of_week`` 0-4（周一至周五）；``day_of_month`` 1-31，超出当月天数时按
       当月最后一日处理（不再整月不调仓）；
-    - ``biweekly`` 必须显式声明 ``week_parity``：ISO 周序的奇偶决定"哪一周调仓"，
-      不提供默认值以免"以为配了双周、实际按另一个奇偶周执行"。
+    - ``biweekly`` 必须显式声明 ``week_parity``：以 2016-01-04（周一）所在周为第 1 周
+      连续计数，奇偶决定"哪一周调仓"；不使用 ISO 周号，避免第 53 周与次年第 1 周同为
+      奇数周导致连续两周调仓。不提供默认值以免"以为配了双周、实际按另一个奇偶周执行"。
 
     Attributes:
         frequency: 调仓频率，daily / weekly / biweekly / monthly。
         day_of_week: 周度/双周调仓日（0=周一, 4=周五），默认 4。
-        week_parity: 双周频率的周次奇偶（odd=奇数周, even=偶数周），仅 biweekly 生效。
+        week_parity: 双周频率的周次奇偶（odd=奇数周, even=偶数周，按锚点周连续计数），
+            仅 biweekly 生效。
         day_of_month: 月度调仓日（1-31，建议 ≤28），默认 1。
     """
 
@@ -333,7 +365,60 @@ class StrategyConfig(BaseModel):
     )
     risk: RiskConfig | None = None
     rebalance: RebalanceConfig | None = None
-    regime_rules: dict[str, RegimeRuleConfig] = Field(
+    regime_rules: dict[RegimeName, RegimeRuleConfig] = Field(
         default_factory=dict,
         description="regime 条件化配置，key=regime 名称（offensive/neutral/defensive），value=该 regime 下的配置覆盖",
     )
+
+
+def iter_factor_refs(config: StrategyConfig) -> list[tuple[str, str, str]]:
+    """列出策略各模块引用的全部因子（不去重），作为引用收集的唯一实现。
+
+    因子加载、配置校验（引用存在性与 usage 匹配）、未使用别名提示都依赖同一份
+    引用清单；此前各处各写一遍遍历，新增模块时极易漏掉某一处。
+
+    Args:
+        config: 已解析的策略配置。
+
+    Returns:
+        ``(模块 key, 中文位置标签, 因子引用)`` 列表；模块 key 取 score / timing /
+        filter / rank，与因子模板 ``usage`` 取值一致。
+    """
+    refs: list[tuple[str, str, str]] = []
+    refs.extend(("score", "评分", ref) for ref in config.score.factors)
+    if config.timing:
+        refs.extend(("timing", "择时", ref) for ref in config.timing.factors)
+    if config.filters:
+        refs.extend(("filter", "过滤", ref) for ref in filter_rule_refs(config.filters))
+    for ref in (config.rank.momentum_factor, config.rank.valuation_factor):
+        if ref:
+            refs.append(("rank", "排名子因子", ref))
+    for regime_rule in config.regime_rules.values():
+        if regime_rule.score:
+            refs.extend(("score", "regime 评分", ref) for ref in regime_rule.score.factors)
+        if regime_rule.filters:
+            refs.extend(
+                ("filter", "regime 过滤", ref) for ref in filter_rule_refs(regime_rule.filters)
+            )
+        if regime_rule.rank:
+            for ref in (regime_rule.rank.momentum_factor, regime_rule.rank.valuation_factor):
+                if ref:
+                    refs.append(("rank", "regime 排名子因子", ref))
+    return refs
+
+
+def filter_rule_refs(filters: FilterConfig) -> list[str]:
+    """列出过滤配置引用的因子（含跨因子比较的 compare_to）。
+
+    Args:
+        filters: 过滤配置。
+
+    Returns:
+        按规则顺序排列的因子引用列表（不去重）。
+    """
+    refs: list[str] = []
+    for rule in filters.rules:
+        refs.append(rule.factor)
+        if rule.compare_to:
+            refs.append(rule.compare_to)
+    return refs

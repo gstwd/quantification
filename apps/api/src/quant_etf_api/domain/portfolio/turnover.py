@@ -32,7 +32,8 @@ def compute_turnover(
     Returns:
         换手率，范围 0-1。
     """
-    all_codes = set(prev_positions.keys()) | set(curr_positions.keys())
+    # 排序保证浮点累加顺序与进程哈希种子无关，换手率可逐次复现
+    all_codes = sorted(set(prev_positions.keys()) | set(curr_positions.keys()))
     turnover = 0.0
     for code in all_codes:
         prev_w = prev_positions.get(code, 0.0)
