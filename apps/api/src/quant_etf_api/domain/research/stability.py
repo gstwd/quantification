@@ -14,6 +14,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
+
+from quant_etf_api.domain.research.metrics import (
+    calc_annualized_return_pct,
+    calc_sharpe_ratio,
+    calc_total_return_pct,
+)
 
 # 年化系数与绩效指标模块保持一致，避免"汇总一套、稳健性一套"的口径漂移
 DEFAULT_TRADING_DAYS_PER_YEAR = 252
@@ -74,6 +81,22 @@ class StabilityMetrics:
     average_exposure: float | None = None
     position_concentration: float | None = None
 
+    def net_metrics_payload(self) -> dict[str, Any]:
+        """输出净成本口径的核心字段，供优化会话与研究批量评估共用。
+
+        Returns:
+            含 cost_bps、净累计/年化收益、净夏普、净超额、年化换手与成本拖累的字典。
+        """
+        return {
+            "cost_bps": self.cost_bps,
+            "net_cumulative_return_pct": self.net_cumulative_return_pct,
+            "net_annualized_return_pct": self.net_annualized_return_pct,
+            "net_sharpe_ratio": self.net_sharpe_ratio,
+            "net_excess_return_pct": self.net_excess_return_pct,
+            "annualized_turnover": self.annualized_turnover,
+            "cost_drag_pct_per_year": self.cost_drag_pct_per_year,
+        }
+
 
 def compute_stability_metrics(
     daily_returns: list[float],
@@ -121,11 +144,13 @@ def compute_stability_metrics(
     years = n / trading_days_per_year
     annualized_turnover = sum(normalized_turnovers) / years if years > 0 else 0.0
 
-    net_annualized = _annualized_return(net_returns, trading_days_per_year)
+    net_annualized = calc_annualized_return_pct(net_returns, trading_days_per_year)
     net_excess: float | None = None
     clean_benchmark = clean_returns_series(benchmark_returns, n)
     if clean_benchmark is not None:
-        net_excess = net_annualized - _annualized_return(clean_benchmark, trading_days_per_year)
+        net_excess = net_annualized - calc_annualized_return_pct(
+            clean_benchmark, trading_days_per_year
+        )
 
     concentration = _yearly_concentration(daily_returns, trade_dates, trading_days_per_year)
     segments = _segment_sharpes(daily_returns, trading_days_per_year)
@@ -135,9 +160,9 @@ def compute_stability_metrics(
         cost_bps=cost_bps,
         annualized_turnover=round(annualized_turnover, 4),
         cost_drag_pct_per_year=round(annualized_turnover * cost_bps / 100.0, 4),
-        net_cumulative_return_pct=round(_total_return(net_returns), 4),
+        net_cumulative_return_pct=round(calc_total_return_pct(net_returns), 4),
         net_annualized_return_pct=round(net_annualized, 4),
-        net_sharpe_ratio=_sharpe_ratio(net_returns, trading_days_per_year),
+        net_sharpe_ratio=calc_sharpe_ratio(net_returns, trading_days_per_year),
         net_excess_return_pct=round(net_excess, 4) if net_excess is not None else None,
         year_return_share_max=concentration["share_max"],
         year_return_share_hhi=concentration["hhi"],
@@ -209,7 +234,7 @@ def compute_cost_ladder(
     annualized_turnover = sum(normalized_turnovers) / years if years > 0 else 0.0
     clean_benchmark = clean_returns_series(benchmark_returns, n)
     benchmark_annualized = (
-        _annualized_return(clean_benchmark, trading_days_per_year)
+        calc_annualized_return_pct(clean_benchmark, trading_days_per_year)
         if clean_benchmark is not None
         else None
     )
@@ -218,13 +243,13 @@ def compute_cost_ladder(
     for cost_bps in ladder:
         costs = [t * cost_bps / 100.0 for t in normalized_turnovers]
         net_returns = [gross - cost for gross, cost in zip(daily_returns, costs)]
-        net_annualized = _annualized_return(net_returns, trading_days_per_year)
+        net_annualized = calc_annualized_return_pct(net_returns, trading_days_per_year)
         entries.append(
             CostLadderEntry(
                 cost_bps=cost_bps,
-                net_cumulative_return_pct=round(_total_return(net_returns), 4),
+                net_cumulative_return_pct=round(calc_total_return_pct(net_returns), 4),
                 net_annualized_return_pct=round(net_annualized, 4),
-                net_sharpe_ratio=_sharpe_ratio(net_returns, trading_days_per_year),
+                net_sharpe_ratio=calc_sharpe_ratio(net_returns, trading_days_per_year),
                 net_excess_return_pct=(
                     round(net_annualized - benchmark_annualized, 4)
                     if benchmark_annualized is not None
@@ -299,37 +324,6 @@ def _align_optional(values: list[float | None] | None, length: int, default: flo
         if value is not None and math.isfinite(value):
             aligned[i] = float(value)
     return aligned
-
-
-def _total_return(daily_returns: list[float]) -> float:
-    """计算累计收益率（%）。"""
-    cumulative = 1.0
-    for r in daily_returns:
-        cumulative *= 1 + r / 100
-    return (cumulative - 1) * 100
-
-
-def _annualized_return(daily_returns: list[float], trading_days: int) -> float:
-    """计算年化收益率（%），交易日不足一年时按比例外推。"""
-    if not daily_returns or trading_days <= 0:
-        return 0.0
-    total = _total_return(daily_returns) / 100
-    years = len(daily_returns) / trading_days
-    if years <= 0 or total <= -1:
-        return 0.0
-    return ((1 + total) ** (1 / years) - 1) * 100
-
-
-def _sharpe_ratio(daily_returns: list[float], trading_days: int) -> float:
-    """计算年化夏普比率（全期口径、无风险利率为 0）。"""
-    if len(daily_returns) < 2:
-        return 0.0
-    mean_r = sum(daily_returns) / len(daily_returns)
-    variance = sum((r - mean_r) ** 2 for r in daily_returns) / (len(daily_returns) - 1)
-    std_r = math.sqrt(variance) if variance > 0 else 0.0
-    if std_r <= 0:
-        return 0.0
-    return round(mean_r / std_r * math.sqrt(trading_days), 4)
 
 
 def _drawdown_series(daily_returns: list[float]) -> list[float]:
@@ -421,15 +415,15 @@ def _yearly_concentration(
             remaining.append(ret)
     positive_years = 0
     for year, returns in by_year.items():
-        if _sharpe_ratio(returns, trading_days) > 0:
+        if calc_sharpe_ratio(returns, trading_days) > 0:
             positive_years += 1
 
     return {
         "share_max": round(max(shares.values()), 4),
         "hhi": round(sum(s * s for s in shares.values()), 4),
         "best_year": best_year,
-        "ex_best_annualized": round(_annualized_return(remaining, trading_days), 4),
-        "ex_best_sharpe": _sharpe_ratio(remaining, trading_days),
+        "ex_best_annualized": round(calc_annualized_return_pct(remaining, trading_days), 4),
+        "ex_best_sharpe": calc_sharpe_ratio(remaining, trading_days),
         "sharpe_positive_ratio": round(positive_years / len(by_year), 4),
     }
 
@@ -438,7 +432,7 @@ def _segment_sharpes(daily_returns: list[float], trading_days: int) -> dict[str,
     """把全期等分为三段，统计分段一致性与最好/最差段夏普。"""
     n = len(daily_returns)
     if n < 3:
-        sharpe = _sharpe_ratio(daily_returns, trading_days)
+        sharpe = calc_sharpe_ratio(daily_returns, trading_days)
         return {
             "positive_ratio": 1.0 if sharpe > 0 else 0.0,
             "best": sharpe,
@@ -446,7 +440,9 @@ def _segment_sharpes(daily_returns: list[float], trading_days: int) -> dict[str,
         }
     chunk = n // 3
     boundaries = [(i * chunk, n if i == 2 else (i + 1) * chunk) for i in range(3)]
-    sharpes = [_sharpe_ratio(daily_returns[start:end], trading_days) for start, end in boundaries]
+    sharpes = [
+        calc_sharpe_ratio(daily_returns[start:end], trading_days) for start, end in boundaries
+    ]
     positive = sum(1 for s in sharpes if s > 0)
     return {
         "positive_ratio": round(positive / len(sharpes), 4),

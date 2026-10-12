@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import statistics
+from collections.abc import Sequence
 from typing import Any
 
 
@@ -55,3 +57,27 @@ def price_invalid(value: Any) -> bool:
         return math.isnan(value)
     except TypeError:
         return False
+
+
+def mean_or_none(values: Sequence[float]) -> float | None:
+    """计算均值，空序列返回 None。
+
+    Args:
+        values: 数值序列。
+
+    Returns:
+        算术平均值；空序列时为 None。
+    """
+    return statistics.mean(values) if values else None
+
+
+def median_or_none(values: Sequence[float]) -> float | None:
+    """计算中位数，空序列返回 None。
+
+    Args:
+        values: 数值序列。
+
+    Returns:
+        中位数（偶数长度取中间两数均值）；空序列时为 None。
+    """
+    return statistics.median(values) if values else None

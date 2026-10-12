@@ -54,7 +54,6 @@ from quant_etf_api.domain.research.metrics import (
 )
 from quant_etf_api.domain.research.periods import (
     PURPOSE_RESEARCH,
-    PeriodBoundaries,
     validate_backtest_period,
 )
 from quant_etf_api.domain.research.stability import (
@@ -128,6 +127,7 @@ from quant_etf_api.services.backtest_reference_service import (
     HOLDER_ROBUSTNESS_VARIANTS,
     BacktestReferenceService,
 )
+from quant_etf_api.services.period_config import load_period_boundaries
 from quant_etf_api.services.strategy_config_service import (
     StrategyConfigService,
     compute_config_hash,
@@ -272,7 +272,7 @@ class BacktestService:
         now = utcnow_aware()
 
         # 研究期/验证期硬约束：研究类回测越过研究期末端直接拒绝
-        validate_backtest_period(_period_boundaries(), req.purpose, req.start_date, req.end_date)
+        validate_backtest_period(load_period_boundaries(), req.purpose, req.start_date, req.end_date)
 
         # 加载策略配置，检查是否有 index_codes 限定
         config_svc = StrategyConfigService(self._db)
@@ -955,7 +955,7 @@ class BacktestService:
         Returns:
             ValidationUsageResponse（按创建时间倒序）。
         """
-        boundaries = _period_boundaries()
+        boundaries = load_period_boundaries()
         try:
             rows = (
                 self._db.query(BacktestRunModel)
@@ -2340,20 +2340,6 @@ class BacktestService:
             optimization_id=getattr(row, "optimization_id", None),
             purpose_reason=getattr(row, "purpose_reason", None),
         )
-
-
-def _period_boundaries() -> PeriodBoundaries:
-    """从系统配置读取研究期/验证期边界。
-
-    Returns:
-        PeriodBoundaries 实例（研究期 2016-01-01 ~ 2025-12-31，验证期自 2026-01-01 起）。
-    """
-    settings = get_settings()
-    return PeriodBoundaries(
-        research_start=date.fromisoformat(settings.research_period_start),
-        research_end=date.fromisoformat(settings.research_period_end),
-        validation_start=date.fromisoformat(settings.validation_period_start),
-    )
 
 
 def _merge_net_metrics(

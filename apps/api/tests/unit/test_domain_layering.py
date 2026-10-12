@@ -16,11 +16,9 @@ import pytest
 
 from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
 from quant_etf_api.domain.portfolio.returns import (
-    compute_allocation_return,
-    compute_close_execution_return,
-    compute_rebalance_day_return,
     count_missing_allocation_assets,
     count_missing_rebalance_assets,
+    get_index_rebalance_legs,
     get_index_return,
 )
 from quant_etf_api.domain.portfolio.turnover import compute_turnover
@@ -88,98 +86,6 @@ class TestTurnoverAndReturns:
         }
         assert get_index_return("000300", date(2025, 1, 15), date(2025, 1, 16), bars) == 3.0
 
-    def test_compute_allocation_return(self) -> None:
-        """组合收益按权重加权。"""
-        bars = {
-            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
-            ("a", date(2025, 1, 16)): SimpleNamespace(close_price=110.0),
-            ("b", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
-            ("b", date(2025, 1, 16)): SimpleNamespace(close_price=100.0),
-        }
-        ret = compute_allocation_return(
-            {"a": 0.5, "b": 0.5}, date(2025, 1, 15), date(2025, 1, 16), bars
-        )
-        assert ret == 5.0
-
-    def test_close_execution_ignores_missing_open(self) -> None:
-        """收盘执行模式只依赖收盘价，不应受开盘价缺失影响。"""
-        bars = {
-            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0, open_price=None),
-            ("a", date(2025, 1, 16)): SimpleNamespace(close_price=105.0, open_price=None),
-        }
-        assert (
-            compute_close_execution_return({"a": 1.0}, date(2025, 1, 15), date(2025, 1, 16), bars)
-            == 5.0
-        )
-
-    def test_compute_rebalance_day_return_split(self) -> None:
-        """调仓日收益拆分为旧仓位隔夜段 + 新仓位日内段。"""
-        bars = {
-            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
-            ("a", date(2025, 1, 16)): SimpleNamespace(open_price=102.0, close_price=104.0),
-        }
-        # 旧仓位 100% 持有 a：隔夜段 = 102/100 - 1 = 2%
-        # 新仓位 100% 持有 a：日内段 = 104/102 - 1 ≈ 1.9608%
-        # 两段复利：1.02 × 104/102 - 1 = 4%（与收盘到收盘一致；
-        # 历史上两段直接相加得到 3.9608%，漏掉交叉项）
-        ret = compute_rebalance_day_return(
-            {"a": 1.0},
-            {"a": 1.0},
-            date(2025, 1, 15),
-            date(2025, 1, 16),
-            bars,
-        )
-        assert ret == pytest.approx(4.0)
-
-    def test_compute_rebalance_day_return_old_sells_new_buys(self) -> None:
-        """调仓换仓：旧仓位吃隔夜，新仓位吃日内。"""
-        bars = {
-            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
-            ("a", date(2025, 1, 16)): SimpleNamespace(open_price=101.0, close_price=102.0),
-            ("b", date(2025, 1, 15)): SimpleNamespace(close_price=200.0),
-            ("b", date(2025, 1, 16)): SimpleNamespace(open_price=210.0, close_price=200.0),
-        }
-        # 旧仓位 a：隔夜 101/100 - 1 = 1%
-        # 新仓位 b：日内 200/210 - 1 ≈ -4.7619%
-        ret = compute_rebalance_day_return(
-            {"a": 1.0},
-            {"b": 1.0},
-            date(2025, 1, 15),
-            date(2025, 1, 16),
-            bars,
-        )
-        # 两段复利：1.01 × 200/210 - 1 = -3.809523... → -3.8095（4 位小数）
-        assert ret == pytest.approx(-3.8095)
-
-    def test_compute_rebalance_day_return_no_next_date(self) -> None:
-        """最后一个交易日无下一交易日，返回 0。"""
-        bars = {
-            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
-        }
-        ret = compute_rebalance_day_return(
-            {"a": 1.0},
-            {"a": 1.0},
-            date(2025, 1, 15),
-            None,
-            bars,
-        )
-        assert ret == 0.0
-
-    def test_compute_rebalance_day_return_missing_bar_skipped(self) -> None:
-        """行情缺失时该仓位收益按 0 处理（与缺口语义一致）。"""
-        bars = {
-            ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
-            # b 缺下一交易日数据
-        }
-        ret = compute_rebalance_day_return(
-            {"b": 1.0},
-            {"b": 1.0},
-            date(2025, 1, 15),
-            date(2025, 1, 16),
-            bars,
-        )
-        assert ret == 0.0
-
     def test_nan_prices_treated_as_missing(self) -> None:
         """NaN 价格按缺失处理，不污染收益链。"""
         bars = {
@@ -191,14 +97,9 @@ class TestTurnoverAndReturns:
             ("b", date(2025, 1, 16)): SimpleNamespace(open_price=float("nan"), close_price=102.0),
         }
         assert get_index_return("a", date(2025, 1, 15), date(2025, 1, 16), bars) is None
-        assert (
-            compute_allocation_return({"a": 1.0}, date(2025, 1, 15), date(2025, 1, 16), bars) == 0.0
-        )
-        assert (
-            compute_rebalance_day_return(
-                {"b": 1.0}, {"b": 1.0}, date(2025, 1, 15), date(2025, 1, 16), bars
-            )
-            == 0.0
+        assert get_index_rebalance_legs("b", date(2025, 1, 15), date(2025, 1, 16), bars) == (
+            None,
+            None,
         )
 
     def test_count_missing_allocation_assets(self) -> None:

@@ -15,8 +15,8 @@ import logging
 import random
 import re
 from copy import deepcopy
-from hashlib import md5
 from datetime import date, timedelta, timezone
+from hashlib import md5
 from typing import Any
 from uuid import uuid4
 
@@ -29,7 +29,8 @@ from quant_etf_api.domain.common.enums import (
     ExecutionModel,
     parse_execution_model,
 )
-from quant_etf_api.domain.research.periods import PURPOSE_RESEARCH, PeriodBoundaries
+from quant_etf_api.domain.common.numeric import mean_or_none, median_or_none
+from quant_etf_api.domain.research.periods import PURPOSE_RESEARCH
 from quant_etf_api.domain.research.robustness import (
     block_bootstrap_sharpe_ci,
     compute_pbo,
@@ -58,6 +59,7 @@ from quant_etf_api.schemas.robustness import (
 from quant_etf_api.schemas.strategy import StrategyConfigCreate
 from quant_etf_api.services.backtest_reference_service import BacktestReferenceService
 from quant_etf_api.services.backtest_service import BacktestService
+from quant_etf_api.services.period_config import load_period_boundaries
 from quant_etf_api.services.strategy_config_service import (
     StrategyConfigService,
     compute_config_hash,
@@ -293,7 +295,7 @@ class RobustnessService:
         baseline = self._config_svc.get_config(strategy_id)
         if baseline is None:
             raise ValueError(f"基线策略 {strategy_id} 不存在")
-        boundaries = _period_boundaries()
+        boundaries = load_period_boundaries()
         trade_dates = self._index_bar_repo.find_all_trading_dates(
             boundaries.research_start, boundaries.research_end
         )
@@ -842,7 +844,7 @@ class RobustnessService:
         codes = list(config.get("index_codes") or [])
         if len(codes) < 3:
             return []
-        boundaries = _period_boundaries()
+        boundaries = load_period_boundaries()
         candidates: list[dict[str, Any]] = []
         rng = random.Random(int(robustness_id[:8], 16))
         keep = max(2, int(round(len(codes) * POOL_KEEP_RATIO)))
@@ -1165,8 +1167,8 @@ class RobustnessService:
                 for label in common_windows
                 if metrics_by_window[label].get("annualized_return_pct") is not None
             ]
-            mean_sharpe = _mean(sharpes)
-            mean_return = _mean(returns)
+            mean_sharpe = mean_or_none(sharpes)
+            mean_return = mean_or_none(returns)
             if variant["label"] == "baseline":
                 baseline_sharpe = mean_sharpe
                 baseline_return = mean_return
@@ -1254,7 +1256,7 @@ class RobustnessService:
             ]
             summary["pool"] = {
                 "n_variants": len(deltas),
-                "delta_median": _round(_median(deltas)),
+                "delta_median": _round(median_or_none(deltas)),
                 "delta_min": _round(min(deltas)) if deltas else None,
                 "delta_max": _round(max(deltas)) if deltas else None,
             }
@@ -1710,32 +1712,6 @@ def _pbo_power_note(n_splits: int) -> str | None:
     )
 
 
-def _mean(values: list[float]) -> float | None:
-    """计算均值，空列表返回 None。"""
-    return sum(values) / len(values) if values else None
-
-
-def _median(values: list[float]) -> float | None:
-    """计算中位数，空列表返回 None。"""
-    if not values:
-        return None
-    ordered = sorted(values)
-    mid = len(ordered) // 2
-    if len(ordered) % 2 == 1:
-        return ordered[mid]
-    return (ordered[mid - 1] + ordered[mid]) / 2
-
-
 def _round(value: float | None, digits: int = 4) -> float | None:
     """四舍五入，None 透传。"""
     return round(value, digits) if value is not None else None
-
-
-def _period_boundaries() -> PeriodBoundaries:
-    """从系统配置读取研究期/验证期边界。"""
-    settings = get_settings()
-    return PeriodBoundaries(
-        research_start=date.fromisoformat(settings.research_period_start),
-        research_end=date.fromisoformat(settings.research_period_end),
-        validation_start=date.fromisoformat(settings.validation_period_start),
-    )

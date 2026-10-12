@@ -8,8 +8,6 @@ from quant_etf_api.domain.portfolio.benchmark import (
     compute_equal_weight_benchmark,
 )
 from quant_etf_api.domain.portfolio.returns import (
-    compute_allocation_return,
-    compute_rebalance_day_return,
     count_missing_allocation_assets,
     count_missing_rebalance_assets,
     get_index_return,
@@ -32,8 +30,6 @@ __all__ = [
     "build_universe_items",
     "compute_buy_hold_benchmark",
     "compute_equal_weight_benchmark",
-    "compute_allocation_return",
-    "compute_rebalance_day_return",
     "count_missing_allocation_assets",
     "count_missing_rebalance_assets",
     "compute_turnover",

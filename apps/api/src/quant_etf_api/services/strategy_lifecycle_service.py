@@ -53,6 +53,7 @@ from quant_etf_api.schemas.lifecycle import (
     LifecycleSummary,
 )
 from quant_etf_api.services.backtest_service import BacktestService
+from quant_etf_api.services.period_config import load_period_boundaries
 from quant_etf_api.services.strategy_config_service import (
     StrategyConfigService,
     compute_config_hash,
@@ -158,7 +159,7 @@ class StrategyLifecycleService:
         if detail is None:
             raise ValueError(f"策略 {strategy_id} 不存在")
 
-        boundaries = _period_boundaries()
+        boundaries = load_period_boundaries()
         live_at = req.live_at or today_cn()
         if live_at < boundaries.validation_start:
             raise ValueError(
@@ -688,16 +689,6 @@ class StrategyLifecycleService:
             computed_at=row.computed_at,
             metrics=row.metrics,
         )
-
-
-def _period_boundaries() -> PeriodBoundaries:
-    """从系统配置读取研究期/验证期边界。"""
-    settings = get_settings()
-    return PeriodBoundaries(
-        research_start=date.fromisoformat(settings.research_period_start),
-        research_end=date.fromisoformat(settings.research_period_end),
-        validation_start=date.fromisoformat(settings.validation_period_start),
-    )
 
 
 def _selection_forward_days(config: Any) -> int:

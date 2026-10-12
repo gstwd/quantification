@@ -35,6 +35,7 @@ from quant_etf_api.domain.research.periods import PeriodBoundaries
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.infra.db.models.core import BacktestRunModel
 from quant_etf_api.services.backtest_service import BacktestRunCaches, BacktestService
+from quant_etf_api.services.period_config import load_period_boundaries
 from quant_etf_api.services.robustness_service import _set_leaf
 from quant_etf_api.services.strategy_config_service import StrategyConfigService
 
@@ -285,7 +286,7 @@ class ResearchBatchService:
         Raises:
             ValueError: 基线策略不存在、窗口无法切分或变体配置无法解析时抛出。
         """
-        boundaries = boundaries or period_boundaries()
+        boundaries = boundaries or load_period_boundaries()
         baseline_detail = self._config_svc.get_config(strategy_id)
         if baseline_detail is None:
             raise ValueError(f"基线策略 {strategy_id} 不存在")
@@ -513,20 +514,6 @@ class ResearchBatchService:
 def _deep_copy_config(config: dict[str, Any] | None) -> dict[str, Any]:
     """深拷贝配置字典（避免变体派生就地改写污染基线）。"""
     return deepcopy(dict(config or {}))
-
-
-def period_boundaries() -> PeriodBoundaries:
-    """从系统配置构造研究期/验证期边界（与回测、稳健性批次口径一致）。
-
-    Returns:
-        PeriodBoundaries。
-    """
-    settings = get_settings()
-    return PeriodBoundaries(
-        research_start=date.fromisoformat(settings.research_period_start),
-        research_end=date.fromisoformat(settings.research_period_end),
-        validation_start=date.fromisoformat(settings.validation_period_start),
-    )
 
 
 def _benchmark_series(daily_rows: list[Any]) -> list[float]:

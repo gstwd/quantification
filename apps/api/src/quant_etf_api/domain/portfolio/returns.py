@@ -56,53 +56,6 @@ def get_index_return(
     return round((next_close / today_close - 1) * 100, 4)
 
 
-def compute_allocation_return(
-    positions: dict[str, float],
-    trade_date: date,
-    next_date: date | None,
-    all_bars: dict[tuple[str, date], Any],
-) -> float:
-    """按仓位分配方案计算指数组合 T+1 收益。
-
-    Args:
-        positions: 仓位权重，key=指数代码。
-        trade_date: 基准交易日。
-        next_date: 收益计算目标日，None 时返回 0。
-        all_bars: (code, date) → BarRow 的映射。
-
-    Returns:
-        组合收益率百分比，无仓位或无下一交易日时返回 0.0。
-    """
-    if next_date is None or not positions:
-        return 0.0
-    total_return = 0.0
-    for code, weight in positions.items():
-        ret = get_index_return(code, trade_date, next_date, all_bars)
-        if ret is not None:
-            total_return += weight * ret
-    return round(total_return, 4)
-
-
-def compute_close_execution_return(
-    positions: dict[str, float],
-    trade_date: date,
-    next_date: date | None,
-    all_bars: dict[tuple[str, date], Any],
-) -> float:
-    """计算 T+1 收盘执行模型下当前实际仓位的收盘到收盘收益。
-
-    Args:
-        positions: 当前收益窗口实际持有的仓位。
-        trade_date: 收益窗口起始交易日。
-        next_date: 收益窗口结束交易日，None 时返回 0。
-        all_bars: (code, date) → BarRow 的映射。
-
-    Returns:
-        组合收益率百分比，缺失资产收益按 0 处理。
-    """
-    return compute_allocation_return(positions, trade_date, next_date, all_bars)
-
-
 def get_index_rebalance_legs(
     index_code: str,
     trade_date: date,
@@ -149,50 +102,6 @@ def get_index_rebalance_legs(
     return overnight, intraday
 
 
-def compute_rebalance_day_return(
-    old_positions: dict[str, float],
-    new_positions: dict[str, float],
-    trade_date: date,
-    next_date: date | None,
-    all_bars: dict[tuple[str, date], Any],
-) -> float:
-    """计算调仓日组合收益（T+1 开盘执行，无滑点）。
-
-    旧仓位持有至 T+1 开盘（吃隔夜段），新仓位自 T+1 开盘买入（吃日内段）；
-    某段价格缺失时该仓位该段按 0 处理（与 B10 缺口语义一致）。
-
-    两段按**复利**衔接：``(1 + R_隔夜) × (1 + R_日内) - 1``。新仓位权重是开盘时
-    净值的占比，日内段作用在隔夜段之后的净值上；历史实现直接相加两段，
-    漏掉交叉项 ``R_隔夜 × R_日内``，每日调仓的策略会逐日累积该误差。
-
-    Args:
-        old_positions: 调仓前持仓权重。
-        new_positions: 调仓后目标权重。
-        trade_date: 信号日 T。
-        next_date: 下一交易日 T+1，None 时返回 0。
-        all_bars: (code, date) → BarRow 的映射。
-
-    Returns:
-        组合收益率百分比（四舍五入到 4 位小数）。
-    """
-    if next_date is None:
-        return 0.0
-    overnight_return = 0.0
-    intraday_return = 0.0
-    # 按代码排序遍历：集合迭代顺序随进程哈希种子变化，浮点累加顺序不同会让
-    # 四舍五入后的第 4 位小数在两次运行间不一致（同配置回测不可逐日复现）
-    for code in sorted(set(old_positions) | set(new_positions)):
-        overnight, intraday = get_index_rebalance_legs(
-            code, trade_date, next_date, all_bars
-        )
-        if overnight is not None and code in old_positions:
-            overnight_return += old_positions[code] * overnight
-        if intraday is not None and code in new_positions:
-            intraday_return += new_positions[code] * intraday
-    total = ((1 + overnight_return / 100) * (1 + intraday_return / 100) - 1) * 100
-    return round(total, 4)
-
-
 def count_missing_allocation_assets(
     positions: dict[str, float],
     trade_date: date,
@@ -201,7 +110,7 @@ def count_missing_allocation_assets(
 ) -> int:
     """统计持仓资产中因行情缺失而无法计算收益的数量。
 
-    与 compute_allocation_return 的缺口语义一致：bar 缺失、收盘价
+    与 BacktestExecutor 的缺口语义一致：bar 缺失、收盘价
     None/NaN/0 均视为缺失（该资产当日收益按 0 处理），用于回测每日
     missing_bar_count 记录与数据缺口天数统计。
 
@@ -232,7 +141,7 @@ def count_missing_rebalance_assets(
 ) -> int:
     """统计调仓日受行情缺失影响的持仓资产数量。
 
-    与 compute_rebalance_day_return 的缺口语义一致：旧仓位隔夜段或
+    与 BacktestExecutor 调仓日的缺口语义一致：旧仓位隔夜段或
     新仓位日内段任一因缺失（bar 缺失、open/close 为 None/NaN/0）无法
     计算，即视为该资产当日受数据缺口影响（相关段收益按 0 处理）。
 

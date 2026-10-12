@@ -52,6 +52,24 @@ class TestCostConversion:
         assert clean_returns_series([1.0], 2) is None
         assert clean_returns_series([1.0, 2.0], 2) == [1.0, 2.0]
 
+    def test_net_metrics_payload_matches_fields(self) -> None:
+        """净口径载荷只含七个净成本字段，且取值与指标对象一致。"""
+        metrics = compute_stability_metrics(
+            [1.0, -0.5, 0.5], _dates(3), turnovers=[0.5, 0.0, 1.0], cost_bps=10.0
+        )
+        payload = metrics.net_metrics_payload()
+        assert set(payload) == {
+            "cost_bps",
+            "net_cumulative_return_pct",
+            "net_annualized_return_pct",
+            "net_sharpe_ratio",
+            "net_excess_return_pct",
+            "annualized_turnover",
+            "cost_drag_pct_per_year",
+        }
+        assert payload["net_sharpe_ratio"] == metrics.net_sharpe_ratio
+        assert payload["cost_bps"] == 10.0
+
 
 class TestConcentration:
     """收益集中度与剔除最好年份后的表现。"""

@@ -8,8 +8,8 @@ import pytest
 
 from quant_etf_api.domain.research.metrics import (
     _calc_alpha_beta,
-    _calc_annualized_return,
-    _calc_sharpe_ratio,
+    calc_annualized_return_pct,
+    calc_sharpe_ratio,
     _calc_sortino_ratio,
     _calc_win_rate,
     compute_annual_breakdown,
@@ -76,7 +76,7 @@ class TestRiskFreeRate:
         """rf=0 时夏普/索提诺与历史实现完全一致（回归保护）。"""
         daily = [0.5, -0.3, 0.8, 0.2, -0.1, 0.6, 0.1, -0.4, 0.9, 0.0]
         m = compute_performance_metrics(daily)
-        assert m.sharpe_ratio == pytest.approx(_calc_sharpe_ratio(daily, 252, 0.0))
+        assert m.sharpe_ratio == pytest.approx(calc_sharpe_ratio(daily, 252, 0.0))
         assert m.sortino_ratio == pytest.approx(_calc_sortino_ratio(daily, 252, 0.0))
 
     def test_identical_series_alpha_zero_with_rf(self) -> None:
@@ -96,8 +96,8 @@ class TestRiskFreeRate:
         bench = [0.2, 0.4, -0.2, 0.3, 0.1, -0.1, 0.5, 0.0, -0.3, 0.2]
         alpha, beta = _calc_alpha_beta(daily, bench, 252, annual_risk_free_rate_pct=3.0)
 
-        ann_p = _calc_annualized_return(daily, 252)
-        ann_b = _calc_annualized_return(bench, 252)
+        ann_p = calc_annualized_return_pct(daily, 252)
+        ann_b = calc_annualized_return_pct(bench, 252)
         expected = (ann_p - 3.0) - beta * (ann_b - 3.0)
         assert alpha == pytest.approx(expected)
 
@@ -120,7 +120,7 @@ class TestRollingMetrics:
         sample = daily[-63:]
         point = rolling[-1]
         assert point is not None
-        assert point.sharpe_ratio == pytest.approx(_calc_sharpe_ratio(sample, 252))
+        assert point.sharpe_ratio == pytest.approx(calc_sharpe_ratio(sample, 252))
         assert point.sortino_ratio == pytest.approx(_calc_sortino_ratio(sample, 252))
 
     def test_window_too_small_raises(self) -> None:
@@ -151,3 +151,16 @@ class TestAnnualBreakdown:
         """收益与日期长度不一致时抛出 ValueError。"""
         with pytest.raises(ValueError):
             compute_annual_breakdown([0.1, 0.2], [date(2025, 1, 1)])
+
+
+class TestAnnualizedReturnGuards:
+    """年化收益的防御分支（与稳健性模块共用同一实现）。"""
+
+    def test_empty_or_non_positive_days_returns_zero(self) -> None:
+        """空序列或年化系数非正时返回 0。"""
+        assert calc_annualized_return_pct([], 252) == 0.0
+        assert calc_annualized_return_pct([1.0], 0) == 0.0
+
+    def test_total_loss_returns_minus_100(self) -> None:
+        """累计亏损达到 -100% 时返回 -100，而不是对负底数开分数次幂。"""
+        assert calc_annualized_return_pct([-100.0, 1.0], 252) == -100.0

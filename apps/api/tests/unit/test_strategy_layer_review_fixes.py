@@ -397,6 +397,6 @@ class TestReturnDeterminism:
         from quant_etf_api.domain.portfolio import returns, turnover
 
         assert "sorted(set(old_positions) | set(new_positions))" in inspect.getsource(
-            returns.compute_rebalance_day_return
+            returns.count_missing_rebalance_assets
         )
         assert "sorted(" in inspect.getsource(turnover.compute_turnover)

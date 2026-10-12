@@ -150,10 +150,10 @@ def compute_performance_metrics(
             profit_loss_ratio=None,
         )
 
-    total_return_pct = _calc_total_return(daily_returns)
-    annualized_return_pct = _calc_annualized_return(daily_returns, trading_days_per_year)
+    total_return_pct = calc_total_return_pct(daily_returns)
+    annualized_return_pct = calc_annualized_return_pct(daily_returns, trading_days_per_year)
     max_drawdown_pct, max_drawdown_days = _calc_max_drawdown_details(daily_returns)
-    sharpe = _calc_sharpe_ratio(daily_returns, trading_days_per_year, annual_risk_free_rate_pct)
+    sharpe = calc_sharpe_ratio(daily_returns, trading_days_per_year, annual_risk_free_rate_pct)
     sortino = _calc_sortino_ratio(daily_returns, trading_days_per_year, annual_risk_free_rate_pct)
     calmar = _calc_calmar_ratio(annualized_return_pct, max_drawdown_pct)
     # 胜率使用持仓期口径：空仓 0 收益日不参与分母（B11）
@@ -196,7 +196,7 @@ def compute_performance_metrics(
     )
 
 
-def _calc_total_return(daily_returns: list[float]) -> float:
+def calc_total_return_pct(daily_returns: list[float]) -> float:
     """计算累计收益率（%）。"""
     cumulative = 1.0
     for r in daily_returns:
@@ -204,12 +204,18 @@ def _calc_total_return(daily_returns: list[float]) -> float:
     return (cumulative - 1) * 100
 
 
-def _calc_annualized_return(daily_returns: list[float], trading_days: int) -> float:
-    """计算年化收益率（%）。"""
-    total = _calc_total_return(daily_returns) / 100
-    years = len(daily_returns) / trading_days
-    if years <= 0:
+def calc_annualized_return_pct(daily_returns: list[float], trading_days: int) -> float:
+    """计算年化收益率（%），交易日不足一年时按比例外推。
+
+    空序列或年化系数非正时返回 0；累计亏损达到 -100% 时直接返回 -100，
+    避免对负底数开分数次幂。
+    """
+    if not daily_returns or trading_days <= 0:
         return 0.0
+    total = calc_total_return_pct(daily_returns) / 100
+    if total <= -1:
+        return -100.0
+    years = len(daily_returns) / trading_days
     return ((1 + total) ** (1 / years) - 1) * 100
 
 
@@ -243,7 +249,7 @@ def _calc_max_drawdown_details(daily_returns: list[float]) -> tuple[float, int]:
     return max_dd, max_dd_days
 
 
-def _calc_sharpe_ratio(
+def calc_sharpe_ratio(
     daily_returns: list[float],
     trading_days: int,
     annual_risk_free_rate_pct: float = 0.0,
@@ -373,8 +379,8 @@ def _calc_alpha_beta(
     beta = cov / var_b if var_b > 0 else 0.0
 
     # 年化 Alpha
-    annualized_p = _calc_annualized_return(daily_returns, trading_days)
-    annualized_b = _calc_annualized_return(benchmark_returns, trading_days)
+    annualized_p = calc_annualized_return_pct(daily_returns, trading_days)
+    annualized_b = calc_annualized_return_pct(benchmark_returns, trading_days)
     alpha = (annualized_p - annual_risk_free_rate_pct) - beta * (
         annualized_b - annual_risk_free_rate_pct
     )
@@ -406,7 +412,7 @@ def _calc_information_ratio(
     if tracking_error_annual <= 0:
         return 0.0, 0.0
 
-    annualized_excess = _calc_annualized_return(excess, trading_days)
+    annualized_excess = calc_annualized_return_pct(excess, trading_days)
     ir = annualized_excess / tracking_error_annual
 
     return ir, tracking_error_annual
@@ -489,14 +495,14 @@ def compute_rolling_metrics(
         daily_std = math.sqrt(variance) if variance > 0 else 0.0
         result.append(
             RollingMetrics(
-                sharpe_ratio=_calc_sharpe_ratio(
+                sharpe_ratio=calc_sharpe_ratio(
                     sample, trading_days_per_year, annual_risk_free_rate_pct
                 ),
                 sortino_ratio=_calc_sortino_ratio(
                     sample, trading_days_per_year, annual_risk_free_rate_pct
                 ),
                 annualized_return_pct=round(
-                    _calc_annualized_return(sample, trading_days_per_year), 2
+                    calc_annualized_return_pct(sample, trading_days_per_year), 2
                 ),
                 annualized_volatility_pct=round(daily_std * math.sqrt(trading_days_per_year), 2),
             )
@@ -546,11 +552,11 @@ def compute_annual_breakdown(
             AnnualPerformanceRow(
                 year=year,
                 trading_days=len(year_returns),
-                total_return_pct=round(_calc_total_return(year_returns), 2),
+                total_return_pct=round(calc_total_return_pct(year_returns), 2),
                 annualized_return_pct=round(
-                    _calc_annualized_return(year_returns, trading_days_per_year), 2
+                    calc_annualized_return_pct(year_returns, trading_days_per_year), 2
                 ),
-                sharpe_ratio=_calc_sharpe_ratio(
+                sharpe_ratio=calc_sharpe_ratio(
                     year_returns, trading_days_per_year, annual_risk_free_rate_pct
                 ),
                 sortino_ratio=_calc_sortino_ratio(

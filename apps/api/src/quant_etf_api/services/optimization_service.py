@@ -26,13 +26,13 @@ from quant_etf_api.domain.common.enums import (
     ExecutionModel,
     parse_execution_model,
 )
+from quant_etf_api.domain.common.numeric import mean_or_none, median_or_none
 from quant_etf_api.domain.research.periods import (
     PURPOSE_RESEARCH,
-    PeriodBoundaries,
     validate_backtest_period,
 )
-from quant_etf_api.domain.research.walk_forward import compute_folds
 from quant_etf_api.domain.research.stability import compute_stability_metrics
+from quant_etf_api.domain.research.walk_forward import compute_folds
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.infra.db.base import utcnow
 from quant_etf_api.infra.db.models.core import (
@@ -46,6 +46,7 @@ from quant_etf_api.schemas.backtest import BacktestCreateRequest
 from quant_etf_api.schemas.strategy import StrategyConfigCreate, StrategyConfigUpdate
 from quant_etf_api.services.backtest_reference_service import BacktestReferenceService
 from quant_etf_api.services.backtest_service import BacktestService
+from quant_etf_api.services.period_config import load_period_boundaries
 from quant_etf_api.services.strategy_config_service import (
     StrategyConfigService,
     compute_config_hash,
@@ -74,16 +75,6 @@ _FOLD_DISPLAY_METRICS: list[str] = [
     "max_drawdown_pct",
     "sharpe_ratio",
 ]
-
-
-def _mean(values: list[float]) -> float | None:
-    """计算均值，空列表返回 None。"""
-    return statistics.mean(values) if values else None
-
-
-def _median(values: list[float]) -> float | None:
-    """计算中位数，空列表返回 None。"""
-    return statistics.median(values) if values else None
 
 
 class OptimizationService:
@@ -146,7 +137,7 @@ class OptimizationService:
             raise ValueError("folds 必须 >= 1")
         # 研究期/验证期硬约束：优化属于研究行为，不得使用验证期数据，
         # 否则"看了样本外再调参"会让验证期失去样本外意义
-        validate_backtest_period(_period_boundaries(), PURPOSE_RESEARCH, start_date, end_date)
+        validate_backtest_period(load_period_boundaries(), PURPOSE_RESEARCH, start_date, end_date)
 
         baseline = self._config_svc.get_config(strategy_id)
         if baseline is None:
@@ -748,16 +739,16 @@ class OptimizationService:
             logger.warning("现算净口径指标失败: backtest_id=%s", backtest_id, exc_info=True)
         return metrics
 
-    def _net_metrics(self, backtest_id: str) -> dict[str, Any]:
+    def _net_metrics(self, backtest_id: str, cost_bps: float | None = None) -> dict[str, Any]:
         """现算单条回测的净成本口径指标（F-16）。
 
         Args:
             backtest_id: 回测 ID。
+            cost_bps: 成本覆盖（基点）；None 时取回测固化的 ``_cost_bps``，
+                再缺失则取系统默认值。
 
         Returns:
-            {net_annualized_return_pct, net_sharpe_ratio, net_excess_return_pct,
-            annualized_turnover, cost_drag_pct_per_year, cost_bps}；
-            无逐日结果时返回空字典。
+            ``StabilityMetrics.net_metrics_payload()`` 的字段；无逐日结果时返回空字典。
         """
         row = self._backtest_repo.find_by_id(backtest_id)
         if row is None:
@@ -765,23 +756,16 @@ class OptimizationService:
         daily = self._backtest_repo.find_daily_results(backtest_id)
         if not daily:
             return {}
-        cost_bps = float((row.params or {}).get("_cost_bps") or get_settings().default_cost_bps)
+        if cost_bps is None:
+            cost_bps = (row.params or {}).get("_cost_bps") or get_settings().default_cost_bps
         metrics = compute_stability_metrics(
             [item.portfolio_return for item in daily],
             [item.trade_date for item in daily],
             benchmark_returns=[getattr(item, "benchmark_return", None) for item in daily],
             turnovers=[getattr(item, "turnover", None) for item in daily],
-            cost_bps=cost_bps,
+            cost_bps=float(cost_bps),
         )
-        return {
-            "cost_bps": cost_bps,
-            "net_cumulative_return_pct": metrics.net_cumulative_return_pct,
-            "net_annualized_return_pct": metrics.net_annualized_return_pct,
-            "net_sharpe_ratio": metrics.net_sharpe_ratio,
-            "net_excess_return_pct": metrics.net_excess_return_pct,
-            "annualized_turnover": metrics.annualized_turnover,
-            "cost_drag_pct_per_year": metrics.cost_drag_pct_per_year,
-        }
+        return metrics.net_metrics_payload()
 
     def _acceptance_checklist(self, session: StrategyOptimizationModel) -> list[dict[str, Any]]:
         """按默认阈值计算验收清单（严格模式强制全部通过）。"""
@@ -854,8 +838,8 @@ class OptimizationService:
                 continue
             baseline_net.append(base)
             candidate_net.append(cand)
-        base_mean = statistics.mean(baseline_net) if baseline_net else None
-        cand_mean = statistics.mean(candidate_net) if candidate_net else None
+        base_mean = mean_or_none(baseline_net)
+        cand_mean = mean_or_none(candidate_net)
         return self._check_item(
             "net_cost_nonnegative",
             f"净成本口径（{cost_bps:g}bp）验证窗平均夏普 ≥ 基线",
@@ -1003,16 +987,7 @@ class OptimizationService:
         row = self._backtest_repo.find_by_id(backtest_id)
         if row is None or row.status != "success":
             return None
-        daily = self._backtest_repo.find_daily_results(backtest_id)
-        if not daily:
-            return None
-        metrics = compute_stability_metrics(
-            [item.portfolio_return for item in daily],
-            [item.trade_date for item in daily],
-            turnovers=[getattr(item, "turnover", None) for item in daily],
-            cost_bps=cost_bps,
-        )
-        return metrics.net_sharpe_ratio
+        return self._net_metrics(backtest_id, cost_bps).get("net_sharpe_ratio")
 
     @staticmethod
     def _check_item(
@@ -1072,10 +1047,10 @@ def _compute_fold_summary(metrics_folds: list[dict[str, Any]]) -> dict[str, Any]
         baseline_values = [base for base, _ in pairs]
         candidate_values = [cand for _, cand in pairs]
         summary["metrics"][metric] = {
-            "baseline_mean": _mean(baseline_values),
-            "candidate_mean": _mean(candidate_values),
-            "baseline_median": _median(baseline_values),
-            "candidate_median": _median(candidate_values),
+            "baseline_mean": mean_or_none(baseline_values),
+            "candidate_mean": mean_or_none(candidate_values),
+            "baseline_median": median_or_none(baseline_values),
+            "candidate_median": median_or_none(candidate_values),
             "candidate_wins": sum(1 for base, cand in pairs if cand > base),
             "evaluated_folds": len(metrics_folds),
             "paired_folds": len(pairs),
@@ -1137,13 +1112,3 @@ def _ge(candidate: Any, baseline: Any) -> bool:
     if candidate is None or baseline is None:
         return False
     return candidate >= baseline
-
-
-def _period_boundaries() -> PeriodBoundaries:
-    """从系统配置读取研究期/验证期边界。"""
-    settings = get_settings()
-    return PeriodBoundaries(
-        research_start=date.fromisoformat(settings.research_period_start),
-        research_end=date.fromisoformat(settings.research_period_end),
-        validation_start=date.fromisoformat(settings.validation_period_start),
-    )
