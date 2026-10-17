@@ -71,6 +71,8 @@ class BreadthMAComputer:
             market_scope=True,
             value_shape=VALUE_SHAPE_MARKET,
             usage=[USAGE_TIMING, USAGE_FILTER],
+            # 占比口径（0-100），可直接作为择时得分
+            native_0_100=True,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:

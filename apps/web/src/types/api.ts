@@ -813,6 +813,8 @@ export interface FactorSpec {
   parameter_schema?: Record<string, FactorParameterSpec>
   /** 模板固有参数口径 */
   default_params?: Record<string, unknown> | null
+  /** 原值是否天然处于 0-100 评分空间；为 false 的因子用于择时时必须配置变换函数 */
+  native_0_100?: boolean
 }
 
 export interface FactorRow {
@@ -950,19 +952,44 @@ export interface AssetFilterDetail {
   fail_reason: string
 }
 
-/** 管线调试完整详情 */
-/** 择时因子明细（pipeline_detail.timing_detail 的值） */
+/** 择时因子全部缺失（降级）时的回退策略：neutral=按中性，defensive=按防守，hold_previous=沿用上一决策日 */
+export type TimingOnDegraded = 'neutral' | 'defensive' | 'hold_previous'
+
+/** 择时代理选择模式：consistent=单一代理全覆盖，per_factor=无代理全覆盖、逐因子回退 */
+export type TimingProxyMode = 'consistent' | 'per_factor'
+
+/** 策略 config_json 中的择时模块（timing） */
+export interface TimingConfigJson {
+  factors?: Record<string, number>
+  transforms?: Record<string, string>
+  thresholds?: { offensive?: number; defensive?: number }
+  proxy_index_codes?: string[]
+  /** 缺省为 neutral（兼容历史口径） */
+  on_degraded?: TimingOnDegraded
+}
+
+/** 择时因子明细（pipeline_detail.timing_detail 中以因子引用为键的值） */
 export interface TimingFactorDetail {
   raw?: number | string | null
   transformed?: number | string | null
   weight?: number | null
   status?: string
+  /** 该因子实际取值的代理指数代码 */
+  proxy?: string | null
 }
 
+/**
+ * pipeline_detail.timing_detail 的值：因子明细对象，或汇总字段
+ * （composite_score / missing_factors / degraded / on_degraded / fallback_regime /
+ * proxy_index_code / proxy_mode 等）。
+ */
+export type TimingDetailValue = TimingFactorDetail | number | string | boolean | string[] | null
+
+/** 管线调试完整详情 */
 export interface PipelineDetail {
   scoring: AssetScoreDetail[]
   filter_results: AssetFilterDetail[] | null
-  timing_detail: Record<string, TimingFactorDetail> | null
+  timing_detail: Record<string, TimingDetailValue> | null
   cross_section_stats: Record<string, unknown> | null
 }
 

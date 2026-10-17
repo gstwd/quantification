@@ -88,6 +88,8 @@ class IndexDiffusionRatioComputer:
             value_shape="asset",
             usage=[USAGE_SCORE, USAGE_FILTER, USAGE_RANK],
             default_params=_default_diffusion_params(),
+            # 快线为成分占比（0-100）
+            native_0_100=True,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:
@@ -269,6 +271,8 @@ class RRGIndustryMatchComputer:
             value_shape="asset",
             usage=[USAGE_SCORE, USAGE_FILTER, USAGE_RANK],
             default_params=_default_rrg_match_params(),
+            # 重合占比口径（0-100）
+            native_0_100=True,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:

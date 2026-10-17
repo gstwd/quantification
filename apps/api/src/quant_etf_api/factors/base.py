@@ -82,6 +82,9 @@ class FactorSpec:
         usage: 适用位置数组：timing/score/filter/rank，
             配置校验按此限制因子在策略中的消费位置。
         default_params: 因子默认参数（模板固有口径，零参数因子为空）。
+        native_0_100: 因子原值是否天然处于 0-100 评分空间（如 RSI、市场宽度、
+            估值百分位）。择时综合分在 0-100 空间加权，原值不在该空间的因子
+            必须配置变换函数，配置校验据此拦截量纲错配。
     """
 
     factor_id: str
@@ -95,6 +98,7 @@ class FactorSpec:
     value_shape: ValueShape = VALUE_SHAPE_ASSET
     usage: list[str] = field(default_factory=lambda: list(DEFAULT_INDEX_FACTOR_USAGE))
     default_params: dict[str, Any] = field(default_factory=dict)
+    native_0_100: bool = False
 
     def __post_init__(self) -> None:
         """校验因子值形态仅允许每资产值或市场级值。"""

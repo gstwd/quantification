@@ -117,6 +117,8 @@ class FactorTemplate:
         base_lookback_days: 默认参数口径下的回望自然日数。
         compute_lookback_days: 按实际参数推导回望自然日数；None 表示用 base_lookback_days。
         instance_label: 按实际参数生成实例展示名；None 表示用模板名称。
+        native_0_100: 因子原值是否天然处于 0-100 评分空间；为 False 的因子用于
+            择时时必须配置变换函数。
     """
 
     template_id: str
@@ -134,6 +136,7 @@ class FactorTemplate:
     base_lookback_days: int
     compute_lookback_days: Callable[[Mapping[str, Any]], int] | None = None
     instance_label: Callable[[Mapping[str, Any]], str] | None = None
+    native_0_100: bool = False
 
     @property
     def tunable(self) -> bool:
@@ -243,6 +246,7 @@ class FactorTemplate:
             value_shape=self.value_shape,
             usage=list(self.usage),
             default_params=dict(self.default_params),
+            native_0_100=self.native_0_100,
         )
 
 
@@ -262,6 +266,7 @@ def build_template(
     value_shape: ValueShape | None = None,
     usage: tuple[str, ...] | None = None,
     market_scope: bool | None = None,
+    native_0_100: bool | None = None,
 ) -> FactorTemplate:
     """构造因子模板。
 
@@ -284,6 +289,7 @@ def build_template(
         value_shape: 因子值形态，None 表示取默认口径计算器的形态。
         usage: 适用位置，None 表示取默认口径计算器的适用位置。
         market_scope: 是否需全市场行情，None 表示取默认口径计算器的声明。
+        native_0_100: 原值是否天然处于 0-100 评分空间，None 表示取默认口径计算器的声明。
 
     Returns:
         构建完成的 FactorTemplate。
@@ -337,6 +343,11 @@ def build_template(
             base_lookback_days=int(base_spec.lookback_days) if base_spec else 0,
             compute_lookback_days=compute_lookback_days,
             instance_label=instance_label,
+            native_0_100=(
+                bool(native_0_100)
+                if native_0_100 is not None
+                else (bool(base_spec.native_0_100) if base_spec else False)
+            ),
         )
 
     # 默认口径必须通过自身校验，否则模板一注册就是坏配置

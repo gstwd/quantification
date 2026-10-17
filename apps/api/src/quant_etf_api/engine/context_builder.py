@@ -16,6 +16,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from quant_etf_api.domain.portfolio.universe import build_universe_items
+from quant_etf_api.domain.strategies.timing_proxy import (
+    TimingProxySelection,
+    select_timing_proxy_values,
+)
 from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.engine.factor_provider import FactorProvider
@@ -59,6 +63,7 @@ class ContextBuilder:
         cached_universe: list[dict[str, Any]] | None = None,
         cached_metadata: dict[str, dict[str, Any]] | None = None,
         market_shape_refs: set[str] | None = None,
+        previous_timing_regime: str | None = None,
     ) -> EngineContext:
         """构建引擎上下文（实时和回测统一入口）。
 
@@ -75,6 +80,8 @@ class ContextBuilder:
             cached_metadata: 预构建的 asset_metadata 字典（回测模式复用）。
             market_shape_refs: 市场级因子引用（回测模式由调用方一次性解析后传入，
                 避免逐日重复解析）；实时模式自动解析。
+            previous_timing_regime: 上一决策日的 regime（仅回测模式由主循环传入，
+                供 ``on_degraded=hold_previous`` 使用）；实时模式无状态，忽略。
 
         Returns:
             填充完成的 EngineContext。
@@ -89,6 +96,7 @@ class ContextBuilder:
                 cached_universe,
                 cached_metadata,
                 market_shape_refs,
+                previous_timing_regime,
             )
         return self._build_live(config, trade_date)
 
@@ -160,17 +168,18 @@ class ContextBuilder:
         asset_matrix = self._factor_provider.load_asset_factor_matrix(
             config, effective_date, index_codes
         )
-        market_factors = self._factor_provider.load_market_factors(config, effective_date)
+        timing_proxy = self._factor_provider.load_market_factor_selection(config, effective_date)
 
         return EngineContext(
             trade_date=effective_date,
             universe=universe,
             asset_factors=asset_matrix.day(effective_date),
-            market_factors=market_factors,
+            market_factors=dict(timing_proxy.values),
             asset_metadata=asset_metadata,
             factor_failures=set(asset_matrix.failed),
             market_shape_refs=set(self._factor_provider.market_shape_refs(config)),
             display_only_refs=set(self._factor_provider.display_only_factor_ids(config)),
+            timing_proxy=timing_proxy if config.timing else None,
         )
 
     # ==================================================================
@@ -187,6 +196,7 @@ class ContextBuilder:
         cached_universe: list[dict[str, Any]] | None = None,
         cached_metadata: dict[str, dict[str, Any]] | None = None,
         market_shape_refs: set[str] | None = None,
+        previous_timing_regime: str | None = None,
     ) -> EngineContext:
         """回测模式：使用当日预计算的因子值构建上下文。
 
@@ -214,17 +224,16 @@ class ContextBuilder:
             dict(precomputed_factors) if precomputed_factors else {}
         )
 
-        # 市场级择时因子：从当日因子值中提取择时代理指数的值
+        # 市场级择时因子：从当日因子值中按代理一致性口径提取（与实时共用同一纯函数）
         market_factors: dict[str, float | None] = {}
+        timing_proxy: TimingProxySelection | None = None
         if config.timing and precomputed_factors:
-            for factor_id in config.timing.factors:
-                for rep_code in config.timing.proxy_index_codes:
-                    val = precomputed_factors.get((rep_code, factor_id))
-                    if val is not None:
-                        market_factors[factor_id] = val
-                        break
-                else:
-                    market_factors[factor_id] = None
+            timing_proxy = select_timing_proxy_values(
+                config.timing.proxy_index_codes,
+                list(config.timing.factors),
+                lambda code, ref: precomputed_factors.get((code, ref)),
+            )
+            market_factors = dict(timing_proxy.values)
 
         return EngineContext(
             trade_date=trade_date,
@@ -233,6 +242,8 @@ class ContextBuilder:
             market_factors=market_factors,
             asset_metadata=asset_metadata,
             market_shape_refs=set(market_shape_refs or ()),
+            timing_proxy=timing_proxy,
+            previous_timing_regime=previous_timing_regime,
         )
 
     # ==================================================================

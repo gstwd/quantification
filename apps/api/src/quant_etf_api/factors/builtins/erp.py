@@ -176,6 +176,8 @@ class ERPPercentileComputer:
             ),
             required_data=["index_valuation", "macro_indicators"],
             lookback_days=_ERP_HISTORY_DAYS,
+            # 历史百分位口径（0-100），可直接作为得分
+            native_0_100=True,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:

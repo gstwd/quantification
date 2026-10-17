@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from quant_etf_api.domain.strategies.timing_proxy import TimingProxySelection
 from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.engine.config import ScoreConfig, StrategyConfig
 from quant_etf_api.engine.context_builder import ContextBuilder
@@ -74,7 +75,7 @@ def _make_live_context(
     provider.load_asset_factor_matrix.return_value = FactorMatrix(
         values={date(2025, 1, 15): {("000300", "close_price"): 100.0}}
     )
-    provider.load_market_factors.return_value = {}
+    provider.load_market_factor_selection.return_value = TimingProxySelection()
     return ContextBuilder(db, factor_provider=provider, registry=get_factor_template_registry())
 
 
@@ -154,3 +155,26 @@ class TestContextBuilderLive:
 
         with pytest.raises(FactorResolutionError):
             provider.resolve_instances(config)
+
+    def test_live_context_carries_timing_proxy_selection(self) -> None:
+        """实时上下文的择时因子值与代理来源都取自同一次代理选择结果。"""
+        from quant_etf_api.engine.config import TimingConfig
+
+        db, chains = _make_mock_db()
+        provider = MagicMock(spec=FactorProvider)
+        builder = _make_live_context(db, chains, provider=provider)
+        provider.load_market_factor_selection.return_value = TimingProxySelection(
+            values={"rsi": 55.0},
+            factor_proxies={"rsi": "000905"},
+            proxy_index_code="000905",
+        )
+        timing = TimingConfig(factors={"rsi": 1.0}, proxy_index_codes=["000300", "000905"])
+        config = _make_config().model_copy(update={"timing": timing})
+
+        ctx = builder.build(config, date(2025, 1, 15))
+
+        assert ctx.market_factors == {"rsi": 55.0}
+        assert ctx.timing_proxy is not None
+        assert ctx.timing_proxy.proxy_index_code == "000905"
+        # 实时路径无状态：不携带上一决策日 regime
+        assert ctx.previous_timing_regime is None

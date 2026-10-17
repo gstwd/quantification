@@ -1436,11 +1436,16 @@ class BacktestService:
         total_in_pos_positive = 0
         # benchmark_index 无分类字段：不再伪造 category，排名展示留空
         cached_metadata = {code: {"name_cn": code} for code in index_codes}
-        # 择时降级（择时因子全部缺失 → 按中性运行）的交易日，收尾时生成告警
+        # 择时降级（择时因子全部缺失 → 按 on_degraded 回退）的交易日，收尾时生成告警
         timing_degraded_dates: list[date] = []
         # 择时观测记录（与逐日结果一一对应），收尾时汇总择时专项统计；只读度量，
         # 不参与任何决策
         timing_days: list[TimingDay] = []
+        # 择时因子部分缺失（剩余因子重新归一化权重）的交易日及各因子缺失天数
+        timing_partial_dates: list[date] = []
+        timing_partial_factors: dict[str, int] = {}
+        # 上一决策日的 regime：供 on_degraded=hold_previous 在降级日沿用
+        previous_timing_regime: str | None = None
         all_index_codes = set(index_codes)
 
         for i, trade_date in enumerate(decision_dates):
@@ -1465,6 +1470,7 @@ class BacktestService:
                 ),
                 cached_metadata={code: cached_metadata[code] for code in day_codes},
                 market_shape_refs=market_shape_refs,
+                previous_timing_regime=previous_timing_regime,
             )
 
             # 两条腿独立到期：选股腿改成分，风险腿仅按择时等比缩放总仓位。
@@ -1488,8 +1494,16 @@ class BacktestService:
             timing_degraded = bool(
                 result.timing is not None and result.timing.factors.get("degraded")
             )
-            if timing_degraded:
-                timing_degraded_dates.append(trade_date)
+            if result.timing is not None:
+                if timing_degraded:
+                    timing_degraded_dates.append(trade_date)
+                elif result.timing.factors.get("missing_factors"):
+                    timing_partial_dates.append(trade_date)
+                    for factor_ref in result.timing.factors["missing_factors"]:
+                        timing_partial_factors[factor_ref] = (
+                            timing_partial_factors.get(factor_ref, 0) + 1
+                        )
+                previous_timing_regime = result.timing.regime
 
             # 以"调仓前实际持仓"（已随行情漂移）合成当日目标；收盘模式先成交昨日
             # 指令，仅风险腿到期时沿用今日收盘成交后的成分
@@ -1657,6 +1671,9 @@ class BacktestService:
                 warmup_trading_days=warmup_trading_days,
                 candidate_pool=candidate_pool,
                 timing_degraded_dates=timing_degraded_dates,
+                timing_on_degraded=config.timing.on_degraded if config.timing else "neutral",
+                timing_partial_dates=timing_partial_dates,
+                timing_partial_factors=timing_partial_factors,
                 exclusion_dates=exclusion_dates,
                 exclusion_reasons=exclusion_reasons,
                 data_quality_mode=data_quality_mode,

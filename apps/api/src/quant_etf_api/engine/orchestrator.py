@@ -329,7 +329,11 @@ class StrategyEngine:
 
         # 计算确信度
         thresholds = config.timing.thresholds
-        if regime == "offensive":
+        if factors.get("degraded"):
+            # 降级回退（defensive / hold_previous）不是由综合分推出的判断，确信度取
+            # 下限；neutral 回退按原公式恰好也是 20，与历史口径一致
+            confidence = 20.0
+        elif regime == "offensive":
             confidence = min(100.0, (composite_score - thresholds.offensive) * 2 + 60)
         elif regime == "defensive":
             confidence = min(100.0, (thresholds.defensive - composite_score) * 2 + 60)

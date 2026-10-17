@@ -130,8 +130,10 @@ class DefaultScoreCalculator:
         """计算择时综合得分。
 
         与 absolute 评分同一口径：负权重按 100 − 得分参与加权。部分因子缺失时
-        在明细中列出 ``missing_factors``；全部缺失时回退为 neutral 并标记
-        ``degraded=True``，由服务层转成结构化告警，避免静默按中性仓位运行。
+        在明细中列出 ``missing_factors``；全部缺失时按 ``config.on_degraded``
+        回退（默认 neutral）并标记 ``degraded=True``，由服务层转成结构化告警，
+        避免静默按回退仓位运行。上下文携带代理选择结果时，明细标出实际使用的
+        代理指数（``proxy_index_code`` / ``proxy_mode``，以及各因子的 ``proxy``）。
 
         Args:
             config: 择时配置。
@@ -143,6 +145,7 @@ class DefaultScoreCalculator:
         weighted_scores: list[tuple[float, float]] = []
         details: dict[str, Any] = {}
         missing_factors: list[str] = []
+        proxy = context.timing_proxy
 
         for factor_id, weight in config.factors.items():
             raw_value = context.market_factors.get(factor_id)
@@ -164,19 +167,27 @@ class DefaultScoreCalculator:
                 "transformed": round(transformed, 1),
                 "weight": weight,
             }
+            if proxy is not None:
+                details[factor_id]["proxy"] = proxy.factor_proxies.get(factor_id)
 
         if not weighted_scores:
-            return (
-                0.0,
-                "neutral",
-                {
-                    "reason": "所有因子数据缺失",
-                    "degraded": True,
-                    "missing_factors": missing_factors,
-                },
-            )
+            regime, fallback_reason = _degraded_regime(config, context)
+            degraded: dict[str, Any] = {
+                "reason": "所有因子数据缺失",
+                "degraded": True,
+                "missing_factors": missing_factors,
+                "on_degraded": config.on_degraded,
+                "fallback_regime": regime,
+            }
+            if fallback_reason:
+                degraded["fallback_reason"] = fallback_reason
+            if proxy is not None:
+                degraded.update(proxy.to_detail())
+            return 0.0, regime, degraded
         if missing_factors:
             details["missing_factors"] = missing_factors
+        if proxy is not None:
+            details.update(proxy.to_detail())
 
         total_weight = sum(w for w, _ in weighted_scores)
         composite = (
@@ -297,6 +308,26 @@ class DefaultScoreCalculator:
                 entry.contribution = round(w * directional / total_weight, 2)
         score = sum(w * d for w, d, _ in weighted_scores) / total_weight
         return round(max(0.0, min(100.0, score)), 1)
+
+
+def _degraded_regime(config: TimingConfig, context: EngineContext) -> tuple[str, str]:
+    """按 on_degraded 决定择时因子全部缺失时的回退 regime。
+
+    Args:
+        config: 择时配置。
+        context: 引擎上下文（hold_previous 读取 ``previous_timing_regime``）。
+
+    Returns:
+        (回退 regime, 回退说明)；说明为空串表示按配置正常回退。
+    """
+    if config.on_degraded == "defensive":
+        return "defensive", ""
+    if config.on_degraded == "hold_previous":
+        if context.previous_timing_regime:
+            return context.previous_timing_regime, ""
+        # 实时路径无状态、或回测首个决策日无历史 regime：只能退化为中性
+        return "neutral", "无上一决策日 regime 可沿用，已退化为 neutral"
+    return "neutral", ""
 
 
 def _directional(value: float, weight: float) -> float:

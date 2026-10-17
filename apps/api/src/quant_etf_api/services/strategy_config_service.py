@@ -17,6 +17,7 @@ from quant_etf_api.engine.config import (
     StrategyConfig,
     iter_factor_refs,
 )
+from quant_etf_api.engine.portfolio import _DEFAULT_TIMING_EXPOSURE
 from quant_etf_api.engine.transforms import list_transform_names
 from quant_etf_api.factors.catalog import (
     FactorResolutionError,
@@ -470,6 +471,7 @@ class StrategyConfigService:
         - factor_aliases 声明的模板存在、启用、参数合法
         - 各模块引用的因子引用可解析（别名或模板 ID），且模板 usage 覆盖消费模块
         - transforms 引用的变换函数均存在于引擎变换注册表
+        - 择时因子原值不在 0-100 评分空间时必须配置变换函数
 
         Args:
             config: 已解析的策略配置。
@@ -486,6 +488,7 @@ class StrategyConfigService:
         errors.extend(self._factor_alias_errors(config, registry, active_by_id, warnings))
         errors.extend(self._factor_reference_errors(config, registry, active_by_id))
         errors.extend(self._transform_validation_errors(config))
+        errors.extend(self._timing_scale_errors(config, registry))
         return StrategyValidationResult(
             valid=len(errors) == 0,
             errors=errors,
@@ -540,6 +543,19 @@ class StrategyConfigService:
             errors.extend(StrategyConfigService._filter_block_errors(prefix, filters))
             errors.extend(StrategyConfigService._rank_block_errors(prefix, rank))
             errors.extend(StrategyConfigService._portfolio_block_errors(prefix, portfolio))
+        if config.timing:
+            # 顶层组合会被三种 regime 读取；regime 覆盖块只在本 regime 下生效
+            warnings.extend(
+                StrategyConfigService._partial_timing_exposure_warnings(
+                    "", config.portfolio, tuple(_DEFAULT_TIMING_EXPOSURE)
+                )
+            )
+            for regime, rule in config.regime_rules.items():
+                warnings.extend(
+                    StrategyConfigService._partial_timing_exposure_warnings(
+                        f"regime_rules.{regime}.", rule.portfolio, (regime,)
+                    )
+                )
         if config.regime_rules and config.timing is None:
             warnings.append(
                 "已配置 regime_rules 但未配置择时（timing）：regime 覆盖永远不会生效"
@@ -567,9 +583,10 @@ class StrategyConfigService:
                     continue
                 exposures = [portfolio.default_exposure]
                 if config.timing:
+                    # 未配置 timing_exposure 时引擎按默认三档表取仓位（唯一来源）
                     exposures.extend(
                         (portfolio.timing_exposure or {}).values()
-                        or (0.80, 0.50, 0.20)  # 与 portfolio._DEFAULT_TIMING_EXPOSURE 一致
+                        or _DEFAULT_TIMING_EXPOSURE.values()
                     )
                 if config.risk.max_asset_weight < max(exposures):
                     warnings.append(
@@ -685,6 +702,37 @@ class StrategyConfigService:
             if not 0.0 <= exposure <= 1.0:
                 errors.append(f"{prefix}portfolio.timing_exposure.{regime} 必须在 [0, 1] 范围内")
         return errors
+
+    @staticmethod
+    def _partial_timing_exposure_warnings(
+        prefix: str, portfolio: PortfolioConfig | None, regimes: tuple[str, ...]
+    ) -> list[str]:
+        """提示 timing_exposure 只配置了部分 regime 的口径歧义。
+
+        引擎对 timing_exposure 中缺失的 regime 回退到 ``default_exposure``，而不是
+        默认三档表；只写了两档时，缺的那一档会静默按默认仓位运行。
+
+        Args:
+            prefix: 配置路径前缀。
+            portfolio: 组合配置，None 表示未覆盖。
+            regimes: 该组合块会被读取的 regime（顶层为三档，regime 覆盖块为本 regime）。
+
+        Returns:
+            警告信息列表；未配置 timing_exposure 或所需档位齐全时为空。
+        """
+        if portfolio is None or not portfolio.timing_exposure:
+            return []
+        missing = [regime for regime in regimes if regime not in portfolio.timing_exposure]
+        if not missing:
+            return []
+        detail = "、".join(
+            f"{regime}（默认三档表为 {_DEFAULT_TIMING_EXPOSURE[regime]:.0%}）" for regime in missing
+        )
+        return [
+            f"{prefix}portfolio.timing_exposure 缺少 {detail}：缺失档位回退到 "
+            f"default_exposure={portfolio.default_exposure:.0%}，而不是默认三档表；"
+            "建议把 offensive / neutral / defensive 三档都写全"
+        ]
 
     def _factor_alias_errors(
         self,
@@ -812,6 +860,41 @@ class StrategyConfigService:
                     f"未知变换函数 '{transform_name}'（用于因子 {factor_id}），"
                     f"可用: {list_transform_names()}"
                 )
+        return errors
+
+    @staticmethod
+    def _timing_scale_errors(config: StrategyConfig, registry: FactorTemplateRegistry) -> list[str]:
+        """校验择时因子的量纲：原值不在 0-100 评分空间的因子必须配置变换函数。
+
+        择时综合分在 0-100 空间加权并与阈值比较；RSRS 的 z 值、收益率百分比等
+        原值直接参与加权会让综合分静默失真。模板声明 ``native_0_100`` 的因子
+        （RSI、市场宽度、估值百分位等）可不配变换。regime_rules 不含择时配置，
+        无需检查。引用无法解析的错误已由引用校验报告，这里跳过。
+
+        Args:
+            config: 已解析的策略配置。
+            registry: 因子模板注册表。
+
+        Returns:
+            错误信息列表。
+        """
+        if config.timing is None:
+            return []
+        errors: list[str] = []
+        for ref in config.timing.factors:
+            if config.timing.transforms.get(ref):
+                continue
+            try:
+                template = registry.resolve(ref, config.factor_aliases).template
+            except FactorResolutionError:
+                continue
+            if template.native_0_100:
+                continue
+            errors.append(
+                f"择时因子 {ref}（模板 {template.template_id}）原值不在 0-100 评分空间，"
+                f"必须在 timing.transforms 中配置变换函数（可用: {list_transform_names()}），"
+                "否则择时综合分会静默失真"
+            )
         return errors
 
     def get_parsed_config(self, strategy_id: str) -> StrategyConfig | None:

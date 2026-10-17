@@ -15,6 +15,7 @@ from quant_etf_api.domain.strategies.models import (
     StrategyResult,
     TimingSignal,
 )
+from quant_etf_api.domain.strategies.timing_proxy import TimingProxySelection
 from quant_etf_api.engine.pipeline_detail import PipelineDetail
 
 
@@ -34,6 +35,10 @@ class EngineContext:
         market_shape_refs: 解析为市场级模板的因子引用；引擎按资产检查
             "缺失即剔除"时豁免这些引用（它们没有逐资产取值）。
         display_only_refs: 仅用于结果展示（排名子因子）的引用；缺失时不告警。
+        timing_proxy: 择时代理选择结果（实际使用的代理指数）；None 表示上下文
+            未经代理选择构建（如直接注入 market_factors 的测试）。
+        previous_timing_regime: 上一决策日的 regime，供 ``on_degraded=hold_previous``
+            在择时因子全部缺失时沿用；实时路径无状态，恒为 None。
     """
 
     trade_date: date
@@ -44,6 +49,8 @@ class EngineContext:
     factor_failures: set[str] = field(default_factory=set)
     market_shape_refs: set[str] = field(default_factory=set)
     display_only_refs: set[str] = field(default_factory=set)
+    timing_proxy: TimingProxySelection | None = None
+    previous_timing_regime: str | None = None
 
 
 @dataclass

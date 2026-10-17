@@ -125,6 +125,10 @@
       </div>
       <div v-show="timingEnabled && expanded.timing" class="module-body">
         <div class="module-desc">基于市场估值/趋势/量能判断 regime（进攻/中性/防守），控制组合总仓位。</div>
+        <div class="threshold-hint">
+          综合分在 0-100 空间加权：除 RSI、市场宽度、估值百分位等原值即 0-100 的因子外，
+          收益率、RSRS、量比等因子必须选择变换函数，否则校验不通过。
+        </div>
 
         <div class="factor-header">
           <span class="fh-factor">模板 / 别名 / 参数</span>
@@ -179,7 +183,22 @@
             class="fp-input"
             placeholder="如 000300,000016，留空=默认沪深300"
           />
-          <span class="threshold-hint">用于加载市场级择时因子的代表性指数</span>
+          <span class="threshold-hint">
+            用于加载市场级择时因子的代表性指数：按顺序选第一个让全部择时因子都有值的代理；
+            都不能全覆盖时逐因子取第一个有值的代理（择时明细会标出实际来源）
+          </span>
+        </div>
+        <div class="sub-field">
+          <label class="sub-label">择时因子全部缺失时</label>
+          <select v-model="timingOnDegraded" class="fp-select">
+            <option value="neutral">按中性（默认）</option>
+            <option value="defensive">按防守</option>
+            <option value="hold_previous">沿用上一决策日</option>
+          </select>
+          <span class="threshold-hint">
+            中性档仓位较高时（如 90%），缺数据会接近满仓运行，可改为按防守。“沿用上一决策日”仅回测有效；
+            实时分配不保存历史状态，会退化为中性并给出告警
+          </span>
         </div>
       </div>
     </div>
@@ -677,7 +696,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { fetchFactorSpecs } from '../api/factors'
 import { fetchBenchmarkIndexes } from '../api/market_data'
-import type { BenchmarkIndex, FactorSpec } from '../types/api'
+import type { BenchmarkIndex, FactorSpec, TimingOnDegraded } from '../types/api'
 import FactorPicker from './FactorPicker.vue'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
@@ -884,10 +903,17 @@ const timingFactors = ref<FactorRowValue[]>([])
 const timingOffensive = ref(65)
 const timingDefensive = ref(35)
 const timingProxyIndexCodes = ref('')
+// 择时因子全部缺失时的回退策略，默认 neutral（与后端默认一致，不写入 config_json）
+const timingOnDegraded = ref<TimingOnDegraded>('neutral')
+
+/** 把 config_json 中的 on_degraded 收窄为合法取值，未知值按默认 neutral 处理 */
+function parseOnDegraded(value: unknown): TimingOnDegraded {
+  return value === 'defensive' || value === 'hold_previous' ? value : 'neutral'
+}
 
 function initTiming(): void {
   const timing = props.modelValue.timing as Record<string, unknown> | undefined
-  if (!timing) { timingEnabled.value = false; return }
+  if (!timing) { timingEnabled.value = false; timingOnDegraded.value = 'neutral'; return }
   timingEnabled.value = true
   const factors = (timing.factors ?? {}) as Record<string, number>
   const transforms = (timing.transforms ?? {}) as Record<string, string>
@@ -902,6 +928,16 @@ function initTiming(): void {
   timingDefensive.value = thresholds.defensive ?? 35
   const proxyCodes = (timing.proxy_index_codes ?? []) as string[]
   timingProxyIndexCodes.value = proxyCodes.length > 0 ? proxyCodes.join(', ') : ''
+  timingOnDegraded.value = parseOnDegraded(timing.on_degraded)
+}
+
+/**
+ * 择时因子原值是否需要变换：模板未声明原生 0-100 时返回 true。
+ * 模板列表未加载（或模板已下线）时无法判断，返回 false，交给后端校验兜底。
+ */
+function needsTimingTransform(templateId: string): boolean {
+  const template = availableFactors.value.find(f => f.factor_id === templateId)
+  return template !== undefined && template.native_0_100 !== true
 }
 
 function addTimingFactor(): void {
@@ -1127,6 +1163,11 @@ const errors = computed((): string[] => {
     if (timingOffensive.value <= timingDefensive.value) {
       errs.push('择时模块：进攻阈值必须大于防守阈值')
     }
+    for (const f of validTiming) {
+      if (!f.transform && needsTimingTransform(f.template_id)) {
+        errs.push(`择时模块：因子 ${f.alias} 原值不在 0-100 评分空间，必须选择变换函数`)
+      }
+    }
   }
   if (filterEnabled.value) {
     for (let i = 0; i < filterRules.value.length; i++) {
@@ -1215,6 +1256,7 @@ function buildConfig(): Record<string, unknown> {
       .map(s => s.trim())
       .filter(Boolean)
     if (proxyCodes.length > 0) timingConfig.proxy_index_codes = proxyCodes
+    if (timingOnDegraded.value !== 'neutral') timingConfig.on_degraded = timingOnDegraded.value
     config.timing = timingConfig
   }
 
@@ -1313,7 +1355,7 @@ watch(
   [
     indexCodesInput,
     scoreFactors, scoreMissingStrategy, scoreScoringMode,
-    timingEnabled, timingFactors, timingOffensive, timingDefensive, timingProxyIndexCodes,
+    timingEnabled, timingFactors, timingOffensive, timingDefensive, timingProxyIndexCodes, timingOnDegraded,
     filterEnabled, filterLogic, filterRules,
     rankOrder, rankTopN, rankBottomN, rankMomentumFactor, rankValuationFactor,
     portfolioMethod, portfolioDefaultExposure, exposureOffensive, exposureNeutral, exposureDefensive,

@@ -22,6 +22,16 @@ _PRICE_EXCLUSION_LABELS: dict[str, str] = {
     "MISSING_NEXT_HIGH_LOW": "缺最高/最低价",
 }
 
+# 择时降级回退策略 → 告警文案中的回退说明
+_DEGRADED_POLICY_TEXT: dict[str, str] = {
+    "neutral": "按中性 regime 决定总仓位",
+    "defensive": "按防守 regime 决定总仓位（on_degraded=defensive）",
+    "hold_previous": (
+        "沿用上一决策日的 regime 决定总仓位（on_degraded=hold_previous；"
+        "回测首个决策日即降级时无历史可沿用，按中性处理）"
+    ),
+}
+
 
 @dataclass
 class RunDiagnostics:
@@ -33,7 +43,10 @@ class RunDiagnostics:
         delisted_codes: 标的池中已停用（退市/停发）的指数代码。
         warmup_trading_days: 因子预热交易日数。
         candidate_pool: 有效候选池时间线。
-        timing_degraded_dates: 择时因子全部缺失、按中性运行的交易日。
+        timing_degraded_dates: 择时因子全部缺失、按 on_degraded 回退的交易日。
+        timing_on_degraded: 择时降级回退策略（neutral/defensive/hold_previous）。
+        timing_partial_dates: 择时因子部分缺失（剩余因子重新归一化权重）的交易日。
+        timing_partial_factors: 部分缺失交易日中各择时因子的缺失天数。
         exclusion_dates: 指数 → 被剔除的交易日。
         exclusion_reasons: 指数 → 剔除原因集合。
         data_quality_mode: 数据缺口提示口径（strict/warn）。
@@ -45,6 +58,9 @@ class RunDiagnostics:
     warmup_trading_days: int = 0
     candidate_pool: dict[str, Any] = field(default_factory=dict)
     timing_degraded_dates: list[date] = field(default_factory=list)
+    timing_on_degraded: str = "neutral"
+    timing_partial_dates: list[date] = field(default_factory=list)
+    timing_partial_factors: dict[str, int] = field(default_factory=dict)
     exclusion_dates: dict[str, list[date]] = field(default_factory=dict)
     exclusion_reasons: dict[str, set[str]] = field(default_factory=dict)
     data_quality_mode: str = "warn"
@@ -411,7 +427,8 @@ def collect_run_warnings(
     """把主循环收集的口径与候选池记录转换为结构化告警。
 
     覆盖日历来源、非交易日行情、退市标的、预热期、候选池缩水、因子缺失、择时
-    降级与数据缺口剔除；行情缺口与基准缺失依赖额外数据，由调用方追加。
+    降级（全部缺失）与择时部分缺失、数据缺口剔除；行情缺口与基准缺失依赖额外数据，
+    由调用方追加。
 
     Args:
         diagnostics: 主循环收集的诊断记录。
@@ -503,6 +520,9 @@ def collect_run_warnings(
     warnings.extend(factor_warnings or [])
     degraded = diagnostics.timing_degraded_dates
     if degraded:
+        policy_text = _DEGRADED_POLICY_TEXT.get(
+            diagnostics.timing_on_degraded, _DEGRADED_POLICY_TEXT["neutral"]
+        )
         warnings.append(
             BacktestWarning(
                 level="warning",
@@ -510,12 +530,48 @@ def collect_run_warnings(
                 message=(
                     f"择时因子在 {len(degraded)} 个交易日全部缺失"
                     f"（{degraded[0]}~{degraded[-1]}），"
-                    "这些交易日按中性 regime 决定总仓位"
+                    f"这些交易日{policy_text}"
                 ),
             )
         )
+    partial_warning = timing_partial_warning(
+        diagnostics.timing_partial_dates, diagnostics.timing_partial_factors
+    )
+    if partial_warning is not None:
+        warnings.append(partial_warning)
     warnings.extend(_exclusion_warnings(diagnostics))
     return warnings
+
+
+def timing_partial_warning(
+    partial_dates: list[date],
+    partial_factors: dict[str, int],
+) -> BacktestWarning | None:
+    """构造"择时因子部分缺失"的告警（TIMING_PARTIAL_MISSING）。
+
+    部分缺失时综合分只由剩余因子重新归一化权重得出，regime 判定口径与配置
+    不一致却不会触发 TIMING_DEGRADED，必须单独提示受影响的交易日与因子。
+
+    Args:
+        partial_dates: 择时因子部分缺失的交易日（升序）。
+        partial_factors: 各择时因子在这些交易日中的缺失天数。
+
+    Returns:
+        结构化告警；没有部分缺失交易日时返回 None。
+    """
+    if not partial_dates:
+        return None
+    ranked = sorted(partial_factors.items(), key=lambda item: (-item[1], item[0]))
+    detail = "、".join(f"{ref} {days} 天" for ref, days in ranked)
+    return BacktestWarning(
+        level="warning",
+        code="TIMING_PARTIAL_MISSING",
+        message=(
+            f"择时因子在 {len(partial_dates)} 个交易日部分缺失"
+            f"（{partial_dates[0]}~{partial_dates[-1]}）：{detail}；"
+            "这些交易日的综合分只由剩余因子重新归一化权重得出，regime 判定口径与配置不一致"
+        ),
+    )
 
 
 def _exclusion_warnings(diagnostics: RunDiagnostics) -> list[BacktestWarning]:

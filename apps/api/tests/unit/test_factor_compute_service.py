@@ -417,3 +417,50 @@ class TestBuildContext:
         result = service.compute_market_factors([instance], DATES[0], ["000300", "000905"])
 
         assert result == {"pe_percentile": None}
+
+    def test_market_factors_use_single_full_coverage_proxy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """首个代理只覆盖部分择时因子时，全部因子统一取第一个全覆盖代理的值。"""
+        valuation = {
+            ("000300", DATES[0]): _Valuation(pe_percentile=20.0),
+            ("000905", DATES[0]): _Valuation(pe_percentile=45.0, pb_percentile=55.0),
+        }
+        _patch_repos(monkeypatch, valuation)
+        service = _service()
+        instances = [service.resolve("pe_percentile", {}), service.resolve("pb_percentile", {})]
+
+        selection = service.compute_market_factor_selection(
+            instances, DATES[0], ["000300", "000905"]
+        )
+
+        # 不再混用：pe 不取 000300 的 20.0，而与 pb 一起取 000905
+        assert selection.values == {"pe_percentile": 45.0, "pb_percentile": 55.0}
+        assert selection.proxy_index_code == "000905"
+        assert selection.mode == "consistent"
+        assert service.compute_market_factors(instances, DATES[0], ["000300", "000905"]) == {
+            "pe_percentile": 45.0,
+            "pb_percentile": 55.0,
+        }
+
+    def test_market_factors_fall_back_per_factor_without_full_coverage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """没有代理全覆盖时退回逐因子口径，并记录每个因子实际使用的代理。"""
+        valuation = {
+            ("000300", DATES[0]): _Valuation(pe_percentile=20.0),
+            ("000905", DATES[0]): _Valuation(pb_percentile=55.0),
+        }
+        _patch_repos(monkeypatch, valuation)
+        service = _service()
+        instances = [service.resolve("pe_percentile", {}), service.resolve("pb_percentile", {})]
+
+        selection = service.compute_market_factor_selection(
+            instances, DATES[0], ["000300", "000905"]
+        )
+
+        assert selection.values == {"pe_percentile": 20.0, "pb_percentile": 55.0}
+        assert selection.proxy_index_code is None
+        assert selection.mode == "per_factor"
+        assert selection.factor_proxies == {"pe_percentile": "000300", "pb_percentile": "000905"}
+        assert selection.mixed is True

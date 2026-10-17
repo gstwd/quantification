@@ -119,7 +119,12 @@ def _valid_config_json() -> dict:
             ]
         },
         "rank": {"momentum_factor": "return_20d", "valuation_factor": "pe_percentile"},
-        "timing": {"factors": {"return_60d": 1.0}, "proxy_index_codes": ["000300"]},
+        # 收益率原值不在 0-100 评分空间，择时引用必须配置变换函数
+        "timing": {
+            "factors": {"return_60d": 1.0},
+            "transforms": {"return_60d": "momentum_score"},
+            "proxy_index_codes": ["000300"],
+        },
         "portfolio": {"method": "equal_weight"},
         "factor_aliases": {
             "return_20d": {"template_id": "return", "params": {"period": 20}},

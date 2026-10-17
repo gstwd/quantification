@@ -446,6 +446,8 @@ class RSIComputer:
             ),
             required_data=["index_bars"],
             lookback_days=period_lookback_days(self._period),
+            # RSI 定义域即 0-100，可直接作为择时得分
+            native_0_100=True,
         )
 
     def compute(self, index_code: str, trade_date: date, ctx: FactorContext) -> FactorValue:

@@ -19,6 +19,9 @@ SUPPORTED_SCHEMA_VERSIONS = {"2"}
 # 合法的择时 regime 名称：timing_exposure 与 regime_rules 的 key 均受此约束
 RegimeName = Literal["offensive", "neutral", "defensive"]
 
+# 择时因子全部缺失时的回退策略（见 TimingConfig.on_degraded）
+TimingDegradedPolicy = Literal["neutral", "defensive", "hold_previous"]
+
 
 class TimingThresholds(BaseModel):
     """择时 regime 判定阈值。
@@ -38,14 +41,21 @@ class TimingConfig(BaseModel):
     Attributes:
         factors: 因子权重映射，key=因子引用（别名或模板 ID），value=权重。
         transforms: 因子变换函数映射，key=因子引用，value=transform 名称。
+            综合分在 0-100 空间合成：原值不在 0-100 的因子必须配置变换函数。
         thresholds: regime 判定阈值。
         proxy_index_codes: 择时代理指数代码列表，用于加载市场级因子值。默认沪深300。
+            按顺序选第一个让全部择时因子都有值的代理；无代理全覆盖时逐因子回退。
+        on_degraded: 择时因子全部缺失（降级）时采用的 regime：
+            neutral=按中性（默认，兼容历史口径）、defensive=按防守、
+            hold_previous=沿用上一决策日的 regime（回测有效；实时路径无状态，
+            退化为 neutral 并在告警中注明）。
     """
 
     factors: dict[str, float]
     transforms: dict[str, str] = Field(default_factory=dict)
     thresholds: TimingThresholds = Field(default_factory=TimingThresholds)
     proxy_index_codes: list[str] = Field(default_factory=lambda: ["000300"])
+    on_degraded: TimingDegradedPolicy = "neutral"
 
 
 class ScoreConfig(BaseModel):

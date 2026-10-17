@@ -40,6 +40,8 @@ class FactorSpecResponse(BaseModel):
         usage: 适用位置数组：timing/score/filter/rank。
         parameter_schema: 可覆盖参数声明，空对象表示零参数模板。
         default_params: 模板固有参数口径（零参数模板记录其固定口径）。
+        native_0_100: 原值是否天然处于 0-100 评分空间；为 False 的因子用于择时时
+            必须配置变换函数。
     """
 
     factor_id: str
@@ -53,6 +55,7 @@ class FactorSpecResponse(BaseModel):
     usage: list[str] = Field(default_factory=list)
     parameter_schema: dict[str, FactorParameterSpecResponse] = Field(default_factory=dict)
     default_params: dict | None = None
+    native_0_100: bool = False
 
 
 class FactorUpdateRequest(BaseModel):

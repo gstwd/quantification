@@ -20,6 +20,10 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from quant_etf_api.domain.strategies.timing_proxy import (
+    TimingProxySelection,
+    select_timing_proxy_values,
+)
 from quant_etf_api.factors.base import (
     VALUE_SHAPE_MARKET,
     BatchFactorComputer,
@@ -489,7 +493,7 @@ class FactorComputeService:
         trade_date: date,
         proxy_codes: Sequence[str],
     ) -> dict[str, float | None]:
-        """计算市场级择时因子：按代理指数顺序取第一个有值的口径。
+        """计算市场级择时因子值（代理选择口径见 :meth:`compute_market_factor_selection`）。
 
         Args:
             instances: 择时引用的因子实例。
@@ -499,20 +503,36 @@ class FactorComputeService:
         Returns:
             {instance_id: 因子值}；代理指数全无数据时为 None。
         """
-        result: dict[str, float | None] = {}
+        return dict(self.compute_market_factor_selection(instances, trade_date, proxy_codes).values)
+
+    def compute_market_factor_selection(
+        self,
+        instances: Sequence[FactorInstance],
+        trade_date: date,
+        proxy_codes: Sequence[str],
+    ) -> TimingProxySelection:
+        """计算市场级择时因子并按代理一致性口径选值。
+
+        优先选第一个让全部择时因子都有值的代理；没有代理全覆盖时退回逐因子取
+        第一个有值代理。与回测路径共用 :func:`select_timing_proxy_values`。
+
+        Args:
+            instances: 择时引用的因子实例。
+            trade_date: 交易日。
+            proxy_codes: 择时代理指数代码列表（按优先级）。
+
+        Returns:
+            代理选择结果，``values`` 的键为 instance_id。
+        """
         if not instances:
-            return result
+            return TimingProxySelection()
         matrix = self.compute_matrix(instances, list(proxy_codes), [trade_date])
         day = matrix.day(trade_date)
-        for instance in instances:
-            value: float | None = None
-            for code in proxy_codes:
-                candidate = day.get((code, instance.instance_id))
-                if candidate is not None:
-                    value = candidate
-                    break
-            result[instance.instance_id] = value
-        return result
+        return select_timing_proxy_values(
+            proxy_codes,
+            [instance.instance_id for instance in instances],
+            lambda code, ref: day.get((code, ref)),
+        )
 
     # ==================================================================
     # 因子查询

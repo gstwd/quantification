@@ -145,9 +145,24 @@
                   进攻 ≥ {{ timingConfig.thresholds?.offensive ?? 65 }}，防守 ≤ {{ timingConfig.thresholds?.defensive ?? 35 }}
                 </span>
               </div>
+              <div v-if="timingConfig.transforms && Object.keys(timingConfig.transforms).length > 0" class="config-row">
+                <span class="config-key">变换函数</span>
+                <div class="factor-weights">
+                  <span v-for="(fn, fid) in timingConfig.transforms" :key="fid" class="factor-tag transform">
+                    <span class="factor-name">{{ factorLabel(String(fid)) }}</span>
+                    <span class="factor-weight">{{ fn }}</span>
+                  </span>
+                </div>
+              </div>
               <div v-if="timingConfig.proxy_index_codes && timingConfig.proxy_index_codes.length > 0" class="config-row">
                 <span class="config-key">代理指数</span>
-                <span class="config-val">{{ timingConfig.proxy_index_codes.join(', ') }}</span>
+                <span class="config-val">
+                  {{ timingConfig.proxy_index_codes.join(', ') }}（优先取全部择时因子都有值的首个代理）
+                </span>
+              </div>
+              <div class="config-row">
+                <span class="config-key">降级回退</span>
+                <span class="config-val">{{ onDegradedLabel(timingConfig.on_degraded) }}（择时因子全部缺失时）</span>
               </div>
             </div>
             <div v-else class="config-empty">未配置（无择时）</div>
@@ -244,6 +259,13 @@
                     <span class="factor-weight">{{ (exp * 100).toFixed(0) }}%</span>
                   </span>
                 </div>
+              </div>
+              <div v-if="timingConfig && missingExposureRegimes.length > 0" class="config-row">
+                <span class="config-key">缺档提示</span>
+                <span class="config-val config-warn">
+                  未配置 {{ missingExposureRegimes.join(' / ') }}：这些 regime 回退到默认仓位
+                  {{ ((portfolioConfig.default_exposure ?? 0.5) * 100).toFixed(0) }}%，而不是默认三档表，建议三档写全
+                </span>
               </div>
               <div v-if="portfolioConfig.default_exposure != null" class="config-row">
                 <span class="config-key">默认仓位</span>
@@ -775,6 +797,13 @@
         <!-- 择时明细 Tab -->
         <div v-if="activeDebugTab === 'timing'" class="debug-panel">
           <div v-if="allocation.pipeline_detail.timing_detail && Object.keys(allocation.pipeline_detail.timing_detail).length > 0">
+            <div v-if="timingSummary" class="timing-summary">
+              <span v-if="timingSummary.composite != null">综合分 {{ timingSummary.composite }}</span>
+              <span v-if="timingSummary.proxyText">代理：{{ timingSummary.proxyText }}</span>
+              <span v-if="timingSummary.degraded && timingSummary.degradedText" class="config-warn">
+                {{ timingSummary.degradedText }}
+              </span>
+            </div>
             <table class="debug-factor-table">
               <thead>
                 <tr>
@@ -782,15 +811,17 @@
                   <th>原始值</th>
                   <th>变换后</th>
                   <th>权重</th>
+                  <th>代理</th>
                   <th>状态</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(detail, fid) in allocation.pipeline_detail.timing_detail" :key="fid">
+                <tr v-for="[fid, detail] in timingFactorRows" :key="fid">
                   <td class="mono">{{ fid }}</td>
                   <td class="mono">{{ detail.raw != null ? (typeof detail.raw === 'number' ? detail.raw.toFixed(2) : detail.raw) : '-' }}</td>
                   <td class="mono">{{ detail.transformed != null ? detail.transformed : '-' }}</td>
                   <td class="mono">{{ detail.weight != null ? detail.weight : '-' }}</td>
+                  <td class="mono">{{ detail.proxy ?? '-' }}</td>
                   <td>
                     <span :class="['status-badge', detail.status === 'missing' ? 'status-missing_ignored' : 'status-ok']">
                       {{ detail.status === 'missing' ? '缺失' : '正常' }}
@@ -907,6 +938,10 @@ import type {
   RobustnessCoverage,
   RobustnessDetail,
   RobustnessSummary,
+  TimingConfigJson,
+  TimingDetailValue,
+  TimingFactorDetail,
+  TimingOnDegraded,
 } from '../types/api'
 import { formatCnTime, shiftDateCn, todayCn } from '../utils/date'
 
@@ -959,7 +994,14 @@ const editConfigText = ref('')
 const configJson = computed(() => store.current?.config_json ?? {})
 const indexCodesList = computed(() => store.current?.index_codes ?? [])
 const scoreConfig = computed(() => configJson.value.score as { factors?: Record<string, number>; transforms?: Record<string, string>; missing_factor_strategy?: string; scoring_mode?: string } | undefined)
-const timingConfig = computed(() => configJson.value.timing as { factors?: Record<string, number>; transforms?: Record<string, string>; thresholds?: { offensive?: number; defensive?: number }; proxy_index_codes?: string[] } | undefined)
+const timingConfig = computed(() => configJson.value.timing as TimingConfigJson | undefined)
+
+/** 择时降级回退策略的展示文案（缺省为 neutral） */
+function onDegradedLabel(policy: TimingOnDegraded | undefined): string {
+  if (policy === 'defensive') return '按防守'
+  if (policy === 'hold_previous') return '沿用上一决策日（仅回测；实时退化为中性）'
+  return '按中性（默认）'
+}
 const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string; missing_strategy?: string }> } | undefined)
 const rankConfig = computed(() => configJson.value.rank as { order?: string; top_n?: number; bottom_n?: number; momentum_factor?: string; valuation_factor?: string } | undefined)
 
@@ -998,6 +1040,13 @@ function factorLabel(ref: string): string {
 const portfolioConfig = computed(() => (
   configJson.value.portfolio ?? { method: 'equal_weight', default_exposure: 0.5 }
 ) as { method?: string; timing_exposure?: Record<string, number>; default_exposure?: number })
+
+/** timing_exposure 只配置了部分 regime 时缺失的档位（未配置 timing_exposure 时按默认三档表，不算缺档） */
+const missingExposureRegimes = computed((): string[] => {
+  const exposure = portfolioConfig.value.timing_exposure
+  if (!exposure || Object.keys(exposure).length === 0) return []
+  return ['offensive', 'neutral', 'defensive'].filter(regime => !(regime in exposure))
+})
 const riskConfig = computed(() => configJson.value.risk as { max_asset_weight?: number; max_portfolio_exposure?: number; min_cash_ratio?: number } | undefined)
 type RebalanceSchedule = { frequency?: string; day_of_week?: number; week_parity?: string; day_of_month?: number }
 const rebalanceConfig = computed(() => configJson.value.rebalance as (RebalanceSchedule & { selection?: RebalanceSchedule; risk?: RebalanceSchedule }) | undefined)
@@ -1213,12 +1262,51 @@ const debugTabs = computed(() => {
     tabs.push({
       key: 'timing',
       label: '择时明细',
-      count: Object.keys(pd.timing_detail).length,
+      // 只计因子行，composite_score / proxy_index_code 等汇总字段不计入
+      count: timingFactorRows.value.length,
     })
   }
   return tabs
 })
 const activeDebugTab = ref('scoring')
+
+/** timing_detail 的值是否为逐因子明细（其余为汇总字段） */
+function isTimingFactorDetail(value: TimingDetailValue): value is TimingFactorDetail {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** 择时明细中的逐因子行（排除综合分、缺失列表、代理与降级等汇总字段） */
+const timingFactorRows = computed((): Array<[string, TimingFactorDetail]> => {
+  const detail = allocation.value?.pipeline_detail?.timing_detail ?? {}
+  const rows: Array<[string, TimingFactorDetail]> = []
+  for (const [fid, value] of Object.entries(detail)) {
+    if (isTimingFactorDetail(value)) rows.push([fid, value])
+  }
+  return rows
+})
+
+/** 择时明细汇总：综合分、实际使用的代理指数与降级回退说明 */
+const timingSummary = computed(() => {
+  const detail = allocation.value?.pipeline_detail?.timing_detail
+  if (!detail) return null
+  const proxy = typeof detail.proxy_index_code === 'string' ? detail.proxy_index_code : null
+  let proxyText: string | null = null
+  if (detail.proxy_mode === 'consistent' && proxy) {
+    proxyText = `全部择时因子统一取 ${proxy}`
+  } else if (detail.proxy_mode === 'per_factor') {
+    proxyText = '无代理覆盖全部择时因子，已逐因子取第一个有值的代理（见各因子“代理”列）'
+  }
+  const fallbackRegime = typeof detail.fallback_regime === 'string' ? detail.fallback_regime : null
+  const fallbackReason = typeof detail.fallback_reason === 'string' ? detail.fallback_reason : null
+  return {
+    composite: typeof detail.composite_score === 'number' ? detail.composite_score : null,
+    proxyText,
+    degraded: detail.degraded === true,
+    degradedText: fallbackRegime
+      ? `择时因子全部缺失，按 ${fallbackRegime} 回退${fallbackReason ? `（${fallbackReason}）` : ''}`
+      : null,
+  }
+})
 
 /** 评分明细按最终得分降序展示；无得分的已排除资产置于末尾。 */
 const sortedScoringDetails = computed(() => {
@@ -1569,6 +1657,17 @@ onUnmounted(() => disposeCharts())
 .config-row:last-child { border-bottom: none; }
 .config-key { font-size: 12px; color: var(--text-muted); min-width: 70px; flex-shrink: 0; }
 .config-val { font-size: 12px; }
+.config-warn { color: #f59e0b; }
+
+/* 择时明细汇总行（综合分 / 代理来源 / 降级回退） */
+.timing-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 8px 0 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
 .config-empty { padding: 20px 16px; text-align: center; color: var(--text-muted); font-size: 12px; }
 
 .factor-weights { display: flex; gap: 4px; flex-wrap: wrap; }

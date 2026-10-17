@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.infra.time import today_cn
 
+from quant_etf_api.domain.strategies.models import TimingSignal
 from quant_etf_api.domain.strategies.rebalance import select_active_legs
 from quant_etf_api.engine.config import RebalanceScheduleConfig, StrategyConfig
 from quant_etf_api.engine.context_builder import ContextBuilder
@@ -223,6 +224,9 @@ class StrategyDecisionService:
                 strategy_id,
                 missing,
             )
+        degraded_warning = _timing_degraded_warning(result.timing, context.trade_date)
+        if degraded_warning is not None:
+            warnings.append(degraded_warning)
         # 引擎在评分前剔除"决策所需因子缺失"的资产（与回测候选池同一口径）
         if result.excluded:
             excluded_codes = sorted(result.excluded)
@@ -433,3 +437,38 @@ def _plan_mode(selection_due: bool, risk_due: bool) -> str:
     if risk_due:
         return "risk_only"
     return "hold"
+
+
+# 降级回退 regime → 告警文案中的中文名
+_REGIME_LABELS: dict[str, str] = {"offensive": "进攻", "neutral": "中性", "defensive": "防守"}
+
+
+def _timing_degraded_warning(
+    timing: TimingSignal | None, trade_date: date
+) -> BacktestWarning | None:
+    """把择时降级（择时因子全部缺失）转换为实时结构化告警。
+
+    回退 regime 由 ``timing.on_degraded`` 决定；``hold_previous`` 在实时路径没有
+    上一决策日状态，只能退化为 neutral，必须在告警中注明，避免误以为沿用了历史。
+
+    Args:
+        timing: 引擎输出的择时信号，None 表示未配置择时。
+        trade_date: 本次决策的有效交易日。
+
+    Returns:
+        结构化告警；择时未降级时返回 None。
+    """
+    if timing is None or not timing.factors.get("degraded"):
+        return None
+    policy = timing.factors.get("on_degraded", "neutral")
+    regime_label = _REGIME_LABELS.get(timing.regime, timing.regime)
+    message = f"择时因子全部缺失，本次按 {regime_label} regime 决定总仓位（on_degraded={policy}）"
+    fallback_reason = timing.factors.get("fallback_reason")
+    if fallback_reason:
+        message += f"；{fallback_reason}（实时路径不保存上一决策日状态）"
+    return BacktestWarning(
+        level="warning",
+        code="TIMING_DEGRADED",
+        message=message,
+        trade_date=trade_date,
+    )

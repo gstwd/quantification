@@ -92,15 +92,20 @@ def _resolve_instance(
         raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
-def _spec_response(row: Any) -> FactorSpecResponse:
+def _spec_response(row: Any, registry: FactorTemplateRegistry) -> FactorSpecResponse:
     """把 factor_definition 行转换为模板元数据响应。
+
+    ``native_0_100`` 是代码侧模板语义（不落库），从注册表读取；
+    模板已从代码移除时按 False 处理。
 
     Args:
         row: FactorDefinitionModel 行。
+        registry: 因子模板注册表。
 
     Returns:
         FactorSpecResponse。
     """
+    template = registry.get(row.factor_id)
     return FactorSpecResponse(
         factor_id=row.factor_id,
         name=row.name,
@@ -113,6 +118,7 @@ def _spec_response(row: Any) -> FactorSpecResponse:
         usage=list(row.usage or []),
         parameter_schema=row.parameter_schema or {},
         default_params=row.default_params,
+        native_0_100=bool(template.native_0_100) if template is not None else False,
     )
 
 
@@ -141,9 +147,10 @@ def init_factor_definitions(
 @router.get("/factors/", response_model=list[FactorSpecResponse])
 def list_factor_specs(
     db: Session = Depends(get_db),
+    registry: FactorTemplateRegistry = Depends(get_factor_registry),
 ) -> list[FactorSpecResponse]:
     """返回所有因子模板的元数据列表（含已禁用），从数据库读取。"""
-    return [_spec_response(row) for row in FactorDefinitionRepository(db).find_all()]
+    return [_spec_response(row, registry) for row in FactorDefinitionRepository(db).find_all()]
 
 
 @router.patch("/factors/{factor_id}", response_model=FactorSpecResponse)
@@ -151,12 +158,14 @@ def update_factor(
     factor_id: str,
     body: FactorUpdateRequest,
     db: Session = Depends(get_db),
+    registry: FactorTemplateRegistry = Depends(get_factor_registry),
 ) -> FactorSpecResponse:
     """编辑因子模板元数据（名称、描述、类别、启用状态）。
 
     Args:
         factor_id: 因子模板标识。
         body: 编辑请求体，仅传入需要修改的字段。
+        registry: 因子模板注册表（读取代码侧模板语义）。
 
     Returns:
         更新后的因子模板元数据。
@@ -182,7 +191,7 @@ def update_factor(
         logger.warning("更新因子模板失败: factor_id=%s", factor_id, exc_info=True)
         raise HTTPException(status_code=500, detail="更新失败") from None
 
-    return _spec_response(row)
+    return _spec_response(row, registry)
 
 
 @router.get("/factors/{factor_id}/cross-section", response_model=CrossSectionResponse)

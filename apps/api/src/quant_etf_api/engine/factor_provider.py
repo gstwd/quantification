@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session
 
+from quant_etf_api.domain.strategies.timing_proxy import TimingProxySelection
 from quant_etf_api.factors.base import FactorContext
 from quant_etf_api.factors.catalog import FactorInstance, FactorTemplateRegistry
 from quant_etf_api.factors.compute import FactorComputeService, FactorMatrix
@@ -196,9 +197,7 @@ class FactorProvider:
         config: "StrategyConfig",
         trade_date: date,
     ) -> dict[str, float | None]:
-        """现算市场级择时因子值。
-
-        按 config.timing.proxy_index_codes 的顺序取第一个有值的代理指数口径。
+        """现算市场级择时因子值（代理选择口径见 :meth:`load_market_factor_selection`）。
 
         Args:
             config: 策略配置，需包含 timing 配置。
@@ -207,8 +206,27 @@ class FactorProvider:
         Returns:
             key=引用名, value=因子数值 的字典。
         """
+        return dict(self.load_market_factor_selection(config, trade_date).values)
+
+    def load_market_factor_selection(
+        self,
+        config: "StrategyConfig",
+        trade_date: date,
+    ) -> TimingProxySelection:
+        """现算市场级择时因子值，并给出实际使用的代理指数。
+
+        按 config.timing.proxy_index_codes 的顺序选第一个让全部择时因子都有值的
+        代理；没有代理全覆盖时退回逐因子取第一个有值的代理（与回测共用同一纯函数）。
+
+        Args:
+            config: 策略配置，需包含 timing 配置。
+            trade_date: 交易日。
+
+        Returns:
+            代理选择结果，``values`` 的键为引用名。
+        """
         if config.timing is None:
-            return {}
+            return TimingProxySelection()
         wanted = set(config.timing.factors)
         instances = [
             instance
@@ -216,8 +234,8 @@ class FactorProvider:
             if ref in wanted
         ]
         if not instances:
-            return {}
-        return self._service().compute_market_factors(
+            return TimingProxySelection()
+        return self._service().compute_market_factor_selection(
             instances, trade_date, list(config.timing.proxy_index_codes)
         )
 

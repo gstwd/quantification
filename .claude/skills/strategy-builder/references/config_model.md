@@ -104,8 +104,8 @@
 
 ### 择时仓位控制
 
-- 有 `timing_exposure`：按择时 regime（offensive/neutral/defensive）查表
-- 有择时信号但无 `timing_exposure`：使用硬编码默认值（进攻 0.80/观望 0.50/防守 0.20）
+- 有 `timing_exposure`：按择时 regime（offensive/neutral/defensive）查表；**只写部分 regime 时缺失档位回退到 `default_exposure`**（不是默认三档表），校验给 warning，应三档写全
+- 有择时信号但无 `timing_exposure`：使用默认三档表 `engine/portfolio._DEFAULT_TIMING_EXPOSURE`（进攻 0.80/观望 0.50/防守 0.20）
 - 无择时：使用 `default_exposure`（默认 0.50）
 
 ## TimingConfig
@@ -113,8 +113,10 @@
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `factors` | dict[str,float] | **是** | - | 择时因子权重 |
-| `transforms` | dict[str,str] | 否 | `{}` | 择时因子变换 |
+| `transforms` | dict[str,str] | 否 | `{}` | 择时因子变换；原值不在 0-100 的因子（收益率、RSRS、量比等，模板 `native_0_100=false`）**必须**配置，否则校验报错 |
 | `thresholds` | TimingThresholds | 否 | `TimingThresholds()` | 择时阈值 |
+| `proxy_index_codes` | list[str] | 否 | `["000300"]` | 择时代理指数，按顺序取第一个让全部择时因子都有值的代理；无代理全覆盖时逐因子回退 |
+| `on_degraded` | str | 否 | `neutral` | 择时因子全部缺失时的回退：`neutral` / `defensive` / `hold_previous`（回测沿用上一决策日 regime；实时无状态退化为 neutral 并告警） |
 
 ### TimingThresholds
 
@@ -123,7 +125,7 @@
 | `offensive` | float | 65.0 | ≥此值 → 进攻 |
 | `defensive` | float | 35.0 | ≤此值 → 防守（中间 → 观望） |
 
-择时使用市场级因子（默认取沪深300 的因子值作为市场代理）。
+择时使用市场级因子（默认取沪深300 的因子值作为市场代理）。原值即 0-100 的模板（RSI、市场宽度、PE/PB/ERP 百分位）可不配变换。
 
 ## RiskConfig
 
