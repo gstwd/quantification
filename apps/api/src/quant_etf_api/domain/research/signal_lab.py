@@ -6,6 +6,8 @@
 - 截面因子（华西量价）：二阶动量、动量期限差、成交额波动（标准化）、量价相关，
   以及作为基准的现有 ``return`` / ``high_low`` 口径；
 - 单指数择时信号：LLT 斜率（广发）、振幅剪刀差（国信）、价量共振（华创）；
+- 择时综合分：本模块只给出默认示例的配置形态与帧组装，逐日计算由调用方注入引擎的
+  ``DefaultScoreCalculator.calculate_timing``，与回测同一实现（不再单独维护公式）；
 - 市场级信号：GSISI 投资者情绪指数（国信）。
 
 所有序列都在单个资产自身的交易日序列上计算，再由调用方对齐日历，避免并集日历
@@ -15,7 +17,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -450,39 +452,109 @@ def signal_pv_resonance(df: pd.DataFrame, p: dict[str, float]) -> pd.DataFrame:
     return out.reindex(df.index)
 
 
-def signal_existing_composite(
-    df: pd.DataFrame,
-    p: dict[str, float],
-    momentum_score: Callable[[float], float],
-    drawdown_score: Callable[[float], float],
-) -> pd.DataFrame:
-    """现有择时综合分（主策略 r60v90）：0.6·momentum_score(ret) + 0.4·drawdown_score(dd)。
+# 默认示例（主策略 r60v90 的择时块）的进攻阈值；防守阈值作为可调参数
+EXISTING_COMPOSITE_OFFENSIVE = 65.0
+# 引擎择时数据帧中各择时因子变换后得分列的前缀
+ENGINE_FACTOR_COLUMN_PREFIX = "score:"
 
-    分段映射函数由调用方注入（引擎 transforms），保证与正式引擎同一口径。
-    on = 综合分 > 防守阈值（非 defensive）。
+
+def existing_composite_timing_block(p: dict[str, float], proxy_code: str) -> dict[str, Any]:
+    """构造"现有择时综合分"默认示例的策略配置片段（timing + factor_aliases）。
+
+    默认示例与主策略 r60v90 的 timing 块同构：0.6 × momentum_score(N 日收益%) +
+    0.4 × drawdown_score(M 日回撤%)，进攻阈值 65、防守阈值可调。这里只给出配置
+    形态，计算一律交给引擎的 ``DefaultScoreCalculator.calculate_timing``，研究台与
+    回测不再维护两份综合分实现。
+
+    Args:
+        p: 已解析参数（return_period / drawdown_period / defensive）。
+        proxy_code: 择时代理指数代码（默认示例取所选指数本身）。
+
+    Returns:
+        可并入 ``StrategyConfig`` 的 ``{"timing": ..., "factor_aliases": ...}`` 字典。
     """
-    close = df["close"].dropna()
-    ret = simple_return(close, int(p["return_period"])) * 100
-    dd = (close / close.rolling(int(p["drawdown_period"])).max() - 1) * 100
-    ms = ret.map(lambda v: np.nan if pd.isna(v) else momentum_score(float(v)))
-    ds = dd.map(lambda v: np.nan if pd.isna(v) else drawdown_score(float(v)))
-    value = 0.6 * ms + 0.4 * ds
-    out = pd.DataFrame(
-        {"value": value, "momentum_score": ms, "drawdown_score": ds, "return_pct": ret}
-    )
-    out["on"] = (value > p["defensive"]).astype(float).where(value.notna())
-    return out.reindex(df.index)
+    ret_ref = f"return_{int(p['return_period'])}d"
+    dd_ref = f"drawdown_{int(p['drawdown_period'])}d"
+    return {
+        "timing": {
+            "factors": {ret_ref: 0.6, dd_ref: 0.4},
+            "transforms": {ret_ref: "momentum_score", dd_ref: "drawdown_score"},
+            "thresholds": {
+                "offensive": EXISTING_COMPOSITE_OFFENSIVE,
+                "defensive": float(p["defensive"]),
+            },
+            "proxy_index_codes": [proxy_code],
+        },
+        "factor_aliases": {
+            ret_ref: {"template_id": "return", "params": {"period": int(p["return_period"])}},
+            dd_ref: {"template_id": "drawdown", "params": {"period": int(p["drawdown_period"])}},
+        },
+    }
+
+
+def signal_engine_timing(
+    index: pd.DatetimeIndex,
+    evaluate: Callable[[pd.Timestamp], tuple[float, str, dict[str, Any]]],
+    factor_refs: Sequence[str],
+) -> pd.DataFrame:
+    """逐日调用引擎择时计算，组装研究台择时数据帧。
+
+    ``evaluate`` 由调用方注入（服务层用引擎 ``DefaultScoreCalculator.calculate_timing``
+    逐日计算），返回 (综合分, regime, 明细)，与回测主循环同一实现。
+
+    降级日（择时因子全部缺失）引擎按中性 regime 运行并给 0 分占位；研究台把它们
+    视为"无信号"（综合分、regime、on 均为空），避免 0 分污染 IC 与分布统计。
+
+    Args:
+        index: 交易日索引。
+        evaluate: 单日择时计算函数。
+        factor_refs: 择时因子引用名（决定输出的分量列）。
+
+    Returns:
+        列 value（综合分）/ regime / on（非防守 = 1）/ degraded / ``score:<引用名>``
+        （各因子变换后得分）的数据帧，索引与 ``index`` 一致。
+    """
+    columns = ["value", "regime", "degraded"] + [
+        f"{ENGINE_FACTOR_COLUMN_PREFIX}{ref}" for ref in factor_refs
+    ]
+    records: list[dict[str, Any]] = []
+    for ts in index:
+        composite, regime, details = evaluate(ts)
+        degraded = bool(details.get("degraded"))
+        record: dict[str, Any] = {
+            "value": np.nan if degraded else float(composite),
+            "regime": None if degraded else regime,
+            "degraded": degraded,
+        }
+        for ref in factor_refs:
+            item = details.get(ref)
+            transformed = item.get("transformed") if isinstance(item, dict) else None
+            record[f"{ENGINE_FACTOR_COLUMN_PREFIX}{ref}"] = (
+                np.nan if transformed is None else float(transformed)
+            )
+        records.append(record)
+    out = pd.DataFrame(records, index=index, columns=columns)
+    # regime 保持 object 列且缺失为 None（DataFrame 构造会把 None 转成 NaN）
+    out["regime"] = pd.Series([r["regime"] for r in records], index=index, dtype=object)
+    out["degraded"] = out["degraded"].astype(bool)
+    out["on"] = (out["regime"] != "defensive").astype(float).where(~out["degraded"])
+    return out
 
 
 TIMING_SIGNALS: dict[str, SignalDefinition] = {
     "existing_composite": SignalDefinition(
         key="existing_composite",
-        label="现有择时综合分（r60v90）",
-        source="主策略现有 Timing 配置",
-        formula="0.6 × momentum_score(ret_N%) + 0.4 × drawdown_score(dd_M%)；> 防守阈值视为持仓",
+        label="择时综合分（引擎口径）",
+        source="默认示例 = 主策略 r60v90 的 Timing 块；也可选择任一策略的 timing 块",
+        formula=(
+            "引擎 DefaultScoreCalculator：Σ|w|·d / Σ|w|，d = transform(因子)，负权重取 100 − d；"
+            "默认示例 0.6 × momentum_score(ret_N%) + 0.4 × drawdown_score(dd_M%)，"
+            "≥ 65 进攻、≤ 防守阈值防守；非防守视为持仓"
+        ),
         principle=(
-            "主策略的择时基准：90 日收益与 60 日回撤分段映射成 0~100 分后加权。"
-            "两者都是滞后指标，用来对照新信号的领先性与回撤控制。"
+            "与回测逐日调用的是同一个引擎实现（因子现算 + calculate_timing），研究台评估的"
+            "就是引擎实际执行的择时口径。默认示例的 90 日收益与 60 日回撤都是滞后指标，"
+            "用来对照新信号的领先性与回撤控制。"
         ),
         required_fields=("close",),
         params=(

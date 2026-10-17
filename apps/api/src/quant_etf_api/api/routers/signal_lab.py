@@ -62,12 +62,21 @@ def get_timing(
     start: date = Query(..., description="起始日期"),
     end: date = Query(..., description="截止日期"),
     params: str | None = Query(default=None, description="JSON 形式的信号参数"),
+    strategy_id: str | None = Query(
+        default=None,
+        description="按该策略的 timing 块计算择时综合分（仅 existing_composite，参数取自策略）",
+    ),
     db: Session = Depends(get_db),
 ) -> SignalLabTimingResponse:
-    """即时计算单指数择时信号、中间分量与评估指标（只读）。"""
+    """即时计算单指数择时信号、中间分量与评估指标（只读）。
+
+    择时综合分走引擎实现；指定 strategy_id 时读取该策略的 timing 块（不写任何数据）。
+    """
     parsed = _parse_params(params)
     try:
-        return SignalLabService(db).timing(index_code, signal, start, end, parsed)
+        return SignalLabService(db).timing(
+            index_code, signal, start, end, parsed, strategy_id=strategy_id
+        )
     except SignalLabNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except SignalLabError as exc:

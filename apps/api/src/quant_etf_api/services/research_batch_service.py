@@ -16,6 +16,11 @@
 
 变体既可以直接给完整 ``config``，也可以给 ``patch``（点号 / 下标路径 → 取值），
 后者让探索文件保持"只写改了哪几个参数"的可读形态。
+
+择时归因（``timing_attribution=True``）复用同一套变体机制：每个带择时的变体评估完
+后，派生一个"同配置、关闭择时、总仓位固定为该变体回测期平均实际暴露"的对照变体
+（kind=timing_off）紧随其后评估，并给出"有择时 − 关闭择时"的收益 / 夏普 / 回撤差，
+回答"择时究竟贡献了多少"。对照只是另一个变体，不新增回测入口。
 """
 
 from __future__ import annotations
@@ -30,8 +35,10 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.domain.common.enums import DEFAULT_EXECUTION_MODEL, ExecutionModel
+from quant_etf_api.domain.portfolio.execution import EXECUTION_MODEL_CLOSE
 from quant_etf_api.domain.portfolio.turnover import TURNOVER_MODEL_DELTA_W
 from quant_etf_api.domain.research.periods import PeriodBoundaries
+from quant_etf_api.domain.research.timing import TimingDay, compute_timing_stats
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.infra.db.models.core import BacktestRunModel
 from quant_etf_api.services.backtest_service import BacktestRunCaches, BacktestService
@@ -43,6 +50,12 @@ logger = logging.getLogger(__name__)
 
 # 变体标签与配置二选一；两个都给时以 patch 在 config 之后生效的顺序应用
 _VARIANT_KEYS = ("label", "config", "patch", "kind")
+# 择时归因对照变体的类型与标签后缀
+TIMING_OFF_KIND = "timing_off"
+TIMING_OFF_SUFFIX = ":timing_off"
+# 对照实际均仓与被测变体实际均仓的容差（仓位绝对差），以及最多追加的校准次数
+TIMING_OFF_EXPOSURE_TOLERANCE = 0.005
+TIMING_OFF_CALIBRATION_PASSES = 2
 
 
 def _fmt_number(value: Any, digits: int = 3) -> str:
@@ -70,7 +83,8 @@ class ResearchVariant:
     Attributes:
         label: 变体标签（用于结果与差异表）。
         config: 完整策略配置 JSON。
-        kind: 变体类型（baseline/knob/ablation/patch/manual），仅用于展示。
+        kind: 变体类型（baseline/knob/ablation/patch/manual/timing_off），仅用于展示；
+            timing_off 是择时归因自动派生的对照变体。
     """
 
     label: str
@@ -147,7 +161,57 @@ class ResearchBatchResult:
                 f"{_fmt_number(delta.get('delta_net_sharpe_ratio')):>9}"
                 f"{_fmt_number(delta.get('worse_window_ratio'), 2):>7}  {per_window}"
             )
+        lines.extend(self._timing_lines())
         return "\n".join(lines)
+
+    def _timing_lines(self) -> list[str]:
+        """择时统计与择时归因的摘要行（没有择时变体时为空）。
+
+        Returns:
+            文本行列表。
+        """
+        lines: list[str] = []
+        for variant in self.variants:
+            stats = (variant.get("aggregate") or {}).get("timing_stats")
+            if not stats:
+                continue
+            shares = " ".join(
+                f"{item['regime'][:3]}={_fmt_number(item['share'], 3)}"
+                for item in stats.get("regimes") or []
+            )
+            quantiles = {
+                f"p{round(item['quantile'] * 100):02d}": item["value"]
+                for item in (stats.get("score") or {}).get("quantiles") or []
+            }
+            turnover = stats.get("turnover") or {}
+            lines.append(
+                f"[timing] {variant.get('label')}: {shares} "
+                f"flips/yr={_fmt_number(stats.get('regime_flips_per_year'), 1)} "
+                "exposureSwitches/yr="
+                f"{_fmt_number(stats.get('target_exposure_switches_per_year'), 1)} "
+                f"riskLegTurnShare={_fmt_number(turnover.get('risk_leg_turnover_share'), 3)} "
+                f"exposureTurnShare={_fmt_number(turnover.get('exposure_turnover_share'), 3)} "
+                f"score p10/p50/p90={_fmt_number(quantiles.get('p10'), 1)}/"
+                f"{_fmt_number(quantiles.get('p50'), 1)}/{_fmt_number(quantiles.get('p90'), 1)}"
+            )
+        for variant in self.variants:
+            block = variant.get("timing_attribution")
+            if not block:
+                continue
+            lines.append(
+                # 控制台可能是 GBK 编码：摘要行只用 ASCII 减号
+                f"[timing attribution] {variant.get('label')} - {block.get('control_label')} "
+                f"(固定仓位 {_fmt_number(block.get('fixed_exposure'), 4)}，实际均仓 "
+                f"{_fmt_number(block.get('control_average_exposure'), 4)} / 目标 "
+                f"{_fmt_number(block.get('target_average_exposure'), 4)}): "
+                f"ΔgrossAnn={_fmt_number(block.get('annualized_return_pct'), 2)} "
+                f"ΔgrossShp={_fmt_number(block.get('sharpe_ratio'))} "
+                f"ΔnetAnn={_fmt_number(block.get('net_annualized_return_pct'), 2)} "
+                f"ΔnetShp={_fmt_number(block.get('net_sharpe_ratio'))} "
+                f"ΔmaxDD={_fmt_number(block.get('max_drawdown_pct'), 2)} "
+                f"Δturn={_fmt_number(block.get('annualized_turnover'), 2)}"
+            )
+        return lines
 
 
 class ResearchBatchService:
@@ -267,6 +331,7 @@ class ResearchBatchService:
         cost_ladder: list[float] | None = None,
         include_baseline: bool = True,
         execution_model: ExecutionModel = DEFAULT_EXECUTION_MODEL,
+        timing_attribution: bool = False,
     ) -> ResearchBatchResult:
         """在研究期窗口上评估全部变体（不落库）。
 
@@ -279,12 +344,15 @@ class ResearchBatchService:
             cost_ladder: 多档成本并列的档位覆盖。
             include_baseline: 是否把基线配置作为第一个对照变体一起评估。
             execution_model: 回测执行模型（探索与正式验收必须同口径）。
+            timing_attribution: 是否为每个带择时的变体派生并评估"关闭择时、总仓位
+                固定为平均实际暴露"的对照变体，并输出择时贡献差值块。
 
         Returns:
             ResearchBatchResult。
 
         Raises:
-            ValueError: 基线策略不存在、窗口无法切分或变体配置无法解析时抛出。
+            ValueError: 基线策略不存在、没有任何可评估变体、窗口无法切分或变体配置
+                无法解析时抛出。
         """
         boundaries = boundaries or load_period_boundaries()
         baseline_detail = self._config_svc.get_config(strategy_id)
@@ -296,6 +364,8 @@ class ResearchBatchService:
         if include_baseline:
             evaluated.append(ResearchVariant(label="baseline", config=baseline_config, kind="baseline"))
         evaluated.extend(variants)
+        if not evaluated:
+            raise ValueError("没有可评估的变体：请提供变体文件或保留基线")
 
         windows_list = self._build_windows(boundaries, windows)
         effective_cost = (
@@ -310,64 +380,23 @@ class ResearchBatchService:
         caches = BacktestRunCaches()
         results: list[dict[str, Any]] = []
         baseline_aggregate: dict[str, Any] | None = None
-        for variant in evaluated:
+
+        def _evaluate(variant: ResearchVariant) -> tuple[dict[str, Any], StrategyConfig]:
+            """评估单个变体，并附上相对基线的差异块。"""
+            nonlocal baseline_aggregate
             config = self._parse_config(strategy_id, baseline_detail, variant)
-            per_window: list[dict[str, Any]] = []
-            all_daily_rows: list[Any] = []
-            params: dict[str, Any] = {}
-            for window in windows_list:
-                row = self._build_row(
-                    strategy_id=strategy_id,
-                    config=config,
-                    window=window,
-                    cost_bps=effective_cost,
-                    execution_model=execution_model,
-                )
-                outcome = self._backtest_svc._run_backtest_loop(  # noqa: SLF001
-                    f"research:{strategy_id}:{variant.label}:{window['label']}",
-                    row,
-                    config,
-                    persist=False,
-                    caches=caches,
-                )
-                # 日历来源在执行中才确定，必须读取执行后的参数作为口径指纹。
-                params = dict(outcome["params"])
-                daily_rows = outcome["daily_rows"]
-                all_daily_rows.extend(daily_rows)
-                stability = self._backtest_svc._compute_stability(  # noqa: SLF001
-                    row, daily_rows, cost_bps=effective_cost, cost_ladder=ladder
-                )
-                per_window.append(
-                    {
-                        "label": window["label"],
-                        "start": window["start"],
-                        "end": window["end"],
-                        "metrics": _metrics_digest(outcome["metrics"]),
-                        "net_metrics": _net_digest(stability),
-                    }
-                )
-            aggregate_row = self._aggregate_row(strategy_id, all_daily_rows, params)
-            aggregate_stability = self._backtest_svc._compute_stability(  # noqa: SLF001
-                aggregate_row, all_daily_rows, cost_bps=effective_cost, cost_ladder=ladder
+            entry = self._evaluate_variant(
+                strategy_id=strategy_id,
+                config=config,
+                variant=variant,
+                windows_list=windows_list,
+                cost_bps=effective_cost,
+                ladder=ladder,
+                execution_model=execution_model,
+                caches=caches,
             )
-            aggregate = {
-                "metrics": _metrics_digest(
-                    self._backtest_svc._compute_summary_metrics(  # noqa: SLF001
-                        _accumulator_from_rows(all_daily_rows),
-                        _benchmark_series(all_daily_rows),
-                    )
-                ),
-                "net_metrics": _net_digest(aggregate_stability),
-                "trading_days": len(all_daily_rows),
-            }
-            entry: dict[str, Any] = {
-                "label": variant.label,
-                "kind": variant.kind,
-                "strategy_id": strategy_id,
-                "windows": per_window,
-                "aggregate": aggregate,
-                "caliber": _caliber_digest(params, effective_cost, windows_list),
-            }
+            aggregate = entry["aggregate"]
+            per_window = entry["windows"]
             if variant.kind == "baseline":
                 baseline_aggregate = aggregate
                 entry["vs_baseline"] = _delta_block(aggregate, aggregate, per_window, per_window)
@@ -378,7 +407,52 @@ class ResearchBatchService:
                 entry["vs_baseline"] = _delta_block(
                     baseline_aggregate, aggregate, baseline_windows, per_window
                 )
+            return entry, config
+
+        for variant in evaluated:
+            entry, config = _evaluate(variant)
             results.append(entry)
+            exposure = entry["aggregate"].get("average_exposure")
+            if not timing_attribution or config.timing is None or not exposure:
+                continue
+            # 对照与被测变体同窗口、同成本、同执行模型，只关闭择时并固定总仓位。
+            # 固定仓位先取被测变体的平均实际仓位；但过滤后入选不足（甚至空仓）的
+            # 日子实际仓位低于目标，对照的实际均仓会偏低，收益差里混入平均 β 的差。
+            # 因此按"目标 / 实际"比例校准固定仓位，直到实际均仓与被测变体一致。
+            target = float(exposure)
+            fixed = target
+            trail: list[dict[str, Any]] = []
+            # (实际均仓与目标之差, 对照结果条目, 该次固定仓位)
+            best: tuple[float, dict[str, Any], float] | None = None
+            for _attempt in range(TIMING_OFF_CALIBRATION_PASSES + 1):
+                control_entry, _control_config = _evaluate(
+                    ResearchVariant(
+                        label=f"{variant.label}{TIMING_OFF_SUFFIX}",
+                        config=build_timing_off_config(variant.config, fixed),
+                        kind=TIMING_OFF_KIND,
+                    )
+                )
+                realized = control_entry["aggregate"].get("average_exposure")
+                trail.append(
+                    {"fixed_exposure": round(fixed, 4), "realized_average_exposure": realized}
+                )
+                gap = abs(realized - target) if realized is not None else float("inf")
+                if best is None or gap < best[0]:
+                    best = (gap, control_entry, fixed)
+                if not realized or gap <= TIMING_OFF_EXPOSURE_TOLERANCE:
+                    break
+                calibrated = round(min(1.0, fixed * target / realized), 4)
+                if calibrated == round(fixed, 4):
+                    # 固定仓位已到上限仍追不上，继续迭代没有意义
+                    break
+                fixed = calibrated
+            if best is None:
+                continue
+            _gap, control_entry, chosen_fixed = best
+            entry["timing_attribution"] = _timing_attribution_block(
+                entry, control_entry, target, chosen_fixed, trail
+            )
+            results.append(control_entry)
 
         return ResearchBatchResult(
             windows=windows_list,
@@ -388,6 +462,103 @@ class ResearchBatchService:
         )
 
     # ── 内部辅助 ──────────────────────────────────────────────────────────
+
+    def _evaluate_variant(
+        self,
+        *,
+        strategy_id: str,
+        config: StrategyConfig,
+        variant: ResearchVariant,
+        windows_list: list[dict[str, str]],
+        cost_bps: float,
+        ladder: list[float],
+        execution_model: ExecutionModel,
+        caches: BacktestRunCaches,
+    ) -> dict[str, Any]:
+        """在全部窗口上评估一个变体，返回逐窗口与窗口拼接的聚合指标。
+
+        Args:
+            strategy_id: 基线策略 ID。
+            config: 已解析的变体配置。
+            variant: 变体（提供标签与类型）。
+            windows_list: 评估窗口。
+            cost_bps: 净口径成本（基点）。
+            ladder: 多档成本档位。
+            execution_model: 回测执行模型。
+            caches: 跨变体共享的行情与因子缓存。
+
+        Returns:
+            变体结果条目（不含 vs_baseline）。聚合块额外带 ``average_exposure``
+            （回测期平均实际仓位），配置择时时带 ``timing_stats``。
+        """
+        per_window: list[dict[str, Any]] = []
+        all_daily_rows: list[Any] = []
+        all_timing_days: list[TimingDay] = []
+        params: dict[str, Any] = {}
+        for window in windows_list:
+            row = self._build_row(
+                strategy_id=strategy_id,
+                config=config,
+                window=window,
+                cost_bps=cost_bps,
+                execution_model=execution_model,
+            )
+            outcome = self._backtest_svc._run_backtest_loop(  # noqa: SLF001
+                f"research:{strategy_id}:{variant.label}:{window['label']}",
+                row,
+                config,
+                persist=False,
+                caches=caches,
+            )
+            # 日历来源在执行中才确定，必须读取执行后的参数作为口径指纹。
+            params = dict(outcome["params"])
+            daily_rows = outcome["daily_rows"]
+            all_daily_rows.extend(daily_rows)
+            all_timing_days.extend(outcome.get("timing_days") or [])
+            stability = self._backtest_svc._compute_stability(  # noqa: SLF001
+                row, daily_rows, cost_bps=cost_bps, cost_ladder=ladder
+            )
+            per_window.append(
+                {
+                    "label": window["label"],
+                    "start": window["start"],
+                    "end": window["end"],
+                    "metrics": _metrics_digest(outcome["metrics"]),
+                    "net_metrics": _net_digest(stability),
+                }
+            )
+        aggregate_row = self._aggregate_row(strategy_id, all_daily_rows, params)
+        aggregate_stability = self._backtest_svc._compute_stability(  # noqa: SLF001
+            aggregate_row, all_daily_rows, cost_bps=cost_bps, cost_ladder=ladder
+        )
+        aggregate: dict[str, Any] = {
+            "metrics": _metrics_digest(
+                self._backtest_svc._compute_summary_metrics(  # noqa: SLF001
+                    _accumulator_from_rows(all_daily_rows),
+                    _benchmark_series(all_daily_rows),
+                )
+            ),
+            "net_metrics": _net_digest(aggregate_stability),
+            "trading_days": len(all_daily_rows),
+            "average_exposure": aggregate_stability.average_exposure,
+        }
+        # 择时统计按窗口拼接后的逐日记录重算（与单窗口回测汇总同一纯函数）
+        timing_stats = compute_timing_stats(
+            all_timing_days,
+            fill_lag=1 if execution_model == EXECUTION_MODEL_CLOSE else 0,
+            offensive_threshold=config.timing.thresholds.offensive if config.timing else None,
+            defensive_threshold=config.timing.thresholds.defensive if config.timing else None,
+        )
+        if timing_stats is not None:
+            aggregate["timing_stats"] = timing_stats.to_dict()
+        return {
+            "label": variant.label,
+            "kind": variant.kind,
+            "strategy_id": strategy_id,
+            "windows": per_window,
+            "aggregate": aggregate,
+            "caliber": _caliber_digest(params, cost_bps, windows_list),
+        }
 
     def _parse_config(
         self, strategy_id: str, baseline_detail: Any, variant: ResearchVariant
@@ -514,6 +685,116 @@ class ResearchBatchService:
 def _deep_copy_config(config: dict[str, Any] | None) -> dict[str, Any]:
     """深拷贝配置字典（避免变体派生就地改写污染基线）。"""
     return deepcopy(dict(config or {}))
+
+
+def build_timing_off_config(config: dict[str, Any], exposure: float) -> dict[str, Any]:
+    """派生择时归因的对照配置：同配置、关闭择时、总仓位固定为给定暴露。
+
+    - 移除 ``timing``：引擎不再判定 regime，组合按 ``default_exposure`` 定总仓位；
+    - 移除 ``regime_rules``：它们只在有 regime 时生效，关闭择时后整体失效，
+      显式删除避免读者误以为仍在使用；
+    - 移除 ``portfolio.timing_exposure`` 并把 ``default_exposure`` 设为给定暴露
+      （截到 [0, 1]）。评分、过滤、排名、风控与调仓频率保持不变，风险腿照常按
+      固定仓位缩放。
+
+    Args:
+        config: 被测变体的完整配置 JSON（不被修改）。
+        exposure: 固定总仓位，通常取被测变体回测期平均实际仓位。
+
+    Returns:
+        对照配置 JSON。
+    """
+    control = _deep_copy_config(config)
+    control.pop("timing", None)
+    control.pop("regime_rules", None)
+    # 缺省组合配置与 StrategyConfig 的默认值一致（等权）
+    portfolio = dict(control.get("portfolio") or {"method": "equal_weight"})
+    portfolio.pop("timing_exposure", None)
+    portfolio["default_exposure"] = round(min(max(exposure, 0.0), 1.0), 4)
+    control["portfolio"] = portfolio
+    return control
+
+
+def _timing_attribution_block(
+    timed: dict[str, Any],
+    control: dict[str, Any],
+    target_exposure: float,
+    fixed_exposure: float,
+    calibration: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """计算择时贡献 = 有择时 − 关闭择时（同平均实际仓位）。
+
+    正值表示择时带来改善：收益 / 夏普更高，最大回撤（负数）更浅；换手差为择时
+    额外带来的年化换手。
+
+    Args:
+        timed: 带择时变体的结果条目。
+        control: 选定的对照变体结果条目（实际均仓最接近目标的一次）。
+        target_exposure: 被测变体回测期平均实际仓位（对照要对齐的目标）。
+        fixed_exposure: 选定对照所用的固定仓位（default_exposure）。
+        calibration: 每次对照运行的固定仓位与实际均仓，按运行顺序。
+
+    Returns:
+        归因块：聚合差值、逐窗口差值与仓位校准轨迹。
+    """
+    timed_agg = timed.get("aggregate") or {}
+    control_agg = control.get("aggregate") or {}
+    timed_gross = timed_agg.get("metrics") or {}
+    control_gross = control_agg.get("metrics") or {}
+    timed_net = timed_agg.get("net_metrics") or {}
+    control_net = control_agg.get("net_metrics") or {}
+    per_window: list[dict[str, Any]] = []
+    for timed_item, control_item in zip(
+        timed.get("windows") or [], control.get("windows") or [], strict=False
+    ):
+        timed_metrics = timed_item.get("metrics") or {}
+        control_metrics = control_item.get("metrics") or {}
+        per_window.append(
+            {
+                "label": timed_item.get("label"),
+                "annualized_return_pct": _safe_delta(
+                    timed_metrics.get("annualized_return_pct"),
+                    control_metrics.get("annualized_return_pct"),
+                ),
+                "net_sharpe_ratio": _safe_delta(
+                    (timed_item.get("net_metrics") or {}).get("net_sharpe_ratio"),
+                    (control_item.get("net_metrics") or {}).get("net_sharpe_ratio"),
+                ),
+                "max_drawdown_pct": _safe_delta(
+                    timed_metrics.get("max_drawdown_pct"), control_metrics.get("max_drawdown_pct")
+                ),
+            }
+        )
+    return {
+        "control_label": control.get("label"),
+        "target_average_exposure": round(target_exposure, 4),
+        "fixed_exposure": round(fixed_exposure, 4),
+        "control_average_exposure": control_agg.get("average_exposure"),
+        "calibration": calibration,
+        "annualized_return_pct": _safe_delta(
+            timed_gross.get("annualized_return_pct"), control_gross.get("annualized_return_pct")
+        ),
+        "cumulative_return_pct": _safe_delta(
+            timed_gross.get("cumulative_return_pct"), control_gross.get("cumulative_return_pct")
+        ),
+        "sharpe_ratio": _safe_delta(
+            timed_gross.get("sharpe_ratio"), control_gross.get("sharpe_ratio")
+        ),
+        "max_drawdown_pct": _safe_delta(
+            timed_gross.get("max_drawdown_pct"), control_gross.get("max_drawdown_pct")
+        ),
+        "net_annualized_return_pct": _safe_delta(
+            timed_net.get("net_annualized_return_pct"),
+            control_net.get("net_annualized_return_pct"),
+        ),
+        "net_sharpe_ratio": _safe_delta(
+            timed_net.get("net_sharpe_ratio"), control_net.get("net_sharpe_ratio")
+        ),
+        "annualized_turnover": _safe_delta(
+            timed_net.get("annualized_turnover"), control_net.get("annualized_turnover")
+        ),
+        "per_window": per_window,
+    }
 
 
 def _benchmark_series(daily_rows: list[Any]) -> list[float]:

@@ -2,6 +2,9 @@
 
 为因子中心下的研究页提供即时计算：读取指数日线 / 申万行业日线，调用
 ``domain.research.signal_lab`` 的纯函数计算因子与信号，并组装检验统计。
+择时综合分（默认示例或任一策略的 timing 块）走引擎实现：按回测口径现算择时因子，
+逐日构建引擎上下文并调用 ``DefaultScoreCalculator.calculate_timing``，研究台评估的
+就是引擎实际执行的择时口径。
 不创建策略、不写任何因子表、不触发回测；区间触及验证期时只提示、不阻断。
 """
 
@@ -16,13 +19,21 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from quant_etf_api.domain.research import signal_lab as lab
-from quant_etf_api.engine.transforms import drawdown_score, momentum_score
+from quant_etf_api.domain.research.timing import count_regime_flips, regime_shares
+from quant_etf_api.engine.config import ScoreConfig, StrategyConfig
+from quant_etf_api.engine.context_builder import ContextBuilder
+from quant_etf_api.engine.factor_provider import FactorProvider
+from quant_etf_api.engine.score import DefaultScoreCalculator
+from quant_etf_api.factors.catalog import FactorResolutionError, get_factor_template_registry
 from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
+from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
     IndustryUniverseRepository,
 )
+from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
+from quant_etf_api.infra.db.repositories.strategy_config import StrategyConfigRepository
 from quant_etf_api.schemas.signal_lab import (
     SignalLabCatalog,
     SignalLabComponent,
@@ -35,6 +46,7 @@ from quant_etf_api.schemas.signal_lab import (
     SignalLabIssue,
     SignalLabLatestItem,
     SignalLabPerformance,
+    SignalLabStrategyOption,
     SignalLabTercile,
     SignalLabTimingMetrics,
     SignalLabTimingResponse,
@@ -42,18 +54,21 @@ from quant_etf_api.schemas.signal_lab import (
     SignalLabYearStat,
 )
 from quant_etf_api.services.period_config import load_period_boundaries
+from quant_etf_api.services.strategy_config_service import StrategyConfigService
 
 # 单次查询自然日上限（约 10 年）
 MAX_RANGE_DAYS = 3700
 # 字段覆盖门槛：低于该占比的指数在截面检验中剔除
 COVERAGE_MIN = 0.95
 DEFAULT_PROXY = "000300"
-# 中间分量展示配置：信号 → [(列名, 标签, 轴)]
+# 走引擎实现的择时信号键（默认示例或指定策略的 timing 块）
+ENGINE_TIMING_KEY = "existing_composite"
+# 引擎择时数据帧在请求起点之前多算的自然日：覆盖 t+1 收盘持仓口径的两日信号滞后
+_ENGINE_FRAME_BUFFER_DAYS = 10
+# 引擎口径下评估指数日线在请求起点之前的加载余量（自然日）：覆盖过去 20 日收益与持仓滞后
+_ENGINE_EVAL_BUFFER_DAYS = 45
+# 中间分量展示配置：信号 → [(列名, 标签, 轴)]；引擎择时的分量按 timing 块动态生成
 _COMPONENTS: dict[str, list[tuple[str, str, str]]] = {
-    "existing_composite": [
-        ("momentum_score", "动量得分", "signal"),
-        ("drawdown_score", "回撤得分", "signal"),
-    ],
     "llt": [("llt", "LLT 趋势线", "price")],
     "amplitude_scissors": [
         ("up_ma", "上行波动均值 (H−O)/O", "aux"),
@@ -107,7 +122,7 @@ def _series_list(series: pd.Series) -> list[float | None]:
 def _definition(
     raw: lab.SignalDefinition, params: dict[str, float] | None = None
 ) -> SignalLabDefinition:
-    """领域定义转为 API 模型；GSISI 参考线随临界值参数变化。"""
+    """领域定义转为 API 模型；GSISI / 择时综合分的参考线随阈值参数变化。"""
     data = raw.to_dict()
     if raw.key == "gsisi" and params:
         t = float(params["threshold"])
@@ -116,7 +131,84 @@ def _definition(
             {"label": "0", "value": 0.0},
             {"label": f"−{t:g}", "value": -t},
         ]
+    if raw.key == ENGINE_TIMING_KEY and params:
+        data["reference_lines"] = _threshold_lines(
+            lab.EXISTING_COMPOSITE_OFFENSIVE, float(params["defensive"])
+        )
     return SignalLabDefinition.model_validate(data)
+
+
+def _threshold_lines(offensive: float, defensive: float) -> list[dict[str, Any]]:
+    """择时综合分的进攻 / 防守阈值参考线。"""
+    return [
+        {"label": f"防守 {defensive:g}", "value": defensive},
+        {"label": f"进攻 {offensive:g}", "value": offensive},
+    ]
+
+
+def _strategy_definition(config: StrategyConfig) -> SignalLabDefinition:
+    """按策略 timing 块生成择时综合分的展示定义（公式、阈值与代理指数）。
+
+    Args:
+        config: 含 timing 块的策略配置。
+
+    Returns:
+        API 定义模型（无可调参数，参考线为策略阈值）。
+    """
+    base = lab.TIMING_SIGNALS[ENGINE_TIMING_KEY]
+    timing = config.timing
+    if timing is None:
+        raise SignalLabError(f"策略 {config.strategy_id} 未配置择时（timing）")
+    terms = " + ".join(
+        f"{weight:g} × {timing.transforms.get(ref, '原值')}({ref})"
+        for ref, weight in timing.factors.items()
+    )
+    aliases = "；".join(
+        f"{ref} = {alias.template_id}({', '.join(f'{k}={v}' for k, v in alias.params.items())})"
+        for ref in timing.factors
+        if (alias := config.factor_aliases.get(ref)) is not None
+    )
+    thresholds = timing.thresholds
+    formula = (
+        f"Σ|w|·d / Σ|w|（负权重取 100 − d）：{terms}；≥ {thresholds.offensive:g} 进攻、"
+        f"≤ {thresholds.defensive:g} 防守；代理指数 {', '.join(timing.proxy_index_codes)}"
+    )
+    return SignalLabDefinition(
+        key=base.key,
+        label=f"策略择时：{config.display_name}",
+        source=f"策略 {config.strategy_id}（v{config.version}）的 timing 块",
+        formula=f"{formula}；{aliases}" if aliases else formula,
+        principle=base.principle,
+        required_fields=list(base.required_fields),
+        params=[],
+        reference_lines=_threshold_lines(thresholds.offensive, thresholds.defensive),
+    )
+
+
+def _timing_only_config(
+    strategy_id: str,
+    display_name: str,
+    version: str,
+    blocks: dict[str, Any],
+) -> StrategyConfig:
+    """构造只含择时块的引擎配置：其余模块不参与择时，避免为代理指数多算评分因子。
+
+    Args:
+        strategy_id: 策略 ID（仅作标识）。
+        display_name: 展示名。
+        version: 版本号。
+        blocks: ``timing`` 与 ``factor_aliases`` 片段（dict 或已解析模型）。
+
+    Returns:
+        StrategyConfig（评分因子为空）。
+    """
+    return StrategyConfig(
+        strategy_id=strategy_id,
+        display_name=display_name,
+        version=version,
+        score=ScoreConfig(factors={}),
+        **blocks,
+    )
 
 
 class SignalLabService:
@@ -139,12 +231,24 @@ class SignalLabService:
             SignalLabIndexOption(index_code=row.index_code, index_name=row.name_cn)
             for row in BenchmarkIndexRepository(self._db).find_active()
         ]
+        # 可选的策略择时口径：启用、非变体、且配置了 timing 块的策略
+        timing_strategies = [
+            SignalLabStrategyOption(
+                strategy_id=row.strategy_id, display_name=row.display_name, version=row.version
+            )
+            for row in StrategyConfigRepository(self._db).find_all_active()
+            if not getattr(row, "is_variant", False) and (row.config_json or {}).get("timing")
+        ]
         return SignalLabCatalog(
             cross_section_factors=[
                 _definition(defn) for defn, _ in lab.CROSS_SECTION_FACTORS.values()
             ],
-            timing_signals=[_definition(defn) for defn in lab.TIMING_SIGNALS.values()],
+            timing_signals=[
+                _definition(defn, lab.resolve_params(defn, None))
+                for defn in lab.TIMING_SIGNALS.values()
+            ],
             market_signals=[_definition(lab.GSISI_DEFINITION)],
+            timing_strategies=timing_strategies,
             indexes=indexes,
             research_start=self._boundaries.research_start,
             research_end=self._boundaries.research_end,
@@ -251,26 +355,78 @@ class SignalLabService:
     # ------------------------------------------------------------------ 择时
 
     def timing(
-        self, index_code: str, signal_key: str, start: date, end: date, raw_params: dict[str, Any]
+        self,
+        index_code: str,
+        signal_key: str,
+        start: date,
+        end: date,
+        raw_params: dict[str, Any],
+        strategy_id: str | None = None,
     ) -> SignalLabTimingResponse:
         """计算单指数择时信号及评估指标。
 
+        择时综合分（``existing_composite``）走引擎实现：未指定策略时为默认示例
+        （主策略 r60v90 口径，参数可调，以所选指数为择时代理）；指定 ``strategy_id``
+        时读取该策略的 timing 块（含代理指数与阈值），参数不可覆盖。
+
+        Args:
+            index_code: 评估指数代码（持仓收益在该指数上计算）。
+            signal_key: 择时信号键。
+            start: 起始日期。
+            end: 截止日期。
+            raw_params: 信号参数。
+            strategy_id: 可选策略 ID，仅对择时综合分生效。
+
         Raises:
-            SignalLabError: 信号未知、参数非法或区间非法。
-            SignalLabNotFound: 指数不存在。
+            SignalLabError: 信号未知、参数非法、区间非法或策略未配置择时。
+            SignalLabNotFound: 指数或策略不存在。
         """
         self._validate_range(start, end)
         definition = lab.TIMING_SIGNALS.get(signal_key)
         if definition is None:
             raise SignalLabError(f"未知择时信号：{signal_key}")
-        params = self._resolve(definition, raw_params)
-        load_start = self._load_start(start, definition.warmup(params))
-        loaded = self._load_bars(
-            [index_code], load_start, self._fetch_end(end, lab.TIMING_FORWARD_DAYS)
-        ).get(index_code)
-        if loaded is None:
-            raise SignalLabNotFound(f"指数 {index_code} 在区间内无日线数据")
-        frame = self._compute_timing(signal_key, loaded.bars, params)
+        if strategy_id and signal_key != ENGINE_TIMING_KEY:
+            raise SignalLabError("strategy_id 只适用于择时综合分（existing_composite）")
+        fetch_end = self._fetch_end(end, lab.TIMING_FORWARD_DAYS)
+        notes: list[str] = []
+        if signal_key == ENGINE_TIMING_KEY:
+            if strategy_id:
+                if raw_params:
+                    raise SignalLabError("按策略 timing 块计算时参数取自策略配置，不接受参数覆盖")
+                timing_config = self._strategy_timing_config(strategy_id)
+                params: dict[str, float] = {}
+                api_definition = _strategy_definition(timing_config)
+                timing_block = timing_config.timing
+                proxies = ", ".join(timing_block.proxy_index_codes) if timing_block else ""
+                notes.append(
+                    f"择时因子在策略代理指数 {proxies} 上按回测口径现算，持仓收益在所选指数 "
+                    f"{index_code} 上评估。"
+                )
+            else:
+                params = self._resolve(definition, raw_params)
+                timing_config = self._default_timing_config(params, index_code)
+                api_definition = _definition(definition, params)
+                notes.append("默认示例以所选指数为择时代理（主策略配置的代理为 000300）。")
+            loaded = self._load_bars(
+                [index_code], start - timedelta(days=_ENGINE_EVAL_BUFFER_DAYS), fetch_end
+            ).get(index_code)
+            if loaded is None:
+                raise SignalLabNotFound(f"指数 {index_code} 在区间内无日线数据")
+            frame = self._engine_timing_frame(timing_config, loaded.bars.index, start)
+            components = self._engine_components(timing_config)
+            notes.append(
+                "综合分由引擎 DefaultScoreCalculator.calculate_timing 逐日计算（与回测主循环同一"
+                "实现）；择时因子全部缺失的降级日引擎按中性 regime 运行，研究台按无信号处理。"
+            )
+        else:
+            params = self._resolve(definition, raw_params)
+            load_start = self._load_start(start, definition.warmup(params))
+            loaded = self._load_bars([index_code], load_start, fetch_end).get(index_code)
+            if loaded is None:
+                raise SignalLabNotFound(f"指数 {index_code} 在区间内无日线数据")
+            frame = self._compute_timing(signal_key, loaded.bars, params)
+            components = _COMPONENTS.get(signal_key, [])
+            api_definition = _definition(definition)
         coverage = self._coverage(index_code, loaded, start, end)
         issues: list[SignalLabIssue] = []
         reason = self._field_issue(coverage, definition.required_fields)
@@ -279,18 +435,143 @@ class SignalLabService:
             coverage.reason = reason
             issues.append(SignalLabIssue(level="warn", code="field_coverage", message=reason))
         return self._timing_response(
-            definition=_definition(definition),
+            definition=api_definition,
             params=params,
             index_code=index_code,
             loaded=loaded,
             frame=frame,
             start=start,
             end=end,
-            components=_COMPONENTS.get(signal_key, []),
+            components=components,
             coverage=coverage,
             issues=issues,
-            notes=[],
+            notes=notes,
+            strategy_id=strategy_id or None,
         )
+
+    # ------------------------------------------------------------------ 引擎择时
+
+    def _strategy_timing_config(self, strategy_id: str) -> StrategyConfig:
+        """读取策略配置并抽出择时块（只读）。
+
+        Raises:
+            SignalLabNotFound: 策略不存在。
+            SignalLabError: 配置无法解析或未配置择时。
+        """
+        if StrategyConfigRepository(self._db).find_by_id(strategy_id) is None:
+            raise SignalLabNotFound(f"策略 {strategy_id} 不存在")
+        config = StrategyConfigService(self._db).get_parsed_config(strategy_id)
+        if config is None:
+            raise SignalLabError(f"策略 {strategy_id} 的配置无法解析")
+        if config.timing is None:
+            raise SignalLabError(f"策略 {strategy_id} 未配置择时（timing）")
+        return _timing_only_config(
+            config.strategy_id,
+            config.display_name,
+            config.version,
+            {"timing": config.timing, "factor_aliases": config.factor_aliases},
+        )
+
+    @staticmethod
+    def _default_timing_config(params: dict[str, float], proxy_code: str) -> StrategyConfig:
+        """默认示例（主策略 r60v90 择时块）的引擎配置。"""
+        return _timing_only_config(
+            "signal_lab_existing_composite",
+            "择时综合分默认示例",
+            "1.0.0",
+            lab.existing_composite_timing_block(params, proxy_code),
+        )
+
+    @staticmethod
+    def _engine_components(config: StrategyConfig) -> list[tuple[str, str, str]]:
+        """引擎择时的中间分量：各择时因子变换后得分（无变换的原值放辅助轴）。"""
+        timing = config.timing
+        if timing is None:
+            return []
+        components: list[tuple[str, str, str]] = []
+        for ref in timing.factors:
+            transform = timing.transforms.get(ref)
+            components.append(
+                (
+                    f"{lab.ENGINE_FACTOR_COLUMN_PREFIX}{ref}",
+                    f"{ref} 得分（{transform}）" if transform else f"{ref} 原值",
+                    "signal" if transform else "aux",
+                )
+            )
+        return components
+
+    def _engine_timing_frame(
+        self, config: StrategyConfig, bars_index: pd.DatetimeIndex, start: date
+    ) -> pd.DataFrame:
+        """用引擎逐日计算择时综合分与 regime，对齐到评估指数的交易日。
+
+        因子按回测口径现算（``FactorProvider.precompute_backtest_factors``，代理指数
+        行情向前预加载模板回望窗口；市场级模板补充全市场行情），再逐日经
+        ``ContextBuilder`` 取代理指数的择时因子、调用
+        ``DefaultScoreCalculator.calculate_timing``，与回测主循环同一条实现。
+
+        Args:
+            config: 只含择时块的引擎配置。
+            bars_index: 评估指数的交易日索引（帧按它对齐）。
+            start: 请求起点；只在起点前留出少量缓冲日计算。
+
+        Returns:
+            ``lab.signal_engine_timing`` 的数据帧，索引为 ``bars_index``。
+
+        Raises:
+            SignalLabError: 择时因子引用无法解析。
+        """
+        timing = config.timing
+        if timing is None or len(bars_index) == 0:
+            return lab.signal_engine_timing(pd.DatetimeIndex([]), lambda _ts: (0.0, "", {}), [])
+        calendar = bars_index[
+            bars_index >= pd.Timestamp(start) - pd.Timedelta(days=_ENGINE_FRAME_BUFFER_DAYS)
+        ]
+        provider = FactorProvider(db=self._db, registry=get_factor_template_registry())
+        try:
+            instances = provider.resolve_instances(config)
+        except FactorResolutionError as exc:
+            raise SignalLabError(f"择时因子无法解析：{exc}") from exc
+        lookback = max(
+            (inst.template.lookback_days(inst.params) for inst in instances.values()), default=0
+        )
+        first_day = calendar[0].date() if len(calendar) else start
+        load_start = first_day - timedelta(days=lookback + 10)
+        load_end = bars_index[-1].date()
+        proxies = list(timing.proxy_index_codes)
+        codes = list(proxies)
+        if any(inst.template.market_scope for inst in instances.values()):
+            # 市场级模板（如市场宽度）需要全市场行情，口径与回测补充加载一致
+            codes.extend(
+                row.index_code
+                for row in BenchmarkIndexRepository(self._db).find_for_period(load_start)
+                if row.index_code not in codes
+            )
+        all_bars = IndexDailyBarRepository(self._db).find_all_date_range(
+            load_start, load_end, index_codes=codes
+        )
+        valuation = IndexValuationRepository(self._db).find_range(load_start, load_end, proxies)
+        macro = MacroIndicatorRepository(self._db).find_all_as_map()
+        matrix = provider.precompute_backtest_factors(
+            config, [ts.date() for ts in calendar], proxies, all_bars, valuation, macro
+        )
+        builder = ContextBuilder(self._db, factor_provider=provider)
+        calculator = DefaultScoreCalculator()
+
+        def _evaluate(ts: pd.Timestamp) -> tuple[float, str, dict[str, Any]]:
+            """单日：构建引擎上下文并调用引擎择时计算。"""
+            day = ts.date()
+            context = builder.build(
+                config,
+                day,
+                index_codes=[],
+                all_bars=all_bars,
+                precomputed_factors=matrix.values.get(day, {}),
+            )
+            return calculator.calculate_timing(timing, context)
+
+        frame = lab.signal_engine_timing(calendar, _evaluate, list(timing.factors))
+        return frame.reindex(bars_index)
 
     def market(
         self, signal_key: str, proxy_code: str, start: date, end: date, raw_params: dict[str, Any]
@@ -369,9 +650,7 @@ class SignalLabService:
 
     @staticmethod
     def _compute_timing(key: str, bars: pd.DataFrame, params: dict[str, float]) -> pd.DataFrame:
-        """按信号键计算择时数据帧（列 value / on / 分量）。"""
-        if key == "existing_composite":
-            return lab.signal_existing_composite(bars, params, momentum_score, drawdown_score)
+        """按信号键计算研报择时数据帧（列 value / on / 分量）；择时综合分走引擎，不在此处。"""
         if key == "llt":
             return lab.signal_llt(bars, params)
         if key == "amplitude_scissors":
@@ -392,8 +671,13 @@ class SignalLabService:
         coverage: SignalLabCoverage,
         issues: list[SignalLabIssue],
         notes: list[str],
+        strategy_id: str | None = None,
     ) -> SignalLabTimingResponse:
-        """组装择时响应：展示区间序列 + 评估指标。"""
+        """组装择时响应：展示区间序列 + 评估指标。
+
+        与"现有择时综合分"的相关 / 同向对照同样走引擎默认示例（所选指数为代理）；
+        引擎择时帧（含 regime 列）额外输出 regime 序列、占比与翻转频率。
+        """
         bars = loaded.bars
         close_all = bars["close"]
         on_all = frame["on"]
@@ -413,32 +697,41 @@ class SignalLabService:
         strat.iloc[0] = 0.0
         bench.iloc[0] = 0.0
 
-        ref = lab.signal_existing_composite(
-            bars,
-            lab.resolve_params(lab.TIMING_SIGNALS["existing_composite"], None),
-            momentum_score,
-            drawdown_score,
-        )
-        is_existing = definition.key == "existing_composite"
+        is_existing = definition.key == ENGINE_TIMING_KEY
         years = max((pd.Timestamp(end) - pd.Timestamp(start)).days / 365.25, 1 / 365.25)
         on_valid = on.dropna()
         flips = float(on_valid.diff().abs().sum()) / years if len(on_valid) > 1 else None
         agree = None
+        corr_existing = None
         if not is_existing:
+            ref = self._engine_timing_frame(
+                self._default_timing_config(
+                    lab.resolve_params(lab.TIMING_SIGNALS[ENGINE_TIMING_KEY], None), index_code
+                ),
+                bars.index,
+                start,
+            )
             ref_on = ref["on"].loc[window]
             both = on.notna() & ref_on.notna()
             agree = float((on[both] == ref_on[both]).mean()) if both.any() else None
+            corr_existing = lab.time_series_spearman(value, ref["value"].loc[window])
+        # 引擎择时帧带 regime 列：缺失（降级 / 预热）记 None
+        regimes: list[str | None] = []
+        if "regime" in frame.columns:
+            regimes = [r if isinstance(r, str) else None for r in frame["regime"].loc[window]]
         metrics = SignalLabTimingMetrics(
             flips_per_year=_num(flips),
             on_ratio=_num(on.mean()),
             ic_fwd20=lab.time_series_spearman(value, fwd.loc[window]),
             ic_past20=lab.time_series_spearman(value, past.loc[window]),
-            corr_existing=None
-            if is_existing
-            else lab.time_series_spearman(value, ref["value"].loc[window]),
+            corr_existing=corr_existing,
             agree_existing=agree,
             strategy=SignalLabPerformance(**lab.performance_summary(strat.iloc[1:])),
             benchmark=SignalLabPerformance(**lab.performance_summary(bench.iloc[1:])),
+            regime_flips_per_year=(
+                _num(count_regime_flips(regimes) / years) if any(regimes) else None
+            ),
+            regime_shares=regime_shares(regimes),
         )
         yearly: list[SignalLabYearStat] = []
         for year, idx in close.groupby(close.index.year).groups.items():
@@ -470,11 +763,25 @@ class SignalLabService:
                         message=f"信号自 {first_valid.date().isoformat()} 起有效（预热或数据起点所致）。",
                     )
                 )
+            if "degraded" in frame.columns and first_valid is not None:
+                degraded = frame["degraded"].loc[first_valid : pd.Timestamp(end)].eq(True)
+                if degraded.any():
+                    issues.append(
+                        SignalLabIssue(
+                            level="warn",
+                            code="timing_degraded",
+                            message=(
+                                f"有效期内 {int(degraded.sum())} 个交易日择时因子全部缺失："
+                                "引擎在这些交易日按中性 regime 运行，本页按无信号处理。"
+                            ),
+                        )
+                    )
         return SignalLabTimingResponse(
             signal=definition,
             params=params,
             index_code=index_code,
             index_name=loaded.name,
+            strategy_id=strategy_id,
             start=start,
             end=end,
             includes_validation=includes_validation,
@@ -482,6 +789,7 @@ class SignalLabService:
             close=_series_list(close),
             value=_series_list(value),
             on=_series_list(on),
+            regime=regimes,
             components=[
                 SignalLabComponent(
                     key=col, label=label, axis=axis, values=_series_list(frame[col].loc[window])

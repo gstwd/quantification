@@ -27,6 +27,16 @@
         <span class="m-label">与现有择时同向占比</span>
         <span class="m-value">{{ fmtPct(m.agree_existing) }}</span>
       </div>
+      <template v-if="result.regime.length">
+        <div class="metric">
+          <span class="m-label">regime 翻转 / 年（引擎三态）</span>
+          <span class="m-value">{{ fmtNum(m.regime_flips_per_year, 1) }}</span>
+        </div>
+        <div class="metric">
+          <span class="m-label">进攻 / 中性 / 防守占比</span>
+          <span class="m-value">{{ regimeShareText }}</span>
+        </div>
+      </template>
     </div>
 
     <table class="perf-table">
@@ -146,6 +156,12 @@ const signalComponents = computed(() => props.result.components.filter((c) => c.
 const auxComponents = computed(() => props.result.components.filter((c) => c.axis === 'aux'))
 const panelCount = computed(() => (auxComponents.value.length ? 4 : 3))
 const chartHeight = computed(() => 90 + panelCount.value * 190)
+// 引擎择时综合分的 regime 占比文本（进攻 / 中性 / 防守）
+const regimeShareText = computed(() =>
+  ['offensive', 'neutral', 'defensive']
+    .map((key) => fmtPct(m.value.regime_shares[key] ?? null, 0))
+    .join(' / '),
+)
 const paramText = computed(() =>
   Object.entries(props.result.params)
     .map(([k, v]) => `${k}=${v}`)

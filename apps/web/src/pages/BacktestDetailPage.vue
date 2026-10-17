@@ -316,6 +316,79 @@
         </div>
       </div>
 
+      <!-- 择时专项统计 -->
+      <div v-if="timingStats" class="metrics-section">
+        <div class="section-label">
+          择时统计
+          <HelpTip :text="'回测执行时按逐日择时记录计算：regime 占比与翻转（逐日信号口径），风险腿到期日的 regime / 目标仓位切换（执行口径），分 regime 的组合与基准日收益（按决策日 regime 归组，收益窗口为次日），换手按调仓腿拆分，以及择时综合分分位。存量回测无该块；择时的净贡献请用 research batch --timing-attribution 对照。'" />
+        </div>
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-label">regime 翻转 / 年</div>
+            <div class="metric-value">{{ fmtOptional(timingStats.regime_flips_per_year, 1) }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">风险腿 regime 切换 / 年</div>
+            <div class="metric-value">{{ fmtOptional(timingStats.risk_leg_regime_changes_per_year, 1) }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">目标仓位切换 / 年</div>
+            <div class="metric-value">{{ fmtOptional(timingStats.target_exposure_switches_per_year, 1) }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">风险腿成交日换手占比</div>
+            <div class="metric-value">{{ fmtShare(timingStats.turnover.risk_leg_turnover_share) }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">仓位变动换手占比</div>
+            <div class="metric-value">{{ fmtShare(timingStats.turnover.exposure_turnover_share) }}</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">择时降级天数</div>
+            <div class="metric-value">{{ timingStats.degraded_days }}</div>
+          </div>
+        </div>
+        <div class="annual-table-wrap">
+          <table class="annual-table">
+            <thead>
+              <tr>
+                <th>regime</th>
+                <th>天数</th>
+                <th>时间占比</th>
+                <th>平均仓位</th>
+                <th>组合日均</th>
+                <th>组合年化</th>
+                <th>基准日均</th>
+                <th>基准年化</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in timingStats.regimes" :key="row.regime">
+                <td>{{ regimeLabel(row.regime) }}</td>
+                <td>{{ row.days }}</td>
+                <td>{{ fmtShare(row.share) }}</td>
+                <td>{{ fmtShare(row.average_exposure) }}</td>
+                <td>{{ fmtOptionalPct(row.mean_daily_return_pct, 3) }}</td>
+                <td :class="pctClass(row.annualized_return_pct ?? 0)">
+                  {{ fmtOptionalPct(row.annualized_return_pct) }}
+                </td>
+                <td>{{ fmtOptionalPct(row.benchmark_mean_daily_return_pct, 3) }}</td>
+                <td :class="pctClass(row.benchmark_annualized_return_pct ?? 0)">
+                  {{ fmtOptionalPct(row.benchmark_annualized_return_pct) }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="stability-note">
+          综合分分布（{{ timingStats.score.count }} 个有效日；进攻 ≥
+          {{ fmtOptional(timingStats.offensive_threshold, 0) }}、防守 ≤
+          {{ fmtOptional(timingStats.defensive_threshold, 0) }}）：{{ timingScoreText }}
+          ｜换手合计 {{ timingStats.turnover.total_turnover.toFixed(2) }}x，仅风险腿到期日占
+          {{ fmtShare(timingStats.turnover.risk_only_turnover_share) }}
+        </div>
+      </div>
+
       <!-- 有效候选池时间线（C6） -->
       <div v-if="candidatePool" class="metrics-section">
         <div class="section-label">
@@ -538,6 +611,62 @@ const isLegacyAccounting = computed(
 
 /** 有效候选池时间线（C6） */
 const candidatePool = computed(() => store.current?.stability?.candidate_pool ?? null)
+
+/** 择时专项统计（未配置择时或存量回测为 null） */
+const timingStats = computed(() => store.current?.timing_stats ?? null)
+
+/** 择时综合分分位文本：p05 … p95 与均值 */
+const timingScoreText = computed(() => {
+  const score = timingStats.value?.score
+  if (!score || score.count === 0) return '—'
+  const parts = score.quantiles.map((q) => `p${Math.round(q.quantile * 100)} ${q.value.toFixed(1)}`)
+  return `${parts.join(' · ')} · 均值 ${fmtOptional(score.mean, 1)}`
+})
+
+/**
+ * 可空数值的定点格式化。
+ *
+ * @param v - 数值，空值显示 “—”
+ * @param digits - 小数位
+ * @returns 文本
+ */
+function fmtOptional(v: number | null | undefined, digits = 2): string {
+  return v === null || v === undefined ? '—' : v.toFixed(digits)
+}
+
+/**
+ * 0-1 占比格式化为百分比。
+ *
+ * @param v - 0-1 小数，空值显示 “—”
+ * @returns 百分比文本
+ */
+function fmtShare(v: number | null | undefined): string {
+  return v === null || v === undefined ? '—' : `${(v * 100).toFixed(1)}%`
+}
+
+/**
+ * 可空百分数（已是 % 单位）格式化。
+ *
+ * @param v - 百分数，空值显示 “—”
+ * @param digits - 小数位
+ * @returns 带符号的百分比文本
+ */
+function fmtOptionalPct(v: number | null | undefined, digits = 2): string {
+  return v === null || v === undefined ? '—' : (v >= 0 ? '+' : '') + v.toFixed(digits) + '%'
+}
+
+/** regime 中文名 */
+const REGIME_LABELS: Record<string, string> = { offensive: '进攻', neutral: '中性', defensive: '防守' }
+
+/**
+ * regime 中文名。
+ *
+ * @param regime - offensive / neutral / defensive
+ * @returns 中文标签，未知时原样返回
+ */
+function regimeLabel(regime: string): string {
+  return REGIME_LABELS[regime] ?? regime
+}
 
 const executionModelLabel = computed(() => {
   const value = store.current?.params?.['_execution_model']

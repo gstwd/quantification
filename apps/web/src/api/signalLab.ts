@@ -31,6 +31,7 @@ export async function fetchSignalLabCatalog(): Promise<SignalLabCatalog> {
  * @param start - 起始日期 YYYY-MM-DD
  * @param end - 截止日期 YYYY-MM-DD
  * @param params - 信号参数
+ * @param strategyId - 可选策略 ID：择时综合分按该策略的 timing 块计算（此时不传参数）
  * @returns 序列、分量与评估指标
  */
 export async function fetchSignalLabTiming(
@@ -39,9 +40,17 @@ export async function fetchSignalLabTiming(
   start: string,
   end: string,
   params?: SignalLabParams,
+  strategyId?: string,
 ): Promise<SignalLabTimingResponse> {
   const { data } = await apiClient.get<SignalLabTimingResponse>('/signal-lab/timing', {
-    params: { index_code: indexCode, signal, start, end, params: encodeParams(params) },
+    params: {
+      index_code: indexCode,
+      signal,
+      start,
+      end,
+      params: strategyId ? undefined : encodeParams(params),
+      strategy_id: strategyId || undefined,
+    },
     timeout: LAB_TIMEOUT,
     toast: false,
   })

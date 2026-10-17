@@ -45,12 +45,21 @@ class SignalLabIndexOption(BaseModel):
     index_name: str
 
 
+class SignalLabStrategyOption(BaseModel):
+    """可作为择时综合分口径的策略（启用、非变体、配置了 timing 块）。"""
+
+    strategy_id: str
+    display_name: str
+    version: str = ""
+
+
 class SignalLabCatalog(BaseModel):
     """研究台目录：可研究的因子、信号、指数与边界说明。"""
 
     cross_section_factors: list[SignalLabDefinition]
     timing_signals: list[SignalLabDefinition]
     market_signals: list[SignalLabDefinition]
+    timing_strategies: list[SignalLabStrategyOption] = Field(default_factory=list)
     indexes: list[SignalLabIndexOption]
     research_start: date
     research_end: date
@@ -94,7 +103,11 @@ class SignalLabPerformance(BaseModel):
 
 
 class SignalLabTimingMetrics(BaseModel):
-    """择时信号评估指标。"""
+    """择时信号评估指标。
+
+    regime_flips_per_year / regime_shares 只对引擎择时综合分输出（三态 regime），
+    其余信号为 None / 空。
+    """
 
     flips_per_year: float | None = None
     on_ratio: float | None = None
@@ -104,6 +117,8 @@ class SignalLabTimingMetrics(BaseModel):
     agree_existing: float | None = None
     strategy: SignalLabPerformance
     benchmark: SignalLabPerformance
+    regime_flips_per_year: float | None = None
+    regime_shares: dict[str, float] = Field(default_factory=dict)
 
 
 class SignalLabYearStat(BaseModel):
@@ -128,12 +143,17 @@ class SignalLabComponent(BaseModel):
 
 
 class SignalLabTimingResponse(BaseModel):
-    """单指数（或市场级）择时信号研究结果，序列按列存放。"""
+    """单指数（或市场级）择时信号研究结果，序列按列存放。
+
+    strategy_id: 择时综合分按该策略的 timing 块计算时的策略 ID，否则为 None。
+    regime: 引擎择时综合分的逐日 regime（降级 / 预热为 None），其余信号为空列表。
+    """
 
     signal: SignalLabDefinition
     params: dict[str, float]
     index_code: str
     index_name: str = ""
+    strategy_id: str | None = None
     start: date
     end: date
     includes_validation: bool = False
@@ -141,6 +161,7 @@ class SignalLabTimingResponse(BaseModel):
     close: list[float | None]
     value: list[float | None]
     on: list[float | None]
+    regime: list[str | None] = Field(default_factory=list)
     components: list[SignalLabComponent] = Field(default_factory=list)
     strategy_nav: list[float | None] = Field(default_factory=list)
     benchmark_nav: list[float | None] = Field(default_factory=list)

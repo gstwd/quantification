@@ -78,15 +78,32 @@
               {{ item.label }}
             </option>
           </select>
+          <template v-if="isEngineTiming">
+            <label>择时口径</label>
+            <select v-model="timingStrategy" class="select-input wide">
+              <option value="">默认示例（r60v90 口径，参数可调）</option>
+              <option
+                v-for="item in catalog.timing_strategies"
+                :key="item.strategy_id"
+                :value="item.strategy_id"
+              >
+                策略：{{ item.display_name }}（{{ item.strategy_id }}）
+              </option>
+            </select>
+          </template>
           <button class="query-btn" type="button" :disabled="timingLoading" @click="queryTiming">
             {{ timingLoading ? '计算中...' : '计算' }}
           </button>
         </div>
-        <div v-if="timingDef" class="form-row wrap">
+        <div v-if="timingDef && !timingStrategy" class="form-row wrap">
           <label>参数</label>
           <ParamEditor v-model="timingParams" :definition="timingDef" />
         </div>
-        <DefinitionCard v-if="timingDef" :definition="timingDef" />
+        <div v-else-if="timingStrategy" class="form-row wrap">
+          <label>参数</label>
+          <span class="hint">取自策略 timing 块（因子、权重、变换、阈值与代理指数），不可覆盖</span>
+        </div>
+        <DefinitionCard v-if="shownTimingDef" :definition="shownTimingDef" />
         <div v-if="timingError" class="error-box">{{ timingError }}</div>
         <TimingResultView v-if="timingResult" :result="timingResult" />
       </template>
@@ -173,6 +190,7 @@
  *
  * 三个模块：单指数择时信号、市场级情绪（GSISI）、截面因子 IC。
  * 全部为只读即时计算，参数可调仅用于理解原理；晋升判定以研报默认参数为准。
+ * 择时综合分走引擎实现，可切换为任一策略的 timing 块（此时参数取自策略配置）。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { AxiosError } from 'axios'
@@ -197,6 +215,9 @@ import { RESEARCH_END, RESEARCH_START, VALIDATION_START } from '../utils/datePre
 import { todayCn } from '../utils/date'
 
 type TabKey = 'timing' | 'market' | 'cross'
+
+/** 走引擎实现的择时综合分信号键 */
+const ENGINE_TIMING_KEY = 'existing_composite'
 
 interface RangePreset {
   label: string
@@ -227,6 +248,8 @@ const endDate = ref(RESEARCH_END)
 
 const timingIndex = ref('000300')
 const timingSignal = ref('pv_resonance')
+// 择时综合分口径：空字符串 = 默认示例，否则为策略 ID（读取该策略的 timing 块）
+const timingStrategy = ref('')
 const timingParams = ref<Record<string, number>>({})
 const timingResult = ref<SignalLabTimingResponse | null>(null)
 const timingLoading = ref(false)
@@ -255,6 +278,14 @@ function findDef(list: SignalLabDefinition[] | undefined, key: string): SignalLa
 }
 
 const timingDef = computed(() => findDef(catalog.value?.timing_signals, timingSignal.value))
+// 择时综合分走引擎实现，可选择任一策略的 timing 块
+const isEngineTiming = computed(() => timingSignal.value === ENGINE_TIMING_KEY)
+// 策略口径的公式由后端按 timing 块生成：结果与当前选择一致时展示结果中的定义
+const shownTimingDef = computed<SignalLabDefinition | null>(() => {
+  const result = timingResult.value
+  if (timingStrategy.value && result && result.strategy_id === timingStrategy.value) return result.signal
+  return timingDef.value
+})
 const marketDef = computed(() => findDef(catalog.value?.market_signals, marketSignal.value))
 const crossDef = computed(() => findDef(catalog.value?.cross_section_factors, crossFactor.value))
 
@@ -298,6 +329,7 @@ async function queryTiming(): Promise<void> {
       startDate.value,
       endDate.value,
       timingParams.value,
+      isEngineTiming.value && timingStrategy.value ? timingStrategy.value : undefined,
     )
   } catch (err) {
     timingError.value = errorText(err)
@@ -547,6 +579,10 @@ onMounted(async () => {
   align-items: center;
   gap: 4px;
   color: #cbd5e1;
+}
+.hint {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 .link-btn {
   background: transparent;

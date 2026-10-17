@@ -69,6 +69,8 @@ class DayExecution:
         executed_positions: 当日实际承担收益的持仓（与 positions 一致，保留字段语义）。
         turnover: 当日成交的单边换手率（Σ|Δw| / 2，按漂移后的实际持仓比较）。
         missing_bar_count: 受原始行情缺失影响的持仓资产数（数据缺口统计口径）。
+        exposure_turnover: 当日成交中总仓位变动带来的单边换手 |ΣW新 − ΣW旧| / 2，
+            是换手里"择时缩放总仓位"部分的下限估计；只用于择时观测，不参与记账。
     """
 
     portfolio_return: float
@@ -76,6 +78,7 @@ class DayExecution:
     executed_positions: dict[str, float]
     turnover: float
     missing_bar_count: int
+    exposure_turnover: float = 0.0
 
 
 def forward_fill_return_bars(
@@ -194,6 +197,22 @@ def _hold_window(
         if ret is not None:
             total += weights[code] * ret
     return total, drift_weights(weights, asset_returns, total)
+
+
+def _exposure_turnover(before: dict[str, float], after: dict[str, float]) -> float:
+    """成交前后总仓位变动带来的单边换手 |ΣW新 − ΣW旧| / 2（与换手同为单边口径）。
+
+    任何把总仓位从 E1 调到 E2 的成交至少产生 |E2 − E1| / 2 的单边换手，因此它是
+    换手中"择时缩放总仓位"部分的下限估计，其余为成分轮换。
+
+    Args:
+        before: 成交前的实际持仓。
+        after: 成交后的目标持仓。
+
+    Returns:
+        单边换手（倍）。
+    """
+    return abs(sum(after.values()) - sum(before.values())) / 2
 
 
 class BacktestExecutor:
@@ -324,6 +343,7 @@ class BacktestExecutor:
         # 换手按"隔夜漂移后的开盘持仓 → 新目标"计算：成交发生在 T+1 开盘
         weights_at_open = drift_weights(previous, overnight, overnight_return)
         turnover = compute_turnover(weights_at_open, new_positions)
+        exposure_turnover = _exposure_turnover(weights_at_open, new_positions)
         intraday_return = sum(
             new_positions[code] * (intraday[code] or 0.0) for code in sorted(new_positions)
         )
@@ -337,6 +357,7 @@ class BacktestExecutor:
             missing_bar_count=count_missing_rebalance_assets(
                 previous, new_positions, trade_date, next_date, quality_bars
             ),
+            exposure_turnover=exposure_turnover,
         )
 
     def _step_close(
@@ -364,9 +385,11 @@ class BacktestExecutor:
         if self._pending is not None:
             # 成交腿 = 漂移到今日收盘的实际持仓 → 昨日指令
             turnover = compute_turnover(self._holdings, self._pending)
+            exposure_turnover = _exposure_turnover(self._holdings, self._pending)
             executed = dict(self._pending)
         else:
             turnover = 0.0
+            exposure_turnover = 0.0
             executed = dict(self._holdings)
         portfolio_return, end_weights = _hold_window(executed, trade_date, next_date, return_bars)
         self._holdings = end_weights
@@ -379,4 +402,5 @@ class BacktestExecutor:
             missing_bar_count=count_missing_allocation_assets(
                 executed, trade_date, next_date, quality_bars
             ),
+            exposure_turnover=exposure_turnover,
         )

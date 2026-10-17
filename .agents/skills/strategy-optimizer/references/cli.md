@@ -103,7 +103,7 @@
 
 | 命令 | 说明 |
 | --- | --- |
-| `research batch --strategy <id> --variants v.json [--windows 5] [--cost-bps 10] [--cost-ladder 0,10,20,30,50] [--no-baseline] [--summary] [--execution-model]` | 同一批变体 × 窗口的离线评估：复用平台执行路径但**不落库**，按窗口共享行情与因子缓存（因此比逐条正式回测快一个量级，是探索阶段的默认工具）；`--summary` 输出「变体 × 指标」排名表（否则是完整 JSON，几十个变体会超输出上限） |
+| `research batch --strategy <id> --variants v.json [--windows 5] [--cost-bps 10] [--cost-ladder 0,10,20,30,50] [--no-baseline] [--summary] [--execution-model] [--timing-attribution]` | 同一批变体 × 窗口的离线评估：复用平台执行路径但**不落库**，按窗口共享行情与因子缓存（因此比逐条正式回测快一个量级，是探索阶段的默认工具）；`--summary` 输出「变体 × 指标」排名表（否则是完整 JSON，几十个变体会超输出上限）；`--timing-attribution` 为每个带择时的变体追加「关闭择时、总仓位校准到同一平均实际仓位」的 `:timing_off` 对照并输出择时贡献差值（只做归因时可省略 `--variants`）；带择时的变体聚合块含 `timing_stats` |
 
 变体文件格式：`{"variants": [{"label": "x", "patch": {"rank.top_n": 4}}, {"label": "y", "config": {...}}]}`。
 `patch` 的路径支持列表下标（`filters.rules[1].value`）与列表追加（`filters.rules[+]` 追加一条规则）；

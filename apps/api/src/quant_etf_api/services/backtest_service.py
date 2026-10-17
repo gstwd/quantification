@@ -34,6 +34,7 @@ from quant_etf_api.domain.portfolio.benchmark import compute_buy_hold_benchmark
 from quant_etf_api.domain.portfolio.execution import (
     ACCOUNTING_MODEL_DRIFT,
     ACCOUNTING_MODEL_LEGACY,
+    EXECUTION_MODEL_CLOSE,
     BacktestExecutor,
     forward_fill_return_bars,
 )
@@ -61,6 +62,7 @@ from quant_etf_api.domain.research.stability import (
     compute_cost_ladder,
     compute_stability_metrics,
 )
+from quant_etf_api.domain.research.timing import TimingDay, compute_timing_stats
 from quant_etf_api.domain.strategies.rebalance import (
     RebalanceLegs,
     select_active_legs,
@@ -105,6 +107,7 @@ from quant_etf_api.schemas.backtest import (
     BacktestPruneResponse,
     BacktestStability,
     BacktestSummary,
+    BacktestTimingStats,
     BacktestWarning,
     CostLadderEntry,
     DanglingReferenceItem,
@@ -189,6 +192,28 @@ def _round_weights(positions: dict[str, float]) -> dict[str, float]:
     """
     rounded = {code: round(weight, 4) for code, weight in sorted(positions.items())}
     return {code: weight for code, weight in rounded.items() if weight > 0}
+
+
+def _parse_timing_stats(metrics: Any) -> BacktestTimingStats | None:
+    """从落库汇总指标中解析择时专项统计，缺失/非法时返回 None。
+
+    择时统计随汇总指标一并落库（``metrics["timing_stats"]``）；``BacktestMetrics``
+    是扁平指标模型、会忽略该嵌套键，因此在详情里单独解析。
+
+    Args:
+        metrics: ``backtest_run.metrics`` 的原始值。
+
+    Returns:
+        BacktestTimingStats；存量回测或未配置择时时为 None。
+    """
+    raw = metrics.get("timing_stats") if isinstance(metrics, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return BacktestTimingStats(**raw)
+    except Exception:
+        logger.warning("timing_stats 解析失败，按缺失处理", exc_info=True)
+        return None
 
 
 def _parse_candidate_pool(raw: Any) -> BacktestCandidatePool | None:
@@ -1236,9 +1261,10 @@ class BacktestService:
             caches: 可选的跨变体共享缓存（行情快照与因子值），仅批量场景使用。
 
         Returns:
-            结果字典：``metrics``（毛口径汇总指标）、``daily_rows``（``persist=False``
-            时的逐日结果对象列表）、``warnings``、``candidate_pool``、
-            ``trading_dates`` 与 ``params``。
+            结果字典：``metrics``（毛口径汇总指标；配置择时时含 ``timing_stats``
+            择时专项统计）、``daily_rows``（``persist=False`` 时的逐日结果对象列表）、
+            ``timing_days``（与逐日结果等长的择时观测记录，供批量评估跨窗口重算）、
+            ``warnings``、``candidate_pool``、``trading_dates`` 与 ``params``。
 
         Raises:
             JobCancelledError: 收到协作取消请求时抛出（由调用方落 cancelled）。
@@ -1412,6 +1438,9 @@ class BacktestService:
         cached_metadata = {code: {"name_cn": code} for code in index_codes}
         # 择时降级（择时因子全部缺失 → 按中性运行）的交易日，收尾时生成告警
         timing_degraded_dates: list[date] = []
+        # 择时观测记录（与逐日结果一一对应），收尾时汇总择时专项统计；只读度量，
+        # 不参与任何决策
+        timing_days: list[TimingDay] = []
         all_index_codes = set(index_codes)
 
         for i, trade_date in enumerate(decision_dates):
@@ -1456,7 +1485,10 @@ class BacktestService:
                     day_exclusion_reasons.get(excluded_code, {"DATA_EXCLUDED"})
                 )
             pool_sizes.append(len(eligible_codes))
-            if result.timing is not None and result.timing.factors.get("degraded"):
+            timing_degraded = bool(
+                result.timing is not None and result.timing.factors.get("degraded")
+            )
+            if timing_degraded:
                 timing_degraded_dates.append(trade_date)
 
             # 以"调仓前实际持仓"（已随行情漂移）合成当日目标；收盘模式先成交昨日
@@ -1506,6 +1538,28 @@ class BacktestService:
                 self._backtest_repo.add_daily_result(daily_row)
             else:
                 memory_rows.append(daily_row)
+            timing_days.append(
+                TimingDay(
+                    regime=timing_regime,
+                    # 降级日引擎返回 0 分占位，不能混进综合分分布
+                    score=(
+                        result.timing.factors.get("composite_score")
+                        if result.timing is not None and not timing_degraded
+                        else None
+                    ),
+                    degraded=timing_degraded,
+                    portfolio_return=day.portfolio_return,
+                    benchmark_return=benchmark_ret,
+                    exposure=day_total_exposure,
+                    target_exposure=(
+                        result.timing_target_exposure if result.timing is not None else None
+                    ),
+                    turnover=day.turnover,
+                    exposure_turnover=day.exposure_turnover,
+                    risk_order=legs.risk,
+                    selection_order=legs.selection,
+                )
+            )
 
             # 写入指数结果并获取持仓统计（指数收益与组合收益共用前向填充行情）
             day_pos_count, day_pos_positive = self._write_index_results(
@@ -1573,6 +1627,16 @@ class BacktestService:
             data_gap_days=data_gap_days,
             annual_risk_free_rate_pct=risk_free_rate_pct,
         )
+        # 择时专项统计（领域纯函数）：未配置择时时为 None、不写键。T+1 收盘执行时
+        # 指令次日成交，换手记在下一行，拆分风险腿换手时按 1 行滞后对齐
+        timing_stats = compute_timing_stats(
+            timing_days,
+            fill_lag=1 if execution_model == EXECUTION_MODEL_CLOSE else 0,
+            offensive_threshold=config.timing.thresholds.offensive if config.timing else None,
+            defensive_threshold=config.timing.thresholds.defensive if config.timing else None,
+        )
+        if timing_stats is not None:
+            metrics["timing_stats"] = timing_stats.to_dict()
 
         # 收集结构化警告，随成功状态一并持久化，前端轮询时按 key 去重弹窗
         candidate_pool = build_candidate_pool_timeline(
@@ -1645,6 +1709,7 @@ class BacktestService:
         return {
             "metrics": metrics,
             "daily_rows": memory_rows,
+            "timing_days": timing_days,
             "warnings": [w.model_dump() for w in run_warnings],
             "candidate_pool": candidate_pool,
             "trading_dates": trading_dates,
@@ -2331,6 +2396,7 @@ class BacktestService:
             warnings = []
         return BacktestDetail(
             **summary.model_dump(),
+            timing_stats=_parse_timing_stats(row.metrics),
             universe_filter=row.universe_filter or {"mode": "all"},
             params=row.params,
             warnings=warnings,

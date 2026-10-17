@@ -510,6 +510,58 @@ export interface QueueStatsResponse {
   capacity: QueueCapacity
 }
 
+/** 单个 regime 的时间占比与收益统计（按决策日 regime 归组；收益为 %，占比与仓位为 0-1） */
+export interface TimingRegimeStats {
+  regime: string
+  days: number
+  share: number
+  average_exposure: number | null
+  mean_daily_return_pct: number | null
+  annualized_return_pct: number | null
+  benchmark_mean_daily_return_pct: number | null
+  benchmark_annualized_return_pct: number | null
+}
+
+/** 换手按调仓腿拆分（单边口径，占比为 0-1） */
+export interface TimingTurnoverBreakdown {
+  total_turnover: number
+  annualized_turnover: number
+  risk_leg_turnover: number
+  risk_leg_turnover_share: number | null
+  risk_only_turnover_share: number | null
+  exposure_turnover: number
+  exposure_turnover_share: number | null
+}
+
+/** 择时综合分分布（降级日不计） */
+export interface TimingScoreDistribution {
+  count: number
+  mean: number | null
+  std: number | null
+  min: number | null
+  max: number | null
+  quantiles: Array<{ quantile: number; value: number }>
+}
+
+/** 回测择时专项统计（执行时计算并随汇总指标落库，存量回测为 null） */
+export interface BacktestTimingStats {
+  trading_days: number
+  timing_days: number
+  degraded_days: number
+  regime_flips: number
+  regime_flips_per_year: number | null
+  risk_leg_days: number
+  risk_leg_regime_changes: number
+  risk_leg_regime_changes_per_year: number | null
+  target_exposure_switches: number
+  target_exposure_switches_per_year: number | null
+  regimes: TimingRegimeStats[]
+  turnover: TimingTurnoverBreakdown
+  score: TimingScoreDistribution
+  offensive_threshold: number | null
+  defensive_threshold: number | null
+}
+
 export interface BacktestDetail extends BacktestSummary {
   universe_filter: Record<string, unknown>
   params: Record<string, unknown> | null
@@ -521,6 +573,8 @@ export interface BacktestDetail extends BacktestSummary {
   stability?: BacktestStability | null
   /** 回测用途说明与触发来源 */
   purpose_reason?: string | null
+  /** 择时专项统计（未配置择时或存量回测为 null） */
+  timing_stats?: BacktestTimingStats | null
 }
 
 export interface BacktestDailyResult {
@@ -1302,11 +1356,19 @@ export interface SignalLabDefinition {
   reference_lines: SignalLabReferenceLine[]
 }
 
+/** 可作为择时综合分口径的策略（启用、非变体、配置了 timing 块） */
+export interface SignalLabStrategyOption {
+  strategy_id: string
+  display_name: string
+  version: string
+}
+
 /** 研究台目录 */
 export interface SignalLabCatalog {
   cross_section_factors: SignalLabDefinition[]
   timing_signals: SignalLabDefinition[]
   market_signals: SignalLabDefinition[]
+  timing_strategies: SignalLabStrategyOption[]
   indexes: Array<{ index_code: string; index_name: string }>
   research_start: string
   research_end: string
@@ -1356,6 +1418,10 @@ export interface SignalLabTimingMetrics {
   agree_existing: number | null
   strategy: SignalLabPerformance
   benchmark: SignalLabPerformance
+  /** 引擎择时综合分的 regime 翻转次数 / 年（其余信号为 null） */
+  regime_flips_per_year: number | null
+  /** 引擎择时综合分的 regime 时间占比（offensive / neutral / defensive，其余信号为空） */
+  regime_shares: Record<string, number>
 }
 
 /** 信号中间分量（axis: price 与收盘同轴 / signal 与信号同轴 / aux 独立辅助图） */
@@ -1372,6 +1438,8 @@ export interface SignalLabTimingResponse {
   params: Record<string, number>
   index_code: string
   index_name: string
+  /** 按策略 timing 块计算时的策略 ID */
+  strategy_id: string | null
   start: string
   end: string
   includes_validation: boolean
@@ -1379,6 +1447,8 @@ export interface SignalLabTimingResponse {
   close: Array<number | null>
   value: Array<number | null>
   on: Array<number | null>
+  /** 引擎择时综合分的逐日 regime（降级 / 预热为 null），其余信号为空数组 */
+  regime: Array<string | null>
   components: SignalLabComponent[]
   strategy_nav: Array<number | null>
   benchmark_nav: Array<number | null>

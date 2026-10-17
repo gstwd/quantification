@@ -464,8 +464,117 @@ class BacktestCancelResponse(BaseModel):
     message: str
 
 
+class TimingRegimeStats(BaseModel):
+    """单个 regime 的时间占比与收益统计（按决策日 regime 归组）。
+
+    Attributes:
+        regime: regime 名称（offensive/neutral/defensive）。
+        days: 决策日数。
+        share: 时间占比（0-1）。
+        average_exposure: 该 regime 决策日的平均组合仓位（0-1）。
+        mean_daily_return_pct: 组合日收益均值（%）。
+        annualized_return_pct: 组合在该 regime 日子里的几何年化收益（%）。
+        benchmark_mean_daily_return_pct: 同期基准日收益均值（%）。
+        benchmark_annualized_return_pct: 同期基准几何年化收益（%）。
+    """
+
+    regime: str
+    days: int
+    share: float
+    average_exposure: float | None = None
+    mean_daily_return_pct: float | None = None
+    annualized_return_pct: float | None = None
+    benchmark_mean_daily_return_pct: float | None = None
+    benchmark_annualized_return_pct: float | None = None
+
+
+class TimingTurnoverBreakdown(BaseModel):
+    """换手按调仓腿拆分（单边口径）。
+
+    Attributes:
+        total_turnover: 全期单边换手合计（倍）。
+        annualized_turnover: 年化单边换手（倍）。
+        risk_leg_turnover: 风险腿指令成交日的换手合计（含两腿同日到期）。
+        risk_leg_turnover_share: 风险腿成交日换手占总换手比例（0-1）。
+        risk_only_turnover_share: 仅风险腿到期的成交日换手占比（0-1）。
+        exposure_turnover: 总仓位变动带来的换手合计（择时换手的下限估计）。
+        exposure_turnover_share: 总仓位变动换手占总换手比例（0-1）。
+    """
+
+    total_turnover: float
+    annualized_turnover: float
+    risk_leg_turnover: float
+    risk_leg_turnover_share: float | None = None
+    risk_only_turnover_share: float | None = None
+    exposure_turnover: float
+    exposure_turnover_share: float | None = None
+
+
+class TimingScoreQuantile(BaseModel):
+    """择时综合分的一个分位点。"""
+
+    quantile: float
+    value: float
+
+
+class TimingScoreDistribution(BaseModel):
+    """择时综合分分布（降级日不计）。"""
+
+    count: int
+    mean: float | None = None
+    std: float | None = None
+    min: float | None = None
+    max: float | None = None
+    quantiles: list[TimingScoreQuantile] = Field(default_factory=list)
+
+
+class BacktestTimingStats(BaseModel):
+    """回测择时专项统计（执行时由 ``domain.research.timing`` 计算并随汇总指标落库）。
+
+    逐日结果只记录 regime，综合分与调仓腿到期情况不落库，因此该块只在执行时
+    计算；存量回测（引入前执行）为 None，不重写历史结果。
+
+    Attributes:
+        trading_days: 决策日数。
+        timing_days: 有 regime 的决策日数。
+        degraded_days: 择时降级（因子全部缺失、按中性运行）的决策日数。
+        regime_flips: 逐日 regime 切换次数（信号口径）。
+        regime_flips_per_year: 每年 regime 切换次数。
+        risk_leg_days: 风险腿到期的决策日数。
+        risk_leg_regime_changes: 相邻风险腿到期日 regime 不同的次数（执行口径）。
+        risk_leg_regime_changes_per_year: 每年执行口径 regime 切换次数。
+        target_exposure_switches: 相邻风险腿到期日择时目标仓位不同的次数。
+        target_exposure_switches_per_year: 每年目标仓位切换次数。
+        regimes: 分 regime 统计。
+        turnover: 换手按调仓腿拆分。
+        score: 择时综合分分布。
+        offensive_threshold: 进攻阈值。
+        defensive_threshold: 防守阈值。
+    """
+
+    trading_days: int
+    timing_days: int
+    degraded_days: int
+    regime_flips: int
+    regime_flips_per_year: float | None = None
+    risk_leg_days: int
+    risk_leg_regime_changes: int
+    risk_leg_regime_changes_per_year: float | None = None
+    target_exposure_switches: int
+    target_exposure_switches_per_year: float | None = None
+    regimes: list[TimingRegimeStats] = Field(default_factory=list)
+    turnover: TimingTurnoverBreakdown
+    score: TimingScoreDistribution
+    offensive_threshold: float | None = None
+    defensive_threshold: float | None = None
+
+
 class BacktestDetail(BacktestSummary):
-    """回测详情，含配置信息。"""
+    """回测详情，含配置信息。
+
+    Attributes:
+        timing_stats: 择时专项统计（未配置择时或存量回测为 None）。
+    """
 
     universe_filter: dict[str, Any]
     params: dict[str, Any] | None = None
@@ -477,6 +586,7 @@ class BacktestDetail(BacktestSummary):
     annual_metrics: list[AnnualMetrics] = Field(default_factory=list)
     stability: BacktestStability | None = None
     purpose_reason: str | None = None
+    timing_stats: BacktestTimingStats | None = None
 
 
 class BacktestDailyResult(BaseModel):

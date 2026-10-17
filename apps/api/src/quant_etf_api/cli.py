@@ -653,8 +653,14 @@ def _build_research_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--strategy", dest="strategy_id", required=True, help="基线策略 ID")
     p.add_argument(
         "--variants",
-        required=True,
-        help="变体文件（JSON 列表，或含 variants 列表的对象；每项给 config 或 patch）",
+        help="变体文件（JSON 列表，或含 variants 列表的对象；每项给 config 或 patch）；"
+        "仅做择时归因（--timing-attribution）时可省略",
+    )
+    p.add_argument(
+        "--timing-attribution",
+        action="store_true",
+        help="择时归因：为每个带择时的变体追加「关闭择时、总仓位固定为其回测期平均实际仓位」"
+        "的对照变体，并输出择时贡献差值（有择时 - 关闭择时）",
     )
     p.add_argument("--windows", type=int, default=5, help="研究期切分窗口数（默认 5 段）")
     p.add_argument("--cost-bps", type=float, help="净口径成本（基点），缺省取系统默认值")
@@ -1439,10 +1445,15 @@ def _run_research(args: argparse.Namespace) -> None:
     try:
         if args.subcommand != "batch":
             raise ValueError(f"未知的 research 子命令: {args.subcommand}")
-        payload = _read_json_any(args.variants)
+        if not args.variants and not args.timing_attribution:
+            raise ValueError("必须提供 --variants，或使用 --timing-attribution 只做择时归因")
         svc = ResearchBatchService(db)
-        variants = ResearchBatchService.parse_variants(
-            svc.baseline_config(args.strategy_id), payload
+        variants = (
+            ResearchBatchService.parse_variants(
+                svc.baseline_config(args.strategy_id), _read_json_any(args.variants)
+            )
+            if args.variants
+            else []
         )
         result = svc.run(
             args.strategy_id,
@@ -1452,6 +1463,7 @@ def _run_research(args: argparse.Namespace) -> None:
             cost_ladder=_parse_cost_ladder(args.cost_ladder),
             include_baseline=not args.no_baseline,
             execution_model=args.execution_model,
+            timing_attribution=args.timing_attribution,
         )
         if args.summary:
             # 摘要视图是"给人/agent 看的表"，不走 JSON 序列化

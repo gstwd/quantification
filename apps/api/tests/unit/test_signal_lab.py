@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -12,11 +13,21 @@ from fastapi import HTTPException
 
 from quant_etf_api.api.routers import signal_lab as router
 from quant_etf_api.domain.research import signal_lab as lab
+from quant_etf_api.engine.config import ScoreConfig, StrategyConfig
+from quant_etf_api.engine.transforms import drawdown_score, momentum_score
+from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
+from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
+from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
+from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
+from quant_etf_api.infra.db.repositories.strategy_config import StrategyConfigRepository
+from quant_etf_api.services import signal_lab_service as svc_module
 from quant_etf_api.services.signal_lab_service import (
     MAX_RANGE_DAYS,
     SignalLabError,
+    SignalLabNotFound,
     SignalLabService,
 )
+from quant_etf_api.services.strategy_config_service import StrategyConfigService
 
 
 def _bars(close: np.ndarray, volume: np.ndarray | None = None) -> pd.DataFrame:
@@ -141,16 +152,200 @@ def test_pv_resonance_on_is_nan_during_warmup() -> None:
     assert set(out["on"].dropna().unique()) <= {0.0, 1.0}
 
 
-def test_existing_composite_uses_injected_transforms() -> None:
-    """现有综合分按 0.6 / 0.4 加权注入的映射函数。"""
-    out = lab.signal_existing_composite(
-        _bars(np.linspace(100, 120, 120)),
-        {"return_period": 10, "drawdown_period": 10, "defensive": 40},
-        lambda v: 100.0,
-        lambda v: 0.0,
+def test_existing_composite_block_matches_main_strategy_shape() -> None:
+    """默认示例是主策略 r60v90 同构的 timing 块：0.6 / 0.4、65 / 防守阈值、所选代理。"""
+    block = lab.existing_composite_timing_block(
+        {"return_period": 90, "drawdown_period": 60, "defensive": 40}, "000905"
     )
-    assert out["value"].dropna().eq(60.0).all()
-    assert out["on"].dropna().eq(1.0).all()
+    config = StrategyConfig(
+        strategy_id="t", display_name="t", score=ScoreConfig(factors={}), **block
+    )
+    assert config.timing is not None
+    assert config.timing.factors == {"return_90d": 0.6, "drawdown_60d": 0.4}
+    assert config.timing.transforms == {
+        "return_90d": "momentum_score",
+        "drawdown_60d": "drawdown_score",
+    }
+    assert (config.timing.thresholds.offensive, config.timing.thresholds.defensive) == (65, 40)
+    assert config.timing.proxy_index_codes == ["000905"]
+    assert config.factor_aliases["return_90d"].params == {"period": 90}
+    assert config.factor_aliases["drawdown_60d"].template_id == "drawdown"
+
+
+def test_engine_timing_frame_maps_regime_and_degraded_days() -> None:
+    """引擎择时帧：降级日为无信号，非防守为持仓，分量列取各因子变换后得分。"""
+    idx = pd.bdate_range("2024-01-01", periods=4)
+    outputs = [
+        (70.0, "offensive", {"a": {"transformed": 80.0}, "b": {"transformed": 55.0}}),
+        (50.0, "neutral", {"a": {"transformed": 50.0}, "b": {"transformed": 50.0}}),
+        (0.0, "neutral", {"degraded": True, "missing_factors": ["a", "b"]}),
+        (30.0, "defensive", {"a": {"transformed": 20.0}, "b": {"raw": None, "status": "missing"}}),
+    ]
+    calls = iter(outputs)
+    out = lab.signal_engine_timing(idx, lambda _ts: next(calls), ["a", "b"])
+
+    assert out["value"].tolist()[:2] == [70.0, 50.0]
+    assert np.isnan(out["value"].iloc[2])
+    assert out["regime"].tolist() == ["offensive", "neutral", None, "defensive"]
+    assert out["on"].tolist()[:2] == [1.0, 1.0]
+    assert np.isnan(out["on"].iloc[2])
+    assert out["on"].iloc[3] == 0.0
+    assert out["degraded"].tolist() == [False, False, True, False]
+    assert out["score:a"].tolist()[:2] == [80.0, 50.0]
+    assert np.isnan(out["score:b"].iloc[3])
+
+
+def test_engine_timing_frame_empty_index() -> None:
+    """空日历返回带完整列的空帧，而不是缺列。"""
+    out = lab.signal_engine_timing(pd.DatetimeIndex([]), lambda _ts: (0.0, "", {}), ["a"])
+    assert out.empty
+    assert {"value", "regime", "on", "degraded", "score:a"} <= set(out.columns)
+
+
+def _bar_rows(code: str, close: np.ndarray, start: str = "2023-01-02") -> dict:
+    """构造仓库返回格式的日线：{(代码, 日期): 行}。"""
+    days = pd.bdate_range(start, periods=len(close))
+    return {
+        (code, day.date()): SimpleNamespace(
+            index_code=code,
+            trade_date=day.date(),
+            open_price=float(c),
+            high_price=float(c) * 1.01,
+            low_price=float(c) * 0.99,
+            close_price=float(c),
+            volume=1e6,
+            turnover=1e8,
+        )
+        for day, c in zip(days, close, strict=True)
+    }
+
+
+def test_service_engine_frame_matches_manual_composite(monkeypatch: pytest.MonkeyPatch) -> None:
+    """服务层引擎择时 = 0.6 × momentum_score(N 日收益%) + 0.4 × drawdown_score(M 日回撤%)。
+
+    走真实的 FactorProvider → ContextBuilder → DefaultScoreCalculator 链路（仓库打桩），
+    与按公式手算的结果逐日一致，确认研究台与回测同一实现。
+    """
+    rng = np.random.default_rng(7)
+    close = 100 * np.cumprod(1 + rng.normal(0, 0.012, 260))
+    rows = _bar_rows("000300", close)
+    monkeypatch.setattr(
+        IndexDailyBarRepository,
+        "find_all_date_range",
+        lambda self, start, end, index_codes=None: {
+            key: row for key, row in rows.items() if start <= key[1] <= end
+        },
+    )
+    monkeypatch.setattr(IndexValuationRepository, "find_range", lambda self, *a, **k: {})
+    monkeypatch.setattr(MacroIndicatorRepository, "find_all_as_map", lambda self: {})
+    service = SignalLabService(MagicMock())
+    params = {"return_period": 20, "drawdown_period": 15, "defensive": 40}
+    config = service._default_timing_config(params, "000300")
+    days = pd.DatetimeIndex(sorted(pd.Timestamp(day) for _, day in rows))
+    start = days[60].date()
+    frame = service._engine_timing_frame(config, days, start)
+
+    series = pd.Series(close, index=days)
+    ret = (series / series.shift(20) - 1) * 100
+    dd = (series / series.rolling(15).max() - 1) * 100
+    expected = 0.6 * ret.map(momentum_score) + 0.4 * dd.map(drawdown_score)
+    window = days[days >= pd.Timestamp(start)]
+    got = frame["value"].loc[window]
+    assert got.notna().all()
+    np.testing.assert_allclose(got.to_numpy(), expected.loc[window].round(1).to_numpy(), atol=0.11)
+    regimes = frame["regime"].loc[window]
+    assert set(regimes) <= {"offensive", "neutral", "defensive"}
+    assert ((got <= 40) == (regimes == "defensive")).all()
+    # 起点缓冲日之前不计算
+    assert np.isnan(frame["value"].loc[days[0]])
+
+
+def test_service_strategy_timing_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """策略口径：策略不存在 404、未配置择时 / 参数覆盖 / 非综合分信号 422。"""
+    service = SignalLabService(MagicMock())
+    monkeypatch.setattr(StrategyConfigRepository, "find_by_id", lambda self, sid: None)
+    with pytest.raises(SignalLabNotFound, match="不存在"):
+        service._strategy_timing_config("missing")
+
+    monkeypatch.setattr(StrategyConfigRepository, "find_by_id", lambda self, sid: object())
+    monkeypatch.setattr(
+        StrategyConfigService,
+        "get_parsed_config",
+        lambda self, sid: StrategyConfig(
+            strategy_id=sid, display_name="无择时", score=ScoreConfig(factors={"a": 1.0})
+        ),
+    )
+    with pytest.raises(SignalLabError, match="未配置择时"):
+        service._strategy_timing_config("no_timing")
+
+    with pytest.raises(SignalLabError, match="只适用于择时综合分"):
+        service.timing("000300", "llt", date(2024, 1, 1), date(2024, 6, 1), {}, strategy_id="s")
+    with pytest.raises(SignalLabError, match="不接受参数覆盖"):
+        service.timing(
+            "000300",
+            "existing_composite",
+            date(2024, 1, 1),
+            date(2024, 6, 1),
+            {"defensive": 30},
+            strategy_id="s",
+        )
+
+
+def test_service_strategy_timing_uses_strategy_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """策略口径只抽取 timing 与别名，定义按策略阈值、权重与代理生成。"""
+    full = StrategyConfig(
+        strategy_id="mainline",
+        display_name="主策略",
+        version="3.2.0",
+        score=ScoreConfig(factors={"return_17d": 1.0}),
+        factor_aliases={
+            "return_60d": {"template_id": "return", "params": {"period": 90}},
+            "max_drawdown_60d": {"template_id": "drawdown", "params": {"period": 60}},
+        },
+        timing={
+            "factors": {"return_60d": 0.6, "max_drawdown_60d": 0.4},
+            "transforms": {"return_60d": "momentum_score", "max_drawdown_60d": "drawdown_score"},
+            "thresholds": {"offensive": 65, "defensive": 40},
+            "proxy_index_codes": ["000300"],
+        },
+    )
+    monkeypatch.setattr(StrategyConfigRepository, "find_by_id", lambda self, sid: object())
+    monkeypatch.setattr(StrategyConfigService, "get_parsed_config", lambda self, sid: full)
+    config = SignalLabService(MagicMock())._strategy_timing_config("mainline")
+
+    assert config.score.factors == {}
+    assert config.timing == full.timing
+    definition = svc_module._strategy_definition(config)
+    assert definition.label == "策略择时：主策略"
+    assert "0.6 × momentum_score(return_60d)" in definition.formula
+    assert "return_60d = return(period=90)" in definition.formula
+    assert [line.value for line in definition.reference_lines] == [40.0, 65.0]
+    assert definition.params == []
+
+
+def test_catalog_lists_only_active_non_variant_timing_strategies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """目录只列出启用、非变体、配置了 timing 块的策略。"""
+    rows = [
+        SimpleNamespace(
+            strategy_id="a", display_name="A", version="1", is_variant=False,
+            config_json={"timing": {"factors": {"x": 1}}},
+        ),
+        SimpleNamespace(
+            strategy_id="b", display_name="B", version="1", is_variant=True,
+            config_json={"timing": {"factors": {"x": 1}}},
+        ),
+        SimpleNamespace(
+            strategy_id="c", display_name="C", version="1", is_variant=False, config_json={}
+        ),
+    ]
+    monkeypatch.setattr(StrategyConfigRepository, "find_all_active", lambda self: rows)
+    monkeypatch.setattr(BenchmarkIndexRepository, "find_active", lambda self: [])
+    catalog = SignalLabService(MagicMock()).catalog()
+    assert [item.strategy_id for item in catalog.timing_strategies] == ["a"]
+    composite = next(d for d in catalog.timing_signals if d.key == "existing_composite")
+    assert [line.value for line in composite.reference_lines] == [40.0, 65.0]
 
 
 def test_hysteresis_holds_state_between_thresholds() -> None:

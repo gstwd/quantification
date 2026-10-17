@@ -30,11 +30,13 @@ from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.factors.catalog import get_factor_template_registry
 from quant_etf_api.infra.db.models.core import BacktestRunModel
 from quant_etf_api.services.backtest_service import BacktestService
+from quant_etf_api.domain.research.timing import TimingDay
 from quant_etf_api.services.research_batch_service import (
     ResearchBatchService,
     ResearchVariant,
     _delta_block,
     _net_digest,
+    build_timing_off_config,
 )
 
 DATES = [date(2025, 1, 2), date(2025, 1, 3), date(2025, 1, 6)]
@@ -441,3 +443,199 @@ class TestDigests:
         variant = ResearchVariant(label="a", config={"rank": {"top_n": 1}})
         with pytest.raises(Exception):
             variant.label = "b"  # type: ignore[misc]
+
+
+def _timed_config_json() -> dict[str, Any]:
+    """带择时块、regime 覆盖与 regime 仓位的基线配置 JSON。"""
+    return {
+        "index_codes": ["000300"],
+        "score": {"factors": {"return_5d": 1.0}},
+        "rank": {"top_n": 1},
+        "portfolio": {
+            "method": "equal_weight",
+            "timing_exposure": {"offensive": 0.9, "neutral": 0.9, "defensive": 0.1},
+        },
+        "risk": {"max_asset_weight": 1.0},
+        "timing": {
+            "factors": {"return_60d": 1.0},
+            "thresholds": {"offensive": 65, "defensive": 40},
+        },
+        "regime_rules": {"defensive": {"rank": {"top_n": 2}}},
+    }
+
+
+def _fake_timed_loop(seen: list[StrategyConfig], control_empty_day: bool = False) -> Any:
+    """按配置是否带择时返回不同逐日序列的回测主循环替身。
+
+    Args:
+        seen: 收集每次运行的配置。
+        control_empty_day: 无择时时第 3 日空仓（模拟过滤后无入选资产），
+            使对照实际均仓 = 0.75 × 固定仓位。
+    """
+
+    def _loop(
+        backtest_id: str,
+        row: BacktestRunModel,
+        config: StrategyConfig,
+        persist: bool = True,
+        caches: Any = None,
+    ) -> dict[str, Any]:
+        """有择时：仓位 0.9/0.1 交替；无择时：仓位固定为 default_exposure。"""
+        seen.append(config)
+        timed = config.timing is not None
+        fixed = config.portfolio.default_exposure
+        exposures = (
+            [0.9, 0.1, 0.9, 0.1]
+            if timed
+            else [fixed, fixed, 0.0 if control_empty_day else fixed, fixed]
+        )
+        returns = [1.0, -0.2, 0.5, 0.1] if timed else [0.8, -1.0, 0.4, 0.2]
+        rows = [
+            SimpleNamespace(
+                trade_date=date(2025, 1, 6 + i),
+                portfolio_return=ret,
+                turnover=0.1,
+                benchmark_return=0.5,
+                total_exposure=exposure,
+                positions={"000300": exposure},
+                executed_positions={"000300": exposure},
+            )
+            for i, (ret, exposure) in enumerate(zip(returns, exposures, strict=True))
+        ]
+        days = [
+            TimingDay(
+                regime=("offensive" if exposure > 0.5 else "defensive") if timed else None,
+                score=(70.0 if exposure > 0.5 else 30.0) if timed else None,
+                degraded=False,
+                portfolio_return=ret,
+                exposure=exposure,
+                target_exposure=exposure if timed else None,
+                turnover=0.1,
+                risk_order=True,
+                selection_order=True,
+            )
+            for ret, exposure in zip(returns, exposures, strict=True)
+        ]
+        return {
+            "params": {"_execution_model": "t_plus_1_open", "_enable_benchmark": True},
+            "daily_rows": rows,
+            "timing_days": days,
+            "metrics": {},
+        }
+
+    return _loop
+
+
+def _attribution_service(
+    seen: list[StrategyConfig], control_empty_day: bool = False
+) -> ResearchBatchService:
+    """构造基线带择时、主循环被替身的研究批量服务。"""
+    svc = ResearchBatchService(db=MagicMock())
+    svc._config_svc = MagicMock()
+    svc._config_svc.get_config.return_value = SimpleNamespace(
+        config_json=_timed_config_json(),
+        display_name="测试",
+        version="1",
+        description="",
+        frequency="daily",
+    )
+    svc._build_windows = MagicMock(
+        return_value=[{"label": "W0", "start": "2025-01-06", "end": "2025-01-09"}]
+    )
+    svc._backtest_svc._run_backtest_loop = MagicMock(
+        side_effect=_fake_timed_loop(seen, control_empty_day)
+    )
+    return svc
+
+
+class TestTimingAttribution:
+    """择时归因：复用变体机制派生"关闭择时、固定平均仓位"的对照。"""
+
+    def test_build_timing_off_config(self) -> None:
+        """对照只关闭择时并固定总仓位，其余配置保持不变，且不改写输入。"""
+        base = _timed_config_json()
+        control = build_timing_off_config(base, 0.73456)
+
+        assert "timing" not in control
+        assert "regime_rules" not in control
+        assert control["portfolio"] == {"method": "equal_weight", "default_exposure": 0.7346}
+        assert control["score"] == base["score"]
+        assert control["rank"] == base["rank"]
+        assert control["risk"] == base["risk"]
+        assert "timing" in base and "timing_exposure" in base["portfolio"]
+        # 缺省组合配置按等权补齐，仓位截到 [0, 1]
+        bare = build_timing_off_config({"score": {"factors": {"a": 1.0}}}, 1.5)
+        assert bare["portfolio"] == {"method": "equal_weight", "default_exposure": 1.0}
+
+    def test_run_appends_control_with_average_exposure(self) -> None:
+        """带择时的变体后紧跟对照变体，对照固定为其平均实际仓位，并给出差值块。"""
+        seen: list[StrategyConfig] = []
+        svc = _attribution_service(seen)
+        result = svc.run("test", [], windows=1, cost_bps=10, timing_attribution=True)
+
+        assert [item["label"] for item in result.variants] == ["baseline", "baseline:timing_off"]
+        assert [item["kind"] for item in result.variants] == ["baseline", "timing_off"]
+        control_config = seen[1]
+        assert control_config.timing is None
+        assert control_config.regime_rules == {}
+        assert control_config.portfolio.timing_exposure is None
+        assert control_config.portfolio.default_exposure == pytest.approx(0.5)
+
+        baseline = result.variants[0]
+        assert baseline["aggregate"]["average_exposure"] == pytest.approx(0.5)
+        assert baseline["aggregate"]["timing_stats"]["regime_flips"] == 3
+        block = baseline["timing_attribution"]
+        assert block["control_label"] == "baseline:timing_off"
+        assert block["target_average_exposure"] == pytest.approx(0.5)
+        assert block["fixed_exposure"] == pytest.approx(0.5)
+        assert block["control_average_exposure"] == pytest.approx(0.5)
+        # 实际均仓一次对齐，不追加校准
+        assert len(block["calibration"]) == 1
+        assert len(seen) == 2
+        assert block["annualized_return_pct"] is not None
+        assert block["max_drawdown_pct"] is not None
+        assert [item["label"] for item in block["per_window"]] == ["W0"]
+        control = result.variants[1]
+        assert "timing_stats" not in control["aggregate"]
+        assert "timing_attribution" not in control
+        # 对照也作为普通变体与基线比较
+        assert control["vs_baseline"]["delta_net_sharpe_ratio"] is not None
+        summary = result.to_summary_table()
+        assert "[timing] baseline" in summary
+        assert "[timing attribution] baseline - baseline:timing_off" in summary
+
+    def test_control_exposure_calibrated_to_realized_average(self) -> None:
+        """对照有空仓日时实际均仓偏低：按目标 / 实际比例校准，只保留对齐的那次对照。"""
+        seen: list[StrategyConfig] = []
+        svc = _attribution_service(seen, control_empty_day=True)
+        result = svc.run("test", [], windows=1, cost_bps=10, timing_attribution=True)
+
+        block = result.variants[0]["timing_attribution"]
+        # 第 1 次固定 0.5 → 实际 0.375；校准为 0.5 × 0.5 / 0.375 → 实际 0.5
+        assert [item["fixed_exposure"] for item in block["calibration"]] == [
+            0.5,
+            pytest.approx(0.6667),
+        ]
+        assert block["calibration"][0]["realized_average_exposure"] == pytest.approx(0.375)
+        assert block["fixed_exposure"] == pytest.approx(0.6667)
+        assert block["control_average_exposure"] == pytest.approx(0.5, abs=1e-3)
+        # 中间的校准运行不进入结果列表
+        assert [item["label"] for item in result.variants] == ["baseline", "baseline:timing_off"]
+        assert result.variants[1]["aggregate"]["average_exposure"] == pytest.approx(0.5, abs=1e-3)
+        assert len(seen) == 3
+
+    def test_no_control_without_flag(self) -> None:
+        """未开启择时归因时不派生对照，但仍输出择时统计。"""
+        seen: list[StrategyConfig] = []
+        svc = _attribution_service(seen)
+        result = svc.run("test", [], windows=1, cost_bps=10)
+
+        assert [item["label"] for item in result.variants] == ["baseline"]
+        assert "timing_attribution" not in result.variants[0]
+        assert result.variants[0]["aggregate"]["timing_stats"]["timing_days"] == 4
+
+    def test_empty_evaluation_rejected(self) -> None:
+        """既无基线也无变体时直接报错，而不是输出空结果。"""
+        svc = _attribution_service([])
+        with pytest.raises(ValueError, match="没有可评估的变体"):
+            svc.run("test", [], windows=1, include_baseline=False, timing_attribution=True)
