@@ -1269,3 +1269,163 @@ export interface RobustnessListResponse {
   items: RobustnessSummary[]
   total: number
 }
+
+// ---------------------------------------------------------------------------
+// 量价 / 择时研报研究台（/signal-lab）
+// ---------------------------------------------------------------------------
+
+/** 研究参数声明 */
+export interface SignalLabParam {
+  name: string
+  label: string
+  default: number
+  minimum: number
+  maximum: number
+  kind: 'int' | 'float'
+}
+
+/** 信号值轴参考线 */
+export interface SignalLabReferenceLine {
+  label: string
+  value: number
+}
+
+/** 因子 / 信号定义（含公式与原理） */
+export interface SignalLabDefinition {
+  key: string
+  label: string
+  source: string
+  formula: string
+  principle: string
+  required_fields: string[]
+  params: SignalLabParam[]
+  reference_lines: SignalLabReferenceLine[]
+}
+
+/** 研究台目录 */
+export interface SignalLabCatalog {
+  cross_section_factors: SignalLabDefinition[]
+  timing_signals: SignalLabDefinition[]
+  market_signals: SignalLabDefinition[]
+  indexes: Array<{ index_code: string; index_name: string }>
+  research_start: string
+  research_end: string
+  validation_start: string
+  default_proxy: string
+  max_range_days: number
+  offline_notes: string[]
+}
+
+/** 数据问题 / 口径提示 */
+export interface SignalLabIssue {
+  level: 'info' | 'warn' | 'error'
+  code: string
+  message: string
+}
+
+/** 单指数字段覆盖 */
+export interface SignalLabCoverage {
+  index_code: string
+  index_name: string
+  first_date: string | null
+  last_date: string | null
+  rows: number
+  close: number
+  ohl: number
+  volume: number
+  amount: number
+  used: boolean
+  reason: string | null
+}
+
+/** 收益统计 */
+export interface SignalLabPerformance {
+  total: number | null
+  annualized: number | null
+  max_drawdown: number | null
+  sharpe: number | null
+}
+
+/** 择时评估指标 */
+export interface SignalLabTimingMetrics {
+  flips_per_year: number | null
+  on_ratio: number | null
+  ic_fwd20: number | null
+  ic_past20: number | null
+  corr_existing: number | null
+  agree_existing: number | null
+  strategy: SignalLabPerformance
+  benchmark: SignalLabPerformance
+}
+
+/** 信号中间分量（axis: price 与收盘同轴 / signal 与信号同轴 / aux 独立辅助图） */
+export interface SignalLabComponent {
+  key: string
+  label: string
+  axis: 'price' | 'signal' | 'aux'
+  values: Array<number | null>
+}
+
+/** 择时 / 市场级信号研究结果 */
+export interface SignalLabTimingResponse {
+  signal: SignalLabDefinition
+  params: Record<string, number>
+  index_code: string
+  index_name: string
+  start: string
+  end: string
+  includes_validation: boolean
+  dates: string[]
+  close: Array<number | null>
+  value: Array<number | null>
+  on: Array<number | null>
+  components: SignalLabComponent[]
+  strategy_nav: Array<number | null>
+  benchmark_nav: Array<number | null>
+  metrics: SignalLabTimingMetrics
+  yearly: Array<{
+    year: number
+    strategy_return: number | null
+    benchmark_return: number | null
+    on_ratio: number | null
+  }>
+  coverage: SignalLabCoverage
+  issues: SignalLabIssue[]
+  notes: string[]
+}
+
+/** 截面因子 IC 研究结果 */
+export interface SignalLabCrossSectionResponse {
+  factor: SignalLabDefinition
+  params: Record<string, number>
+  horizon: number
+  start: string
+  end: string
+  includes_validation: boolean
+  dates: string[]
+  ic: Array<number | null>
+  cum_ic: Array<number | null>
+  n_assets: number[]
+  summary: {
+    mean: number | null
+    std: number | null
+    icir: number | null
+    positive_ratio: number | null
+    n_periods: number
+    avg_assets: number | null
+  }
+  yearly: Array<{ year: number; ic_mean: number | null; n_periods: number }>
+  terciles: Array<{ group: string; mean_return: number | null; annualized: number | null }>
+  correlations: Array<{ label: string; corr: number | null }>
+  latest_date: string | null
+  latest: Array<{
+    index_code: string
+    index_name: string
+    value: number | null
+    rank: number | null
+    forward_return: number | null
+  }>
+  coverage: SignalLabCoverage[]
+  issues: SignalLabIssue[]
+  notes: string[]
+}

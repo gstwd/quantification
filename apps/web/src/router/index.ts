@@ -12,6 +12,7 @@ import FactorDetailPage from '../pages/FactorDetailPage.vue'
 import FactorsPage from '../pages/FactorsPage.vue'
 import KeywordTagsPage from '../pages/KeywordTagsPage.vue'
 import RunsPage from '../pages/RunsPage.vue'
+import SignalLabPage from '../pages/SignalLabPage.vue'
 import IndexDetailPage from '../pages/IndexDetailPage.vue'
 import IndexListPage from '../pages/IndexListPage.vue'
 import IndustryDetailPage from '../pages/IndustryDetailPage.vue'
@@ -42,6 +43,7 @@ const router = createRouter({
     { path: '/factors', component: FactorsPage },
     { path: '/factors/:factorId', component: FactorDetailPage, props: true },
     { path: '/tools/rrg-lab', component: RRGLabPage },
+    { path: '/tools/signal-lab', component: SignalLabPage },
     { path: '/runs', component: RunsPage },
     { path: '/backtests', component: BacktestListPage },
     { path: '/backtests/new', component: BacktestCreatePage },
