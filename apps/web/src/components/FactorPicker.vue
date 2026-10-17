@@ -115,6 +115,7 @@ const TRANSFORM_OPTIONS = [
   { value: 'volume_score', label: '量能得分', description: '量比分段映射为 0-100 得分' },
   { value: 'trend_score', label: '趋势得分', description: 'MA 偏离度映射为 0-100 得分' },
   { value: 'clamp_0_100', label: '裁剪 0-100', description: '限制值在 0-100 范围内' },
+  { value: 'resonance_score', label: '共振得分', description: '价量共振比 > 1 记 100 分，否则 0 分' },
 ]
 
 /** 按 category 分组模板 */

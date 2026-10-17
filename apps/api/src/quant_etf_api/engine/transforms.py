@@ -180,6 +180,16 @@ def rsrs_score(value: float) -> float:
     return round(50.0 + value * 25, 1)
 
 
+def resonance_score(value: float) -> float:
+    """价量共振比映射为择时得分（0 或 100）。
+
+    value 为 pv_resonance 输出的共振比（指标 / 当日开仓阈值）。研报规则是
+    指标严格大于阈值才开仓，因此共振比 > 1 记 100 分，否则记 0 分；
+    无可调参数，避免在择时层引入新的待调阈值。
+    """
+    return 100.0 if value > 1.0 else 0.0
+
+
 # 内置变换函数注册（启动即注册，供配置校验与引擎执行使用）
 _BUILTIN_TRANSFORMS: dict[str, Callable[[float], float]] = {
     "invert_percentile": invert_percentile,
@@ -190,6 +200,7 @@ _BUILTIN_TRANSFORMS: dict[str, Callable[[float], float]] = {
     "erp_score": erp_score,
     "drawdown_score": drawdown_score,
     "rsrs_score": rsrs_score,
+    "resonance_score": resonance_score,
 }
 
 for _name, _fn in _BUILTIN_TRANSFORMS.items():

@@ -149,6 +149,21 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
       description: '近 N 个交易日日收益率的标准差，年化后以百分比表示（N 由模板 period 参数指定，默认 20）。<br>衡量价格的波动剧烈程度。<br>高波动率意味着价格波动大、风险高。<br>低波动率意味着价格走势平稳。<br>通常波动率越低，策略的风险调整收益越好。',
       formula: 'std(N日日收益率) × √252 × 100',
     },
+    amount_volatility: {
+      label: '成交额波动（标准化）',
+      description: '近 N 日成交额的变异系数取负（N 由 period 参数指定，默认 20）。<br>成交额越稳定（资金持续流入而非脉冲式炒作）取值越高。<br>来源：华西《行业有效量价因子与行业轮动》；原版为原始标准差，这里除以均值以便跨指数比较。<br>成交额缺失或为 0 的指数取值为空。',
+      formula: '−Std(成交额, N) / Mean(成交额, N)',
+    },
+    price_volume_corr: {
+      label: '量价相关',
+      description: '近 N 日收盘价与成交量的相关系数取负（默认 20）。<br>放量下跌、缩量上涨等量价背离时取值高。<br>来源：华西《行业有效量价因子与行业轮动》。<br>成交量缺失或为 0 的指数取值为空。',
+      formula: '−Corr(收盘价, 成交量, N)',
+    },
+    pv_resonance: {
+      label: '价量共振',
+      description: '价格动量与量能同时放大时取值高，输出为“共振比”（指标 / 当日开仓阈值）。<br>> 1 即研报开仓条件：过滤可用“大于 1”，择时请配合“共振得分”变换。<br>空头市场（短均线低于长均线）使用更高的阈值，从而在下跌段减少持仓；信号翻转较频繁。<br>来源：华创《成交量的奥秘：另类价量共振指标》。',
+      formula: '[HMA(C,bma)/HMA(C,bma)_{t−lag}] × [HMA(V,5)/HMA(V,ama)] / 阈值',
+    },
     pe_percentile: {
       label: 'PE分位',
       description: '当前 PE(TTM) 在历史时间窗口中的排名位置（0-100%）。<br>0% 表示 PE 处于历史最低水平（最便宜），100% 表示历史最高（最贵）。<br>低分位 = 估值便宜，投资价值较高。<br>高分位 = 估值昂贵，需注意回调风险。<br>注意：仅沪深300/上证50/中证500 支持 PE 历史分位。',
@@ -189,6 +204,11 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
       label: '裁剪 0-100',
       description: '将任意值限制在 [0, 100] 区间内。<br>小于 0 的值变为 0，大于 100 的值变为 100。<br>适用于本身已是百分位含义的因子（PE分位/PB分位），无需进一步变换。',
       formula: 'max(0, min(100, 原始值))',
+    },
+    resonance_score: {
+      label: '共振得分',
+      description: '把价量共振比映射为 0/100 的择时得分。<br>共振比 > 1（满足研报开仓条件）记 100 分，否则 0 分。<br>无可调参数，仅适用于 pv_resonance 模板。',
+      formula: '共振比 > 1 ? 100 : 0',
     },
   },
 

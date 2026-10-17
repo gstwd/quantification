@@ -20,6 +20,8 @@ from typing import Any, Protocol, runtime_checkable
 
 from quant_etf_api.factors.base import (
     USAGE_FILTER,
+    USAGE_RANK,
+    USAGE_SCORE,
     USAGE_TIMING,
     FactorComputer,
     period_lookback_days,
@@ -55,10 +57,26 @@ _RSRS_M = ParameterSpec("integer", 20, 400, 250, "修正斜率标准化窗口（
 _MONTHLY_MA_MONTHS = ParameterSpec("integer", 2, 12, 10, "月线均线周期（月）")
 _MONTHLY_RETURN_MONTHS = ParameterSpec("integer", 1, 12, 2, "月线动量回望月数")
 _PMI_MONTHS = ParameterSpec("integer", 1, 12, 3, "PMI 动量回看月数")
+_AMOUNT_VOLATILITY_PERIOD = ParameterSpec("integer", 5, 250, 20, "成交额波动窗口（交易日）")
+_PRICE_VOLUME_CORR_PERIOD = ParameterSpec("integer", 5, 250, 20, "量价相关窗口（交易日）")
+# 价量共振参数取研报默认值，范围与研究台（domain.research.signal_lab）一致
+_PV_RESONANCE_SCHEMA = {
+    "bma_window": ParameterSpec("integer", 5, 200, 50, "价格 HMA 窗口（交易日）"),
+    "ama_window": ParameterSpec("integer", 10, 250, 100, "量能 HMA 长窗口（交易日）"),
+    "lag": ParameterSpec("integer", 1, 20, 3, "价格动量滞后（交易日）"),
+    "fast_window": ParameterSpec("integer", 2, 60, 5, "市场划分短均线（交易日）"),
+    "slow_window": ParameterSpec("integer", 20, 250, 90, "市场划分长均线（交易日）"),
+    "bull_threshold": ParameterSpec("number", 0.5, 2.0, 1.125, "多头市场开仓阈值"),
+    "bear_threshold": ParameterSpec("number", 0.5, 2.0, 1.275, "空头市场开仓阈值"),
+}
 
 # 绝对点位类因子（均线、ATR、通道、月线均线、收盘价）只适合与同一指数的价格
 # 比较，跨指数横截面比较没有意义，适用位置收敛为择时与过滤。
 _LEVEL_USAGE = (USAGE_TIMING, USAGE_FILTER)
+# 截面量价因子：经截面 IC 检验晋升，用于评分 / 过滤 / 排序，不作为择时综合分输入。
+_CROSS_SECTION_USAGE = (USAGE_SCORE, USAGE_FILTER, USAGE_RANK)
+# 时序开仓信号：经各指数时序检验晋升，用于择时与指数自身过滤，不参与截面评分。
+_SIGNAL_USAGE = (USAGE_TIMING, USAGE_FILTER)
 
 
 # 依赖最高/最低价的模板：当日高低价缺失时这些因子无法计算，回测候选池需提前剔除。
@@ -441,6 +459,12 @@ def build_default_templates() -> list[FactorTemplate]:
         VolatilityComputer,
     )
     from quant_etf_api.factors.builtins.volume import AmountRatioComputer, VolumeRatioComputer
+    from quant_etf_api.factors.builtins.volume_price import (
+        AmountVolatilityComputer,
+        PriceVolumeCorrComputer,
+        PvResonanceComputer,
+        pv_resonance_lookback_days,
+    )
 
     templates: list[FactorTemplate] = []
 
@@ -722,6 +746,54 @@ def build_default_templates() -> list[FactorTemplate]:
                 "（参考月 PMI 次月起可见），衡量经济扩张/收缩趋势变化。"
             ),
             category="macro",
+        ),
+        # ── QuantsPlaybook 第一批晋升因子（研究结论见因子中心「量价 / 择时研究」）──
+        build_template(
+            "amount_volatility",
+            lambda p: AmountVolatilityComputer(period=int(p["period"])),
+            parameter_schema={"period": _AMOUNT_VOLATILITY_PERIOD},
+            compute_lookback_days=_period_lookback,
+            instance_label=_period_label("日成交额波动"),
+            name="成交额波动（标准化）",
+            description=(
+                "−Std(成交额, N) / Mean(成交额, N)：成交额越稳定取值越高"
+                "（华西《行业有效量价因子与行业轮动》，原版标准差按均值标准化以便跨指数比较）；"
+                "成交额缺失或为 0 时为空。"
+            ),
+            category="volume",
+            usage=_CROSS_SECTION_USAGE,
+        ),
+        build_template(
+            "price_volume_corr",
+            lambda p: PriceVolumeCorrComputer(period=int(p["period"])),
+            parameter_schema={"period": _PRICE_VOLUME_CORR_PERIOD},
+            compute_lookback_days=_period_lookback,
+            instance_label=_period_label("日量价相关"),
+            name="量价相关",
+            description=(
+                "−Corr(收盘价, 成交量, N)：放量下跌 / 缩量上涨等量价背离时取值高"
+                "（华西《行业有效量价因子与行业轮动》）；成交量缺失或为 0 时为空。"
+            ),
+            category="volume",
+            usage=_CROSS_SECTION_USAGE,
+        ),
+        build_template(
+            "pv_resonance",
+            lambda p: PvResonanceComputer(p),
+            parameter_schema=_PV_RESONANCE_SCHEMA,
+            compute_lookback_days=pv_resonance_lookback_days,
+            instance_label=lambda p: (
+                f"价量共振（{p['bma_window']}/{p['ama_window']}，"
+                f"阈值 {p['bull_threshold']}/{p['bear_threshold']}）"
+            ),
+            name="价量共振",
+            description=(
+                "价格 HMA 动量 × 量能 HMA 比值，除以按 MA(fast)/MA(slow) 多空划分的开仓阈值"
+                "得到共振比，> 1 为开仓条件（华创《成交量的奥秘》）。Filter 用 gt 1；"
+                "Timing 配合 resonance_score 变换（> 1 记 100 分，否则 0 分）。"
+            ),
+            category="volume",
+            usage=_SIGNAL_USAGE,
         ),
     ]
     templates.extend(tunable)

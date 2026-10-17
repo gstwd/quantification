@@ -22,6 +22,7 @@ from quant_etf_api.engine.transforms import (
     clamp_0_100,
     invert_percentile,
     momentum_score,
+    resonance_score,
     rsrs_score,
     trend_score,
     volume_score,
@@ -102,6 +103,11 @@ class TestTransformFunctions:
         assert rsrs_score(-1.0) == 25.0
         assert rsrs_score(2.0) == 100.0
         assert rsrs_score(3.0) == 100.0
+
+    def test_resonance_score(self) -> None:
+        """价量共振比 > 1 记 100 分，否则 0 分。"""
+        assert resonance_score(1.0) == 0.0
+        assert resonance_score(1.2) == 100.0
 
 
 class TestDefaultScoreCalculator:

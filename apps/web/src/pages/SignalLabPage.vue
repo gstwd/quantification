@@ -11,9 +11,12 @@
       </p>
       <div class="notice-bar">
         <div class="notice-item">
-          <span class="notice-label">第一批沙箱结论</span>
-          建议晋升：成交额波动（标准化）、价量共振；备选：量价相关；不晋升：二阶动量（与 return_5d 相关 0.64）、
-          动量期限差、LLT、GSISI、NH−NL%；振幅剪刀差暂缓（主题指数缺 OHL）。
+          <span class="notice-label">第一批晋升（已登记到因子中心）</span>
+          <RouterLink to="/factors/amount_volatility">成交额波动（标准化）</RouterLink> ·
+          <RouterLink to="/factors/price_volume_corr">量价相关</RouterLink> ·
+          <RouterLink to="/factors/pv_resonance">价量共振</RouterLink>（择时配合 resonance_score 变换）。
+          不晋升：二阶动量（与 return_5d 相关 0.64）、动量期限差、LLT、GSISI、NH−NL%；
+          振幅剪刀差暂缓（主题指数缺 OHL）。
         </div>
         <div class="notice-item">
           <span class="notice-label">研究期边界</span>
@@ -415,6 +418,10 @@ onMounted(async () => {
   color: var(--accent);
   font-weight: 600;
   margin-right: 8px;
+}
+.notice-item a {
+  color: #bfdbfe;
+  text-decoration: underline;
 }
 .card {
   background: var(--surface);
