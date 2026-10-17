@@ -67,6 +67,7 @@ from quant_etf_api.domain.strategies.rebalance import (
     RebalanceLegs,
     select_active_legs,
 )
+from quant_etf_api.domain.strategies.timing_state import TimingState
 from quant_etf_api.engine.config import (
     StrategyConfig,
     iter_factor_refs,
@@ -1315,7 +1316,8 @@ class BacktestService:
         # 确保择时代理指数的行情数据和因子也被加载（代理指数可能不在策略标的池中）
         factor_index_codes = list(index_codes)
         if config.timing:
-            for proxy_code in config.timing.proxy_index_codes:
+            # 含 timing.factor_proxies 中按因子指定的代理
+            for proxy_code in config.timing.all_proxy_codes():
                 if proxy_code not in factor_index_codes:
                     factor_index_codes.append(proxy_code)
                     all_bars.update(self._load_all_index_bars(trading_dates, [proxy_code]))
@@ -1444,8 +1446,10 @@ class BacktestService:
         # 择时因子部分缺失（剩余因子重新归一化权重）的交易日及各因子缺失天数
         timing_partial_dates: list[date] = []
         timing_partial_factors: dict[str, int] = {}
-        # 上一决策日的 regime：供 on_degraded=hold_previous 在降级日沿用
+        # 上一决策日的有效 regime 与择时状态层状态：逐日传给引擎，供状态层（滞回、
+        # 确认、最短持有）与 on_degraded=hold_previous 使用
         previous_timing_regime: str | None = None
+        timing_state: TimingState | None = None
         all_index_codes = set(index_codes)
 
         for i, trade_date in enumerate(decision_dates):
@@ -1471,6 +1475,7 @@ class BacktestService:
                 cached_metadata={code: cached_metadata[code] for code in day_codes},
                 market_shape_refs=market_shape_refs,
                 previous_timing_regime=previous_timing_regime,
+                timing_state=timing_state,
             )
 
             # 两条腿独立到期：选股腿改成分，风险腿仅按择时等比缩放总仓位。
@@ -1504,6 +1509,7 @@ class BacktestService:
                             timing_partial_factors.get(factor_ref, 0) + 1
                         )
                 previous_timing_regime = result.timing.regime
+                timing_state = result.timing_state
 
             # 以"调仓前实际持仓"（已随行情漂移）合成当日目标；收盘模式先成交昨日
             # 指令，仅风险腿到期时沿用今日收盘成交后的成分

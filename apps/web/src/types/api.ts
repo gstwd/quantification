@@ -955,17 +955,53 @@ export interface AssetFilterDetail {
 /** 择时因子全部缺失（降级）时的回退策略：neutral=按中性，defensive=按防守，hold_previous=沿用上一决策日 */
 export type TimingOnDegraded = 'neutral' | 'defensive' | 'hold_previous'
 
-/** 择时代理选择模式：consistent=单一代理全覆盖，per_factor=无代理全覆盖、逐因子回退 */
-export type TimingProxyMode = 'consistent' | 'per_factor'
+/**
+ * 择时代理选择模式：consistent=单一代理全覆盖，configured=按因子指定代理且各组全覆盖，
+ * per_factor=存在未全覆盖的代理组、逐因子回退
+ */
+export type TimingProxyMode = 'consistent' | 'configured' | 'per_factor'
+
+/** 择时综合方式：weighted=因子加权综合分过阈值（默认），rules=按进攻/防守规则组判定 */
+export type TimingCombineMode = 'weighted' | 'rules'
+
+/** 择时规则组中的单条规则（与过滤规则同结构，比较市场级因子原值） */
+export interface TimingRuleJson {
+  factor: string
+  op: string
+  value?: number | number[] | null
+  compare_to?: string | null
+  missing_strategy?: string
+}
+
+/** 择时规则组：logic=AND 全部满足 / OR 任一满足 */
+export interface TimingRuleGroupJson {
+  logic?: 'AND' | 'OR'
+  rules?: TimingRuleJson[]
+}
+
+/** 择时状态层：滞回、无信号维持、确认天数、最短持有（缺省为恒等） */
+export interface TimingStateJson {
+  hysteresis?: number
+  hold_on_neutral?: boolean
+  confirm_days?: number
+  min_hold_days?: number
+}
 
 /** 策略 config_json 中的择时模块（timing） */
 export interface TimingConfigJson {
+  /** 缺省为 weighted */
+  combine?: TimingCombineMode
   factors?: Record<string, number>
   transforms?: Record<string, string>
   thresholds?: { offensive?: number; defensive?: number }
+  /** 规则模式的进攻 / 防守规则组（防守优先） */
+  rules?: { offensive?: TimingRuleGroupJson | null; defensive?: TimingRuleGroupJson | null } | null
   proxy_index_codes?: string[]
+  /** 按因子指定代理：因子引用 → 代理指数代码列表 */
+  factor_proxies?: Record<string, string[]>
   /** 缺省为 neutral（兼容历史口径） */
   on_degraded?: TimingOnDegraded
+  state?: TimingStateJson
 }
 
 /** 择时因子明细（pipeline_detail.timing_detail 中以因子引用为键的值） */
@@ -981,9 +1017,17 @@ export interface TimingFactorDetail {
 /**
  * pipeline_detail.timing_detail 的值：因子明细对象，或汇总字段
  * （composite_score / missing_factors / degraded / on_degraded / fallback_regime /
- * proxy_index_code / proxy_mode 等）。
+ * proxy_index_code / proxy_mode / combine / raw_regime / state / rule_groups 等）。
+ * 对象型汇总字段（state、rule_groups）以 unknown 记录承载，由页面按需收窄。
  */
-export type TimingDetailValue = TimingFactorDetail | number | string | boolean | string[] | null
+export type TimingDetailValue =
+  | TimingFactorDetail
+  | Record<string, unknown>
+  | number
+  | string
+  | boolean
+  | string[]
+  | null
 
 /** 管线调试完整详情 */
 export interface PipelineDetail {

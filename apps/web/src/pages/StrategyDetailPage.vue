@@ -131,6 +131,18 @@
           <div class="config-body">
             <div v-if="timingConfig" class="config-section">
               <div class="config-row">
+                <span class="config-key">综合方式</span>
+                <span class="config-val">
+                  {{ timingConfig.combine === 'rules' ? '规则模式（防守组优先，其次进攻组，都不满足为中性）' : '因子加权综合分过阈值' }}
+                </span>
+              </div>
+              <template v-if="timingConfig.combine === 'rules'">
+                <div v-for="group in timingRuleGroups" :key="group.regime" class="config-row">
+                  <span class="config-key">{{ group.label }}规则</span>
+                  <span class="config-val">{{ group.text }}</span>
+                </div>
+              </template>
+              <div v-if="timingConfig.combine !== 'rules'" class="config-row">
                 <span class="config-key">因子权重</span>
                 <div class="factor-weights">
                   <span v-for="(weight, fid) in timingConfig.factors" :key="fid" class="factor-tag">
@@ -139,13 +151,16 @@
                   </span>
                 </div>
               </div>
-              <div class="config-row">
+              <div v-if="timingConfig.combine !== 'rules'" class="config-row">
                 <span class="config-key">阈值</span>
                 <span class="config-val">
                   进攻 ≥ {{ timingConfig.thresholds?.offensive ?? 65 }}，防守 ≤ {{ timingConfig.thresholds?.defensive ?? 35 }}
                 </span>
               </div>
-              <div v-if="timingConfig.transforms && Object.keys(timingConfig.transforms).length > 0" class="config-row">
+              <div
+                v-if="timingConfig.combine !== 'rules' && timingConfig.transforms && Object.keys(timingConfig.transforms).length > 0"
+                class="config-row"
+              >
                 <span class="config-key">变换函数</span>
                 <div class="factor-weights">
                   <span v-for="(fn, fid) in timingConfig.transforms" :key="fid" class="factor-tag transform">
@@ -159,6 +174,19 @@
                 <span class="config-val">
                   {{ timingConfig.proxy_index_codes.join(', ') }}（优先取全部择时因子都有值的首个代理）
                 </span>
+              </div>
+              <div v-if="timingConfig.factor_proxies && Object.keys(timingConfig.factor_proxies).length > 0" class="config-row">
+                <span class="config-key">按因子代理</span>
+                <div class="factor-weights">
+                  <span v-for="(codes, fid) in timingConfig.factor_proxies" :key="fid" class="factor-tag">
+                    <span class="factor-name">{{ factorLabel(String(fid)) }}</span>
+                    <span class="factor-weight">{{ codes.join(', ') }}</span>
+                  </span>
+                </div>
+              </div>
+              <div v-if="timingStateText" class="config-row">
+                <span class="config-key">状态层</span>
+                <span class="config-val">{{ timingStateText }}</span>
               </div>
               <div class="config-row">
                 <span class="config-key">降级回退</span>
@@ -800,6 +828,8 @@
             <div v-if="timingSummary" class="timing-summary">
               <span v-if="timingSummary.composite != null">综合分 {{ timingSummary.composite }}</span>
               <span v-if="timingSummary.proxyText">代理：{{ timingSummary.proxyText }}</span>
+              <span v-if="timingSummary.stateText">{{ timingSummary.stateText }}</span>
+              <span v-if="timingSummary.rulesText">{{ timingSummary.rulesText }}</span>
               <span v-if="timingSummary.degraded && timingSummary.degradedText" class="config-warn">
                 {{ timingSummary.degradedText }}
               </span>
@@ -999,7 +1029,7 @@ const timingConfig = computed(() => configJson.value.timing as TimingConfigJson 
 /** 择时降级回退策略的展示文案（缺省为 neutral） */
 function onDegradedLabel(policy: TimingOnDegraded | undefined): string {
   if (policy === 'defensive') return '按防守'
-  if (policy === 'hold_previous') return '沿用上一决策日（仅回测；实时退化为中性）'
+  if (policy === 'hold_previous') return '沿用上一决策日（实时回放最近交易日得到）'
   return '按中性（默认）'
 }
 const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string; missing_strategy?: string }> } | undefined)
@@ -1270,17 +1300,55 @@ const debugTabs = computed(() => {
 })
 const activeDebugTab = ref('scoring')
 
+/** timing_detail 中对象型的汇总字段（不是逐因子明细） */
+const TIMING_OBJECT_SUMMARY_KEYS = new Set(['state', 'rule_groups'])
+
 /** timing_detail 的值是否为逐因子明细（其余为汇总字段） */
 function isTimingFactorDetail(value: TimingDetailValue): value is TimingFactorDetail {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
+
+const REGIME_TEXT: Record<string, string> = { offensive: '进攻', neutral: '中性', defensive: '防守' }
+
+/** 规则模式下的进攻 / 防守规则组展示文本 */
+const timingRuleGroups = computed((): Array<{ regime: string; label: string; text: string }> => {
+  const rules = timingConfig.value?.rules
+  if (!rules) return []
+  const groups: Array<{ regime: string; label: string; text: string }> = []
+  for (const [regime, label] of [['defensive', '防守'], ['offensive', '进攻']] as const) {
+    const group = rules[regime]
+    if (!group || !group.rules || group.rules.length === 0) continue
+    const joiner = group.logic === 'OR' ? ' 或 ' : ' 且 '
+    const text = group.rules
+      .map(rule => {
+        const target = rule.compare_to ? factorLabel(rule.compare_to) : JSON.stringify(rule.value)
+        return `${factorLabel(rule.factor)} ${rule.op} ${target}`
+      })
+      .join(joiner)
+    groups.push({ regime, label, text })
+  }
+  return groups
+})
+
+/** 状态层配置的展示文本；恒等（全部缺省）时为空串 */
+const timingStateText = computed((): string => {
+  const state = timingConfig.value?.state
+  if (!state) return ''
+  const parts: string[] = []
+  if ((state.hysteresis ?? 0) > 0) parts.push(`滞回 ${state.hysteresis} 分`)
+  if (state.hold_on_neutral) parts.push('无信号维持前值')
+  if ((state.confirm_days ?? 1) > 1) parts.push(`连续 ${state.confirm_days} 日确认才切换`)
+  if ((state.min_hold_days ?? 0) > 0) parts.push(`切换后最短持有 ${state.min_hold_days} 日`)
+  return parts.join('，')
+})
 
 /** 择时明细中的逐因子行（排除综合分、缺失列表、代理与降级等汇总字段） */
 const timingFactorRows = computed((): Array<[string, TimingFactorDetail]> => {
   const detail = allocation.value?.pipeline_detail?.timing_detail ?? {}
   const rows: Array<[string, TimingFactorDetail]> = []
   for (const [fid, value] of Object.entries(detail)) {
-    if (isTimingFactorDetail(value)) rows.push([fid, value])
+    if (TIMING_OBJECT_SUMMARY_KEYS.has(fid)) continue
+    if (isTimingFactorDetail(value)) rows.push([fid, value as TimingFactorDetail])
   }
   return rows
 })
@@ -1293,14 +1361,38 @@ const timingSummary = computed(() => {
   let proxyText: string | null = null
   if (detail.proxy_mode === 'consistent' && proxy) {
     proxyText = `全部择时因子统一取 ${proxy}`
+  } else if (detail.proxy_mode === 'configured') {
+    proxyText = '按因子指定代理，各代理组均全覆盖（见各因子“代理”列）'
   } else if (detail.proxy_mode === 'per_factor') {
-    proxyText = '无代理覆盖全部择时因子，已逐因子取第一个有值的代理（见各因子“代理”列）'
+    proxyText = '存在未全覆盖的代理组，已逐因子取第一个有值的代理（见各因子“代理”列）'
+  }
+  let stateText: string | null = null
+  const rawRegime = typeof detail.raw_regime === 'string' ? detail.raw_regime : null
+  const stateDetail = detail.state
+  if (rawRegime && typeof stateDetail === 'object' && stateDetail !== null && !Array.isArray(stateDetail)) {
+    const record = stateDetail as Record<string, unknown>
+    const held = typeof record.held_days === 'number' ? record.held_days : null
+    const pending = typeof record.pending_regime === 'string' ? record.pending_regime : null
+    const pendingDays = typeof record.pending_days === 'number' ? record.pending_days : 0
+    stateText = `状态层：原始判定 ${REGIME_TEXT[rawRegime] ?? rawRegime}`
+    if (held != null) stateText += `，当前 regime 已持有 ${held} 日`
+    if (pending) stateText += `，待确认 ${REGIME_TEXT[pending] ?? pending}（${pendingDays} 日）`
+  }
+  let rulesText: string | null = null
+  const ruleGroups = detail.rule_groups
+  if (typeof ruleGroups === 'object' && ruleGroups !== null && !Array.isArray(ruleGroups)) {
+    const groups = ruleGroups as Record<string, { matched?: boolean } | undefined>
+    const defensive = groups.defensive?.matched ? '满足' : '未满足'
+    const offensive = groups.offensive?.matched ? '满足' : '未满足'
+    rulesText = `规则组：防守${defensive}，进攻${offensive}`
   }
   const fallbackRegime = typeof detail.fallback_regime === 'string' ? detail.fallback_regime : null
   const fallbackReason = typeof detail.fallback_reason === 'string' ? detail.fallback_reason : null
   return {
     composite: typeof detail.composite_score === 'number' ? detail.composite_score : null,
     proxyText,
+    stateText,
+    rulesText,
     degraded: detail.degraded === true,
     degradedText: fallbackRegime
       ? `择时因子全部缺失，按 ${fallbackRegime} 回退${fallbackReason ? `（${fallbackReason}）` : ''}`

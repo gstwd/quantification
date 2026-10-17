@@ -15,6 +15,7 @@ from quant_etf_api.engine.config import (
     PortfolioConfig,
     RankConfig,
     StrategyConfig,
+    TimingConfig,
     iter_factor_refs,
 )
 from quant_etf_api.engine.portfolio import _DEFAULT_TIMING_EXPOSURE
@@ -529,6 +530,12 @@ class StrategyConfigService:
             and config.timing.thresholds.defensive > config.timing.thresholds.offensive
         ):
             errors.append("timing.thresholds.defensive 不能大于 offensive")
+        if config.timing:
+            timing_errors, timing_warnings = StrategyConfigService._timing_mode_issues(
+                config.timing
+            )
+            errors.extend(timing_errors)
+            warnings.extend(timing_warnings)
 
         # 顶层与各 regime 覆盖块共用同一套模块校验（枚举取值已由 Pydantic Literal 约束，
         # 此处只做跨字段规则），避免"regime 覆盖里写错只在运行时才暴露"
@@ -626,12 +633,16 @@ class StrategyConfigService:
         return errors, warnings
 
     @staticmethod
-    def _filter_block_errors(prefix: str, filters: FilterConfig | None) -> list[str]:
-        """校验一个过滤配置块的跨字段规则。
+    def _filter_block_errors(
+        prefix: str, filters: FilterConfig | None, block: str = "filters"
+    ) -> list[str]:
+        """校验一个过滤配置块（或同结构的择时规则组）的跨字段规则。
 
         Args:
             prefix: 配置路径前缀（顶层为空串，regime 覆盖为 ``regime_rules.<regime>.``）。
             filters: 过滤配置，None 表示未配置。
+            block: 规则所在块的路径名，过滤为 ``filters``，择时规则组为
+                ``timing.rules.<regime>``。
 
         Returns:
             错误信息列表。
@@ -640,7 +651,7 @@ class StrategyConfigService:
             return []
         errors: list[str] = []
         for index, rule in enumerate(filters.rules):
-            where = f"{prefix}filters.rules[{index}]"
+            where = f"{prefix}{block}.rules[{index}]"
             # 跨因子比较校验：compare_to 与 value 二选一
             has_value = rule.value is not None
             has_compare = bool(rule.compare_to)
@@ -863,6 +874,56 @@ class StrategyConfigService:
         return errors
 
     @staticmethod
+    def _timing_mode_issues(timing: TimingConfig) -> tuple[list[str], list[str]]:
+        """校验择时综合方式、规则组、按因子代理与状态层的跨字段规则。
+
+        Args:
+            timing: 择时配置。
+
+        Returns:
+            (错误列表, 警告列表)。
+        """
+        errors: list[str] = []
+        warnings: list[str] = []
+        if timing.combine == "weighted":
+            if not timing.factors:
+                errors.append("timing.factors 不能为空（加权模式 combine=weighted）")
+            if timing.rules is not None:
+                warnings.append("timing.rules 仅在 combine=rules 时生效，当前加权模式会忽略")
+        else:
+            groups = timing.rules
+            if groups is None or not any(
+                group is not None and group.rules for group in (groups.offensive, groups.defensive)
+            ):
+                errors.append(
+                    "规则模式（combine=rules）必须在 timing.rules.offensive / defensive "
+                    "中至少配置一条规则"
+                )
+            if groups is not None:
+                for regime in ("offensive", "defensive"):
+                    errors.extend(
+                        StrategyConfigService._filter_block_errors(
+                            "", getattr(groups, regime), block=f"timing.rules.{regime}"
+                        )
+                    )
+            if timing.factors:
+                warnings.append("规则模式（combine=rules）不使用 timing.factors 权重，已忽略")
+            if timing.transforms:
+                warnings.append("规则模式比较因子原值，timing.transforms 不生效")
+            if timing.state.hysteresis > 0:
+                warnings.append(
+                    "timing.state.hysteresis 只对加权综合分生效，规则模式下不起作用；"
+                    "可改用 confirm_days / hold_on_neutral 抑制翻转"
+                )
+        refs = set(timing.factor_refs())
+        for ref, codes in timing.factor_proxies.items():
+            if not codes:
+                errors.append(f"timing.factor_proxies.{ref} 不能为空列表")
+            if ref not in refs:
+                warnings.append(f"timing.factor_proxies.{ref} 不是择时实际使用的因子，已忽略")
+        return errors, warnings
+
+    @staticmethod
     def _timing_scale_errors(config: StrategyConfig, registry: FactorTemplateRegistry) -> list[str]:
         """校验择时因子的量纲：原值不在 0-100 评分空间的因子必须配置变换函数。
 
@@ -878,7 +939,8 @@ class StrategyConfigService:
         Returns:
             错误信息列表。
         """
-        if config.timing is None:
+        if config.timing is None or config.timing.combine != "weighted":
+            # 规则模式比较原值，不在 0-100 空间合成，无需量纲检查
             return []
         errors: list[str] = []
         for ref in config.timing.factors:

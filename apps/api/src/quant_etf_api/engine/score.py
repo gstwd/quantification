@@ -10,7 +10,8 @@ import logging
 from typing import Any, Protocol
 
 from quant_etf_api.engine.base import EngineContext
-from quant_etf_api.engine.config import ScoreConfig, TimingConfig
+from quant_etf_api.engine.config import FilterConfig, ScoreConfig, TimingConfig
+from quant_etf_api.engine.filter import _check_rule
 from quant_etf_api.engine.pipeline_detail import (
     AssetScoreDetail,
     FactorScoreBreakdown,
@@ -129,7 +130,9 @@ class DefaultScoreCalculator:
     ) -> tuple[float, str, dict[str, Any]]:
         """计算择时综合得分。
 
-        与 absolute 评分同一口径：负权重按 100 − 得分参与加权。部分因子缺失时
+        加权模式（默认）与 absolute 评分同一口径：负权重按 100 − 得分参与加权。
+        规则模式（``combine=rules``）改由进攻 / 防守规则组判定，见
+        :func:`_calculate_rules_timing`。部分因子缺失时
         在明细中列出 ``missing_factors``；全部缺失时按 ``config.on_degraded``
         回退（默认 neutral）并标记 ``degraded=True``，由服务层转成结构化告警，
         避免静默按回退仓位运行。上下文携带代理选择结果时，明细标出实际使用的
@@ -142,6 +145,9 @@ class DefaultScoreCalculator:
         Returns:
             (composite_score, regime, factors_detail) 元组。
         """
+        if config.combine == "rules":
+            return _calculate_rules_timing(config, context)
+
         weighted_scores: list[tuple[float, float]] = []
         details: dict[str, Any] = {}
         missing_factors: list[str] = []
@@ -310,6 +316,105 @@ class DefaultScoreCalculator:
         return round(max(0.0, min(100.0, score)), 1)
 
 
+# 规则模式下各 regime 的占位综合分：供明细、研究台与择时统计使用（无连续含义）
+RULES_REGIME_SCORES: dict[str, float] = {"offensive": 100.0, "neutral": 50.0, "defensive": 0.0}
+
+
+def _calculate_rules_timing(
+    config: TimingConfig, context: EngineContext
+) -> tuple[float, str, dict[str, Any]]:
+    """规则模式择时：防守组满足 → defensive，否则进攻组满足 → offensive，否则 neutral。
+
+    规则比较市场级因子原值（与过滤规则同一口径与缺失语义）。全部引用因子缺失时
+    按 ``on_degraded`` 回退并标记 ``degraded=True``，与加权模式一致。
+
+    Args:
+        config: 择时配置（combine=rules）。
+        context: 引擎上下文。
+
+    Returns:
+        (占位综合分, regime, 明细) 元组；综合分取 :data:`RULES_REGIME_SCORES`。
+    """
+    refs = config.factor_refs()
+    proxy = context.timing_proxy
+    details: dict[str, Any] = {"combine": "rules"}
+    missing_factors = [ref for ref in refs if context.market_factors.get(ref) is None]
+    for ref in refs:
+        value = context.market_factors.get(ref)
+        details[ref] = (
+            {"raw": value, "status": "missing"} if value is None else {"raw": value}
+        )
+        if proxy is not None:
+            details[ref]["proxy"] = proxy.factor_proxies.get(ref)
+
+    if refs and len(missing_factors) == len(refs):
+        regime, fallback_reason = _degraded_regime(config, context)
+        degraded: dict[str, Any] = {
+            "reason": "所有因子数据缺失",
+            "degraded": True,
+            "combine": "rules",
+            "missing_factors": missing_factors,
+            "on_degraded": config.on_degraded,
+            "fallback_regime": regime,
+        }
+        if fallback_reason:
+            degraded["fallback_reason"] = fallback_reason
+        if proxy is not None:
+            degraded.update(proxy.to_detail())
+        return 0.0, regime, degraded
+
+    def _group_matched(group: FilterConfig | None) -> tuple[bool, list[dict[str, Any]]]:
+        """评估单个规则组，返回 (是否满足, 逐条规则明细)。"""
+        if group is None or not group.rules:
+            return False, []
+        results: list[dict[str, Any]] = []
+        for rule in group.rules:
+            value = context.market_factors.get(rule.factor)
+            target: float | list[float] | None
+            if rule.compare_to is not None:
+                target = context.market_factors.get(rule.compare_to)
+            else:
+                target = rule.value
+            missing = value is None or target is None
+            passed = (
+                rule.missing_strategy == "pass" if missing else _check_rule(value, rule.op, target)
+            )
+            results.append(
+                {
+                    "factor": rule.factor,
+                    "op": rule.op,
+                    "threshold": rule.compare_to if rule.compare_to is not None else rule.value,
+                    "value": value,
+                    "compare_value": target if rule.compare_to is not None else None,
+                    "passed": passed,
+                    "missing": missing,
+                }
+            )
+        flags = [item["passed"] for item in results]
+        return (all(flags) if group.logic == "AND" else any(flags)), results
+
+    rules = config.rules
+    defensive_hit, defensive_detail = _group_matched(rules.defensive if rules else None)
+    offensive_hit, offensive_detail = _group_matched(rules.offensive if rules else None)
+    if defensive_hit:
+        regime = "defensive"
+    elif offensive_hit:
+        regime = "offensive"
+    else:
+        regime = "neutral"
+    details["rule_groups"] = {
+        "defensive": {"matched": defensive_hit, "rules": defensive_detail},
+        "offensive": {"matched": offensive_hit, "rules": offensive_detail},
+    }
+    if missing_factors:
+        details["missing_factors"] = missing_factors
+    if proxy is not None:
+        details.update(proxy.to_detail())
+    composite = RULES_REGIME_SCORES[regime]
+    details["composite_score"] = composite
+    return composite, regime, details
+
+
 def _degraded_regime(config: TimingConfig, context: EngineContext) -> tuple[str, str]:
     """按 on_degraded 决定择时因子全部缺失时的回退 regime。
 
@@ -325,7 +430,7 @@ def _degraded_regime(config: TimingConfig, context: EngineContext) -> tuple[str,
     if config.on_degraded == "hold_previous":
         if context.previous_timing_regime:
             return context.previous_timing_regime, ""
-        # 实时路径无状态、或回测首个决策日无历史 regime：只能退化为中性
+        # 实时回放与回测首个决策日都没有历史 regime 时：只能退化为中性
         return "neutral", "无上一决策日 regime 可沿用，已退化为 neutral"
     return "neutral", ""
 

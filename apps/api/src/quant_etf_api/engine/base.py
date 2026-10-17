@@ -16,6 +16,7 @@ from quant_etf_api.domain.strategies.models import (
     TimingSignal,
 )
 from quant_etf_api.domain.strategies.timing_proxy import TimingProxySelection
+from quant_etf_api.domain.strategies.timing_state import TimingState
 from quant_etf_api.engine.pipeline_detail import PipelineDetail
 
 
@@ -37,8 +38,10 @@ class EngineContext:
         display_only_refs: 仅用于结果展示（排名子因子）的引用；缺失时不告警。
         timing_proxy: 择时代理选择结果（实际使用的代理指数）；None 表示上下文
             未经代理选择构建（如直接注入 market_factors 的测试）。
-        previous_timing_regime: 上一决策日的 regime，供 ``on_degraded=hold_previous``
-            在择时因子全部缺失时沿用；实时路径无状态，恒为 None。
+        previous_timing_regime: 上一决策日的有效 regime，供 ``on_degraded=hold_previous``
+            在择时因子全部缺失时沿用；有 ``timing_state`` 时以其 regime 为准。
+        timing_state: 上一决策日结束时的择时状态层状态（回测主循环逐日传递，
+            实时路径由 ``ContextBuilder`` 回放历史重建）；None 表示无历史。
     """
 
     trade_date: date
@@ -51,6 +54,7 @@ class EngineContext:
     display_only_refs: set[str] = field(default_factory=set)
     timing_proxy: TimingProxySelection | None = None
     previous_timing_regime: str | None = None
+    timing_state: TimingState | None = None
 
 
 @dataclass
@@ -75,6 +79,8 @@ class EngineResult:
         effective_scoring_mode: regime 覆盖后实际生效的评分模式。
         excluded: 因决策所需因子缺失而在评分前被剔除的资产，key=index_code，
             value=原因（MISSING_FACTOR）。
+        timing_state: 当日结束时的择时状态层状态，回测主循环传给下一决策日；
+            未配置择时时为 None。
     """
 
     trade_date: date
@@ -91,3 +97,4 @@ class EngineResult:
     max_asset_weight: float | None = None
     effective_scoring_mode: str = "absolute"
     excluded: dict[str, str] = field(default_factory=dict)
+    timing_state: TimingState | None = None

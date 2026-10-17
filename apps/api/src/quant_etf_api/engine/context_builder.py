@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -18,11 +18,14 @@ from sqlalchemy.orm import Session
 from quant_etf_api.domain.portfolio.universe import build_universe_items
 from quant_etf_api.domain.strategies.timing_proxy import (
     TimingProxySelection,
-    select_timing_proxy_values,
+    select_grouped_timing_proxy_values,
 )
+from quant_etf_api.domain.strategies.timing_state import TimingState
 from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.engine.factor_provider import FactorProvider
+from quant_etf_api.engine.score import DefaultScoreCalculator
+from quant_etf_api.engine.timing import TIMING_STATE_REPLAY_DAYS, evaluate_timing
 from quant_etf_api.factors.base import MissingReason
 from quant_etf_api.factors.catalog import FactorTemplateRegistry
 
@@ -64,6 +67,7 @@ class ContextBuilder:
         cached_metadata: dict[str, dict[str, Any]] | None = None,
         market_shape_refs: set[str] | None = None,
         previous_timing_regime: str | None = None,
+        timing_state: TimingState | None = None,
     ) -> EngineContext:
         """构建引擎上下文（实时和回测统一入口）。
 
@@ -80,8 +84,10 @@ class ContextBuilder:
             cached_metadata: 预构建的 asset_metadata 字典（回测模式复用）。
             market_shape_refs: 市场级因子引用（回测模式由调用方一次性解析后传入，
                 避免逐日重复解析）；实时模式自动解析。
-            previous_timing_regime: 上一决策日的 regime（仅回测模式由主循环传入，
-                供 ``on_degraded=hold_previous`` 使用）；实时模式无状态，忽略。
+            previous_timing_regime: 上一决策日的有效 regime（仅回测模式由主循环传入，
+                供 ``on_degraded=hold_previous`` 使用）；实时模式忽略。
+            timing_state: 上一决策日结束时的择时状态（仅回测模式由主循环传入）；
+                实时模式在择时依赖历史时回放最近交易日重建，忽略该参数。
 
         Returns:
             填充完成的 EngineContext。
@@ -97,6 +103,7 @@ class ContextBuilder:
                 cached_metadata,
                 market_shape_refs,
                 previous_timing_regime,
+                timing_state,
             )
         return self._build_live(config, trade_date)
 
@@ -169,6 +176,7 @@ class ContextBuilder:
             config, effective_date, index_codes
         )
         timing_proxy = self._factor_provider.load_market_factor_selection(config, effective_date)
+        timing_state = self._replay_timing_state(config, effective_date)
 
         return EngineContext(
             trade_date=effective_date,
@@ -180,7 +188,56 @@ class ContextBuilder:
             market_shape_refs=set(self._factor_provider.market_shape_refs(config)),
             display_only_refs=set(self._factor_provider.display_only_factor_ids(config)),
             timing_proxy=timing_proxy if config.timing else None,
+            previous_timing_regime=timing_state.regime if timing_state else None,
+            timing_state=timing_state,
         )
+
+    def _replay_timing_state(
+        self, config: StrategyConfig, effective_date: date
+    ) -> TimingState | None:
+        """实时路径：回放最近交易日的择时判定，重建上一决策日结束时的状态。
+
+        仅在择时依赖历史（状态层非恒等，或 ``on_degraded=hold_previous``）时执行；
+        回放与回测主循环调用同一个 :func:`evaluate_timing`，因子按代理组现算，
+        保持只读。
+
+        Args:
+            config: 策略配置。
+            effective_date: 本次决策的有效交易日（不参与回放）。
+
+        Returns:
+            上一决策日结束时的状态；无需回放或无历史交易日时为 None。
+        """
+        from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
+
+        timing = config.timing
+        if timing is None or not timing.needs_history:
+            return None
+        # 250 个交易日约 1 年，按 1.7 倍自然日向前取足够的候选日
+        start = effective_date - timedelta(days=int(TIMING_STATE_REPLAY_DAYS * 1.7) + 10)
+        history = [
+            day
+            for day in IndexDailyBarRepository(self._db).find_trading_dates(
+                start, effective_date, timing.all_proxy_codes()
+            )
+            if day < effective_date
+        ][-TIMING_STATE_REPLAY_DAYS:]
+        if not history:
+            return None
+        selections = self._factor_provider.load_market_factor_history(config, history)
+        calculator = DefaultScoreCalculator()
+        state: TimingState | None = None
+        for day in history:
+            selection = selections.get(day, TimingProxySelection())
+            context = EngineContext(
+                trade_date=day,
+                universe=[],
+                market_factors=dict(selection.values),
+                timing_proxy=selection,
+                timing_state=state,
+            )
+            _signal, state = evaluate_timing(calculator, timing, context)
+        return state
 
     # ==================================================================
     # 回测模式
@@ -197,6 +254,7 @@ class ContextBuilder:
         cached_metadata: dict[str, dict[str, Any]] | None = None,
         market_shape_refs: set[str] | None = None,
         previous_timing_regime: str | None = None,
+        timing_state: TimingState | None = None,
     ) -> EngineContext:
         """回测模式：使用当日预计算的因子值构建上下文。
 
@@ -228,9 +286,8 @@ class ContextBuilder:
         market_factors: dict[str, float | None] = {}
         timing_proxy: TimingProxySelection | None = None
         if config.timing and precomputed_factors:
-            timing_proxy = select_timing_proxy_values(
-                config.timing.proxy_index_codes,
-                list(config.timing.factors),
+            timing_proxy = select_grouped_timing_proxy_values(
+                config.timing.proxy_groups(),
                 lambda code, ref: precomputed_factors.get((code, ref)),
             )
             market_factors = dict(timing_proxy.values)
@@ -243,7 +300,10 @@ class ContextBuilder:
             asset_metadata=asset_metadata,
             market_shape_refs=set(market_shape_refs or ()),
             timing_proxy=timing_proxy,
-            previous_timing_regime=previous_timing_regime,
+            previous_timing_regime=(
+                timing_state.regime if timing_state is not None else previous_timing_regime
+            ),
+            timing_state=timing_state,
         )
 
     # ==================================================================

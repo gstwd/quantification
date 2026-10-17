@@ -125,9 +125,25 @@
       </div>
       <div v-show="timingEnabled && expanded.timing" class="module-body">
         <div class="module-desc">基于市场估值/趋势/量能判断 regime（进攻/中性/防守），控制组合总仓位。</div>
-        <div class="threshold-hint">
+
+        <div class="sub-field">
+          <label class="sub-label">综合方式</label>
+          <div class="radio-row">
+            <label class="radio-opt">
+              <input type="radio" v-model="timingCombine" value="weighted" /> 加权综合分（过阈值）
+            </label>
+            <label class="radio-opt">
+              <input type="radio" v-model="timingCombine" value="rules" /> 规则模式（进攻 / 防守规则组）
+            </label>
+          </div>
+        </div>
+        <div v-if="timingCombine === 'weighted'" class="threshold-hint">
           综合分在 0-100 空间加权：除 RSI、市场宽度、估值百分位等原值即 0-100 的因子外，
           收益率、RSRS、量比等因子必须选择变换函数，否则校验不通过。
+        </div>
+        <div v-else class="threshold-hint">
+          规则模式：防守组满足 → 防守；否则进攻组满足 → 进攻；都不满足 → 中性（无信号，可配合“无信号维持前值”）。
+          规则比较因子原值；下方因子列表只用于声明择时因子（别名 / 模板 / 参数），权重与变换不生效。
         </div>
 
         <div class="factor-header">
@@ -148,7 +164,106 @@
 
         <button class="add-btn" @click="addTimingFactor">+ 添加因子</button>
 
-        <div class="threshold-row">
+        <template v-if="timingCombine === 'rules'">
+          <div v-for="group in TIMING_RULE_GROUPS" :key="group.key" class="sub-field">
+            <label class="sub-label">{{ group.label }}</label>
+            <div class="radio-row">
+              <label class="radio-opt">
+                <input type="radio" v-model="timingRules[group.key].logic" value="AND" @change="emitConfig" /> AND（全部满足）
+              </label>
+              <label class="radio-opt">
+                <input type="radio" v-model="timingRules[group.key].logic" value="OR" @change="emitConfig" /> OR（任一满足）
+              </label>
+            </div>
+            <div v-for="(rule, i) in timingRules[group.key].rules" :key="i" class="filter-rule-row">
+              <select
+                :value="rule.factor"
+                class="fp-select fr-factor"
+                @change="updateTimingRule(group.key, i, 'factor', ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="" disabled>选择因子</option>
+                <option v-for="opt in timingRuleFactorOptions" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </option>
+              </select>
+              <select
+                :value="rule.op"
+                class="fp-select fr-op"
+                @change="updateTimingRule(group.key, i, 'op', ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="gt">大于 (>)</option>
+                <option value="lt">小于 (<)</option>
+                <option value="gte">大于等于 (≥)</option>
+                <option value="lte">小于等于 (≤)</option>
+                <option value="eq">等于 (=)</option>
+                <option value="neq">不等于 (≠)</option>
+                <option value="between">区间 (between)</option>
+              </select>
+              <select
+                :value="rule.missing_strategy ?? 'fail'"
+                class="fp-select fr-missing"
+                title="因子值缺失时的处理方式"
+                @change="updateTimingRule(group.key, i, 'missing_strategy', ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="fail">缺失:不满足</option>
+                <option value="pass">缺失:满足</option>
+              </select>
+              <template v-if="rule.op === 'between'">
+                <input
+                  :value="Array.isArray(rule.value) ? rule.value[0] : ''"
+                  type="number"
+                  step="any"
+                  class="fp-input fr-value"
+                  placeholder="最小值"
+                  @input="updateTimingRuleBetween(group.key, i, 0, ($event.target as HTMLInputElement).value)"
+                />
+                <span class="fr-sep">~</span>
+                <input
+                  :value="Array.isArray(rule.value) ? rule.value[1] : ''"
+                  type="number"
+                  step="any"
+                  class="fp-input fr-value"
+                  placeholder="最大值"
+                  @input="updateTimingRuleBetween(group.key, i, 1, ($event.target as HTMLInputElement).value)"
+                />
+              </template>
+              <template v-else>
+                <select
+                  :value="rule.compare_to !== undefined ? 'compare' : 'value'"
+                  class="fp-select fr-mode"
+                  @change="onTimingRuleModeChange(group.key, i, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="value">固定值</option>
+                  <option value="compare">因子比较</option>
+                </select>
+                <select
+                  v-if="rule.compare_to !== undefined"
+                  :value="rule.compare_to"
+                  class="fp-select fr-factor"
+                  @change="updateTimingRule(group.key, i, 'compare_to', ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="" disabled>选择比较因子</option>
+                  <option v-for="opt in timingRuleFactorOptions" :key="opt.value" :value="opt.value">
+                    {{ opt.label }}
+                  </option>
+                </select>
+                <input
+                  v-else
+                  :value="typeof rule.value === 'number' ? rule.value : ''"
+                  type="number"
+                  step="any"
+                  class="fp-input fr-value"
+                  placeholder="值"
+                  @input="updateTimingRule(group.key, i, 'value', parseFloat(($event.target as HTMLInputElement).value) || 0)"
+                />
+              </template>
+              <button class="fp-remove" @click="removeTimingRule(group.key, i)" title="移除">×</button>
+            </div>
+            <button class="add-btn" @click="addTimingRule(group.key)">+ 添加{{ group.short }}规则</button>
+          </div>
+        </template>
+
+        <div v-if="timingCombine === 'weighted'" class="threshold-row">
           <div class="threshold-field">
             <label class="sub-label">进攻阈值</label>
             <div class="threshold-input-wrap">
@@ -189,6 +304,49 @@
           </span>
         </div>
         <div class="sub-field">
+          <label class="sub-label">按因子指定代理（可选）</label>
+          <input
+            v-model="timingFactorProxiesText"
+            class="fp-input"
+            placeholder="如 pv_res:000852; trend:000300,000905（别名:代码,代码；多条用分号分隔）"
+          />
+          <span class="threshold-hint">
+            未列出的因子使用上面的代理指数；列出的因子按自己的代理列表顺序取值，例如价量共振看中证1000、动量看沪深300
+          </span>
+        </div>
+        <div class="sub-field">
+          <label class="sub-label">状态层（抑制来回翻转，缺省不启用）</label>
+          <div class="threshold-row">
+            <div v-if="timingCombine === 'weighted'" class="threshold-field">
+              <label class="sub-label">滞回带（分）</label>
+              <div class="threshold-input-wrap">
+                <input v-model.number="timingHysteresis" type="number" min="0" max="50" step="any" class="fp-input" />
+                <span class="threshold-hint">已在进攻时综合分不低于“进攻阈值 − 滞回带”就保持进攻，防守对称</span>
+              </div>
+            </div>
+            <div class="threshold-field">
+              <label class="sub-label">确认天数</label>
+              <div class="threshold-input-wrap">
+                <input v-model.number="timingConfirmDays" type="number" min="1" max="60" class="fp-input" />
+                <span class="threshold-hint">新 regime 需连续出现的交易日数，1=当日切换</span>
+              </div>
+            </div>
+            <div class="threshold-field">
+              <label class="sub-label">最短持有天数</label>
+              <div class="threshold-input-wrap">
+                <input v-model.number="timingMinHoldDays" type="number" min="0" max="250" class="fp-input" />
+                <span class="threshold-hint">切换后至少持有的交易日数，0=不限制</span>
+              </div>
+            </div>
+          </div>
+          <label class="radio-opt">
+            <input type="checkbox" v-model="timingHoldOnNeutral" /> 无信号（中性）时维持前一 regime
+          </label>
+          <span class="threshold-hint">
+            实时分配会回放最近 250 个交易日重建状态，与回测同一实现
+          </span>
+        </div>
+        <div class="sub-field">
           <label class="sub-label">择时因子全部缺失时</label>
           <select v-model="timingOnDegraded" class="fp-select">
             <option value="neutral">按中性（默认）</option>
@@ -196,8 +354,8 @@
             <option value="hold_previous">沿用上一决策日</option>
           </select>
           <span class="threshold-hint">
-            中性档仓位较高时（如 90%），缺数据会接近满仓运行，可改为按防守。“沿用上一决策日”仅回测有效；
-            实时分配不保存历史状态，会退化为中性并给出告警
+            中性档仓位较高时（如 90%），缺数据会接近满仓运行，可改为按防守。“沿用上一决策日”在实时分配中
+            由回放最近交易日得到；回放不到历史时退化为中性并给出告警
           </span>
         </div>
       </div>
@@ -696,7 +854,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { fetchFactorSpecs } from '../api/factors'
 import { fetchBenchmarkIndexes } from '../api/market_data'
-import type { BenchmarkIndex, FactorSpec, TimingOnDegraded } from '../types/api'
+import type { BenchmarkIndex, FactorSpec, TimingCombineMode, TimingOnDegraded } from '../types/api'
 import FactorPicker from './FactorPicker.vue'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
@@ -905,6 +1063,107 @@ const timingDefensive = ref(35)
 const timingProxyIndexCodes = ref('')
 // 择时因子全部缺失时的回退策略，默认 neutral（与后端默认一致，不写入 config_json）
 const timingOnDegraded = ref<TimingOnDegraded>('neutral')
+// 综合方式：weighted=加权综合分（默认，不写入 config_json）/ rules=规则组
+const timingCombine = ref<TimingCombineMode>('weighted')
+
+/** 择时规则组的键 */
+type TimingRuleGroupKey = 'offensive' | 'defensive'
+
+/** 单个择时规则组的表单状态 */
+interface TimingRuleGroupValue {
+  logic: string
+  rules: FilterRuleValue[]
+}
+
+/** 规则组展示顺序：防守优先判定，因此排在前面 */
+const TIMING_RULE_GROUPS: Array<{ key: TimingRuleGroupKey; label: string; short: string }> = [
+  { key: 'defensive', label: '防守规则组（满足即防守，优先判定）', short: '防守' },
+  { key: 'offensive', label: '进攻规则组（防守组不满足时，满足即进攻）', short: '进攻' },
+]
+
+const timingRules = ref<Record<TimingRuleGroupKey, TimingRuleGroupValue>>({
+  defensive: { logic: 'OR', rules: [] },
+  offensive: { logic: 'AND', rules: [] },
+})
+// 按因子指定代理的文本形式："别名:代码,代码; 别名2:代码"
+const timingFactorProxiesText = ref('')
+// 状态层：缺省值即恒等变换，不写入 config_json
+const timingHysteresis = ref(0)
+const timingHoldOnNeutral = ref(false)
+const timingConfirmDays = ref(1)
+const timingMinHoldDays = ref(0)
+
+/** 把 config_json 中的规则组解析为表单状态 */
+function parseTimingRuleGroup(raw: unknown, defaultLogic: string): TimingRuleGroupValue {
+  const group = (raw ?? {}) as Record<string, unknown>
+  return {
+    logic: group.logic === 'OR' || group.logic === 'AND' ? group.logic : defaultLogic,
+    rules: ((group.rules ?? []) as Array<Record<string, unknown>>).map(r => ({
+      factor: (r.factor as string) || '',
+      op: (r.op as string) || 'gt',
+      value: r.value as number | number[],
+      compare_to: (r.compare_to as string | null | undefined) ?? undefined,
+      missing_strategy: r.missing_strategy as string | undefined,
+    })),
+  }
+}
+
+/** 规则组中引用的因子（含比较因子），用于在因子列表中补齐别名声明 */
+function timingRuleRefs(): string[] {
+  const refs: string[] = []
+  for (const { key } of TIMING_RULE_GROUPS) {
+    for (const rule of timingRules.value[key].rules) {
+      if (rule.factor) refs.push(rule.factor)
+      if (rule.compare_to) refs.push(rule.compare_to)
+    }
+  }
+  return refs
+}
+
+/** 解析“别名:代码,代码; 别名2:代码”为 factor_proxies；格式不完整的条目忽略 */
+function parseFactorProxies(text: string): Record<string, string[]> {
+  const result: Record<string, string[]> = {}
+  for (const entry of text.split(/[;；\n]/)) {
+    const [ref, codesText] = entry.split(/[:：]/)
+    if (!ref || !codesText) continue
+    const codes = codesText.split(/[,，]/).map(c => c.trim()).filter(Boolean)
+    if (ref.trim() && codes.length > 0) result[ref.trim()] = codes
+  }
+  return result
+}
+
+function addTimingRule(key: TimingRuleGroupKey): void {
+  timingRules.value[key].rules.push({ factor: '', op: 'gt', value: 0, compare_to: undefined, missing_strategy: 'fail' })
+}
+
+function updateTimingRule(key: TimingRuleGroupKey, i: number, field: string, value: unknown): void {
+  ;(timingRules.value[key].rules[i] as Record<string, unknown>)[field] = value
+  emitConfig()
+}
+
+function updateTimingRuleBetween(key: TimingRuleGroupKey, i: number, index: number, raw: string): void {
+  const rule = timingRules.value[key].rules[i]
+  const arr = Array.isArray(rule.value) ? [...rule.value] : [0, 0]
+  arr[index] = raw === '' ? 0 : parseFloat(raw)
+  rule.value = arr
+  emitConfig()
+}
+
+function onTimingRuleModeChange(key: TimingRuleGroupKey, i: number, mode: string): void {
+  const rule = timingRules.value[key].rules[i]
+  if (mode === 'compare') {
+    rule.compare_to = ''
+    rule.value = 0
+  } else {
+    rule.compare_to = undefined
+  }
+  emitConfig()
+}
+
+function removeTimingRule(key: TimingRuleGroupKey, i: number): void {
+  timingRules.value[key].rules.splice(i, 1)
+  emitConfig()
+}
 
 /** 把 config_json 中的 on_degraded 收窄为合法取值，未知值按默认 neutral 处理 */
 function parseOnDegraded(value: unknown): TimingOnDegraded {
@@ -915,14 +1174,36 @@ function initTiming(): void {
   const timing = props.modelValue.timing as Record<string, unknown> | undefined
   if (!timing) { timingEnabled.value = false; timingOnDegraded.value = 'neutral'; return }
   timingEnabled.value = true
+  timingCombine.value = timing.combine === 'rules' ? 'rules' : 'weighted'
+  const rules = (timing.rules ?? {}) as Record<string, unknown>
+  timingRules.value = {
+    defensive: parseTimingRuleGroup(rules.defensive, 'OR'),
+    offensive: parseTimingRuleGroup(rules.offensive, 'AND'),
+  }
   const factors = (timing.factors ?? {}) as Record<string, number>
   const transforms = (timing.transforms ?? {}) as Record<string, string>
   const aliases = readFactorAliases()
-  timingFactors.value = Object.entries(factors).map(([ref, weight]) => ({
+  const rows: FactorRowValue[] = Object.entries(factors).map(([ref, weight]) => ({
     ...resolveFactorRow(ref, aliases),
     weight,
     transform: transforms[ref] || undefined,
   }))
+  // 规则模式引用的因子不在 factors 中：补成因子行，保证别名声明不丢失
+  if (timingCombine.value === 'rules') {
+    for (const ref of Array.from(new Set(timingRuleRefs()))) {
+      if (!rows.some(row => row.alias === ref)) rows.push({ ...resolveFactorRow(ref, aliases), weight: 0 })
+    }
+  }
+  timingFactors.value = rows
+  const proxies = (timing.factor_proxies ?? {}) as Record<string, string[]>
+  timingFactorProxiesText.value = Object.entries(proxies)
+    .map(([ref, codes]) => `${ref}:${codes.join(',')}`)
+    .join('; ')
+  const state = (timing.state ?? {}) as Record<string, unknown>
+  timingHysteresis.value = typeof state.hysteresis === 'number' ? state.hysteresis : 0
+  timingHoldOnNeutral.value = state.hold_on_neutral === true
+  timingConfirmDays.value = typeof state.confirm_days === 'number' ? state.confirm_days : 1
+  timingMinHoldDays.value = typeof state.min_hold_days === 'number' ? state.min_hold_days : 0
   const thresholds = (timing.thresholds ?? {}) as Record<string, number>
   timingOffensive.value = thresholds.offensive ?? 65
   timingDefensive.value = thresholds.defensive ?? 35
@@ -971,6 +1252,21 @@ const filterFactorOptions = computed(() => {
   for (const f of availableFactors.value) {
     const zeroParam = Object.keys(f.parameter_schema ?? {}).length === 0
     if (zeroParam && usableFor(f, 'filter')) {
+      options.push({ value: f.factor_id, label: f.factor_id })
+    }
+  }
+  return options
+})
+
+/** 择时规则因子候选：择时因子行的别名 + 可用于择时的零参数模板 */
+const timingRuleFactorOptions = computed(() => {
+  const options: Array<{ value: string; label: string }> = timingFactors.value
+    .map(row => row.alias)
+    .filter(Boolean)
+    .map(alias => ({ value: alias, label: `${alias}（别名）` }))
+  for (const f of availableFactors.value) {
+    const zeroParam = Object.keys(f.parameter_schema ?? {}).length === 0
+    if (zeroParam && usableFor(f, 'timing') && !options.some(o => o.value === f.factor_id)) {
       options.push({ value: f.factor_id, label: f.factor_id })
     }
   }
@@ -1155,7 +1451,7 @@ const errors = computed((): string[] => {
       errs.push(`评分模块：因子 ${f.alias} 权重为 0，将不参与评分`)
     }
   }
-  if (timingEnabled.value) {
+  if (timingEnabled.value && timingCombine.value === 'weighted') {
     const validTiming = timingFactors.value.filter(f => f.alias && f.template_id)
     if (validTiming.length === 0) {
       errs.push('择时模块：已启用但未配置因子')
@@ -1167,6 +1463,18 @@ const errors = computed((): string[] => {
       if (!f.transform && needsTimingTransform(f.template_id)) {
         errs.push(`择时模块：因子 ${f.alias} 原值不在 0-100 评分空间，必须选择变换函数`)
       }
+    }
+  }
+  if (timingEnabled.value && timingCombine.value === 'rules') {
+    const total = TIMING_RULE_GROUPS.reduce((n, g) => n + timingRules.value[g.key].rules.length, 0)
+    if (total === 0) errs.push('择时模块：规则模式至少需要一条进攻或防守规则')
+    for (const group of TIMING_RULE_GROUPS) {
+      timingRules.value[group.key].rules.forEach((rule, i) => {
+        if (!rule.factor) errs.push(`择时模块：${group.short}规则 ${i + 1} 未选择因子`)
+        if (rule.compare_to !== undefined && rule.compare_to === '') {
+          errs.push(`择时模块：${group.short}规则 ${i + 1} 已切换为因子比较模式，但未选择比较因子`)
+        }
+      })
     }
   }
   if (filterEnabled.value) {
@@ -1240,17 +1548,49 @@ function buildConfig(): Record<string, unknown> {
     const tTransforms: Record<string, string> = {}
     for (const f of timingFactors.value) {
       if (!f.alias || !f.template_id) continue
-      tFactors[f.alias] = f.weight
-      if (f.transform) tTransforms[f.alias] = f.transform
+      // 规则模式下因子行只用于声明别名，不写入 factors 权重
+      if (timingCombine.value === 'weighted') {
+        tFactors[f.alias] = f.weight
+        if (f.transform) tTransforms[f.alias] = f.transform
+      }
       const declaration = buildAliasDeclaration(f.alias, f.template_id, f.params)
       if (declaration) factorAliases[f.alias] = declaration
     }
-    const timingConfig: Record<string, unknown> = { factors: tFactors }
-    if (Object.keys(tTransforms).length > 0) timingConfig.transforms = tTransforms
-    timingConfig.thresholds = {
-      offensive: timingOffensive.value,
-      defensive: timingDefensive.value,
+    const timingConfig: Record<string, unknown> = {}
+    if (timingCombine.value === 'rules') {
+      timingConfig.combine = 'rules'
+      const rules: Record<string, unknown> = {}
+      for (const { key } of TIMING_RULE_GROUPS) {
+        const group = timingRules.value[key]
+        const groupRules = group.rules.filter(r => r.factor).map(r => {
+          const rule: Record<string, unknown> = { factor: r.factor, op: r.op }
+          if (r.compare_to) {
+            rule.compare_to = r.compare_to
+          } else {
+            rule.value = r.value
+          }
+          if (r.missing_strategy && r.missing_strategy !== 'fail') rule.missing_strategy = r.missing_strategy
+          return rule
+        })
+        if (groupRules.length > 0) rules[key] = { logic: group.logic, rules: groupRules }
+      }
+      timingConfig.rules = rules
+    } else {
+      timingConfig.factors = tFactors
+      if (Object.keys(tTransforms).length > 0) timingConfig.transforms = tTransforms
+      timingConfig.thresholds = {
+        offensive: timingOffensive.value,
+        defensive: timingDefensive.value,
+      }
     }
+    const factorProxies = parseFactorProxies(timingFactorProxiesText.value)
+    if (Object.keys(factorProxies).length > 0) timingConfig.factor_proxies = factorProxies
+    const state: Record<string, unknown> = {}
+    if (timingCombine.value === 'weighted' && timingHysteresis.value > 0) state.hysteresis = timingHysteresis.value
+    if (timingHoldOnNeutral.value) state.hold_on_neutral = true
+    if (timingConfirmDays.value > 1) state.confirm_days = timingConfirmDays.value
+    if (timingMinHoldDays.value > 0) state.min_hold_days = timingMinHoldDays.value
+    if (Object.keys(state).length > 0) timingConfig.state = state
     const proxyCodes = timingProxyIndexCodes.value
       .split(',')
       .map(s => s.trim())
@@ -1356,6 +1696,8 @@ watch(
     indexCodesInput,
     scoreFactors, scoreMissingStrategy, scoreScoringMode,
     timingEnabled, timingFactors, timingOffensive, timingDefensive, timingProxyIndexCodes, timingOnDegraded,
+    timingCombine, timingRules, timingFactorProxiesText,
+    timingHysteresis, timingHoldOnNeutral, timingConfirmDays, timingMinHoldDays,
     filterEnabled, filterLogic, filterRules,
     rankOrder, rankTopN, rankBottomN, rankMomentumFactor, rankValuationFactor,
     portfolioMethod, portfolioDefaultExposure, exposureOffensive, exposureNeutral, exposureDefensive,

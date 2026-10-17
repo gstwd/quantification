@@ -448,8 +448,9 @@ def _timing_degraded_warning(
 ) -> BacktestWarning | None:
     """把择时降级（择时因子全部缺失）转换为实时结构化告警。
 
-    回退 regime 由 ``timing.on_degraded`` 决定；``hold_previous`` 在实时路径没有
-    上一决策日状态，只能退化为 neutral，必须在告警中注明，避免误以为沿用了历史。
+    回退 regime 由 ``timing.on_degraded`` 决定；``hold_previous`` 在实时路径沿用
+    回放最近交易日得到的上一有效 regime，回放不到任何历史时退化为 neutral，
+    必须在告警中注明，避免误以为沿用了历史。
 
     Args:
         timing: 引擎输出的择时信号，None 表示未配置择时。
@@ -465,7 +466,7 @@ def _timing_degraded_warning(
     message = f"择时因子全部缺失，本次按 {regime_label} regime 决定总仓位（on_degraded={policy}）"
     fallback_reason = timing.factors.get("fallback_reason")
     if fallback_reason:
-        message += f"；{fallback_reason}（实时路径不保存上一决策日状态）"
+        message += f"；{fallback_reason}（实时回放未取到历史决策日）"
     return BacktestWarning(
         level="warning",
         code="TIMING_DEGRADED",

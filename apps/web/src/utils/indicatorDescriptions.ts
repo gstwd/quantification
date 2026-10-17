@@ -256,7 +256,7 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
   strategy_config: {
     timing: {
       label: '择时模块',
-      description: '基于市场估值/趋势/量能判断当前市场 regime（进攻/中性/防守），<br>控制组合总仓位。进攻时加仓，防守时减仓。<br>使用因子加权综合得分 ≥ 进攻阈值 → 进攻 regime。<br>得分 ≤ 防守阈值 → 防守 regime。<br>得分在两者之间 → 中性 regime（观望）。<br>可选模块，不启用时策略不受择时限制。',
+      description: '基于市场估值/趋势/量能判断当前市场 regime（进攻/中性/防守），<br>控制组合总仓位。进攻时加仓，防守时减仓。<br>使用因子加权综合得分 ≥ 进攻阈值 → 进攻 regime。<br>得分 ≤ 防守阈值 → 防守 regime。<br>得分在两者之间 → 中性 regime（观望）。<br>也可改用规则模式：防守规则组满足 → 防守，否则进攻规则组满足 → 进攻，都不满足 → 中性。<br>状态层（滞回、无信号维持、确认天数、最短持有）可抑制来回翻转，缺省不启用。<br>可选模块，不启用时策略不受择时限制。',
     },
     score: {
       label: '评分模块',

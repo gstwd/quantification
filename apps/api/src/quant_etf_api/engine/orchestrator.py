@@ -17,6 +17,7 @@ from quant_etf_api.domain.strategies.models import (
     StrategyResult,
     TimingSignal,
 )
+from quant_etf_api.domain.strategies.timing_state import TimingState
 from quant_etf_api.engine.base import EngineContext, EngineResult
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.engine.filter import DefaultFilterEngine, FilterEngine
@@ -29,6 +30,7 @@ from quant_etf_api.engine.portfolio import (
 from quant_etf_api.engine.rank import DefaultRankEngine, RankEngine
 from quant_etf_api.engine.risk import DefaultRiskManager, RiskManager
 from quant_etf_api.engine.score import CrossSectionScorer, DefaultScoreCalculator, ScoreCalculator
+from quant_etf_api.engine.timing import evaluate_timing
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +121,9 @@ class StrategyEngine:
 
         # 1. 择时评估（可选）
         timing = None
+        timing_state = None
         if config.timing:
-            timing = self._run_timing(config, context)
+            timing, timing_state = self._run_timing(config, context)
             log(
                 "[pipeline] 择时完成: %s regime=%s confidence=%s",
                 strategy_tag,
@@ -276,6 +279,7 @@ class StrategyEngine:
             max_asset_weight=effective.risk.max_asset_weight if effective.risk else None,
             effective_scoring_mode=effective.score.scoring_mode,
             excluded=excluded,
+            timing_state=timing_state,
         )
 
     def _eligible_context(
@@ -323,31 +327,11 @@ class StrategyEngine:
             return context, {}
         return replace(context, universe=kept), excluded
 
-    def _run_timing(self, config: StrategyConfig, context: EngineContext) -> TimingSignal:
-        """运行择时评估，返回 TimingSignal。"""
-        composite_score, regime, factors = self._score.calculate_timing(config.timing, context)
-
-        # 计算确信度
-        thresholds = config.timing.thresholds
-        if factors.get("degraded"):
-            # 降级回退（defensive / hold_previous）不是由综合分推出的判断，确信度取
-            # 下限；neutral 回退按原公式恰好也是 20，与历史口径一致
-            confidence = 20.0
-        elif regime == "offensive":
-            confidence = min(100.0, (composite_score - thresholds.offensive) * 2 + 60)
-        elif regime == "defensive":
-            confidence = min(100.0, (thresholds.defensive - composite_score) * 2 + 60)
-        else:
-            confidence = max(20.0, 60 - abs(composite_score - 50))
-
-        label_map = {"offensive": "进攻", "defensive": "防守", "neutral": "观望"}
-
-        return TimingSignal(
-            regime=regime,
-            confidence=round(confidence, 1),
-            label=label_map.get(regime, "观望"),
-            factors=factors,
-        )
+    def _run_timing(
+        self, config: StrategyConfig, context: EngineContext
+    ) -> tuple[TimingSignal, TimingState]:
+        """运行择时评估（原始判定 + 状态层），返回有效择时信号与当日状态。"""
+        return evaluate_timing(self._score, config.timing, context)
 
     def _resolve_regime_config(
         self, config: StrategyConfig, timing: TimingSignal | None

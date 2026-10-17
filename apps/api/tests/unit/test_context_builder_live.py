@@ -176,5 +176,5 @@ class TestContextBuilderLive:
         assert ctx.market_factors == {"rsi": 55.0}
         assert ctx.timing_proxy is not None
         assert ctx.timing_proxy.proxy_index_code == "000905"
-        # 实时路径无状态：不携带上一决策日 regime
+        # 择时不依赖历史（状态层恒等、未配 hold_previous）：不回放，不携带上一 regime
         assert ctx.previous_timing_regime is None

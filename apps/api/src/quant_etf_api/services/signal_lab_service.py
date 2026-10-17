@@ -20,10 +20,12 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.domain.research import signal_lab as lab
 from quant_etf_api.domain.research.timing import count_regime_flips, regime_shares
-from quant_etf_api.engine.config import ScoreConfig, StrategyConfig
+from quant_etf_api.domain.strategies.timing_state import TimingState
+from quant_etf_api.engine.config import ScoreConfig, StrategyConfig, TimingConfig
 from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.score import DefaultScoreCalculator
+from quant_etf_api.engine.timing import evaluate_timing
 from quant_etf_api.factors.catalog import FactorResolutionError, get_factor_template_registry
 from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
@@ -159,20 +161,31 @@ def _strategy_definition(config: StrategyConfig) -> SignalLabDefinition:
     timing = config.timing
     if timing is None:
         raise SignalLabError(f"策略 {config.strategy_id} 未配置择时（timing）")
-    terms = " + ".join(
-        f"{weight:g} × {timing.transforms.get(ref, '原值')}({ref})"
-        for ref, weight in timing.factors.items()
-    )
     aliases = "；".join(
         f"{ref} = {alias.template_id}({', '.join(f'{k}={v}' for k, v in alias.params.items())})"
-        for ref in timing.factors
+        for ref in timing.factor_refs()
         if (alias := config.factor_aliases.get(ref)) is not None
     )
-    thresholds = timing.thresholds
-    formula = (
-        f"Σ|w|·d / Σ|w|（负权重取 100 − d）：{terms}；≥ {thresholds.offensive:g} 进攻、"
-        f"≤ {thresholds.defensive:g} 防守；代理指数 {', '.join(timing.proxy_index_codes)}"
-    )
+    proxies = ", ".join(timing.proxy_index_codes)
+    if timing.factor_proxies:
+        proxies += "（" + "；".join(
+            f"{ref} 用 {', '.join(codes)}" for ref, codes in timing.factor_proxies.items()
+        ) + "）"
+    if timing.combine == "rules":
+        formula = f"规则模式：{_rules_text(timing)}；代理指数 {proxies}"
+    else:
+        terms = " + ".join(
+            f"{weight:g} × {timing.transforms.get(ref, '原值')}({ref})"
+            for ref, weight in timing.factors.items()
+        )
+        thresholds = timing.thresholds
+        formula = (
+            f"Σ|w|·d / Σ|w|（负权重取 100 − d）：{terms}；≥ {thresholds.offensive:g} 进攻、"
+            f"≤ {thresholds.defensive:g} 防守；代理指数 {proxies}"
+        )
+    state_text = _state_text(timing)
+    if state_text:
+        formula = f"{formula}；状态层：{state_text}"
     return SignalLabDefinition(
         key=base.key,
         label=f"策略择时：{config.display_name}",
@@ -209,6 +222,41 @@ def _timing_only_config(
         score=ScoreConfig(factors={}),
         **blocks,
     )
+
+
+def _rules_text(timing: TimingConfig) -> str:
+    """把规则模式的进攻 / 防守规则组转成可读文本（研究台定义展示用）。"""
+    parts: list[str] = []
+    rules = timing.rules
+    for regime, label in (("defensive", "防守"), ("offensive", "进攻")):
+        group = getattr(rules, regime) if rules else None
+        if group is None or not group.rules:
+            continue
+        joiner = " 且 " if group.logic == "AND" else " 或 "
+        conds = joiner.join(
+            f"{rule.factor} {rule.op} {rule.compare_to if rule.compare_to else rule.value}"
+            for rule in group.rules
+        )
+        parts.append(f"{label}：{conds}")
+    parts.append("都不满足为中性（防守优先）")
+    return "；".join(parts)
+
+
+def _state_text(timing: TimingConfig) -> str:
+    """把非恒等的状态层配置转成可读文本；恒等时返回空串。"""
+    state = timing.state
+    if state.is_identity:
+        return ""
+    parts: list[str] = []
+    if state.hysteresis > 0:
+        parts.append(f"滞回 {state.hysteresis:g} 分")
+    if state.hold_on_neutral:
+        parts.append("无信号维持前值")
+    if state.confirm_days > 1:
+        parts.append(f"连续 {state.confirm_days} 日确认")
+    if state.min_hold_days > 0:
+        parts.append(f"最短持有 {state.min_hold_days} 日")
+    return "、".join(parts)
 
 
 class SignalLabService:
@@ -489,8 +537,8 @@ class SignalLabService:
         if timing is None:
             return []
         components: list[tuple[str, str, str]] = []
-        for ref in timing.factors:
-            transform = timing.transforms.get(ref)
+        for ref in timing.factor_refs():
+            transform = timing.transforms.get(ref) if timing.combine == "weighted" else None
             components.append(
                 (
                     f"{lab.ENGINE_FACTOR_COLUMN_PREFIX}{ref}",
@@ -538,7 +586,7 @@ class SignalLabService:
         first_day = calendar[0].date() if len(calendar) else start
         load_start = first_day - timedelta(days=lookback + 10)
         load_end = bars_index[-1].date()
-        proxies = list(timing.proxy_index_codes)
+        proxies = timing.all_proxy_codes()
         codes = list(proxies)
         if any(inst.template.market_scope for inst in instances.values()):
             # 市场级模板（如市场宽度）需要全市场行情，口径与回测补充加载一致
@@ -557,9 +605,11 @@ class SignalLabService:
         )
         builder = ContextBuilder(self._db, factor_provider=provider)
         calculator = DefaultScoreCalculator()
+        # 状态层按交易日顺序推进（signal_engine_timing 逐日顺序调用），与回测主循环一致
+        state_box: list[TimingState | None] = [None]
 
         def _evaluate(ts: pd.Timestamp) -> tuple[float, str, dict[str, Any]]:
-            """单日：构建引擎上下文并调用引擎择时计算。"""
+            """单日：构建引擎上下文，调用引擎择时评估（原始判定 + 状态层）。"""
             day = ts.date()
             context = builder.build(
                 config,
@@ -567,10 +617,15 @@ class SignalLabService:
                 index_codes=[],
                 all_bars=all_bars,
                 precomputed_factors=matrix.values.get(day, {}),
+                timing_state=state_box[0],
             )
-            return calculator.calculate_timing(timing, context)
+            signal, state_box[0] = evaluate_timing(calculator, timing, context)
+            composite = signal.factors.get("composite_score")
+            return (float(composite) if composite is not None else 0.0), signal.regime, (
+                signal.factors
+            )
 
-        frame = lab.signal_engine_timing(calendar, _evaluate, list(timing.factors))
+        frame = lab.signal_engine_timing(calendar, _evaluate, timing.factor_refs())
         return frame.reindex(bars_index)
 
     def market(

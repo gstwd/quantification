@@ -215,8 +215,9 @@ class FactorProvider:
     ) -> TimingProxySelection:
         """现算市场级择时因子值，并给出实际使用的代理指数。
 
-        按 config.timing.proxy_index_codes 的顺序选第一个让全部择时因子都有值的
-        代理；没有代理全覆盖时退回逐因子取第一个有值的代理（与回测共用同一纯函数）。
+        按代理组（``timing.proxy_index_codes`` 与 ``timing.factor_proxies``）逐组选第一个
+        让组内全部择时因子都有值的代理；没有代理全覆盖时退回逐因子取第一个有值的
+        代理（与回测共用同一纯函数）。
 
         Args:
             config: 策略配置，需包含 timing 配置。
@@ -227,16 +228,38 @@ class FactorProvider:
         """
         if config.timing is None:
             return TimingProxySelection()
-        wanted = set(config.timing.factors)
+        return self.load_market_factor_history(config, [trade_date]).get(
+            trade_date, TimingProxySelection()
+        )
+
+    def load_market_factor_history(
+        self,
+        config: "StrategyConfig",
+        dates: list[date],
+    ) -> dict[date, TimingProxySelection]:
+        """现算多个交易日的市场级择时因子（含按因子指定的代理），逐日给出代理选择。
+
+        实时路径用它回放择时状态层；单日调用即 :meth:`load_market_factor_selection`。
+
+        Args:
+            config: 策略配置，需包含 timing 配置。
+            dates: 交易日（升序）。
+
+        Returns:
+            {交易日: 代理选择结果}；未配置择时或无择时因子时为空字典。
+        """
+        if config.timing is None or not dates:
+            return {}
+        wanted = set(config.timing.factor_refs())
         instances = [
             instance
             for ref, instance in self.resolve_instances(config).items()
             if ref in wanted
         ]
         if not instances:
-            return TimingProxySelection()
-        return self._service().compute_market_factor_selection(
-            instances, trade_date, list(config.timing.proxy_index_codes)
+            return {}
+        return self._service().compute_market_factor_series(
+            instances, dates, config.timing.proxy_groups()
         )
 
     def precompute_backtest_factors(

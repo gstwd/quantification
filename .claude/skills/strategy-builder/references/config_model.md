@@ -112,11 +112,26 @@
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `factors` | dict[str,float] | **是** | - | 择时因子权重 |
-| `transforms` | dict[str,str] | 否 | `{}` | 择时因子变换；原值不在 0-100 的因子（收益率、RSRS、量比等，模板 `native_0_100=false`）**必须**配置，否则校验报错 |
-| `thresholds` | TimingThresholds | 否 | `TimingThresholds()` | 择时阈值 |
-| `proxy_index_codes` | list[str] | 否 | `["000300"]` | 择时代理指数，按顺序取第一个让全部择时因子都有值的代理；无代理全覆盖时逐因子回退 |
-| `on_degraded` | str | 否 | `neutral` | 择时因子全部缺失时的回退：`neutral` / `defensive` / `hold_previous`（回测沿用上一决策日 regime；实时无状态退化为 neutral 并告警） |
+| `combine` | str | 否 | `weighted` | 综合方式：`weighted`=因子加权综合分过阈值；`rules`=按 `rules` 的进攻 / 防守规则组判定 |
+| `factors` | dict[str,float] | 加权模式是 | `{}` | 择时因子权重（规则模式不使用，校验给 warning） |
+| `transforms` | dict[str,str] | 否 | `{}` | 择时因子变换；加权模式下原值不在 0-100 的因子（收益率、RSRS、量比等，模板 `native_0_100=false`）**必须**配置，否则校验报错；规则模式比较原值、不使用变换 |
+| `thresholds` | TimingThresholds | 否 | `TimingThresholds()` | 加权模式的择时阈值 |
+| `rules` | TimingRulesConfig | 规则模式是 | `null` | `{offensive, defensive}` 两个规则组，结构同 FilterConfig（`logic` + `rules`）；判定顺序防守优先：防守组满足→defensive，否则进攻组满足→offensive，否则 neutral。规则比较市场级因子**原值**，缺失按 `missing_strategy`（pass=满足，fail/exclude=不满足） |
+| `proxy_index_codes` | list[str] | 否 | `["000300"]` | 择时代理指数，按顺序取第一个让（同组）全部择时因子都有值的代理；无代理全覆盖时逐因子回退 |
+| `factor_proxies` | dict[str,list[str]] | 否 | `{}` | 按因子指定代理（如 `{"pv_res": ["000852"]}`），未列出的因子用 `proxy_index_codes` |
+| `on_degraded` | str | 否 | `neutral` | 择时因子全部缺失时的回退：`neutral` / `defensive` / `hold_previous`（沿用上一决策日有效 regime；实时由回放最近交易日得到）。降级回退不受状态层确认 / 最短持有约束 |
+| `state` | TimingStateConfig | 否 | 恒等 | 状态层，见下表 |
+
+### TimingStateConfig（择时状态层）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `hysteresis` | float | 0 | 滞回带（综合分点数，仅加权模式）：已处于进攻时综合分 ≥ `offensive − hysteresis` 就保持进攻，防守对称 |
+| `hold_on_neutral` | bool | false | 候选 regime 为中性（无信号）时沿用上一有效 regime |
+| `confirm_days` | int | 1 | 新 regime 需连续出现的决策日数才切换，1=当日切换 |
+| `min_hold_days` | int | 0 | 切换后最短持有的决策日数 |
+
+施加顺序：滞回 → 无信号维持 → 确认 → 最短持有。默认值下为恒等变换。回测按决策日逐日推进；实时回放最近 250 个交易日重建状态（`engine/timing.TIMING_STATE_REPLAY_DAYS`）。
 
 ### TimingThresholds
 

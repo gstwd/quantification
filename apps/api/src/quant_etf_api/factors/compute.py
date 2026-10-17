@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.domain.strategies.timing_proxy import (
     TimingProxySelection,
+    select_grouped_timing_proxy_values,
     select_timing_proxy_values,
 )
 from quant_etf_api.factors.base import (
@@ -533,6 +534,38 @@ class FactorComputeService:
             [instance.instance_id for instance in instances],
             lambda code, ref: day.get((code, ref)),
         )
+
+    def compute_market_factor_series(
+        self,
+        instances: Sequence[FactorInstance],
+        dates: Sequence[date],
+        proxy_groups: Sequence[tuple[Sequence[str], Sequence[str]]],
+    ) -> dict[date, TimingProxySelection]:
+        """批量计算多个交易日的市场级择时因子，并按代理组逐日选值。
+
+        用于实时路径回放择时状态层（以及按因子指定代理的单日计算）：一次
+        ``compute_matrix`` 覆盖全部交易日与全部代理指数，再逐日调用
+        :func:`select_grouped_timing_proxy_values`，与回测路径同一口径。
+
+        Args:
+            instances: 择时引用的因子实例。
+            dates: 交易日（升序）。
+            proxy_groups: ``(代理指数代码列表, 因子 instance_id 列表)`` 代理组。
+
+        Returns:
+            {交易日: 代理选择结果}；``values`` 的键为 instance_id。
+        """
+        if not instances or not dates:
+            return {}
+        codes = list(dict.fromkeys(code for proxies, _refs in proxy_groups for code in proxies))
+        matrix = self.compute_matrix(instances, codes, list(dates))
+        result: dict[date, TimingProxySelection] = {}
+        for day in dates:
+            values = matrix.day(day)
+            result[day] = select_grouped_timing_proxy_values(
+                proxy_groups, lambda code, ref, values=values: values.get((code, ref))
+            )
+        return result
 
     # ==================================================================
     # 因子查询

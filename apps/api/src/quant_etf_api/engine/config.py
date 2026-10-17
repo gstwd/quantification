@@ -22,6 +22,9 @@ RegimeName = Literal["offensive", "neutral", "defensive"]
 # 择时因子全部缺失时的回退策略（见 TimingConfig.on_degraded）
 TimingDegradedPolicy = Literal["neutral", "defensive", "hold_previous"]
 
+# 择时综合方式：weighted=因子加权综合分过阈值（默认）；rules=按进攻/防守规则组判定
+TimingCombineMode = Literal["weighted", "rules"]
+
 
 class TimingThresholds(BaseModel):
     """择时 regime 判定阈值。
@@ -33,29 +36,6 @@ class TimingThresholds(BaseModel):
 
     offensive: float = Field(default=65.0, ge=0.0, le=100.0)
     defensive: float = Field(default=35.0, ge=0.0, le=100.0)
-
-
-class TimingConfig(BaseModel):
-    """市场择时配置（可选模块）。
-
-    Attributes:
-        factors: 因子权重映射，key=因子引用（别名或模板 ID），value=权重。
-        transforms: 因子变换函数映射，key=因子引用，value=transform 名称。
-            综合分在 0-100 空间合成：原值不在 0-100 的因子必须配置变换函数。
-        thresholds: regime 判定阈值。
-        proxy_index_codes: 择时代理指数代码列表，用于加载市场级因子值。默认沪深300。
-            按顺序选第一个让全部择时因子都有值的代理；无代理全覆盖时逐因子回退。
-        on_degraded: 择时因子全部缺失（降级）时采用的 regime：
-            neutral=按中性（默认，兼容历史口径）、defensive=按防守、
-            hold_previous=沿用上一决策日的 regime（回测有效；实时路径无状态，
-            退化为 neutral 并在告警中注明）。
-    """
-
-    factors: dict[str, float]
-    transforms: dict[str, str] = Field(default_factory=dict)
-    thresholds: TimingThresholds = Field(default_factory=TimingThresholds)
-    proxy_index_codes: list[str] = Field(default_factory=lambda: ["000300"])
-    on_degraded: TimingDegradedPolicy = "neutral"
 
 
 class ScoreConfig(BaseModel):
@@ -114,6 +94,155 @@ class FilterConfig(BaseModel):
 
     logic: Literal["AND", "OR"] = "AND"
     rules: list[FilterRule] = Field(default_factory=list)
+
+
+class TimingRulesConfig(BaseModel):
+    """规则模式（``timing.combine=rules``）下的进攻 / 防守规则组。
+
+    判定顺序为"风险优先"：防守组满足 → defensive；否则进攻组满足 → offensive；
+    都不满足 → neutral（"无信号"，可配合 ``state.hold_on_neutral`` 维持前值）。
+    两组各自独立配置 AND / OR，可表达研报常见的进出场不对称，例如进攻要求
+    "趋势多头 且 动量上行"（AND），防守只要"任一转空"（OR）。
+
+    规则直接比较市场级因子的**原值**（与过滤规则同一口径，不经 transforms），
+    取值来自择时代理指数；缺失按各规则的 ``missing_strategy`` 处理
+    （pass=视为满足，fail/exclude=视为不满足）。
+
+    Attributes:
+        offensive: 进攻规则组；None 表示不会判定为进攻。
+        defensive: 防守规则组；None 表示不会判定为防守。
+    """
+
+    offensive: FilterConfig | None = None
+    defensive: FilterConfig | None = None
+
+
+class TimingStateConfig(BaseModel):
+    """择时状态层配置：在原始 regime 之上施加滞回、无信号维持、确认与最短持有。
+
+    默认值下状态层为恒等变换（有效 regime 等于原始 regime），存量配置口径不变。
+    天数均按**决策日**（交易日）计；实时路径回放最近
+    ``engine.timing.TIMING_STATE_REPLAY_DAYS`` 个交易日重建状态，与回测同一实现。
+
+    Attributes:
+        hysteresis: 滞回带宽（综合分点数，仅加权模式生效）：已处于进攻时综合分
+            不低于 ``offensive − hysteresis`` 即保持进攻；防守对称。0 表示不启用。
+        hold_on_neutral: 候选 regime 为中性（无信号）时沿用上一有效 regime。
+        confirm_days: 切换到新 regime 所需的连续确认决策日数，1 表示当日即切换。
+        min_hold_days: 有效 regime 切换后最短持有的决策日数，0 表示不限制。
+    """
+
+    hysteresis: float = Field(default=0.0, ge=0.0, le=50.0)
+    hold_on_neutral: bool = False
+    confirm_days: int = Field(default=1, ge=1, le=60)
+    min_hold_days: int = Field(default=0, ge=0, le=250)
+
+    @property
+    def is_identity(self) -> bool:
+        """状态层是否为恒等变换（实时路径据此跳过历史回放）。"""
+        return (
+            self.hysteresis <= 0
+            and not self.hold_on_neutral
+            and self.confirm_days <= 1
+            and self.min_hold_days <= 0
+        )
+
+
+class TimingConfig(BaseModel):
+    """市场择时配置（可选模块）。
+
+    Attributes:
+        combine: 综合方式。weighted=因子加权综合分过阈值（默认）；
+            rules=按 ``rules`` 中的进攻 / 防守规则组判定。
+        factors: 加权模式的因子权重映射，key=因子引用（别名或模板 ID），value=权重。
+            规则模式下可为空（规则引用的因子另行收集）。
+        transforms: 因子变换函数映射，key=因子引用，value=transform 名称。
+            综合分在 0-100 空间合成：原值不在 0-100 的因子必须配置变换函数。
+            规则模式比较原值，不使用变换。
+        thresholds: 加权模式的 regime 判定阈值。
+        rules: 规则模式的进攻 / 防守规则组。
+        proxy_index_codes: 择时代理指数代码列表，用于加载市场级因子值。默认沪深300。
+            按顺序选第一个让全部（同组）择时因子都有值的代理；无代理全覆盖时逐因子回退。
+        factor_proxies: 按因子指定代理，key=因子引用，value=该因子的代理指数代码列表
+            （同样按顺序取值）；未列出的因子使用 ``proxy_index_codes``。
+        on_degraded: 择时因子全部缺失（降级）时采用的 regime：
+            neutral=按中性（默认，兼容历史口径）、defensive=按防守、
+            hold_previous=沿用上一决策日的有效 regime（实时路径回放历史得到）。
+        state: 状态层配置（滞回、无信号维持、确认天数、最短持有）。
+    """
+
+    combine: TimingCombineMode = "weighted"
+    factors: dict[str, float] = Field(default_factory=dict)
+    transforms: dict[str, str] = Field(default_factory=dict)
+    thresholds: TimingThresholds = Field(default_factory=TimingThresholds)
+    rules: TimingRulesConfig | None = None
+    proxy_index_codes: list[str] = Field(default_factory=lambda: ["000300"])
+    factor_proxies: dict[str, list[str]] = Field(default_factory=dict)
+    on_degraded: TimingDegradedPolicy = "neutral"
+    state: TimingStateConfig = Field(default_factory=TimingStateConfig)
+
+    def rule_refs(self) -> list[str]:
+        """规则模式引用的因子（含 compare_to，按规则顺序，不去重）。
+
+        Returns:
+            因子引用列表；加权模式或未配置规则时为空。
+        """
+        if self.combine != "rules" or self.rules is None:
+            return []
+        refs: list[str] = []
+        for group in (self.rules.defensive, self.rules.offensive):
+            if group is not None:
+                refs.extend(filter_rule_refs(group))
+        return refs
+
+    def factor_refs(self) -> list[str]:
+        """择时实际使用的全部因子引用（去重、保序）。
+
+        加权模式为 ``factors`` 的键；规则模式为规则组引用的因子。
+
+        Returns:
+            因子引用列表。
+        """
+        refs = list(self.factors) if self.combine == "weighted" else self.rule_refs()
+        return list(dict.fromkeys(refs))
+
+    def proxies_for(self, ref: str) -> list[str]:
+        """返回某个择时因子使用的代理指数代码列表。
+
+        Args:
+            ref: 因子引用。
+
+        Returns:
+            ``factor_proxies`` 中的单独配置，未配置时为 ``proxy_index_codes``。
+        """
+        return list(self.factor_proxies.get(ref) or self.proxy_index_codes)
+
+    def proxy_groups(self) -> list[tuple[list[str], list[str]]]:
+        """按代理列表把择时因子分组（供代理选择纯函数使用）。
+
+        Returns:
+            ``(代理指数代码列表, 因子引用列表)`` 列表；默认代理组在前。
+        """
+        groups: dict[tuple[str, ...], list[str]] = {tuple(self.proxy_index_codes): []}
+        for ref in self.factor_refs():
+            groups.setdefault(tuple(self.proxies_for(ref)), []).append(ref)
+        return [(list(codes), refs) for codes, refs in groups.items() if refs]
+
+    def all_proxy_codes(self) -> list[str]:
+        """择时涉及的全部代理指数代码（去重、保序），供行情与因子预加载。
+
+        Returns:
+            代理指数代码列表。
+        """
+        codes = list(self.proxy_index_codes)
+        for ref in self.factor_refs():
+            codes.extend(self.proxies_for(ref))
+        return list(dict.fromkeys(codes))
+
+    @property
+    def needs_history(self) -> bool:
+        """择时判定是否依赖历史（状态层非恒等或降级时沿用前值）。"""
+        return not self.state.is_identity or self.on_degraded == "hold_previous"
 
 
 class FactorAliasConfig(BaseModel):
@@ -397,7 +526,7 @@ def iter_factor_refs(config: StrategyConfig) -> list[tuple[str, str, str]]:
     refs: list[tuple[str, str, str]] = []
     refs.extend(("score", "评分", ref) for ref in config.score.factors)
     if config.timing:
-        refs.extend(("timing", "择时", ref) for ref in config.timing.factors)
+        refs.extend(("timing", "择时", ref) for ref in config.timing.factor_refs())
     if config.filters:
         refs.extend(("filter", "过滤", ref) for ref in filter_rule_refs(config.filters))
     for ref in (config.rank.momentum_factor, config.rank.valuation_factor):
