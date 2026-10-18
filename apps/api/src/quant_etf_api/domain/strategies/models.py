@@ -94,12 +94,20 @@ class TimingSignal:
         confidence: 信号确信度，0-100，越高表示判断越确定。
         label: 中文标签，进攻 / 防守 / 观望。
         factors: 驱动因素详情，用于解释和调试。
+        tier: 有效仓位档位序号（``timing.tiers`` 下标）；None 表示未启用档位或
+            未命中（按 regime 查仓位表）。
+        tier_label: 有效仓位档位展示名；无档位时为 None。
+        exposure: 有效仓位档位决定的目标总仓位（0-1，风控上限之前）；None 表示
+            按 regime 查 ``portfolio.timing_exposure``（存量口径）。
     """
 
     regime: str
     confidence: float
     label: str
     factors: dict[str, Any] = field(default_factory=dict)
+    tier: int | None = None
+    tier_label: str | None = None
+    exposure: float | None = None
 
 
 @dataclass

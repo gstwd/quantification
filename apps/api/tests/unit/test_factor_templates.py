@@ -14,6 +14,7 @@ import pytest
 from quant_etf_api.engine.config import FactorAliasConfig
 from quant_etf_api.factors.base import FactorSpec
 from quant_etf_api.factors.catalog import (
+    STRATEGY_SCOPED_VALUATION_TEMPLATE_IDS,
     FactorResolutionError,
     FactorTemplateRegistry,
     build_default_registry,
@@ -217,10 +218,10 @@ class TestFactorTemplateRegistry:
     """模板注册表与引用解析。"""
 
     def test_default_registry_shape(self) -> None:
-        """默认注册表包含 35 个模板，其中 25 个可调参。"""
+        """默认注册表包含 36 个模板，其中 26 个可调参。"""
         registry = build_default_registry()
-        assert len(registry.all()) == 35
-        assert sum(1 for template in registry.all() if template.tunable) == 25
+        assert len(registry.all()) == 36
+        assert sum(1 for template in registry.all() if template.tunable) == 26
         assert set(registry.ids()) >= {"sma", "return", "return_std", "rsi", "atr"}
 
     def test_no_legal_params_exceed_backtest_warmup(self) -> None:
@@ -228,14 +229,21 @@ class TestFactorTemplateRegistry:
 
         回测的数据加载窗口是常量（取注册表默认参数下的最大 lookback），
         因此参数上界必须保证长窗口因子不会在回测中静默算成 None。
+        只依赖估值的长窗口模板（STRATEGY_SCOPED_VALUATION_TEMPLATE_IDS）不受此约束：
+        回测按策略实例回望单独扩展估值预加载，也不计入该常量窗口。
         """
         registry = build_default_registry()
-        warmup = max(template.lookback_days() for template in registry.all())
-        for template in registry.all():
+        covered = [
+            template
+            for template in registry.all()
+            if template.template_id not in STRATEGY_SCOPED_VALUATION_TEMPLATE_IDS
+        ]
+        warmup = max(template.lookback_days() for template in covered)
+        for template in covered:
             if not template.tunable:
                 continue
             maximal = {
-                name: parameter.maximum
+                name: parameter.default if parameter.type == "choice" else parameter.maximum
                 for name, parameter in template.parameter_schema.items()
             }
             assert template.lookback_days(maximal) <= warmup, template.template_id
@@ -330,6 +338,10 @@ class TestMergedTemplateEquivalence:
                 continue
             for name, parameter in template.parameter_schema.items():
                 default = template.default_params[name]
+                if parameter.type == "choice":
+                    # 枚举参数：默认值必须是可选值之一
+                    assert default in parameter.choices, (template.template_id, name)
+                    continue
                 assert parameter.minimum <= default <= parameter.maximum, (
                     template.template_id,
                     name,
@@ -353,6 +365,13 @@ class TestMergedTemplateEquivalence:
             if not template.tunable:
                 continue
             for name, parameter in template.parameter_schema.items():
+                if parameter.type == "choice":
+                    # 枚举参数：不在可选列表中的取值（含数值）都拒绝
+                    assert parameter.choices, (template.template_id, name)
+                    for invalid in ("__invalid__", 1):
+                        with pytest.raises(FactorParameterError):
+                            template.resolve_params({name: invalid})
+                    continue
                 assert parameter.maximum is not None, (template.template_id, name)
                 with pytest.raises(FactorParameterError):
                     template.resolve_params({name: parameter.maximum + 1})

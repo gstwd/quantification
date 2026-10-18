@@ -133,7 +133,7 @@
               <div class="config-row">
                 <span class="config-key">综合方式</span>
                 <span class="config-val">
-                  {{ timingConfig.combine === 'rules' ? '规则模式（防守组优先，其次进攻组，都不满足为中性）' : '因子加权综合分过阈值' }}
+                  {{ timingCombineText }}
                 </span>
               </div>
               <template v-if="timingConfig.combine === 'rules'">
@@ -183,6 +183,17 @@
                     <span class="factor-weight">{{ codes.join(', ') }}</span>
                   </span>
                 </div>
+              </div>
+              <div v-for="tier in timingTierRows" :key="tier.index" class="config-row">
+                <span class="config-key">仓位档位 {{ tier.index + 1 }}</span>
+                <span class="config-val">{{ tier.text }}</span>
+              </div>
+              <div v-if="timingTierRows.length > 0" class="config-row">
+                <span class="config-key">档位说明</span>
+                <span class="config-val">
+                  按顺序首个命中的档位决定总仓位（取代组合模块的 regime 仓位）；都未命中或择时降级时按 regime 仓位；
+                  状态层沿用前一 regime 时同时沿用上一档位
+                </span>
               </div>
               <div v-if="timingStateText" class="config-row">
                 <span class="config-key">状态层</span>
@@ -617,6 +628,12 @@
               <span class="alloc-key">标签</span>
               <span class="alloc-val">{{ allocation.timing.label }}</span>
             </div>
+            <div v-if="allocation.timing.tier != null && allocation.timing.exposure != null" class="alloc-row">
+              <span class="alloc-key">仓位档位</span>
+              <span class="alloc-val">
+                {{ allocation.timing.tier_label }}（档位仓位 {{ (allocation.timing.exposure * 100).toFixed(0) }}%）
+              </span>
+            </div>
           </div>
         </div>
 
@@ -830,6 +847,7 @@
               <span v-if="timingSummary.proxyText">代理：{{ timingSummary.proxyText }}</span>
               <span v-if="timingSummary.stateText">{{ timingSummary.stateText }}</span>
               <span v-if="timingSummary.rulesText">{{ timingSummary.rulesText }}</span>
+              <span v-if="timingSummary.tierText">{{ timingSummary.tierText }}</span>
               <span v-if="timingSummary.degraded && timingSummary.degradedText" class="config-warn">
                 {{ timingSummary.degradedText }}
               </span>
@@ -1301,7 +1319,7 @@ const debugTabs = computed(() => {
 const activeDebugTab = ref('scoring')
 
 /** timing_detail 中对象型的汇总字段（不是逐因子明细） */
-const TIMING_OBJECT_SUMMARY_KEYS = new Set(['state', 'rule_groups'])
+const TIMING_OBJECT_SUMMARY_KEYS = new Set(['state', 'rule_groups', 'tier', 'tier_rules'])
 
 /** timing_detail 的值是否为逐因子明细（其余为汇总字段） */
 function isTimingFactorDetail(value: TimingDetailValue): value is TimingFactorDetail {
@@ -1328,6 +1346,40 @@ const timingRuleGroups = computed((): Array<{ regime: string; label: string; tex
     groups.push({ regime, label, text })
   }
   return groups
+})
+
+/** 择时综合方式的展示文本（区分是否启用多档仓位） */
+const timingCombineText = computed((): string => {
+  const timing = timingConfig.value
+  const hasTiers = (timing?.tiers ?? []).length > 0
+  if (timing?.combine === 'rules') {
+    return hasTiers
+      ? '规则模式 · 多档仓位（按档位顺序首个满足的档位决定 regime 与仓位，都不满足为中性）'
+      : '规则模式（防守组优先，其次进攻组，都不满足为中性）'
+  }
+  return hasTiers ? '因子加权综合分过阈值 · 多档仓位（综合分分段映射总仓位）' : '因子加权综合分过阈值'
+})
+
+/** 多档仓位配置的逐档展示文本 */
+const timingTierRows = computed((): Array<{ index: number; text: string }> => {
+  const timing = timingConfig.value
+  const tiers = timing?.tiers ?? []
+  return tiers.map((tier, index) => {
+    const name = tier.label || `档位${index + 1}`
+    const exposure = `仓位 ${((tier.exposure ?? 0) * 100).toFixed(0)}%`
+    if (timing?.combine === 'rules') {
+      const joiner = tier.logic === 'OR' ? ' 或 ' : ' 且 '
+      const condition = (tier.rules ?? [])
+        .map(rule => {
+          const target = rule.compare_to ? factorLabel(rule.compare_to) : JSON.stringify(rule.value)
+          return `${factorLabel(rule.factor)} ${rule.op} ${target}`
+        })
+        .join(joiner)
+      const regime = REGIME_TEXT[tier.regime ?? 'neutral'] ?? tier.regime
+      return { index, text: `${name}：${condition || '（无规则）'} → ${regime}，${exposure}` }
+    }
+    return { index, text: `${name}：综合分 ≥ ${tier.min_score ?? '—'} → ${exposure}` }
+  })
 })
 
 /** 状态层配置的展示文本；恒等（全部缺省）时为空串 */
@@ -1386,6 +1438,19 @@ const timingSummary = computed(() => {
     const offensive = groups.offensive?.matched ? '满足' : '未满足'
     rulesText = `规则组：防守${defensive}，进攻${offensive}`
   }
+  let tierText: string | null = null
+  const tierDetail = detail.tier
+  if (typeof tierDetail === 'object' && tierDetail !== null && !Array.isArray(tierDetail)) {
+    const record = tierDetail as Record<string, unknown>
+    const label = typeof record.label === 'string' ? record.label : null
+    const exposure = typeof record.exposure === 'number' ? record.exposure : null
+    if (label && exposure != null) {
+      const source = record.source === 'held' ? '（状态层沿用上一档位）' : ''
+      tierText = `仓位档位：${label}，档位仓位 ${(exposure * 100).toFixed(0)}%${source}`
+    } else {
+      tierText = '仓位档位：未命中，按 regime 仓位'
+    }
+  }
   const fallbackRegime = typeof detail.fallback_regime === 'string' ? detail.fallback_regime : null
   const fallbackReason = typeof detail.fallback_reason === 'string' ? detail.fallback_reason : null
   return {
@@ -1393,6 +1458,7 @@ const timingSummary = computed(() => {
     proxyText,
     stateText,
     rulesText,
+    tierText,
     degraded: detail.degraded === true,
     degradedText: fallbackRegime
       ? `择时因子全部缺失，按 ${fallbackRegime} 回退${fallbackReason ? `（${fallbackReason}）` : ''}`

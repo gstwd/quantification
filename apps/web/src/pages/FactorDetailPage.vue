@@ -38,7 +38,18 @@
                 <span class="param-name" :title="parameterSpec(key)?.description">
                   {{ key }}
                 </span>
+                <select
+                  v-if="parameterSpec(key)?.type === 'choice'"
+                  v-model="params[key]"
+                  class="param-input"
+                  @change="reloadWithParams"
+                >
+                  <option v-for="choice in parameterSpec(key)?.choices ?? []" :key="choice" :value="choice">
+                    {{ choice }}
+                  </option>
+                </select>
                 <input
+                  v-else
                   v-model.number="params[key]"
                   type="number"
                   :step="parameterSpec(key)?.type === 'integer' ? 1 : 0.05"
@@ -278,7 +289,16 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { fetchFactorCrossSection, fetchFactorCorrelation, fetchFactorIC, fetchFactorSpecs, fetchFactorTimeSeries } from '../api/factors'
-import type { CorrelationResponse, CrossSectionRow, FactorRow, FactorParameterSpec, FactorSpec, ICPoint, ICSummary } from '../types/api'
+import type {
+  CorrelationResponse,
+  CrossSectionRow,
+  FactorRow,
+  FactorParameterSpec,
+  FactorParameterValue,
+  FactorSpec,
+  ICPoint,
+  ICSummary,
+} from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
 import { shiftDateCn, todayCn } from '../utils/date'
@@ -293,8 +313,8 @@ const props = defineProps<{ factorId: string }>()
 const spec = ref<FactorSpec | null>(null)
 const specLoading = ref(false)
 
-/** 当前模板参数：以模板默认值为初值，可由页面输入覆盖 */
-const params = ref<Record<string, number>>({})
+/** 当前模板参数：以模板默认值为初值，可由页面输入覆盖（choice 参数为字符串） */
+const params = ref<Record<string, FactorParameterValue>>({})
 
 /** 当前模板声明的可覆盖参数名 */
 const parameterKeys = computed(() => Object.keys(spec.value?.parameter_schema ?? {}))
@@ -740,7 +760,7 @@ onMounted(async () => {
   try {
     const all = await fetchFactorSpecs()
     spec.value = all.find(s => s.factor_id === props.factorId) ?? null
-    const defaults: Record<string, number> = {}
+    const defaults: Record<string, FactorParameterValue> = {}
     for (const [key, parameter] of Object.entries(spec.value?.parameter_schema ?? {})) {
       defaults[key] = parameter.default
     }

@@ -76,7 +76,11 @@ from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.orchestrator import StrategyEngine
 from quant_etf_api.engine.rebalance import DefaultRebalanceScheduler
-from quant_etf_api.factors.catalog import OHLC_DEPENDENT_TEMPLATE_IDS, FactorTemplateRegistry
+from quant_etf_api.factors.catalog import (
+    OHLC_DEPENDENT_TEMPLATE_IDS,
+    STRATEGY_SCOPED_VALUATION_TEMPLATE_IDS,
+    FactorTemplateRegistry,
+)
 from quant_etf_api.factors.compute import FactorMatrix
 from quant_etf_api.infra.db.models.core import (
     BacktestDailyResultModel,
@@ -1323,6 +1327,11 @@ class BacktestService:
                     all_bars.update(self._load_all_index_bars(trading_dates, [proxy_code]))
                     all_valuation.update(self._load_all_valuation(trading_dates, [proxy_code]))
 
+        # 滚动估值分位等长窗口估值模板：按策略实例回望补齐更早的估值行（不改写共享缓存）
+        all_valuation, valuation_lookback_days = self._ensure_valuation_history(
+            config, trading_dates, factor_index_codes, all_valuation
+        )
+
         # 预计算所有因子值（含择时代理指数）；批量评估时按
         # （窗口, 所需因子的计算实例, 参与计算的指数）复用，避免每个变体重算一遍。
         # 缓存键必须携带模板 ID + 规范化参数 + 模板版本：参数高原扫描只在参数上
@@ -1359,6 +1368,9 @@ class BacktestService:
             first_bar_by_code(all_bars),
         )
         run_params["_lookback_days"] = lookback_days
+        if valuation_lookback_days is not None:
+            # 仅在为长窗口估值模板扩展了估值预加载时记录，存量口径不出现该键
+            run_params["_valuation_lookback_days"] = valuation_lookback_days
         run_params["_warmup_trading_days"] = warmup_trading_days
         # 基准口径标记：策略/基准逐日序列均按"决策日归因"落账
         # （T 日决策 → T+1 行情），历史数据一次性回填命令据此跳过新记录
@@ -1578,6 +1590,7 @@ class BacktestService:
                     exposure_turnover=day.exposure_turnover,
                     risk_order=legs.risk,
                     selection_order=legs.selection,
+                    tier=result.timing.tier if result.timing is not None else None,
                 )
             )
 
@@ -1654,6 +1667,7 @@ class BacktestService:
             fill_lag=1 if execution_model == EXECUTION_MODEL_CLOSE else 0,
             offensive_threshold=config.timing.thresholds.offensive if config.timing else None,
             defensive_threshold=config.timing.thresholds.defensive if config.timing else None,
+            tiers=config.timing.tier_specs() if config.timing else None,
         )
         if timing_stats is not None:
             metrics["timing_stats"] = timing_stats.to_dict()
@@ -2317,12 +2331,73 @@ class BacktestService:
         因此固定窗口足以覆盖任意配置，长周期因子不会在回测前段因回望不足
         而全部为 None。该不变量由单元测试守住。
 
+        只依赖估值、窗口随参数可达数年的模板（``STRATEGY_SCOPED_VALUATION_TEMPLATE_IDS``，
+        如滚动估值分位）不计入全局窗口，由 :meth:`_ensure_valuation_history` 按策略
+        实际实例单独扩展估值预加载，不拉长其他回测的行情预加载与计算日历。
+
         Returns:
             最大回望自然日数。
         """
         return max(
-            (template.lookback_days() for template in self._registry.all()), default=90
+            (
+                template.lookback_days()
+                for template in self._registry.all()
+                if template.template_id not in STRATEGY_SCOPED_VALUATION_TEMPLATE_IDS
+            ),
+            default=90,
         )
+
+    def _ensure_valuation_history(
+        self,
+        config: StrategyConfig,
+        trading_dates: list[date],
+        index_codes: list[str],
+        all_valuation: dict[tuple[str, date], Any],
+    ) -> tuple[dict[tuple[str, date], Any], int | None]:
+        """按策略实际引用的长窗口估值模板扩展估值预加载。
+
+        全局预加载窗口不覆盖滚动估值分位等长窗口模板（见 :meth:`_get_lookback_days`）。
+        策略引用这类模板且实例回望超过全局窗口时，补加载
+        ``[首个交易日 − 实例回望, 首个交易日 − 全局窗口)`` 的估值行并入一份**新**字典：
+        研究批量评估在变体间共享同一窗口的估值缓存，不能就地改写。
+
+        Args:
+            config: 策略配置。
+            trading_dates: 回测交易日（升序）。
+            index_codes: 参与因子计算的指数（含择时代理）。
+            all_valuation: 全局窗口预加载的估值数据（不被修改）。
+
+        Returns:
+            (估值数据, 扩展后的估值回望自然日数)；无需扩展时返回原字典与 None。
+        """
+        if not trading_dates or not index_codes:
+            return all_valuation, None
+        instances = self._factor_provider.resolve_instances(config).values()
+        required = max(
+            (
+                instance.lookback_days
+                for instance in instances
+                if instance.template_id in STRATEGY_SCOPED_VALUATION_TEMPLATE_IDS
+            ),
+            default=0,
+        )
+        base = self._get_lookback_days()
+        if required <= base:
+            return all_valuation, None
+        first = trading_dates[0]
+        extra = IndexValuationRepository(self._db).find_range(
+            first - timedelta(days=required),
+            first - timedelta(days=base + 1),
+            list(index_codes),
+        )
+        logger.info(
+            "[backtest] 扩展估值预加载: 回望 %s 天（全局窗口 %s 天）指数=%s 新增行=%s",
+            required,
+            base,
+            len(index_codes),
+            len(extra),
+        )
+        return {**extra, **all_valuation}, required
 
     def _load_all_index_bars(
         self, trading_dates: list[date], index_codes: list[str]

@@ -124,10 +124,13 @@ function isTunable(spec: FactorSpec): boolean {
   return Object.keys(spec.parameter_schema ?? {}).length > 0
 }
 
-/** 可调参模板的参数摘要，如「period 2–250，默认 20」 */
+/** 可调参模板的参数摘要，如「period 2–250，默认 20」；choice 参数列出可选值 */
 function parameterSummary(spec: FactorSpec): string {
   return Object.entries(spec.parameter_schema ?? {})
     .map(([key, param]) => {
+      if (param.type === 'choice') {
+        return `${key} ${(param.choices ?? []).join(' / ')}，默认 ${param.default}`
+      }
       const range =
         param.minimum != null && param.maximum != null
           ? `${param.minimum}–${param.maximum}`

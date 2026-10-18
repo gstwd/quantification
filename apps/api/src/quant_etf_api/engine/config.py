@@ -117,6 +117,56 @@ class TimingRulesConfig(BaseModel):
     defensive: FilterConfig | None = None
 
 
+class TimingTierConfig(BaseModel):
+    """择时仓位档位（``timing.tiers`` 的一项）：命中条件 → 目标总仓位。
+
+    档位按列表顺序匹配，**首个命中**的档位决定目标总仓位（取代按 regime 查
+    ``portfolio.timing_exposure``），用于表达 0/25/50/75/100 这类多档加减仓。
+    两种综合方式使用不同的命中条件：
+
+    - 加权模式（combine=weighted）：综合分 ≥ ``min_score`` 命中；regime 仍由
+      ``thresholds`` 判定，档位只决定仓位；
+    - 规则模式（combine=rules）：``logic`` + ``rules`` 规则组满足即命中（与过滤
+      规则同一口径、比较原值），命中档位的 ``regime`` 即当日原始 regime。
+
+    都未命中时回退原口径（按 regime 查 ``portfolio.timing_exposure`` / 默认三档表）。
+
+    Attributes:
+        label: 档位展示名，如"深度超跌"；空串时按序号展示。
+        exposure: 命中该档时的目标总仓位（0-1，组合级风控上限之前）。
+        min_score: 加权模式的命中下限（综合分 ≥ 该值命中，0-100）。
+        regime: 规则模式下命中该档时的 regime（供状态层、regime_rules 与择时统计使用）。
+        logic: 规则模式的多规则逻辑，AND=全部满足, OR=任一满足。
+        rules: 规则模式的命中规则（与过滤规则同结构）。
+    """
+
+    label: str = Field(default="", max_length=40)
+    exposure: float = Field(ge=0.0, le=1.0)
+    min_score: float | None = Field(default=None, ge=0.0, le=100.0)
+    regime: RegimeName | None = None
+    logic: Literal["AND", "OR"] = "AND"
+    rules: list[FilterRule] = Field(default_factory=list)
+
+    def display_label(self, index: int) -> str:
+        """返回档位展示名（未命名时按序号）。
+
+        Args:
+            index: 档位在 ``timing.tiers`` 中的序号（0 起）。
+
+        Returns:
+            展示名。
+        """
+        return self.label or f"档位{index + 1}"
+
+    def as_rule_group(self) -> FilterConfig:
+        """把规则模式档位的命中条件转为规则组（复用过滤规则的求值与校验）。
+
+        Returns:
+            等价的 FilterConfig。
+        """
+        return FilterConfig(logic=self.logic, rules=self.rules)
+
+
 class TimingStateConfig(BaseModel):
     """择时状态层配置：在原始 regime 之上施加滞回、无信号维持、确认与最短持有。
 
@@ -169,6 +219,9 @@ class TimingConfig(BaseModel):
             neutral=按中性（默认，兼容历史口径）、defensive=按防守、
             hold_previous=沿用上一决策日的有效 regime（实时路径回放历史得到）。
         state: 状态层配置（滞回、无信号维持、确认天数、最短持有）。
+        tiers: 多档仓位（按顺序匹配，首个命中的档位决定目标总仓位）；空列表表示
+            不启用，按 regime 查 ``portfolio.timing_exposure``（存量口径）。规则模式
+            下与 ``rules.offensive/defensive`` 互斥。
     """
 
     combine: TimingCombineMode = "weighted"
@@ -180,25 +233,31 @@ class TimingConfig(BaseModel):
     factor_proxies: dict[str, list[str]] = Field(default_factory=dict)
     on_degraded: TimingDegradedPolicy = "neutral"
     state: TimingStateConfig = Field(default_factory=TimingStateConfig)
+    tiers: list[TimingTierConfig] = Field(default_factory=list)
 
     def rule_refs(self) -> list[str]:
         """规则模式引用的因子（含 compare_to，按规则顺序，不去重）。
 
+        规则组（防守、进攻）在前，规则模式档位的命中规则按档位顺序在后。
+
         Returns:
             因子引用列表；加权模式或未配置规则时为空。
         """
-        if self.combine != "rules" or self.rules is None:
+        if self.combine != "rules":
             return []
         refs: list[str] = []
-        for group in (self.rules.defensive, self.rules.offensive):
-            if group is not None:
-                refs.extend(filter_rule_refs(group))
+        if self.rules is not None:
+            for group in (self.rules.defensive, self.rules.offensive):
+                if group is not None:
+                    refs.extend(filter_rule_refs(group))
+        for tier in self.tiers:
+            refs.extend(filter_rule_refs(tier.as_rule_group()))
         return refs
 
     def factor_refs(self) -> list[str]:
         """择时实际使用的全部因子引用（去重、保序）。
 
-        加权模式为 ``factors`` 的键；规则模式为规则组引用的因子。
+        加权模式为 ``factors`` 的键；规则模式为规则组与档位规则引用的因子。
 
         Returns:
             因子引用列表。
@@ -238,6 +297,14 @@ class TimingConfig(BaseModel):
         for ref in self.factor_refs():
             codes.extend(self.proxies_for(ref))
         return list(dict.fromkeys(codes))
+
+    def tier_specs(self) -> list[tuple[str, float]]:
+        """多档仓位的 ``(展示名, 仓位)`` 列表（供择时统计按档位分组）。
+
+        Returns:
+            按配置顺序的列表；未启用档位时为空。
+        """
+        return [(tier.display_label(index), tier.exposure) for index, tier in enumerate(self.tiers)]
 
     @property
     def needs_history(self) -> bool:

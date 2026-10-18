@@ -488,6 +488,34 @@ class TimingRegimeStats(BaseModel):
     benchmark_annualized_return_pct: float | None = None
 
 
+class TimingTierStats(BaseModel):
+    """单个仓位档位的时间占比与收益统计（按决策日有效档位归组）。
+
+    Attributes:
+        tier: 档位序号（timing.tiers 下标）；None 表示未命中档位、按 regime 仓位表的决策日。
+        label: 档位展示名。
+        exposure: 档位配置的目标总仓位；未命中组为 None。
+        days: 决策日数。
+        share: 时间占比（0-1）。
+        average_exposure: 该档位决策日的平均组合仓位（0-1）。
+        mean_daily_return_pct: 组合日收益均值（%）。
+        annualized_return_pct: 组合在该档位日子里的几何年化收益（%）。
+        benchmark_mean_daily_return_pct: 同期基准日收益均值（%）。
+        benchmark_annualized_return_pct: 同期基准几何年化收益（%）。
+    """
+
+    tier: int | None = None
+    label: str
+    exposure: float | None = None
+    days: int
+    share: float
+    average_exposure: float | None = None
+    mean_daily_return_pct: float | None = None
+    annualized_return_pct: float | None = None
+    benchmark_mean_daily_return_pct: float | None = None
+    benchmark_annualized_return_pct: float | None = None
+
+
 class TimingTurnoverBreakdown(BaseModel):
     """换手按调仓腿拆分（单边口径）。
 
@@ -550,6 +578,7 @@ class BacktestTimingStats(BaseModel):
         score: 择时综合分分布。
         offensive_threshold: 进攻阈值。
         defensive_threshold: 防守阈值。
+        tiers: 分仓位档位统计（未配置 timing.tiers 或存量结果为 None）。
     """
 
     trading_days: int
@@ -567,6 +596,7 @@ class BacktestTimingStats(BaseModel):
     score: TimingScoreDistribution
     offensive_threshold: float | None = None
     defensive_threshold: float | None = None
+    tiers: list[TimingTierStats] | None = None
 
 
 class BacktestDetail(BacktestSummary):

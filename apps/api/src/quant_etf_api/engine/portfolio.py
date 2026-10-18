@@ -29,9 +29,13 @@ def resolve_target_exposure(config: PortfolioConfig, timing: TimingSignal | None
         timing: 择时信号，None 表示未配置择时。
 
     Returns:
-        目标总仓位（0-1）：配置了 timing_exposure 时按 regime 取值，否则使用默认
-        regime 仓位表；未配置择时使用 default_exposure。
+        目标总仓位（0-1）：择时命中多档仓位（``timing.tiers``）时取档位仓位；
+        否则配置了 timing_exposure 时按 regime 取值，再否则使用默认 regime 仓位表；
+        未配置择时使用 default_exposure。
     """
+    if timing and timing.exposure is not None:
+        # 档位仓位优先于按 regime 查表（含 regime_rules 覆盖的 timing_exposure）
+        return timing.exposure
     if timing and config.timing_exposure:
         return config.timing_exposure.get(timing.regime, config.default_exposure)
     if timing:

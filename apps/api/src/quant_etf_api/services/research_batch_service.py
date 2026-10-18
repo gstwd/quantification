@@ -194,6 +194,19 @@ class ResearchBatchResult:
                 f"score p10/p50/p90={_fmt_number(quantiles.get('p10'), 1)}/"
                 f"{_fmt_number(quantiles.get('p50'), 1)}/{_fmt_number(quantiles.get('p90'), 1)}"
             )
+            tiers = stats.get("tiers") or []
+            if tiers:
+                # 多档仓位：按档位给出时间占比与同期基准年化，判断档位是否区分了市场
+                lines.append(
+                    f"[timing tiers] {variant.get('label')}: "
+                    + " ".join(
+                        f"{'-' if item.get('tier') is None else item['tier'] + 1}"
+                        f"@{_fmt_number(item.get('exposure'), 2)}="
+                        f"{_fmt_number(item.get('share'), 3)}"
+                        f"(bench {_fmt_number(item.get('benchmark_annualized_return_pct'), 1)}%)"
+                        for item in tiers
+                    )
+                )
         for variant in self.variants:
             block = variant.get("timing_attribution")
             if not block:
@@ -548,6 +561,7 @@ class ResearchBatchService:
             fill_lag=1 if execution_model == EXECUTION_MODEL_CLOSE else 0,
             offensive_threshold=config.timing.thresholds.offensive if config.timing else None,
             defensive_threshold=config.timing.thresholds.defensive if config.timing else None,
+            tiers=config.timing.tier_specs() if config.timing else None,
         )
         if timing_stats is not None:
             aggregate["timing_stats"] = timing_stats.to_dict()
@@ -690,7 +704,8 @@ def _deep_copy_config(config: dict[str, Any] | None) -> dict[str, Any]:
 def build_timing_off_config(config: dict[str, Any], exposure: float) -> dict[str, Any]:
     """派生择时归因的对照配置：同配置、关闭择时、总仓位固定为给定暴露。
 
-    - 移除 ``timing``：引擎不再判定 regime，组合按 ``default_exposure`` 定总仓位；
+    - 移除 ``timing``（含多档仓位 ``tiers``）：引擎不再判定 regime，组合按
+      ``default_exposure`` 定总仓位；
     - 移除 ``regime_rules``：它们只在有 regime 时生效，关闭择时后整体失效，
       显式删除避免读者误以为仍在使用；
     - 移除 ``portfolio.timing_exposure`` 并把 ``default_exposure`` 设为给定暴露

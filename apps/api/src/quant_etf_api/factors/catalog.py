@@ -69,6 +69,22 @@ _PV_RESONANCE_SCHEMA = {
     "bull_threshold": ParameterSpec("number", 0.5, 2.0, 1.125, "多头市场开仓阈值"),
     "bear_threshold": ParameterSpec("number", 0.5, 2.0, 1.275, "空头市场开仓阈值"),
 }
+# 滚动估值分位：窗口按估值有效观测（交易日）计，默认约 5 年；
+# 上限 3000 覆盖 index_valuation 全部历史（2014-10 起），此时与入库扩张分位一致
+_VALUATION_PERCENTILE_SCHEMA = {
+    "field": ParameterSpec(
+        "choice",
+        None,
+        None,
+        "pe",
+        "估值字段：pe=PE(TTM)，pb=PB，mean=PE 与 PB 滚动分位的算术平均",
+        choices=("pe", "pb", "mean"),
+    ),
+    "window": ParameterSpec("integer", 60, 3000, 1250, "滚动窗口（交易日，约 250 日/年）"),
+    "min_periods": ParameterSpec(
+        "integer", 1, 3000, 250, "最少样本数（交易日），不足时不出值；超过窗口时按窗口截断"
+    ),
+}
 
 # 绝对点位类因子（均线、ATR、通道、月线均线、收盘价）只适合与同一指数的价格
 # 比较，跨指数横截面比较没有意义，适用位置收敛为择时与过滤。
@@ -93,6 +109,13 @@ OHLC_DEPENDENT_TEMPLATE_IDS: frozenset[str] = frozenset(
         "rsrs",
     }
 )
+
+
+# 回望随参数可远超全局预加载窗口、且只依赖估值数据的模板。回测的全局预加载窗口
+# （行情与估值共用，默认参数下全部模板 lookback 的最大值）不计入这些模板，避免一个
+# 5 年估值窗口把所有回测的行情预加载与计算日历拉长；回测改为按策略实际实例的
+# 回望单独扩展估值预加载（见 BacktestService._ensure_valuation_history）。
+STRATEGY_SCOPED_VALUATION_TEMPLATE_IDS: frozenset[str] = frozenset({"valuation_percentile"})
 
 
 class FactorResolutionError(ValueError):
@@ -388,6 +411,21 @@ def _rsrs_label(params: Mapping[str, Any]) -> str:
     return f"RSRS阻力支撑相对强度（{params['n']}/{params['m']}）"
 
 
+def _valuation_percentile_label(params: Mapping[str, Any]) -> str:
+    """生成滚动估值分位的实例展示名，如「PE滚动分位（1250日）」。
+
+    Args:
+        params: 已规范化参数（field / window / min_periods）。
+
+    Returns:
+        实例展示名。
+    """
+    field_label = {"pe": "PE", "pb": "PB", "mean": "PE/PB均值"}.get(
+        str(params["field"]), str(params["field"])
+    )
+    return f"{field_label}滚动分位（{params['window']}日）"
+
+
 def _months_label(suffix: str) -> Callable[[Mapping[str, Any]], str]:
     """构造「N + 月后缀」形式的实例展示名生成函数。
 
@@ -452,6 +490,7 @@ def build_default_templates() -> list[FactorTemplate]:
     from quant_etf_api.factors.builtins.valuation import (
         PBPercentileComputer,
         PEPercentileComputer,
+        ValuationPercentileComputer,
     )
     from quant_etf_api.factors.builtins.volatility import (
         HighLowRangeComputer,
@@ -794,6 +833,23 @@ def build_default_templates() -> list[FactorTemplate]:
             ),
             category="volume",
             usage=_SIGNAL_USAGE,
+        ),
+        build_template(
+            "valuation_percentile",
+            lambda p: ValuationPercentileComputer(p),
+            parameter_schema=_VALUATION_PERCENTILE_SCHEMA,
+            compute_lookback_days=lambda p: period_lookback_days(int(p["window"])),
+            instance_label=_valuation_percentile_label,
+            name="滚动估值分位",
+            description=(
+                "从 index_valuation 原始 PE/PB 现算最近 N 个交易日（含当日）的滚动历史百分位"
+                "（0-100，越低越便宜），口径与入库扩张分位 pe_percentile/pb_percentile 一致、"
+                "只是样本截成固定窗口；窗口覆盖全部历史时两者相同。当日无估值或样本不足"
+                " min_periods 时缺失。仅有估值数据覆盖的宽基指数可用。"
+            ),
+            category="valuation",
+            required_data=("index_valuation",),
+            native_0_100=True,
         ),
     ]
     templates.extend(tunable)

@@ -2,14 +2,15 @@ import { apiClient } from './client'
 import type {
   CorrelationResponse,
   CrossSectionResponse,
+  FactorParameterValue,
   FactorRow,
   FactorSpec,
   FactorUpdatePayload,
   ICResponse,
 } from '../types/api'
 
-/** 模板参数取值：可覆盖参数名 → 数值 */
-export type FactorParams = Record<string, number>
+/** 模板参数取值：可覆盖参数名 → 数值（choice 参数为字符串） */
+export type FactorParams = Record<string, FactorParameterValue>
 
 /**
  * 把模板参数序列化为查询串取值。

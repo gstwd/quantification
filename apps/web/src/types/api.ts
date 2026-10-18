@@ -522,6 +522,23 @@ export interface TimingRegimeStats {
   benchmark_annualized_return_pct: number | null
 }
 
+/**
+ * 单个仓位档位的时间占比与收益统计（按决策日有效档位归组；收益为 %，占比与仓位为 0-1）。
+ * tier 为 null 的一项表示“未命中档位、按 regime 仓位”的决策日。
+ */
+export interface TimingTierStats {
+  tier: number | null
+  label: string
+  exposure: number | null
+  days: number
+  share: number
+  average_exposure: number | null
+  mean_daily_return_pct: number | null
+  annualized_return_pct: number | null
+  benchmark_mean_daily_return_pct: number | null
+  benchmark_annualized_return_pct: number | null
+}
+
 /** 换手按调仓腿拆分（单边口径，占比为 0-1） */
 export interface TimingTurnoverBreakdown {
   total_turnover: number
@@ -560,6 +577,8 @@ export interface BacktestTimingStats {
   score: TimingScoreDistribution
   offensive_threshold: number | null
   defensive_threshold: number | null
+  /** 分仓位档位统计（未配置 timing.tiers 或存量回测为 null / 缺省） */
+  tiers?: TimingTierStats[] | null
 }
 
 export interface BacktestDetail extends BacktestSummary {
@@ -785,15 +804,23 @@ export interface DateRange {
   max_date: string | null
 }
 
+/** 因子模板参数类型：integer / number 为数值，choice 为枚举取值（如估值字段 pe / pb） */
+export type FactorParameterType = 'integer' | 'number' | 'choice'
+
+/** 因子模板参数取值：数值类参数为 number，choice 参数为 string */
+export type FactorParameterValue = number | string
+
 /** 因子模板单个可覆盖参数的声明 */
 export interface FactorParameterSpec {
-  type: 'integer' | 'number'
-  /** 允许的最小值（含），null 表示不设下界 */
+  type: FactorParameterType
+  /** 允许的最小值（含），null 表示不设下界；choice 类型为 null */
   minimum: number | null
-  /** 允许的最大值（含），null 表示不设上界 */
+  /** 允许的最大值（含），null 表示不设上界；choice 类型为 null */
   maximum: number | null
-  default: number
+  default: FactorParameterValue
   description: string
+  /** choice 类型的可选取值；数值类型缺省 */
+  choices?: string[] | null
 }
 
 /** 因子模板元数据（factor_id 即模板 ID） */
@@ -979,6 +1006,20 @@ export interface TimingRuleGroupJson {
   rules?: TimingRuleJson[]
 }
 
+/**
+ * 择时仓位档位（timing.tiers 的一项）：按顺序首个命中的档位决定目标总仓位。
+ * 加权模式用 min_score（综合分 ≥ 下限命中）；规则模式用 regime + logic + rules。
+ */
+export interface TimingTierJson {
+  label?: string
+  /** 命中该档时的目标总仓位（0-1） */
+  exposure: number
+  min_score?: number | null
+  regime?: 'offensive' | 'neutral' | 'defensive' | null
+  logic?: 'AND' | 'OR'
+  rules?: TimingRuleJson[]
+}
+
 /** 择时状态层：滞回、无信号维持、确认天数、最短持有（缺省为恒等） */
 export interface TimingStateJson {
   hysteresis?: number
@@ -1002,6 +1043,8 @@ export interface TimingConfigJson {
   /** 缺省为 neutral（兼容历史口径） */
   on_degraded?: TimingOnDegraded
   state?: TimingStateJson
+  /** 多档仓位（缺省不启用，按 regime 查 portfolio.timing_exposure） */
+  tiers?: TimingTierJson[]
 }
 
 /** 择时因子明细（pipeline_detail.timing_detail 中以因子引用为键的值） */
@@ -1017,8 +1060,9 @@ export interface TimingFactorDetail {
 /**
  * pipeline_detail.timing_detail 的值：因子明细对象，或汇总字段
  * （composite_score / missing_factors / degraded / on_degraded / fallback_regime /
- * proxy_index_code / proxy_mode / combine / raw_regime / state / rule_groups 等）。
- * 对象型汇总字段（state、rule_groups）以 unknown 记录承载，由页面按需收窄。
+ * proxy_index_code / proxy_mode / combine / raw_regime / state / rule_groups /
+ * matched_tier / tier / tier_rules 等）。
+ * 对象型汇总字段（state、rule_groups、tier、tier_rules）以 unknown 记录承载，由页面按需收窄。
  */
 export type TimingDetailValue =
   | TimingFactorDetail
@@ -1043,6 +1087,12 @@ export interface AllocationTiming {
   confidence: number
   label: string
   factors: Record<string, unknown>
+  /** 有效仓位档位序号（timing.tiers 下标）；未启用档位或未命中时为 null */
+  tier?: number | null
+  /** 有效仓位档位展示名 */
+  tier_label?: string | null
+  /** 档位决定的目标总仓位（0-1，风控上限之前）；null 表示按 regime 仓位表 */
+  exposure?: number | null
 }
 
 export interface AllocationRanking {

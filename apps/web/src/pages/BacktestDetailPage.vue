@@ -380,6 +380,36 @@
             </tbody>
           </table>
         </div>
+        <div v-if="timingStats.tiers && timingStats.tiers.length > 0" class="annual-table-wrap">
+          <table class="annual-table">
+            <thead>
+              <tr>
+                <th>仓位档位</th>
+                <th>档位仓位</th>
+                <th>天数</th>
+                <th>时间占比</th>
+                <th>平均仓位</th>
+                <th>组合年化</th>
+                <th>基准年化</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in timingStats.tiers" :key="row.tier ?? 'none'">
+                <td>{{ row.tier != null ? `${row.tier + 1}. ${row.label}` : row.label }}</td>
+                <td>{{ fmtShare(row.exposure) }}</td>
+                <td>{{ row.days }}</td>
+                <td>{{ fmtShare(row.share) }}</td>
+                <td>{{ fmtShare(row.average_exposure) }}</td>
+                <td :class="pctClass(row.annualized_return_pct ?? 0)">
+                  {{ fmtOptionalPct(row.annualized_return_pct) }}
+                </td>
+                <td :class="pctClass(row.benchmark_annualized_return_pct ?? 0)">
+                  {{ fmtOptionalPct(row.benchmark_annualized_return_pct) }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
         <div class="stability-note">
           综合分分布（{{ timingStats.score.count }} 个有效日；进攻 ≥
           {{ fmtOptional(timingStats.offensive_threshold, 0) }}、防守 ≤

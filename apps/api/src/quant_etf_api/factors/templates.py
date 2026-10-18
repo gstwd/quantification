@@ -22,10 +22,11 @@ from quant_etf_api.factors.base import (
     ValueShape,
 )
 
-# 参数类型：integer=整数周期类，number=浮点比例类
+# 参数类型：integer=整数周期类，number=浮点比例类，choice=枚举取值（如估值字段 pe/pb）
 PARAM_TYPE_INTEGER = "integer"
 PARAM_TYPE_NUMBER = "number"
-ParameterType = Literal["integer", "number"]
+PARAM_TYPE_CHOICE = "choice"
+ParameterType = Literal["integer", "number", "choice"]
 
 
 class FactorParameterError(ValueError):
@@ -37,20 +38,22 @@ class ParameterSpec:
     """模板单个可覆盖参数的声明。
 
     Attributes:
-        type: 参数类型，integer 或 number。
-        minimum: 允许的最小值（含），None 表示不设下界。
-        maximum: 允许的最大值（含），None 表示不设上界。
+        type: 参数类型，integer / number / choice。
+        minimum: 允许的最小值（含），None 表示不设下界；choice 类型为 None。
+        maximum: 允许的最大值（含），None 表示不设上界；choice 类型为 None。
         default: 默认值，未显式给参数时使用。
         description: 参数中文说明，用于配置校验提示与前端表单。
+        choices: choice 类型的可选取值（字符串，有序）；数值类型为空元组。
     """
 
     type: ParameterType
     minimum: int | float | None
     maximum: int | float | None
-    default: int | float
+    default: int | float | str
     description: str
+    choices: tuple[str, ...] = ()
 
-    def coerce(self, name: str, value: Any) -> int | float:
+    def coerce(self, name: str, value: Any) -> int | float | str:
         """校验并规范化单个参数取值。
 
         Args:
@@ -58,11 +61,18 @@ class ParameterSpec:
             value: 原始取值（来自策略配置或接口查询串）。
 
         Returns:
-            规范化后的取值：integer 返回 int，number 返回 float。
+            规范化后的取值：integer 返回 int，number 返回 float，choice 返回 str。
 
         Raises:
-            FactorParameterError: 取值不是有限数值、类型不符或超出取值范围。
+            FactorParameterError: 取值不是有限数值、类型不符、超出取值范围，或
+                choice 取值不在可选列表中。
         """
+        if self.type == PARAM_TYPE_CHOICE:
+            if not isinstance(value, str) or value not in self.choices:
+                raise FactorParameterError(
+                    f"参数 {name} 必须是 {list(self.choices)} 之一，实际为 {value!r}"
+                )
+            return value
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise FactorParameterError(f"参数 {name} 必须是数值，实际为 {value!r}")
 
@@ -86,15 +96,19 @@ class ParameterSpec:
         """转换为接口响应字典。
 
         Returns:
-            含 type/minimum/maximum/default/description 的字典。
+            含 type/minimum/maximum/default/description 的字典；choice 类型另含
+            choices（数值类型不输出该键，保持存量模板目录载荷不变）。
         """
-        return {
+        payload: dict[str, Any] = {
             "type": self.type,
             "minimum": self.minimum,
             "maximum": self.maximum,
             "default": self.default,
             "description": self.description,
         }
+        if self.type == PARAM_TYPE_CHOICE:
+            payload["choices"] = list(self.choices)
+        return payload
 
 
 @dataclass(frozen=True, eq=False)

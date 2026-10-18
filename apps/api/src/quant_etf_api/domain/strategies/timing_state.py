@@ -30,12 +30,15 @@ class TimingState:
         held_days: 有效 regime 已连续持有的决策日数（含当日）。
         pending: 尚未确认的候选 regime；None 表示没有待确认的切换。
         pending_days: 候选 regime 已连续出现的决策日数。
+        tier: 当日有效仓位档位序号（``timing.tiers`` 下标）；None 表示未启用档位
+            或未命中档位（按 regime 仓位表）。状态层沿用前 regime 时同时沿用该档位。
     """
 
     regime: str
     held_days: int = 1
     pending: str | None = None
     pending_days: int = 0
+    tier: int | None = None
 
     def to_detail(self) -> dict[str, Any]:
         """转换为择时明细中的状态字段。
@@ -48,6 +51,48 @@ class TimingState:
             "pending_regime": self.pending,
             "pending_days": self.pending_days,
         }
+
+
+def resolve_effective_tier(
+    *,
+    regime: str,
+    raw_regime: str,
+    raw_tier: int | None,
+    previous: TimingState | None,
+    degraded: bool,
+    hold_previous_on_degraded: bool,
+) -> tuple[int | None, str]:
+    """在状态层给出有效 regime 后，确定当日有效仓位档位。
+
+    档位跟随有效 regime：状态层接受当日原始判定（有效 regime 等于原始 regime）时
+    采用当日命中的档位；状态层沿用上一 regime（滞回、确认中、无信号维持、最短持有）
+    时同时沿用上一决策日的档位，避免"regime 被维持、仓位却跳到另一档"。同一 regime
+    内的档位变化不受确认 / 持有约束，当日生效。
+
+    降级日（择时因子全部缺失）的回退是显式策略：只有 ``on_degraded=hold_previous``
+    且回退 regime 与上一决策日相同时才沿用上一档位，其余按 regime 仓位表。
+
+    Args:
+        regime: 当日有效 regime。
+        raw_regime: 当日原始 regime（综合分过阈值或规则判定）。
+        raw_tier: 当日原始命中的档位序号；None 表示未命中。
+        previous: 上一决策日结束时的状态；None 表示无历史。
+        degraded: 当日是否降级。
+        hold_previous_on_degraded: 降级策略是否为 hold_previous。
+
+    Returns:
+        (有效档位序号, 来源)；来源取 matched（当日命中）/ held（沿用上一档位）/
+        none（无档位，按 regime 仓位表）。
+    """
+    if degraded:
+        if hold_previous_on_degraded and previous is not None and previous.regime == regime:
+            return (previous.tier, "held") if previous.tier is not None else (None, "none")
+        return None, "none"
+    if regime == raw_regime:
+        return (raw_tier, "matched") if raw_tier is not None else (None, "none")
+    if previous is not None and previous.regime == regime and previous.tier is not None:
+        return previous.tier, "held"
+    return None, "none"
 
 
 def resolve_candidate_regime(

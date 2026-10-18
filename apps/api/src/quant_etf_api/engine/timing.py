@@ -18,6 +18,7 @@ from quant_etf_api.domain.strategies.models import TimingSignal
 from quant_etf_api.domain.strategies.timing_state import (
     TimingState,
     resolve_candidate_regime,
+    resolve_effective_tier,
     step_timing_state,
 )
 from quant_etf_api.engine.base import EngineContext
@@ -62,6 +63,11 @@ def evaluate_timing(
     降级日（择时因子全部缺失）的回退 regime 是显式策略，不受确认天数与最短
     持有期约束：直接成为有效 regime 并重置状态。
 
+    配置了多档仓位（``tiers``）时，有效档位跟随有效 regime（见
+    :func:`resolve_effective_tier`）：状态层接受当日判定时用当日命中档位，沿用前
+    regime 时沿用上一档位；有效档位写入状态、信号的 ``tier`` / ``exposure`` 与明细
+    ``tier``。未配置档位时信号与明细和改造前完全一致。
+
     Args:
         calculator: 原始择时判定计算器。
         config: 择时配置。
@@ -103,20 +109,66 @@ def evaluate_timing(
         )
         regime = new_state.regime
 
+    tier: int | None = None
+    if config.tiers:
+        raw_tier = details.get("matched_tier")
+        tier, tier_source = resolve_effective_tier(
+            regime=regime,
+            raw_regime=raw_regime,
+            raw_tier=raw_tier if isinstance(raw_tier, int) else None,
+            previous=previous,
+            degraded=degraded,
+            hold_previous_on_degraded=config.on_degraded == "hold_previous",
+        )
+        # 配置变更后回放出的旧序号可能越界：按无档位处理
+        if tier is not None and not 0 <= tier < len(config.tiers):
+            tier, tier_source = None, "none"
+        new_state = replace(new_state, tier=tier)
+        details = dict(details)
+        details["tier"] = _tier_detail(config, tier, tier_source, raw_tier)
+
     if not state_cfg.is_identity:
         details = dict(details)
         details["raw_regime"] = raw_regime
         details["state"] = new_state.to_detail()
 
+    tier_config = config.tiers[tier] if tier is not None else None
     return (
         TimingSignal(
             regime=regime,
             confidence=_confidence(config, composite, regime, raw_regime, degraded),
             label=_REGIME_LABELS.get(regime, "观望"),
             factors=details,
+            tier=tier,
+            tier_label=tier_config.display_label(tier) if tier_config is not None else None,
+            exposure=tier_config.exposure if tier_config is not None else None,
         ),
         new_state,
     )
+
+
+def _tier_detail(
+    config: TimingConfig, tier: int | None, source: str, matched: Any
+) -> dict[str, Any]:
+    """构造择时明细中的有效档位字段。
+
+    Args:
+        config: 择时配置（已配置 tiers）。
+        tier: 有效档位序号；None 表示按 regime 仓位表。
+        source: 有效档位来源（matched / held / none）。
+        matched: 当日原始命中的档位序号（None 表示未命中）。
+
+    Returns:
+        含 index / label / exposure / source / matched_index 的字典。
+    """
+    tier_config = config.tiers[tier] if tier is not None else None
+    return {
+        "index": tier,
+        "label": tier_config.display_label(tier) if tier_config is not None else None,
+        "exposure": tier_config.exposure if tier_config is not None else None,
+        "source": source,
+        "matched_index": matched if isinstance(matched, int) else None,
+    }
 
 
 def _confidence(

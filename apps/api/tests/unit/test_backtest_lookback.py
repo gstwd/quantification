@@ -3,6 +3,7 @@
 覆盖：
 - 回望自然日数从因子模板注册表推导，与实时模式口径一致
 - BacktestService 按注册表推导回望窗口，行情与估值加载共用同一窗口
+- 滚动估值分位等长窗口估值模板不抬高全局窗口，按策略单独扩展估值预加载
 - 预热期估算：前 N 个交易日因子数据不足的天数提示
 """
 
@@ -11,8 +12,11 @@ from __future__ import annotations
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
+from quant_etf_api.engine.config import FactorAliasConfig, ScoreConfig, StrategyConfig
+from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.factors.base import FactorSpec
 from quant_etf_api.factors.catalog import (
+    STRATEGY_SCOPED_VALUATION_TEMPLATE_IDS,
     FactorTemplateRegistry,
     build_default_registry,
     build_template,
@@ -67,9 +71,24 @@ class TestMaxLookbackDays:
     """回望自然日数推导测试。"""
 
     def test_default_registry_returns_max_lookback(self) -> None:
-        """默认注册表应返回全部模板的最大 lookback（估值百分位/ERP 为 730）。"""
+        """全局窗口 = 默认注册表（不含按策略扩展估值的模板）最大 lookback（估值百分位/ERP 为 730）。"""
         registry = build_default_registry()
-        assert max(template.lookback_days() for template in registry.all()) == 730
+        assert (
+            max(
+                template.lookback_days()
+                for template in registry.all()
+                if template.template_id not in STRATEGY_SCOPED_VALUATION_TEMPLATE_IDS
+            )
+            == 730
+        )
+
+    def test_strategy_scoped_templates_only_need_valuation(self) -> None:
+        """豁免全局窗口的模板只能依赖估值数据（行情预加载无需为它们拉长）。"""
+        registry = build_default_registry()
+        for template_id in STRATEGY_SCOPED_VALUATION_TEMPLATE_IDS:
+            template = registry.get(template_id)
+            assert template is not None
+            assert template.required_data == ("index_valuation",)
 
     def test_empty_instances_return_default(self) -> None:
         """无实例时应返回默认 90 天。"""
@@ -128,6 +147,77 @@ class TestBacktestServiceLookback:
         """无交易日时估值加载应返回空字典。"""
         svc = BacktestService(db=MagicMock())
         assert svc._load_all_valuation([], ["000300"]) == {}
+
+
+def _valuation_config(aliases: dict[str, FactorAliasConfig], refs: list[str]) -> StrategyConfig:
+    """评分引用给定因子的最小策略配置。"""
+    return StrategyConfig(
+        strategy_id="v",
+        display_name="v",
+        factor_aliases=aliases,
+        score=ScoreConfig(factors={ref: 1.0 for ref in refs}),
+    )
+
+
+class TestEnsureValuationHistory:
+    """长窗口估值模板按策略扩展估值预加载。"""
+
+    _DATES = [date(2018, 1, 2), date(2018, 1, 3)]
+
+    def _svc(self) -> BacktestService:
+        """使用真实注册表与因子解析的回测服务。"""
+        svc = BacktestService(db=MagicMock())
+        svc._factor_provider = FactorProvider(registry=build_default_registry())
+        return svc
+
+    def test_default_strategy_not_extended(self) -> None:
+        """未引用长窗口估值模板时不补加载、原样返回同一字典。"""
+        svc = self._svc()
+        cached = {("000852", date(2017, 1, 3)): object()}
+        with patch(
+            "quant_etf_api.services.backtest_service.IndexValuationRepository"
+        ) as mock_repo_cls:
+            result, extended = svc._ensure_valuation_history(
+                _valuation_config({}, ["pe_percentile", "rsi"]), self._DATES, ["000852"], cached
+            )
+        assert result is cached and extended is None
+        mock_repo_cls.assert_not_called()
+
+    def test_short_window_within_global_not_extended(self) -> None:
+        """实例回望不超过全局窗口（730 天）时不补加载。"""
+        aliases = {
+            "v": FactorAliasConfig(template_id="valuation_percentile", params={"window": 400})
+        }
+        svc = self._svc()
+        with patch("quant_etf_api.services.backtest_service.IndexValuationRepository"):
+            _result, extended = svc._ensure_valuation_history(
+                _valuation_config(aliases, ["v"]), self._DATES, ["000852"], {}
+            )
+        assert extended is None
+
+    def test_long_window_extends_without_mutating_cache(self) -> None:
+        """5 年窗口补加载全局窗口之前的估值行，合并进新字典而不改写共享缓存。"""
+        aliases = {"v": FactorAliasConfig(template_id="valuation_percentile", params={})}
+        svc = self._svc()
+        cached_key = ("000852", date(2017, 1, 3))
+        cached = {cached_key: "global"}
+        old_key = ("000852", date(2013, 1, 4))
+        with patch(
+            "quant_etf_api.services.backtest_service.IndexValuationRepository"
+        ) as mock_repo_cls:
+            mock_repo_cls.return_value.find_range.return_value = {old_key: "old"}
+            result, extended = svc._ensure_valuation_history(
+                _valuation_config(aliases, ["v"]), self._DATES, ["000852", "000300"], cached
+            )
+        assert extended == 2010
+        start, end, codes = mock_repo_cls.return_value.find_range.call_args.args
+        assert start == self._DATES[0] - timedelta(days=2010)
+        assert end == self._DATES[0] - timedelta(days=731)
+        assert codes == ["000852", "000300"]
+        assert result == {cached_key: "global", old_key: "old"}
+        assert cached == {cached_key: "global"}
+        # 全局窗口不因长窗口模板而变化
+        assert svc._get_lookback_days() == 730
 
 
 class TestEstimateWarmupTradingDays:

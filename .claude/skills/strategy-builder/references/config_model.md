@@ -107,6 +107,7 @@
 - 有 `timing_exposure`：按择时 regime（offensive/neutral/defensive）查表；**只写部分 regime 时缺失档位回退到 `default_exposure`**（不是默认三档表），校验给 warning，应三档写全
 - 有择时信号但无 `timing_exposure`：使用默认三档表 `engine/portfolio._DEFAULT_TIMING_EXPOSURE`（进攻 0.80/观望 0.50/防守 0.20）
 - 无择时：使用 `default_exposure`（默认 0.50）
+- 配置 `timing.tiers` 且命中档位：直接取档位 `exposure`（优先于以上查表），见 TimingTierConfig
 
 ## TimingConfig
 
@@ -121,6 +122,7 @@
 | `factor_proxies` | dict[str,list[str]] | 否 | `{}` | 按因子指定代理（如 `{"pv_res": ["000852"]}`），未列出的因子用 `proxy_index_codes` |
 | `on_degraded` | str | 否 | `neutral` | 择时因子全部缺失时的回退：`neutral` / `defensive` / `hold_previous`（沿用上一决策日有效 regime；实时由回放最近交易日得到）。降级回退不受状态层确认 / 最短持有约束 |
 | `state` | TimingStateConfig | 否 | 恒等 | 状态层，见下表 |
+| `tiers` | list[TimingTierConfig] | 否 | `[]` | 多档仓位，见下文；空列表=按 regime 查 `portfolio.timing_exposure` |
 
 ### TimingStateConfig（择时状态层）
 
@@ -132,6 +134,20 @@
 | `min_hold_days` | int | 0 | 切换后最短持有的决策日数 |
 
 施加顺序：滞回 → 无信号维持 → 确认 → 最短持有。默认值下为恒等变换。回测按决策日逐日推进；实时回放最近 250 个交易日重建状态（`engine/timing.TIMING_STATE_REPLAY_DAYS`）。
+
+### TimingTierConfig（多档仓位）
+
+按列表顺序匹配，**首个命中**的档位决定目标总仓位（取代按 regime 查表，含 `regime_rules` 覆盖的 `timing_exposure`），再经组合级风控上限裁剪；都未命中或择时降级时回退 regime 仓位表。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `label` | str | `""` | 档位展示名 |
+| `exposure` | float | 必填 | 命中时的目标总仓位 [0, 1] |
+| `min_score` | float | null | 加权模式：综合分 ≥ 该值命中；各档必须严格降序。regime 仍由 `thresholds` 判定 |
+| `regime` | str | null | 规则模式必填：命中该档时的 regime |
+| `logic` / `rules` | — | `AND` / `[]` | 规则模式的命中规则组（同 FilterConfig，比较原值）；与 `rules.offensive/defensive` 互斥 |
+
+状态层只约束 regime：沿用前一 regime（滞回 / 确认中 / 无信号维持 / 最短持有）时同时沿用上一档位；同 regime 内换档当日生效。`hold_on_neutral` 对 neutral 档位同样生效（命中中性档位也会沿用前值，校验给 warning）。例：中证1000 年线乖离 5 档 = 规则模式 `≤−20→100%`、`≤−15→75%`、`≥25→0%`、`≥15→25%`、`−5~5→50%`（neutral），灰区不命中按中性仓位。
 
 ### TimingThresholds
 

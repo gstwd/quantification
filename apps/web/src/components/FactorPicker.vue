@@ -33,7 +33,19 @@
     />
 
     <template v-for="key in parameterKeys" :key="key">
+      <select
+        v-if="parameterSpec(key)?.type === 'choice'"
+        :value="modelValue.params[key]"
+        class="fp-select fp-param"
+        :title="parameterSpec(key)?.description || key"
+        @change="updateChoiceParam(key, ($event.target as HTMLSelectElement).value)"
+      >
+        <option v-for="choice in parameterSpec(key)?.choices ?? []" :key="choice" :value="choice">
+          {{ choice }}
+        </option>
+      </select>
       <input
+        v-else
         :value="modelValue.params[key]"
         type="number"
         :step="parameterSpec(key)?.type === 'integer' ? 1 : 0.05"
@@ -85,13 +97,13 @@
 
 import { computed } from 'vue'
 
-import type { FactorParameterSpec, FactorSpec } from '../types/api'
+import type { FactorParameterSpec, FactorParameterValue, FactorSpec } from '../types/api'
 
-/** 因子行数据结构：别名 + 模板 + 参数 + 权重 + 变换 */
+/** 因子行数据结构：别名 + 模板 + 参数 + 权重 + 变换（choice 参数取字符串） */
 interface FactorRowValue {
   alias: string
   template_id: string
-  params: Record<string, number>
+  params: Record<string, FactorParameterValue>
   weight: number
   transform?: string
 }
@@ -145,7 +157,7 @@ function parameterSpec(key: string): FactorParameterSpec | undefined {
 /** 切换模板：重置参数为该模板默认值，别名未填时用模板 ID 兜底 */
 function onTemplateChange(templateId: string): void {
   const template = props.factors.find((f) => f.factor_id === templateId)
-  const params: Record<string, number> = {}
+  const params: Record<string, FactorParameterValue> = {}
   for (const [key, spec] of Object.entries(template?.parameter_schema ?? {})) {
     params[key] = spec.default
   }
@@ -154,7 +166,7 @@ function onTemplateChange(templateId: string): void {
 }
 
 /** 生成默认别名：零参数模板直接用模板 ID，带参数模板拼上参数值 */
-function defaultAlias(templateId: string, params: Record<string, number>): string {
+function defaultAlias(templateId: string, params: Record<string, FactorParameterValue>): string {
   const values = Object.values(params)
   if (values.length === 0) return templateId
   return `${templateId}_${values.join('_')}`
@@ -167,6 +179,12 @@ function updateField(key: keyof FactorRowValue, value: string | undefined): void
 function updateParam(key: string, raw: string): void {
   const num = raw === '' ? 0 : parseFloat(raw)
   const params = { ...props.modelValue.params, [key]: isNaN(num) ? 0 : num }
+  emit('update:modelValue', { ...props.modelValue, params })
+}
+
+/** 更新 choice 类型参数（取值来自模板声明的 choices，原样保存字符串） */
+function updateChoiceParam(key: string, value: string): void {
+  const params = { ...props.modelValue.params, [key]: value }
   emit('update:modelValue', { ...props.modelValue, params })
 }
 

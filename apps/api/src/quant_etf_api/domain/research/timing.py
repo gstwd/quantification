@@ -8,7 +8,7 @@
 - 风险腿到期日 regime / 目标仓位的实际切换次数（执行口径，周度风险腿只在
   到期日把 regime 落到持仓上）；
 - 分 regime 的组合日收益（以及同期基准日收益，用来看 regime 是否真的区分了
-  市场好坏）；
+  市场好坏）；配置了多档仓位（``timing.tiers``）时另按有效档位分组；
 - 风险腿成交日换手占总换手的比例，以及总仓位变动带来的换手下限占比；
 - 择时综合分的分布（分位数）。
 
@@ -50,6 +50,8 @@ class TimingDay:
         exposure_turnover: 当日成交中总仓位变动带来的单边换手 |ΣW新 − ΣW旧| / 2。
         risk_order: 当日风险腿到期（下达按择时缩放总仓位的指令）。
         selection_order: 当日选股腿到期（下达重建成分的指令）。
+        tier: 当日有效仓位档位序号（``timing.tiers`` 下标）；未启用档位或未命中
+            （按 regime 仓位表）时为 None。
     """
 
     regime: str | None
@@ -63,6 +65,7 @@ class TimingDay:
     exposure_turnover: float = 0.0
     risk_order: bool = False
     selection_order: bool = False
+    tier: int | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,36 @@ class RegimeReturnStats:
     """
 
     regime: str
+    days: int
+    share: float
+    average_exposure: float | None = None
+    mean_daily_return_pct: float | None = None
+    annualized_return_pct: float | None = None
+    benchmark_mean_daily_return_pct: float | None = None
+    benchmark_annualized_return_pct: float | None = None
+
+
+@dataclass(frozen=True)
+class TierReturnStats:
+    """单个仓位档位下的时间占比与收益统计（按决策日有效档位归组）。
+
+    Attributes:
+        tier: 档位序号（``timing.tiers`` 下标）；None 表示"未命中档位、按 regime
+            仓位表"的决策日。
+        label: 档位展示名。
+        exposure: 档位配置的目标总仓位；未命中组为 None。
+        days: 该档位的决策日数。
+        share: 时间占比（0-1，分母为有 regime 的决策日数）。
+        average_exposure: 该档位决策日的平均组合仓位（0-1）。
+        mean_daily_return_pct: 组合日收益均值（%）。
+        annualized_return_pct: 组合在该档位日子里的几何年化收益（%）。
+        benchmark_mean_daily_return_pct: 同期基准日收益均值（%）。
+        benchmark_annualized_return_pct: 同期基准几何年化收益（%）。
+    """
+
+    tier: int | None
+    label: str
+    exposure: float | None
     days: int
     share: float
     average_exposure: float | None = None
@@ -168,6 +201,8 @@ class TimingStats:
         score: 择时综合分分布。
         offensive_threshold: 进攻阈值（综合分 ≥ 该值为 offensive），未知时为 None。
         defensive_threshold: 防守阈值（综合分 ≤ 该值为 defensive），未知时为 None。
+        tiers: 分仓位档位统计（按配置顺序，末尾为"未命中档位"组）；未配置
+            ``timing.tiers`` 时为 None。
     """
 
     trading_days: int
@@ -185,6 +220,7 @@ class TimingStats:
     score: ScoreDistribution
     offensive_threshold: float | None = None
     defensive_threshold: float | None = None
+    tiers: list[TierReturnStats] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转换为可写入 JSON 列的字典（嵌套数据类一并展开）。"""
@@ -281,6 +317,37 @@ def score_distribution(
     )
 
 
+def _group_returns(
+    group: Sequence[TimingDay], total: int, trading_days_per_year: int
+) -> dict[str, Any]:
+    """计算一组决策日的时间占比、平均仓位与组合 / 基准收益（分组统计共用）。
+
+    Args:
+        group: 同组决策日（非空）。
+        total: 占比分母（有 regime 的决策日数）。
+        trading_days_per_year: 年化系数。
+
+    Returns:
+        可直接展开为 RegimeReturnStats / TierReturnStats 字段的字典。
+    """
+    returns = [day.portfolio_return for day in group]
+    exposures = [day.exposure for day in group if day.exposure is not None]
+    bench = [day.benchmark_return for day in group if day.benchmark_return is not None]
+    return {
+        "days": len(group),
+        "share": round(len(group) / total, 4) if total else 0.0,
+        "average_exposure": _round(sum(exposures) / len(exposures)) if exposures else None,
+        "mean_daily_return_pct": _round(sum(returns) / len(returns)),
+        "annualized_return_pct": _round(
+            calc_annualized_return_pct(returns, trading_days_per_year), 2
+        ),
+        "benchmark_mean_daily_return_pct": _round(sum(bench) / len(bench)) if bench else None,
+        "benchmark_annualized_return_pct": (
+            _round(calc_annualized_return_pct(bench, trading_days_per_year), 2) if bench else None
+        ),
+    }
+
+
 def regime_return_stats(
     days: Sequence[TimingDay],
     trading_days_per_year: int = DEFAULT_TRADING_DAYS_PER_YEAR,
@@ -307,27 +374,48 @@ def regime_return_stats(
         if not group:
             result.append(RegimeReturnStats(regime=regime, days=0, share=0.0))
             continue
-        returns = [day.portfolio_return for day in group]
-        exposures = [day.exposure for day in group if day.exposure is not None]
-        bench = [day.benchmark_return for day in group if day.benchmark_return is not None]
         result.append(
-            RegimeReturnStats(
-                regime=regime,
-                days=len(group),
-                share=round(len(group) / total, 4) if total else 0.0,
-                average_exposure=_round(sum(exposures) / len(exposures)) if exposures else None,
-                mean_daily_return_pct=_round(sum(returns) / len(returns)),
-                annualized_return_pct=_round(
-                    calc_annualized_return_pct(returns, trading_days_per_year), 2
-                ),
-                benchmark_mean_daily_return_pct=(
-                    _round(sum(bench) / len(bench)) if bench else None
-                ),
-                benchmark_annualized_return_pct=(
-                    _round(calc_annualized_return_pct(bench, trading_days_per_year), 2)
-                    if bench
-                    else None
-                ),
+            RegimeReturnStats(regime=regime, **_group_returns(group, total, trading_days_per_year))
+        )
+    return result
+
+
+def tier_return_stats(
+    days: Sequence[TimingDay],
+    tiers: Sequence[tuple[str, float]],
+    trading_days_per_year: int = DEFAULT_TRADING_DAYS_PER_YEAR,
+) -> list[TierReturnStats]:
+    """按决策日有效仓位档位归组统计组合与基准的日收益（归组口径同 regime）。
+
+    Args:
+        days: 逐日择时记录。
+        tiers: 按配置顺序的 ``(档位展示名, 档位仓位)`` 列表。
+        trading_days_per_year: 年化系数。
+
+    Returns:
+        每个档位一项（未出现的也列出，days=0），末尾追加"未命中档位"组
+        （tier=None，按 regime 仓位表的决策日，含降级日）。
+    """
+    timed = [day for day in days if day.regime is not None]
+    total = len(timed)
+    groups: list[tuple[int | None, str, float | None]] = [
+        (index, label, exposure) for index, (label, exposure) in enumerate(tiers)
+    ]
+    groups.append((None, "未命中档位（按 regime 仓位）", None))
+    result: list[TierReturnStats] = []
+    for index, label, exposure in groups:
+        group = [day for day in timed if day.tier == index]
+        if not group:
+            result.append(
+                TierReturnStats(tier=index, label=label, exposure=exposure, days=0, share=0.0)
+            )
+            continue
+        result.append(
+            TierReturnStats(
+                tier=index,
+                label=label,
+                exposure=exposure,
+                **_group_returns(group, total, trading_days_per_year),
             )
         )
     return result
@@ -404,6 +492,7 @@ def compute_timing_stats(
     fill_lag: int = 0,
     offensive_threshold: float | None = None,
     defensive_threshold: float | None = None,
+    tiers: Sequence[tuple[str, float]] | None = None,
     trading_days_per_year: int = DEFAULT_TRADING_DAYS_PER_YEAR,
 ) -> TimingStats | None:
     """汇总回测的择时专项统计。
@@ -413,6 +502,8 @@ def compute_timing_stats(
         fill_lag: 指令到成交的行滞后（T+1 开盘 0，T+1 收盘 1）。
         offensive_threshold: 进攻阈值，仅随结果透传便于解读分布。
         defensive_threshold: 防守阈值，仅随结果透传便于解读分布。
+        tiers: 多档仓位配置（``(展示名, 仓位)`` 列表，按配置顺序）；None 或空表示
+            未启用档位，结果的 ``tiers`` 为 None。
         trading_days_per_year: 年化系数。
 
     Returns:
@@ -447,4 +538,5 @@ def compute_timing_stats(
         score=score_distribution([day.score for day in days]),
         offensive_threshold=offensive_threshold,
         defensive_threshold=defensive_threshold,
+        tiers=tier_return_stats(days, tiers, trading_days_per_year) if tiers else None,
     )

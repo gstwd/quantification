@@ -132,7 +132,8 @@ class DefaultScoreCalculator:
 
         加权模式（默认）与 absolute 评分同一口径：负权重按 100 − 得分参与加权。
         规则模式（``combine=rules``）改由进攻 / 防守规则组判定，见
-        :func:`_calculate_rules_timing`。部分因子缺失时
+        :func:`_calculate_rules_timing`。配置了多档仓位（``tiers``）时，加权模式
+        另在明细 ``matched_tier`` 写入综合分命中的档位序号（regime 仍按阈值）。部分因子缺失时
         在明细中列出 ``missing_factors``；全部缺失时按 ``config.on_degraded``
         回退（默认 neutral）并标记 ``degraded=True``，由服务层转成结构化告警，
         避免静默按回退仓位运行。上下文携带代理选择结果时，明细标出实际使用的
@@ -210,6 +211,9 @@ class DefaultScoreCalculator:
             regime = "neutral"
 
         details["composite_score"] = round(composite, 1)
+        if config.tiers:
+            # 多档仓位：与阈值同用未取整的综合分，避免展示值 65.0 与判定口径不一致
+            details["matched_tier"] = match_score_tier(config, composite)
         return round(composite, 1), regime, details
 
     def _score_single_asset(
@@ -325,8 +329,10 @@ def _calculate_rules_timing(
 ) -> tuple[float, str, dict[str, Any]]:
     """规则模式择时：防守组满足 → defensive，否则进攻组满足 → offensive，否则 neutral。
 
-    规则比较市场级因子原值（与过滤规则同一口径与缺失语义）。全部引用因子缺失时
-    按 ``on_degraded`` 回退并标记 ``degraded=True``，与加权模式一致。
+    配置了多档仓位（``tiers``）时改为按档位顺序匹配：首个命中档位的 ``regime`` 即
+    原始 regime，命中序号写入明细 ``matched_tier``（逐档明细见 ``tier_rules``）；
+    都未命中为 neutral。规则比较市场级因子原值（与过滤规则同一口径与缺失语义）。
+    全部引用因子缺失时按 ``on_degraded`` 回退并标记 ``degraded=True``，与加权模式一致。
 
     Args:
         config: 择时配置（combine=rules）。
@@ -363,49 +369,29 @@ def _calculate_rules_timing(
             degraded.update(proxy.to_detail())
         return 0.0, regime, degraded
 
-    def _group_matched(group: FilterConfig | None) -> tuple[bool, list[dict[str, Any]]]:
-        """评估单个规则组，返回 (是否满足, 逐条规则明细)。"""
-        if group is None or not group.rules:
-            return False, []
-        results: list[dict[str, Any]] = []
-        for rule in group.rules:
-            value = context.market_factors.get(rule.factor)
-            target: float | list[float] | None
-            if rule.compare_to is not None:
-                target = context.market_factors.get(rule.compare_to)
-            else:
-                target = rule.value
-            missing = value is None or target is None
-            passed = (
-                rule.missing_strategy == "pass" if missing else _check_rule(value, rule.op, target)
-            )
-            results.append(
-                {
-                    "factor": rule.factor,
-                    "op": rule.op,
-                    "threshold": rule.compare_to if rule.compare_to is not None else rule.value,
-                    "value": value,
-                    "compare_value": target if rule.compare_to is not None else None,
-                    "passed": passed,
-                    "missing": missing,
-                }
-            )
-        flags = [item["passed"] for item in results]
-        return (all(flags) if group.logic == "AND" else any(flags)), results
-
-    rules = config.rules
-    defensive_hit, defensive_detail = _group_matched(rules.defensive if rules else None)
-    offensive_hit, offensive_detail = _group_matched(rules.offensive if rules else None)
-    if defensive_hit:
-        regime = "defensive"
-    elif offensive_hit:
-        regime = "offensive"
+    if config.tiers:
+        # 多档仓位：按顺序首个命中的档位决定原始 regime 与仓位（与规则组互斥，档位优先）
+        regime, details["matched_tier"], details["tier_rules"] = _match_rule_tiers(
+            config, context.market_factors
+        )
     else:
-        regime = "neutral"
-    details["rule_groups"] = {
-        "defensive": {"matched": defensive_hit, "rules": defensive_detail},
-        "offensive": {"matched": offensive_hit, "rules": offensive_detail},
-    }
+        rules = config.rules
+        defensive_hit, defensive_detail = _evaluate_rule_group(
+            rules.defensive if rules else None, context.market_factors
+        )
+        offensive_hit, offensive_detail = _evaluate_rule_group(
+            rules.offensive if rules else None, context.market_factors
+        )
+        if defensive_hit:
+            regime = "defensive"
+        elif offensive_hit:
+            regime = "offensive"
+        else:
+            regime = "neutral"
+        details["rule_groups"] = {
+            "defensive": {"matched": defensive_hit, "rules": defensive_detail},
+            "offensive": {"matched": offensive_hit, "rules": offensive_detail},
+        }
     if missing_factors:
         details["missing_factors"] = missing_factors
     if proxy is not None:
@@ -413,6 +399,104 @@ def _calculate_rules_timing(
     composite = RULES_REGIME_SCORES[regime]
     details["composite_score"] = composite
     return composite, regime, details
+
+
+def _evaluate_rule_group(
+    group: FilterConfig | None, market_factors: dict[str, float | None]
+) -> tuple[bool, list[dict[str, Any]]]:
+    """评估单个择时规则组（规则组或规则模式档位），返回 (是否满足, 逐条规则明细)。
+
+    与过滤规则同一口径：比较市场级因子原值；缺失按各规则的 ``missing_strategy``
+    处理（pass=视为满足，fail/exclude=视为不满足）。
+
+    Args:
+        group: 规则组；None 或无规则时视为不满足。
+        market_factors: 市场级因子值，key=因子引用。
+
+    Returns:
+        (是否满足, 逐条规则明细列表)。
+    """
+    if group is None or not group.rules:
+        return False, []
+    results: list[dict[str, Any]] = []
+    for rule in group.rules:
+        value = market_factors.get(rule.factor)
+        target: float | list[float] | None
+        if rule.compare_to is not None:
+            target = market_factors.get(rule.compare_to)
+        else:
+            target = rule.value
+        missing = value is None or target is None
+        passed = rule.missing_strategy == "pass" if missing else _check_rule(value, rule.op, target)
+        results.append(
+            {
+                "factor": rule.factor,
+                "op": rule.op,
+                "threshold": rule.compare_to if rule.compare_to is not None else rule.value,
+                "value": value,
+                "compare_value": target if rule.compare_to is not None else None,
+                "passed": passed,
+                "missing": missing,
+            }
+        )
+    flags = [item["passed"] for item in results]
+    return (all(flags) if group.logic == "AND" else any(flags)), results
+
+
+def _match_rule_tiers(
+    config: TimingConfig, market_factors: dict[str, float | None]
+) -> tuple[str, int | None, list[dict[str, Any]]]:
+    """规则模式多档仓位：按顺序评估档位，首个命中的档位决定原始 regime。
+
+    全部档位都会评估（便于明细展示"哪些档位条件满足"），但只取第一个命中者。
+
+    Args:
+        config: 择时配置（combine=rules 且配置了 tiers）。
+        market_factors: 市场级因子值。
+
+    Returns:
+        (原始 regime, 命中档位序号, 逐档明细)；都未命中时 regime 为 neutral、
+        序号为 None。
+    """
+    matched: int | None = None
+    tier_details: list[dict[str, Any]] = []
+    for index, tier in enumerate(config.tiers):
+        hit, rule_details = _evaluate_rule_group(tier.as_rule_group(), market_factors)
+        tier_details.append(
+            {
+                "index": index,
+                "label": tier.display_label(index),
+                "regime": tier.regime,
+                "exposure": tier.exposure,
+                "matched": hit,
+                "rules": rule_details,
+            }
+        )
+        if hit and matched is None:
+            matched = index
+    if matched is None:
+        return "neutral", None, tier_details
+    # regime 在规则模式档位上必填（服务校验保证）；缺省按中性处理
+    return config.tiers[matched].regime or "neutral", matched, tier_details
+
+
+def match_score_tier(config: TimingConfig, composite: float) -> int | None:
+    """加权模式多档仓位：返回综合分命中的第一个档位序号。
+
+    档位按 ``min_score`` 降序排列（服务校验保证），综合分 ≥ ``min_score`` 即命中；
+    未给 ``min_score`` 的档位在加权模式下不参与匹配。
+
+    Args:
+        config: 择时配置（combine=weighted 且配置了 tiers）。
+        composite: 未取整的综合分（与阈值判定同一口径）。
+
+    Returns:
+        命中档位序号；综合分低于全部档位下限时为 None。
+    """
+    for index, tier in enumerate(config.tiers):
+        if tier.min_score is not None and composite >= tier.min_score:
+            return index
+    return None
 
 
 def _degraded_regime(config: TimingConfig, context: EngineContext) -> tuple[str, str]:

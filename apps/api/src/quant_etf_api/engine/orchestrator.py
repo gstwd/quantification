@@ -422,6 +422,15 @@ class StrategyEngine:
                     f"择时：{timing.label}（确信度 {timing.confidence:.0f}%），"
                     f"目标仓位 {total_exposure:.0%}"
                 )
+                if timing.tier is not None and timing.exposure is not None:
+                    # 多档仓位：仓位由档位而非 regime 仓位表决定，需在说明中写明
+                    payload["timing_tier_label"] = timing.tier_label
+                    payload["timing_tier_exposure"] = timing.exposure
+                    payload["plan_reasoning"] = (
+                        f"择时：{timing.label}·{timing.tier_label}"
+                        f"（档位仓位 {timing.exposure:.0%}，确信度 {timing.confidence:.0f}%），"
+                        f"目标仓位 {total_exposure:.0%}"
+                    )
             if ranking:
                 payload["momentum_rank"] = ranking.momentum_rank
                 payload["valuation_rank"] = ranking.valuation_rank

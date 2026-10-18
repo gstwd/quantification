@@ -563,6 +563,11 @@ class StrategyConfigService:
                         f"regime_rules.{regime}.", rule.portfolio, (regime,)
                     )
                 )
+                if config.timing.tiers and rule.portfolio and rule.portfolio.timing_exposure:
+                    warnings.append(
+                        f"regime_rules.{regime}.portfolio.timing_exposure 只在未命中仓位档位时"
+                        "生效：命中 timing.tiers 时目标仓位取档位 exposure"
+                    )
         if config.regime_rules and config.timing is None:
             warnings.append(
                 "已配置 regime_rules 但未配置择时（timing）：regime 覆盖永远不会生效"
@@ -595,6 +600,8 @@ class StrategyConfigService:
                         (portfolio.timing_exposure or {}).values()
                         or _DEFAULT_TIMING_EXPOSURE.values()
                     )
+                    # 多档仓位命中时直接取档位仓位
+                    exposures.extend(tier.exposure for tier in config.timing.tiers)
                 if config.risk.max_asset_weight < max(exposures):
                     warnings.append(
                         f"winner_take_all 的目标仓位最高 {max(exposures):.0%}，但 "
@@ -892,12 +899,18 @@ class StrategyConfigService:
                 warnings.append("timing.rules 仅在 combine=rules 时生效，当前加权模式会忽略")
         else:
             groups = timing.rules
-            if groups is None or not any(
+            has_groups = groups is not None and any(
                 group is not None and group.rules for group in (groups.offensive, groups.defensive)
-            ):
+            )
+            if timing.tiers and has_groups:
+                errors.append(
+                    "规则模式下 timing.tiers 与 timing.rules.offensive / defensive 互斥："
+                    "配置多档仓位时由档位的 regime 决定市场状态，请删除进攻 / 防守规则组"
+                )
+            elif not timing.tiers and not has_groups:
                 errors.append(
                     "规则模式（combine=rules）必须在 timing.rules.offensive / defensive "
-                    "中至少配置一条规则"
+                    "中至少配置一条规则（或改用 timing.tiers 多档仓位）"
                 )
             if groups is not None:
                 for regime in ("offensive", "defensive"):
@@ -915,12 +928,84 @@ class StrategyConfigService:
                     "timing.state.hysteresis 只对加权综合分生效，规则模式下不起作用；"
                     "可改用 confirm_days / hold_on_neutral 抑制翻转"
                 )
+        tier_errors, tier_warnings = StrategyConfigService._timing_tier_issues(timing)
+        errors.extend(tier_errors)
+        warnings.extend(tier_warnings)
         refs = set(timing.factor_refs())
         for ref, codes in timing.factor_proxies.items():
             if not codes:
                 errors.append(f"timing.factor_proxies.{ref} 不能为空列表")
             if ref not in refs:
                 warnings.append(f"timing.factor_proxies.{ref} 不是择时实际使用的因子，已忽略")
+        return errors, warnings
+
+    @staticmethod
+    def _timing_tier_issues(timing: TimingConfig) -> tuple[list[str], list[str]]:
+        """校验多档仓位（timing.tiers）在两种综合方式下的命中条件。
+
+        - 加权模式：每档必须给 ``min_score`` 且严格降序（首个命中即生效，乱序会让
+          低档位永远命不中）；不得给规则；``regime`` 由阈值判定、档位上的值被忽略；
+          最低档下限 > 0 时提示未覆盖区间回退 regime 仓位表。
+        - 规则模式：每档必须声明 ``regime`` 并至少一条规则（规则跨字段校验与过滤
+          规则一致）；``min_score`` 被忽略；``hold_on_neutral`` 会把命中 neutral 档位
+          也当作无信号沿用前值，需提示。
+
+        Args:
+            timing: 择时配置。
+
+        Returns:
+            (错误列表, 警告列表)；未配置档位时均为空。
+        """
+        errors: list[str] = []
+        warnings: list[str] = []
+        if not timing.tiers:
+            return errors, warnings
+        if timing.combine == "weighted":
+            previous: float | None = None
+            for index, tier in enumerate(timing.tiers):
+                where = f"timing.tiers[{index}]"
+                if tier.rules:
+                    errors.append(
+                        f"{where}：加权模式按综合分匹配档位，不能配置 rules（规则档位需 combine=rules）"
+                    )
+                if tier.regime is not None:
+                    warnings.append(
+                        f"{where}.regime 在加权模式下被忽略：regime 由 timing.thresholds 判定"
+                    )
+                if tier.min_score is None:
+                    errors.append(f"{where}.min_score 必填（加权模式：综合分 ≥ min_score 命中）")
+                    continue
+                if previous is not None and tier.min_score >= previous:
+                    errors.append(
+                        f"{where}.min_score={tier.min_score:g} 必须小于上一档的 {previous:g}："
+                        "档位按顺序首个命中生效，需按 min_score 严格降序排列"
+                    )
+                previous = tier.min_score
+            if previous is not None and previous > 0:
+                warnings.append(
+                    f"综合分低于 {previous:g} 时未命中任何档位，按 regime 查 "
+                    "portfolio.timing_exposure（或默认三档表）决定仓位"
+                )
+            return errors, warnings
+
+        for index, tier in enumerate(timing.tiers):
+            where = f"timing.tiers[{index}]"
+            if tier.regime is None:
+                errors.append(
+                    f"{where}.regime 必填（规则模式：命中该档时的 offensive / neutral / defensive）"
+                )
+            if not tier.rules:
+                errors.append(f"{where} 至少需要一条命中规则")
+            if tier.min_score is not None:
+                warnings.append(f"{where}.min_score 仅在加权模式生效，规则模式下被忽略")
+            errors.extend(
+                StrategyConfigService._filter_block_errors("", tier.as_rule_group(), block=where)
+            )
+        if timing.state.hold_on_neutral and any(tier.regime == "neutral" for tier in timing.tiers):
+            warnings.append(
+                "timing.state.hold_on_neutral 对 neutral 档位同样生效：命中 neutral 档位时"
+                "也会沿用上一决策日的 regime 与档位，中性档位的仓位不会生效"
+            )
         return errors, warnings
 
     @staticmethod
