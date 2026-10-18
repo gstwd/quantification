@@ -276,6 +276,8 @@ class TestEvaluate:
             date(2024, 1, i + 1) for i in range(8)
         ]
         svc._create_backtest = MagicMock(return_value="bt_x")
+        # 异步模式会入队回测；必须替换掉入队，否则会经全局任务队列写真实 background_job
+        svc._enqueue_backtest = MagicMock()
 
         svc.evaluate("opt1", folds=2, async_mode=True)
 

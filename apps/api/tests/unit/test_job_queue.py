@@ -346,6 +346,17 @@ def _clean_cancel_cache() -> Any:
     clear_cache()
 
 
+@pytest.fixture(autouse=True)
+def _stub_abandon_handlers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把业务侧回收回调替换为空操作，保证用例不触达真实数据库。
+
+    真实回调经全局 SessionLocal 读写 backtest_run 等表；僵尸扫描类用例只验证
+    队列状态，需要断言回调本身的用例在测试内自行覆盖。
+    """
+    for job_type in list(JOB_ABANDON_HANDLERS):
+        monkeypatch.setitem(JOB_ABANDON_HANDLERS, job_type, lambda payload, reason: None)
+
+
 class TestJobQueue:
     """任务队列核心行为测试。"""
 
