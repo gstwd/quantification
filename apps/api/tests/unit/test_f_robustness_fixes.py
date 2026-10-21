@@ -272,7 +272,7 @@ class TestTrialLedger:
     """Deflated Sharpe 的试验次数台账。"""
 
     def test_breakdown_counts_robustness_and_optimization(self) -> None:
-        """台账 = 稳健性批次变体数 + 已评估优化会话数（历史实现漏计后者）。"""
+        """台账含稳健性批次变体数 + 已评估优化会话数（历史实现漏计后者）。"""
         service = object.__new__(RobustnessService)
         db = MagicMock()
         service._db = db
@@ -281,18 +281,24 @@ class TestTrialLedger:
         # 第二段查询：count(strategy_optimization)
         db.query.return_value.select_from.return_value.filter.return_value.scalar.return_value = 3
 
+        # 第三段查询：research_trial 按来源分组（此处无研究台账记录）
+        db.query.return_value.filter.return_value.group_by.return_value.all.return_value = []
+
         assert service._trial_ledger_breakdown("s1") == {
             "robustness": 12,
             "optimization": 3,
+            "research_batch": 0,
+            "manual": 0,
+            "estimated": 0,
         }
         assert service._trial_ledger("s1") == 15
 
-    def test_ledger_is_at_least_one_on_failure(self) -> None:
-        """台账查询失败时至少返回 1（保持历史行为）。"""
+    def test_ledger_failure_raises(self) -> None:
+        """台账查询失败时异常上抛，不再退回 N=1（否则 Deflated Sharpe 会静默放行）。"""
         service = object.__new__(RobustnessService)
         db = MagicMock()
         db.query.side_effect = RuntimeError("db down")
         service._db = db
 
-        assert service._trial_ledger_breakdown("s1") == {"robustness": 1, "optimization": 0}
-        assert service._trial_ledger("s1") == 1
+        with pytest.raises(RuntimeError, match="db down"):
+            service._trial_ledger_breakdown("s1")

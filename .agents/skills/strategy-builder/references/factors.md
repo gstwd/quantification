@@ -89,6 +89,22 @@
 | `change_pct` | 当日涨跌幅 (%) | `index_daily_bar.change_pct` |
 | `close_price` | 当日收盘价 | `index_daily_bar.close_price` |
 
+## 派生因子（`expr` 模板）
+
+在已有因子之上做四则与函数组合，现算、不落库。在 `factor_aliases` 中声明：
+
+```json
+"factor_aliases": {
+  "dev250": {"template_id": "ma_deviation", "params": {"period": 250}},
+  "dev60":  {"template_id": "ma_deviation", "params": {"period": 60}},
+  "dev_spread": {"template_id": "expr", "params": {"expr": "dev250 - dev60"}}
+}
+```
+
+- 语法白名单：数值常量、因子引用（别名或模板 ID）、`+ - * / **`、一元正负号、`abs / min / max / log / sqrt / sign`；不允许比较、下标、属性等其他语法；最长 200 字符。可嵌套引用其他派生因子（最多 4 层，循环引用被拒绝）。
+- 任一依赖缺失、除零或定义域错误时值为 None（与因子缺失同一语义）。依赖按各自模板的回望窗口现算；用于择时时同样按择时代理取值，原值不在 0-100 时要配变换。
+- **诊断前置门槛**：派生因子进入 `research batch` 变体或 `optimization start` 候选前，必须先用 `research factor-ic` 或 `research buckets` 诊断过（按「表达式 + 依赖口径」的指纹记入研究台账，与别名名字无关），否则命令直接拒绝。尚未进入策略的组合用 `--strategy <提供别名的策略> --factor expr --params '{"expr": "..."}' [--aliases '<新增别名 JSON>']` 诊断。
+
 ## 注意事项
 
 - 所有因子以 `index_code` 为计算单位（如 `000300`、`000905`），不是 ETF 代码

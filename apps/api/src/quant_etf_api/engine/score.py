@@ -11,7 +11,7 @@ from typing import Any, Protocol
 
 from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.engine.config import FilterConfig, ScoreConfig, TimingConfig
-from quant_etf_api.engine.filter import _check_rule
+from quant_etf_api.engine.filter import evaluate_rule_group
 from quant_etf_api.engine.pipeline_detail import (
     AssetScoreDetail,
     FactorScoreBreakdown,
@@ -416,31 +416,35 @@ def _evaluate_rule_group(
     Returns:
         (是否满足, 逐条规则明细列表)。
     """
-    if group is None or not group.rules:
+    if group is None or group.is_empty:
         return False, []
     results: list[dict[str, Any]] = []
-    for rule in group.rules:
-        value = market_factors.get(rule.factor)
-        target: float | list[float] | None
-        if rule.compare_to is not None:
-            target = market_factors.get(rule.compare_to)
-        else:
-            target = rule.value
-        missing = value is None or target is None
-        passed = rule.missing_strategy == "pass" if missing else _check_rule(value, rule.op, target)
-        results.append(
-            {
-                "factor": rule.factor,
-                "op": rule.op,
-                "threshold": rule.compare_to if rule.compare_to is not None else rule.value,
-                "value": value,
-                "compare_value": target if rule.compare_to is not None else None,
-                "passed": passed,
-                "missing": missing,
-            }
-        )
-    flags = [item["passed"] for item in results]
-    return (all(flags) if group.logic == "AND" else any(flags)), results
+
+    def _observe(
+        _index: int,
+        rule: Any,
+        value: float | None,
+        compare_value: Any,
+        passed: bool,
+        missing: bool,
+        path: str,
+    ) -> None:
+        item: dict[str, Any] = {
+            "factor": rule.factor,
+            "op": rule.op,
+            "threshold": rule.compare_to if rule.compare_to is not None else rule.value,
+            "value": value,
+            "compare_value": compare_value,
+            "passed": passed,
+            "missing": missing,
+        }
+        if path:
+            # 嵌套子组里的规则带上子组路径，顶层规则明细与改造前一致
+            item["group"] = path
+        results.append(item)
+
+    matched = evaluate_rule_group(group, market_factors.get, observer=_observe)
+    return matched, results
 
 
 def _match_rule_tiers(

@@ -422,6 +422,7 @@ class TestFinish:
             description="基线描述",
         )
 
+        svc._record_no_strict = MagicMock()
         result = svc.finish(
             "opt1",
             "accept",
@@ -429,13 +430,23 @@ class TestFinish:
             promote=True,
             # 严格验收默认开启；本用例只验证 promote 写回行为，故显式关闭清单硬校验
             strict=False,
+            no_strict_reason="只验证 promote 写回",
         )
 
+        svc._record_no_strict.assert_called_once()
         assert result["status"] == "accepted"
         assert result["report"] == "# 报告"
         update_req = svc._config_svc.update_config.call_args.args[1]
         assert update_req.config_json == _CANDIDATE_CONFIG
         assert update_req.version == "1.0.1"
+
+    def test_non_strict_accept_requires_reason(self) -> None:
+        """非严格接受不给理由时拒绝，避免"沉默放行"。"""
+        svc = _make_service()
+        svc._repo = MagicMock()
+        svc._repo.find_by_id.return_value = _make_session(fold_summary={"metrics": {}})
+        with pytest.raises(ValueError, match="理由"):
+            svc.finish("opt1", "accept", strict=False)
 
     def test_strict_accept_rejects_bad_candidate(self) -> None:
         """严格模式夏普不及基线时拒绝接受。"""

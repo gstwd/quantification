@@ -279,7 +279,8 @@ class TestSingleFactorSemantics:
 _TEMPLATE_IDS = [
     template_id
     for template_id in build_default_registry().ids()
-    if template_id not in _PANEL_TEMPLATES
+    # 派生因子不直接计算（由 compute_matrix 在依赖算完后求值），不参与逐模板一致性检查
+    if template_id not in _PANEL_TEMPLATES and template_id != "expr"
 ]
 
 
@@ -290,6 +291,8 @@ class TestAllTemplatesConsistency:
         """内置模板全部实现批量协议，现算不再走逐日时点化上下文。"""
         registry = build_default_registry()
         for template in registry.all():
+            if template.template_id == "expr":
+                continue  # 派生因子由 compute_matrix 统一求值，不实现批量协议
             assert isinstance(template.build_computer(), BatchFactorComputer), template.template_id
 
     @pytest.mark.parametrize("template_id", _TEMPLATE_IDS)

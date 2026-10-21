@@ -7,4 +7,5 @@ Claude 专属约定：
 - 不要复制或覆盖 `AGENTS.md` 中的规则；需要新增跨助手规则时只修改 `AGENTS.md`。
 - 策略构建任务使用 `.claude/skills/strategy-builder/`；与 Codex 同名技能的共同边界以 `AGENTS.md`、当前 schema 和 CLI 为准。
 - 策略优化任务优先读取 `.agents/skills/strategy-optimizer/` 的流程与约束；运行命令前以当前 CLI `--help` 为准。
+- 研究战役（自动研究循环）使用 `.claude/skills/research-campaign/`；被 `research campaign run` 启动的 headless 会话按任务卡角色读取其中的 `references/researcher.md` 或 `references/reviewer.md`。
 - `.claude/settings.json` 只管理 Claude 插件启用状态，不存放业务架构或安全规则。

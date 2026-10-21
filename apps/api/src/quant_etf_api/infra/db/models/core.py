@@ -601,7 +601,10 @@ class StrategyConfigModel(Base):
     """
 
     __tablename__ = "strategy_config"
-    __table_args__ = (Index("ix_strategy_config_source_batch", "source_batch_id"),)
+    __table_args__ = (
+        Index("ix_strategy_config_source_batch", "source_batch_id"),
+        Index("ix_strategy_config_lineage", "lineage_id"),
+    )
 
     strategy_id: Mapped[str] = mapped_column(
         String(64), primary_key=True, comment="策略唯一标识，如 index_allocation"
@@ -634,6 +637,11 @@ class StrategyConfigModel(Base):
     source_batch_id: Mapped[str | None] = mapped_column(
         String(64),
         comment="派生来源批次 ID（稳健性验证批次），手工策略为 NULL（D-4）",
+    )
+    lineage_id: Mapped[str | None] = mapped_column(
+        String(64),
+        comment="研究线 ID（研究线根策略 ID）：优化候选与稳健性变体继承基线的研究线，"
+        "试验次数 N、试验预算与验证期消费按研究线汇总；NULL 视同自身 strategy_id",
     )
     validation_consumed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
@@ -1237,6 +1245,268 @@ class RobustnessRunModel(Base):
     )
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime, comment="批次完成时间（UTC），未完成时为 NULL"
+    )
+
+
+class ResearchHypothesisModel(Base):
+    """研究假设台账表，记录每个被检验的研究假设及其结论。
+
+    假设先登记（含事先写定的判定标准）再检验；检验产生的研究批量评估、
+    优化会话与稳健性批次以 ``research_trial`` 行挂到假设下。结论（接受 / 否决 /
+    无定论 / 受 schema 限制）连同原因入库，供后续会话开工前查询"已证伪方向"。
+    指数级结论（如某指数上趋势规则失效）通过 ``index_codes`` / ``tags`` 跨策略检索。
+    """
+
+    __tablename__ = "research_hypothesis"
+    __table_args__ = (
+        Index("ix_research_hypothesis_strategy", "strategy_id"),
+        Index("ix_research_hypothesis_status", "status"),
+    )
+
+    hypothesis_id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, comment="假设唯一 ID（h + 12 位十六进制）"
+    )
+    strategy_id: Mapped[str | None] = mapped_column(
+        String(64), comment="关联策略 ID；指数级或跨策略假设可为空"
+    )
+    index_codes: Mapped[list | None] = mapped_column(
+        JSONB, comment="假设涉及的指数代码列表，用于跨策略检索"
+    )
+    tags: Mapped[list | None] = mapped_column(JSONB, comment="自由标签列表，如 pv_resonance")
+    category: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        comment="改动类别：timing/score/filter/rank/portfolio/risk/rebalance/factor/universe/other",
+    )
+    statement: Mapped[str] = mapped_column(Text, nullable=False, comment="假设陈述")
+    rationale: Mapped[str | None] = mapped_column(Text, comment="提出假设的依据（诊断证据等）")
+    pre_registration: Mapped[dict | None] = mapped_column(
+        JSONB,
+        comment="检验前写定的判定标准 {criteria, execution_models}，检验后不得改写",
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="open",
+        server_default=sa.text("'open'"),
+        comment="状态：open/testing/accepted/rejected/inconclusive/blocked_by_schema",
+    )
+    conclusion: Mapped[str | None] = mapped_column(Text, comment="结论与原因（关闭时必填）")
+    parent_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("research_hypothesis.hypothesis_id", ondelete="SET NULL"),
+        comment="父假设 ID（假设树），父假设删除时置空",
+    )
+    campaign_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("research_campaign.campaign_id", ondelete="SET NULL"),
+        comment="所属研究战役 ID（自动研究循环登记），人工登记为 NULL",
+    )
+    created_by: Mapped[str | None] = mapped_column(
+        String(64), comment="登记者标识，如 claude / codex / human"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow_aware, comment="登记时间（UTC，timestamptz）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow_aware,
+        onupdate=utcnow_aware,
+        comment="最后更新时间（UTC，timestamptz）",
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), comment="关闭时间（UTC，timestamptz），未关闭为 NULL"
+    )
+
+
+class ResearchTrialModel(Base):
+    """研究试验台账表，记录每一次检验动作及其试验次数。
+
+    ``kind`` 区分来源：
+    - ``research_batch``：研究批量评估（不落回测），每次运行自动写一行，
+      ``trial_count`` 为评估的非基线变体数，计入多重检验的试验次数 N；
+    - ``manual``：平台外的人工/原型对比或历史补录估算值，同样计入 N；
+    - ``optimization`` / ``robustness``：只是把会话 / 批次挂到假设下的关联行，
+      N 仍从 ``strategy_optimization`` / ``robustness_run`` 统计，避免重复计数。
+    """
+
+    __tablename__ = "research_trial"
+    __table_args__ = (
+        Index("ix_research_trial_strategy", "strategy_id"),
+        Index("ix_research_trial_hypothesis", "hypothesis_id"),
+    )
+
+    trial_id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="试验唯一 ID")
+    hypothesis_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("research_hypothesis.hypothesis_id", ondelete="SET NULL"),
+        comment="所属假设 ID；未挂假设的探索为 NULL（仍计入 N）",
+    )
+    strategy_id: Mapped[str | None] = mapped_column(
+        String(64), comment="试验所针对的策略 ID（N 按此归属）；派生因子诊断记录可为空"
+    )
+    kind: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        comment="来源：research_batch/manual 计入 N；optimization/robustness 仅为关联",
+    )
+    ref_id: Mapped[str | None] = mapped_column(
+        String(64), comment="关联的优化会话 ID 或稳健性批次 ID"
+    )
+    execution_model: Mapped[str | None] = mapped_column(
+        String(32), comment="试验所用执行模型（t_plus_1_open / t_plus_1_close）"
+    )
+    start_date: Mapped[date | None] = mapped_column(Date, comment="评估区间起始日期（含）")
+    end_date: Mapped[date | None] = mapped_column(Date, comment="评估区间截止日期（含）")
+    trial_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=sa.text("0"),
+        comment="本次检验的独立变体数（试验次数）",
+    )
+    is_estimated: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=sa.text("FALSE"),
+        comment="是否为历史补录的估算值（非运行时自动记录）",
+    )
+    config_hashes: Mapped[list | None] = mapped_column(JSONB, comment="被检验的变体配置哈希列表")
+    summary: Mapped[dict | None] = mapped_column(JSONB, comment="关键指标摘要")
+    note: Mapped[str | None] = mapped_column(Text, comment="备注（补录依据、人工说明等）")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow_aware, comment="记录时间（UTC，timestamptz）"
+    )
+
+
+class ResearchCampaignModel(Base):
+    """研究战役表：一次自动研究循环的目标、范围、限额与进度。
+
+    平台持有规则（限额、停止条件、命令拦截），agent 只负责每一步的研究判断。
+    每一步由驱动器启动一个全新的 headless agent 会话执行，步骤记在
+    ``research_campaign_step``；战役内登记的假设带 ``campaign_id``。
+    """
+
+    __tablename__ = "research_campaign"
+    __table_args__ = (Index("ix_research_campaign_status", "status"),)
+
+    campaign_id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, comment="战役唯一 ID（c + 12 位十六进制）"
+    )
+    objective: Mapped[str] = mapped_column(Text, nullable=False, comment="研究目标")
+    strategy_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="种子基线策略 ID（战役只能改动其研究线内的策略）"
+    )
+    lineage_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="种子策略所在研究线 ID（N、预算按此汇总）"
+    )
+    index_codes: Mapped[list | None] = mapped_column(JSONB, comment="研究范围涉及的指数代码")
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="running",
+        server_default=sa.text("'running'"),
+        comment="状态：running=进行中，stopped=触发停止条件或人工停止，completed=研究员判定无新方向",
+    )
+    max_trials: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="本战役最多新增的试验次数（研究线 N 的增量）"
+    )
+    max_hours: Mapped[float] = mapped_column(Float, nullable=False, comment="墙钟时长上限（小时）")
+    max_rounds: Mapped[int] = mapped_column(Integer, nullable=False, comment="研究员轮数上限")
+    max_consecutive_rejects: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="连续否决的假设数上限"
+    )
+    max_step_usd: Mapped[float | None] = mapped_column(
+        Float, comment="单步 agent 会话的花费上限（美元，传给 claude --max-budget-usd）"
+    )
+    model: Mapped[str | None] = mapped_column(String(64), comment="agent 使用的模型（可选）")
+    trials_at_start: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="开始时研究线已用试验次数"
+    )
+    max_diagnostics: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=30,
+        server_default=sa.text("30"),
+        comment="战役内诊断命令（factor-ic / buckets / signal-lab）次数上限",
+    )
+    diagnostics_used: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=sa.text("0"),
+        comment="战役内已执行的诊断命令次数（放行时计数）",
+    )
+    stop_reason: Mapped[str | None] = mapped_column(Text, comment="停止原因")
+    created_by: Mapped[str | None] = mapped_column(String(64), comment="发起者标识")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow_aware, comment="创建时间（UTC，timestamptz）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow_aware,
+        onupdate=utcnow_aware,
+        comment="最后更新时间（UTC，timestamptz）",
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), comment="结束时间（UTC，timestamptz），进行中为 NULL"
+    )
+
+
+class ResearchCampaignStepModel(Base):
+    """研究战役步骤表：每一步对应一个独立的 headless agent 会话。
+
+    角色：``researcher``（登记假设、做检验、请求评审）与 ``reviewer``
+    （只看证据给出评审结论，推荐接受时可以严格模式 finish accept，不得 promote）。
+    """
+
+    __tablename__ = "research_campaign_step"
+    __table_args__ = (Index("ix_research_campaign_step_campaign", "campaign_id"),)
+
+    step_id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="步骤唯一 ID")
+    campaign_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("research_campaign.campaign_id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属战役 ID",
+    )
+    round: Mapped[int] = mapped_column(Integer, nullable=False, comment="轮次（从 1 开始）")
+    role: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="角色：researcher / reviewer"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="running",
+        server_default=sa.text("'running'"),
+        comment="状态：running / done / failed",
+    )
+    agent_session_id: Mapped[str | None] = mapped_column(
+        String(64), comment="agent 会话 ID（headless 可用 claude --resume 复查；桌面模式为桌面会话 ID）"
+    )
+    orchestrator_session_id: Mapped[str | None] = mapped_column(
+        String(64),
+        comment="桌面编排模式下编排会话的 CLAUDE_CODE_SESSION_ID：步骤运行期间只有该会话的"
+        " CLI 调用不受战役模式约束；headless 驱动器模式为空",
+    )
+    hypothesis_id: Mapped[str | None] = mapped_column(String(64), comment="本步涉及的假设 ID")
+    optimization_id: Mapped[str | None] = mapped_column(
+        String(64), comment="本步提交评审 / 被评审的优化会话 ID"
+    )
+    outcome: Mapped[str | None] = mapped_column(
+        String(32),
+        comment="研究员：review_requested/rejected/blocked/no_idea；"
+        "评审员：recommend_accept/reject/needs_more",
+    )
+    summary: Mapped[str | None] = mapped_column(Text, comment="本步结论摘要（agent 回报）")
+    cost_usd: Mapped[float | None] = mapped_column(Float, comment="本步 agent 花费（美元）")
+    error: Mapped[str | None] = mapped_column(Text, comment="失败原因")
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow_aware, comment="开始时间（UTC，timestamptz）"
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), comment="结束时间（UTC，timestamptz）"
     )
 
 

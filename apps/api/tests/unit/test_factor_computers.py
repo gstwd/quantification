@@ -501,7 +501,7 @@ class TestFactorTemplateRegistry:
     def test_default_registry_has_all_templates(self) -> None:
         """默认注册表应包含全部内置模板。"""
         registry = build_default_registry()
-        assert len(registry.all()) == 36
+        assert len(registry.all()) == 37
 
     def test_default_registry_template_ids(self) -> None:
         """默认注册表的 template_id 集合应包含全部内置模板。"""
@@ -544,6 +544,7 @@ class TestFactorTemplateRegistry:
             "erp_percentile",
             "index_diffusion_ratio",
             "rrg_industry_match_score",
+            "expr",
         }
 
     def test_retired_template_ids_are_gone(self) -> None:
@@ -609,7 +610,7 @@ class TestFactorTemplateRegistry:
         """自定义注册表与默认注册表互不影响。"""
         registry = FactorTemplateRegistry()
         assert registry.all() == []
-        assert len(build_default_registry().all()) == 36
+        assert len(build_default_registry().all()) == 37
 
 
 # ─── LowAmplitudeMomentumComputer（低振幅条件动量）──────────────────────────────

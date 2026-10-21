@@ -431,6 +431,13 @@ class StrategyEngine:
                         f"（档位仓位 {timing.exposure:.0%}，确信度 {timing.confidence:.0f}%），"
                         f"目标仓位 {total_exposure:.0%}"
                     )
+                if timing.exposure_cap is not None:
+                    # 条件仓位上限命中：说明里写明封顶来源，避免误读为档位 / regime 仓位
+                    payload["timing_exposure_cap"] = timing.exposure_cap
+                    payload["timing_exposure_cap_label"] = timing.exposure_cap_label
+                    payload["plan_reasoning"] += (
+                        f"；条件上限「{timing.exposure_cap_label}」封顶 {timing.exposure_cap:.0%}"
+                    )
             if ranking:
                 payload["momentum_rank"] = ranking.momentum_rank
                 payload["valuation_rank"] = ranking.valuation_rank

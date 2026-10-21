@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import sqlalchemy as sa
+
 from quant_etf_api.infra.db.models.core import StrategyConfigModel
 from quant_etf_api.infra.db.repositories.base import BaseRepository
 
@@ -23,6 +25,14 @@ class StrategyConfigRepository(BaseRepository):
     def find_by_id(self, strategy_id: str) -> StrategyConfigModel | None:
         """按主键查询策略配置。"""
         return self._db.get(StrategyConfigModel, strategy_id)
+
+    def find_all_rows(self) -> list[StrategyConfigModel]:
+        """查询全部策略（含草稿与变体），按策略 ID 升序（研究线汇总用）。"""
+        return (
+            self._db.query(StrategyConfigModel)
+            .order_by(StrategyConfigModel.strategy_id.asc())
+            .all()
+        )
 
     def upsert(self, model: StrategyConfigModel) -> None:
         """插入或更新策略配置。"""
@@ -64,6 +74,23 @@ class StrategyConfigRepository(BaseRepository):
                 StrategyConfigModel.source_batch_id == batch_id,
                 StrategyConfigModel.is_variant == True,  # noqa: E712
             )
+            .order_by(StrategyConfigModel.strategy_id.asc())
+            .all()
+        )
+
+    def find_lineage_members(self, lineage_id: str) -> list[StrategyConfigModel]:
+        """查询研究线的全部成员策略（``lineage_id`` 为空的行视同自身 ID）。
+
+        Args:
+            lineage_id: 研究线 ID（研究线根策略 ID）。
+
+        Returns:
+            成员策略行列表，按策略 ID 升序。
+        """
+        line = sa.func.coalesce(StrategyConfigModel.lineage_id, StrategyConfigModel.strategy_id)
+        return (
+            self._db.query(StrategyConfigModel)
+            .filter(line == lineage_id)
             .order_by(StrategyConfigModel.strategy_id.asc())
             .all()
         )

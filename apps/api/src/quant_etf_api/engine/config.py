@@ -84,16 +84,42 @@ class FilterRule(BaseModel):
     missing_strategy: Literal["fail", "pass", "exclude"] = "fail"
 
 
+# 规则组最大嵌套层数（顶层算第 1 层）：足以表达"(A 且 B) 或 C"，避免不可读的深层树
+MAX_RULE_GROUP_DEPTH = 3
+
+
 class FilterConfig(BaseModel):
-    """过滤配置（可选模块）。
+    """过滤配置 / 规则组（过滤、择时规则组、规则模式档位、条件仓位上限共用）。
+
+    ``rules`` 与 ``groups`` 一起按 ``logic`` 组合：AND=全部满足，OR=任一满足。
+    子规则组可再嵌套（最多 :data:`MAX_RULE_GROUP_DEPTH` 层），用于表达
+    "(RSI ≤ 25 且 年线乖离 ≤ −10) 或 年线乖离 ≤ −15" 这类条件。
 
     Attributes:
         logic: 多规则逻辑，AND=全部满足, OR=任一满足。
         rules: 过滤规则列表。
+        groups: 子规则组列表（与 rules 同级参与组合）；默认空，存量配置口径不变。
     """
 
     logic: Literal["AND", "OR"] = "AND"
     rules: list[FilterRule] = Field(default_factory=list)
+    groups: list[FilterConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_depth(self) -> FilterConfig:
+        """限制嵌套层数。"""
+        if self.depth() > MAX_RULE_GROUP_DEPTH:
+            raise ValueError(f"规则组最多嵌套 {MAX_RULE_GROUP_DEPTH} 层")
+        return self
+
+    def depth(self) -> int:
+        """规则组的嵌套层数（只有 rules 时为 1）。"""
+        return 1 + max((group.depth() for group in self.groups), default=0)
+
+    @property
+    def is_empty(self) -> bool:
+        """没有任何规则（含子组）。"""
+        return not self.rules and all(group.is_empty for group in self.groups)
 
 
 class TimingRulesConfig(BaseModel):
@@ -141,11 +167,41 @@ class TimingTierConfig(BaseModel):
     """
 
     label: str = Field(default="", max_length=40)
-    exposure: float = Field(ge=0.0, le=1.0)
+    exposure: float | None = Field(default=None, ge=0.0, le=1.0)
+    hold: bool = False
+    exposure_delta: float | None = Field(default=None, ge=-1.0, le=1.0)
+    min_exposure: float = Field(default=0.0, ge=0.0, le=1.0)
+    max_exposure: float = Field(default=1.0, ge=0.0, le=1.0)
     min_score: float | None = Field(default=None, ge=0.0, le=100.0)
     regime: RegimeName | None = None
     logic: Literal["AND", "OR"] = "AND"
     rules: list[FilterRule] = Field(default_factory=list)
+    groups: list[FilterConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_exposure_mode(self) -> TimingTierConfig:
+        """仓位方式三选一：固定仓位 / 维持上一仓位 / 相对上一仓位增减。"""
+        modes = [self.exposure is not None, self.hold, self.exposure_delta is not None]
+        if sum(modes) != 1:
+            raise ValueError("档位必须且只能设置 exposure、hold、exposure_delta 之一")
+        if self.min_exposure > self.max_exposure:
+            raise ValueError("档位 min_exposure 不能大于 max_exposure")
+        return self
+
+    @property
+    def is_dynamic(self) -> bool:
+        """仓位依赖上一决策日的有效仓位（hold 或 exposure_delta）。"""
+        return self.hold or self.exposure_delta is not None
+
+    def exposure_text(self) -> str:
+        """仓位方式的展示文本（如 "50%"、"维持"、"+25%（0%~100%）"）。"""
+        if self.hold:
+            return "维持"
+        if self.exposure_delta is not None:
+            return (
+                f"{self.exposure_delta:+.0%}（{self.min_exposure:.0%}~{self.max_exposure:.0%}）"
+            )
+        return f"{self.exposure:.0%}"
 
     def display_label(self, index: int) -> str:
         """返回档位展示名（未命名时按序号）。
@@ -164,7 +220,37 @@ class TimingTierConfig(BaseModel):
         Returns:
             等价的 FilterConfig。
         """
-        return FilterConfig(logic=self.logic, rules=self.rules)
+        return FilterConfig(logic=self.logic, rules=self.rules, groups=self.groups)
+
+
+class TimingExposureCapConfig(BaseModel):
+    """条件仓位上限（``timing.exposure_caps`` 的一项）：规则组满足时封顶目标总仓位。
+
+    规则比较市场级因子原值（取值来自择时代理，与规则模式同一口径与缺失语义），
+    多条上限同时命中时取最小值；上限在档位 / regime 仓位之后、组合级风控之前施加，
+    例如"5 年估值分位 ≥ 80 时总仓位不超过 50%"。
+
+    Attributes:
+        label: 展示名。
+        max_exposure: 命中时的总仓位上限（0-1）。
+        logic: 多规则逻辑。
+        rules: 命中规则。
+        groups: 子规则组。
+    """
+
+    label: str = Field(default="", max_length=40)
+    max_exposure: float = Field(ge=0.0, le=1.0)
+    logic: Literal["AND", "OR"] = "AND"
+    rules: list[FilterRule] = Field(default_factory=list)
+    groups: list[FilterConfig] = Field(default_factory=list)
+
+    def as_rule_group(self) -> FilterConfig:
+        """转为规则组（复用规则求值与校验）。"""
+        return FilterConfig(logic=self.logic, rules=self.rules, groups=self.groups)
+
+    def display_label(self, index: int) -> str:
+        """返回展示名（未命名时按序号）。"""
+        return self.label or f"仓位上限{index + 1}"
 
 
 class TimingStateConfig(BaseModel):
@@ -180,12 +266,16 @@ class TimingStateConfig(BaseModel):
         hold_on_neutral: 候选 regime 为中性（无信号）时沿用上一有效 regime。
         confirm_days: 切换到新 regime 所需的连续确认决策日数，1 表示当日即切换。
         min_hold_days: 有效 regime 切换后最短持有的决策日数，0 表示不限制。
+        max_exposure_step: 档位决定的目标仓位每个决策日最多变动的幅度（0-1），
+            如 0.25 表示"每次最多加 / 减一档"；None 表示不限制。只约束由 ``tiers``
+            决定的仓位（未命中档位、按 regime 仓位表时不受约束）。
     """
 
     hysteresis: float = Field(default=0.0, ge=0.0, le=50.0)
     hold_on_neutral: bool = False
     confirm_days: int = Field(default=1, ge=1, le=60)
     min_hold_days: int = Field(default=0, ge=0, le=250)
+    max_exposure_step: float | None = Field(default=None, gt=0.0, le=1.0)
 
     @property
     def is_identity(self) -> bool:
@@ -195,6 +285,7 @@ class TimingStateConfig(BaseModel):
             and not self.hold_on_neutral
             and self.confirm_days <= 1
             and self.min_hold_days <= 0
+            and self.max_exposure_step is None
         )
 
 
@@ -221,7 +312,11 @@ class TimingConfig(BaseModel):
         state: 状态层配置（滞回、无信号维持、确认天数、最短持有）。
         tiers: 多档仓位（按顺序匹配，首个命中的档位决定目标总仓位）；空列表表示
             不启用，按 regime 查 ``portfolio.timing_exposure``（存量口径）。规则模式
-            下与 ``rules.offensive/defensive`` 互斥。
+            下与 ``rules.offensive/defensive`` 互斥。档位可用 ``hold`` 维持上一仓位、
+            ``exposure_delta`` 相对上一仓位增减。
+        tier_base_exposure: 动态档位（hold / exposure_delta）在没有上一仓位时的起点
+            （0-1）；配置了动态档位时必填。
+        exposure_caps: 条件仓位上限；命中的上限取最小值封顶目标总仓位。
     """
 
     combine: TimingCombineMode = "weighted"
@@ -234,6 +329,33 @@ class TimingConfig(BaseModel):
     on_degraded: TimingDegradedPolicy = "neutral"
     state: TimingStateConfig = Field(default_factory=TimingStateConfig)
     tiers: list[TimingTierConfig] = Field(default_factory=list)
+    tier_base_exposure: float | None = Field(default=None, ge=0.0, le=1.0)
+    exposure_caps: list[TimingExposureCapConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_dynamic_tiers(self) -> TimingConfig:
+        """动态档位需要起点仓位。"""
+        if self.has_dynamic_tiers and self.tier_base_exposure is None:
+            raise ValueError(
+                "timing.tiers 含 hold / exposure_delta 档位时必须设置 timing.tier_base_exposure"
+            )
+        return self
+
+    @property
+    def has_dynamic_tiers(self) -> bool:
+        """是否存在依赖上一仓位的档位。"""
+        return any(tier.is_dynamic for tier in self.tiers)
+
+    def cap_refs(self) -> list[str]:
+        """条件仓位上限引用的因子（按顺序，不去重）。"""
+        refs: list[str] = []
+        for cap in self.exposure_caps:
+            refs.extend(filter_rule_refs(cap.as_rule_group()))
+        return refs
+
+    def market_refs(self) -> list[str]:
+        """需要按择时代理现算的全部市场级因子（择时判定 + 条件仓位上限，去重保序）。"""
+        return list(dict.fromkeys([*self.factor_refs(), *self.cap_refs()]))
 
     def rule_refs(self) -> list[str]:
         """规则模式引用的因子（含 compare_to，按规则顺序，不去重）。
@@ -283,7 +405,7 @@ class TimingConfig(BaseModel):
             ``(代理指数代码列表, 因子引用列表)`` 列表；默认代理组在前。
         """
         groups: dict[tuple[str, ...], list[str]] = {tuple(self.proxy_index_codes): []}
-        for ref in self.factor_refs():
+        for ref in self.market_refs():
             groups.setdefault(tuple(self.proxies_for(ref)), []).append(ref)
         return [(list(codes), refs) for codes, refs in groups.items() if refs]
 
@@ -294,22 +416,27 @@ class TimingConfig(BaseModel):
             代理指数代码列表。
         """
         codes = list(self.proxy_index_codes)
-        for ref in self.factor_refs():
+        for ref in self.market_refs():
             codes.extend(self.proxies_for(ref))
         return list(dict.fromkeys(codes))
 
-    def tier_specs(self) -> list[tuple[str, float]]:
+    def tier_specs(self) -> list[tuple[str, float | None]]:
         """多档仓位的 ``(展示名, 仓位)`` 列表（供择时统计按档位分组）。
 
         Returns:
-            按配置顺序的列表；未启用档位时为空。
+            按配置顺序的列表；动态档位（hold / exposure_delta）的仓位为 None；
+            未启用档位时为空。
         """
         return [(tier.display_label(index), tier.exposure) for index, tier in enumerate(self.tiers)]
 
     @property
     def needs_history(self) -> bool:
-        """择时判定是否依赖历史（状态层非恒等或降级时沿用前值）。"""
-        return not self.state.is_identity or self.on_degraded == "hold_previous"
+        """择时判定是否依赖历史（状态层非恒等、降级时沿用前值或存在动态档位）。"""
+        return (
+            not self.state.is_identity
+            or self.on_degraded == "hold_previous"
+            or self.has_dynamic_tiers
+        )
 
 
 class FactorAliasConfig(BaseModel):
@@ -593,7 +720,7 @@ def iter_factor_refs(config: StrategyConfig) -> list[tuple[str, str, str]]:
     refs: list[tuple[str, str, str]] = []
     refs.extend(("score", "评分", ref) for ref in config.score.factors)
     if config.timing:
-        refs.extend(("timing", "择时", ref) for ref in config.timing.factor_refs())
+        refs.extend(("timing", "择时", ref) for ref in config.timing.market_refs())
     if config.filters:
         refs.extend(("filter", "过滤", ref) for ref in filter_rule_refs(config.filters))
     for ref in (config.rank.momentum_factor, config.rank.valuation_factor):
@@ -627,4 +754,6 @@ def filter_rule_refs(filters: FilterConfig) -> list[str]:
         refs.append(rule.factor)
         if rule.compare_to:
             refs.append(rule.compare_to)
+    for group in filters.groups:
+        refs.extend(filter_rule_refs(group))
     return refs

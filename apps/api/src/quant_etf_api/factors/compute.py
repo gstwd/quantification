@@ -244,7 +244,9 @@ class FactorComputeService:
         Returns:
             面板字典；无面板类实例或输入不完整时为空字典。
         """
-        instance_list = list(instances)
+        # 派生因子的依赖可能是面板类模板：先展开，否则面板不会被装配
+        base, derived = _expand_derived(list(instances))
+        instance_list = [*base, *derived]
         panel_instances = [
             instance
             for instance in instance_list
@@ -345,6 +347,8 @@ class FactorComputeService:
 
         同一模板 + 同一规范化参数的多个别名只创建一个计算器、只算一次，结果按实例
         ID 展开。支持批量协议的模板一次遍历覆盖所有交易日，其余模板按交易日逐点计算。
+        派生因子（expr 模板）不直接计算：先把它们绑定的依赖并入本次计算，算完后
+        按依赖顺序逐日逐指数求表达式（依赖值也会出现在结果中）。
 
         Args:
             instances: 本次计算的因子实例。
@@ -365,6 +369,7 @@ class FactorComputeService:
         if not instance_list or not index_codes or not target_dates:
             return FactorMatrix()
         _assert_unique_instance_ids(instance_list)
+        instance_list, derived = _expand_derived(instance_list)
         matrix = FactorMatrix(values={day: {} for day in target_dates})
 
         context = ctx or self.build_context(
@@ -448,6 +453,9 @@ class FactorComputeService:
                             continue
                         for instance_id in instance_ids:
                             matrix.values[trade_date][(code, instance_id)] = value.numeric
+
+        if derived:
+            _evaluate_derived(matrix, derived, index_codes, target_dates)
 
         elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
         filled = sum(
@@ -667,6 +675,73 @@ class FactorComputeService:
             .all()
         )
         return {row[0]: row[1] for row in rows}
+
+
+def _expand_derived(
+    instances: Sequence[FactorInstance],
+) -> tuple[list[FactorInstance], list[FactorInstance]]:
+    """拆出派生因子并补齐其依赖。
+
+    Args:
+        instances: 本次请求的实例。
+
+    Returns:
+        (需要直接计算的实例, 按依赖顺序排列的派生实例)；依赖与请求中已有的同名
+        实例只算一次。
+    """
+    from quant_etf_api.factors.builtins.derived import ExpressionComputer  # noqa: PLC0415
+
+    base: list[FactorInstance] = []
+    derived: list[FactorInstance] = []
+    seen: set[str] = set()
+
+    def _visit(instance: FactorInstance) -> None:
+        if instance.instance_id in seen:
+            return
+        seen.add(instance.instance_id)
+        computer = instance.computer
+        if isinstance(computer, ExpressionComputer):
+            # 依赖先入列：保证求值时依赖已有值（派生引用派生同样成立）
+            for dep in computer.dependencies.values():
+                _visit(dep)
+            derived.append(instance)
+        else:
+            base.append(instance)
+
+    # 请求中直接给出的普通实例优先占位，派生因子的同名依赖复用它们
+    for instance in instances:
+        if not isinstance(instance.computer, ExpressionComputer):
+            _visit(instance)
+    for instance in instances:
+        _visit(instance)
+    return base, derived
+
+
+def _evaluate_derived(
+    matrix: FactorMatrix,
+    derived: Sequence[FactorInstance],
+    index_codes: Sequence[str],
+    dates: Sequence[date],
+) -> None:
+    """逐日逐指数求派生因子（依赖缺失或数学错误时为 None）。
+
+    Args:
+        matrix: 已写入依赖值的矩阵（原地写入派生值）。
+        derived: 按依赖顺序排列的派生实例。
+        index_codes: 指数代码。
+        dates: 交易日。
+    """
+    for instance in derived:
+        computer = instance.computer
+        refs = computer.refs  # type: ignore[attr-defined]
+        if matrix.failed.intersection(refs):
+            matrix.failed.add(instance.instance_id)
+        for trade_date in dates:
+            day_values = matrix.values.setdefault(trade_date, {})
+            for code in index_codes:
+                day_values[(code, instance.instance_id)] = computer.evaluate(  # type: ignore[attr-defined]
+                    lambda ref, _code=code, _day=day_values: _day.get((_code, ref))
+                )
 
 
 def _assert_unique_instance_ids(instances: Sequence[FactorInstance]) -> None:

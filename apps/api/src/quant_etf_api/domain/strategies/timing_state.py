@@ -32,6 +32,8 @@ class TimingState:
         pending_days: 候选 regime 已连续出现的决策日数。
         tier: 当日有效仓位档位序号（``timing.tiers`` 下标）；None 表示未启用档位
             或未命中档位（按 regime 仓位表）。状态层沿用前 regime 时同时沿用该档位。
+        exposure: 当日由档位决定的目标总仓位（条件上限之前）；None 表示按 regime
+            仓位表。动态档位（hold / exposure_delta）与步长限制以它为"上一仓位"。
     """
 
     regime: str
@@ -39,6 +41,7 @@ class TimingState:
     pending: str | None = None
     pending_days: int = 0
     tier: int | None = None
+    exposure: float | None = None
 
     def to_detail(self) -> dict[str, Any]:
         """转换为择时明细中的状态字段。
@@ -46,11 +49,15 @@ class TimingState:
         Returns:
             含有效 regime 持有天数与待确认候选的字典。
         """
-        return {
+        detail: dict[str, Any] = {
             "held_days": self.held_days,
             "pending_regime": self.pending,
             "pending_days": self.pending_days,
         }
+        if self.exposure is not None:
+            # 只在档位决定仓位时输出，未启用档位的明细与改造前一致
+            detail["exposure"] = self.exposure
+        return detail
 
 
 def resolve_effective_tier(
@@ -93,6 +100,58 @@ def resolve_effective_tier(
     if previous is not None and previous.regime == regime and previous.tier is not None:
         return previous.tier, "held"
     return None, "none"
+
+
+def resolve_tier_exposure(
+    *,
+    source: str,
+    exposure: float | None,
+    hold: bool,
+    exposure_delta: float | None,
+    min_exposure: float,
+    max_exposure: float,
+    previous_exposure: float | None,
+    base_exposure: float | None,
+    max_step: float | None,
+) -> float:
+    """确定有效档位当日的目标总仓位（条件上限之前）。
+
+    - 状态层沿用上一档位（``source=held``）：沿用上一仓位，不重复施加增减；
+    - ``hold``：维持上一仓位（"灰区不动"）；
+    - ``exposure_delta``：在上一仓位上增减并夹在 [min_exposure, max_exposure]；
+    - 固定仓位：取 ``exposure``。
+
+    没有上一仓位（首个决策日、上一日未命中档位）时以 ``base_exposure`` 为起点。
+    ``max_step`` 限制相对上一仓位的单日变动（如"每次最多一档"）。
+
+    Args:
+        source: 有效档位来源（matched / held）。
+        exposure: 固定仓位档位的仓位。
+        hold: 是否维持上一仓位。
+        exposure_delta: 相对上一仓位的增减。
+        min_exposure: 增减后的下限。
+        max_exposure: 增减后的上限。
+        previous_exposure: 上一决策日由档位决定的仓位。
+        base_exposure: 没有上一仓位时的起点。
+        max_step: 单日最大变动；None 表示不限制。
+
+    Returns:
+        目标总仓位（0-1，4 位小数）。
+    """
+    start = previous_exposure if previous_exposure is not None else base_exposure
+    if source == "held" and previous_exposure is not None:
+        target = previous_exposure
+    elif hold:
+        target = start if start is not None else 0.0
+    elif exposure_delta is not None:
+        base = start if start is not None else 0.0
+        target = min(max_exposure, max(min_exposure, base + exposure_delta))
+    else:
+        target = exposure if exposure is not None else (start or 0.0)
+    if max_step is not None and previous_exposure is not None:
+        low, high = previous_exposure - max_step, previous_exposure + max_step
+        target = min(high, max(low, target))
+    return round(min(1.0, max(0.0, target)), 4)
 
 
 def resolve_candidate_regime(

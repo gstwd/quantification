@@ -171,6 +171,8 @@ def _strategy_definition(config: StrategyConfig) -> SignalLabDefinition:
         proxies += "（" + "；".join(
             f"{ref} 用 {', '.join(codes)}" for ref, codes in timing.factor_proxies.items()
         ) + "）"
+    # 参考线两种模式都要用：规则模式下阈值取配置默认值，不能只在加权分支里赋值
+    thresholds = timing.thresholds
     if timing.combine == "rules":
         formula = f"规则模式：{_rules_text(timing)}；代理指数 {proxies}"
     else:
@@ -178,7 +180,6 @@ def _strategy_definition(config: StrategyConfig) -> SignalLabDefinition:
             f"{weight:g} × {timing.transforms.get(ref, '原值')}({ref})"
             for ref, weight in timing.factors.items()
         )
-        thresholds = timing.thresholds
         formula = (
             f"Σ|w|·d / Σ|w|（负权重取 100 − d）：{terms}；≥ {thresholds.offensive:g} 进攻、"
             f"≤ {thresholds.defensive:g} 防守；代理指数 {proxies}"

@@ -6,16 +6,18 @@ import argparse
 import difflib
 import json
 import logging
+import os
 import sys
 import time
 from datetime import date, datetime, timedelta
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, NoReturn
 
 from quant_etf_api.config.logging_config import setup_logging
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.domain.common.enums import (
-    DEFAULT_EXECUTION_MODEL,
     EXECUTION_MODELS,
+    RESEARCH_DEFAULT_EXECUTION_MODEL,
 )
 from quant_etf_api.factors.catalog import build_default_registry
 from quant_etf_api.infra.clients.akshare_index import _PE_PB_NAME_MAP, _calc_percentile
@@ -23,12 +25,21 @@ from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.infra.db.models.core import IndexValuationModel
 from quant_etf_api.infra.time import today_cn
 from quant_etf_api.schemas.backtest import BacktestCreateRequest
+from quant_etf_api.domain.research.campaign import DEFAULT_MAX_DIAGNOSTICS
+from quant_etf_api.domain.research.ledger import ALL_STATUSES as HYPOTHESIS_STATUSES
+from quant_etf_api.domain.research.ledger import CLOSED_STATUSES as HYPOTHESIS_VERDICTS
+from quant_etf_api.domain.research.ledger import HYPOTHESIS_CATEGORIES
+from quant_etf_api.engine.config import FactorAliasConfig
 from quant_etf_api.schemas.strategy import StrategyConfigCreate, StrategyConfigUpdate
 from quant_etf_api.services.backtest_service import BacktestService
 from quant_etf_api.services.factor_admin_service import FactorAdminService
 from quant_etf_api.services.optimization_service import OptimizationService
 from quant_etf_api.services.research_batch_service import ResearchBatchService
+from quant_etf_api.services.research_diagnostics_service import ResearchDiagnosticsService
+from quant_etf_api.services.research_campaign_service import ResearchCampaignService
+from quant_etf_api.services.research_ledger_service import ResearchLedgerService
 from quant_etf_api.services.robustness_service import SCAN_PRESETS, RobustnessService
+from quant_etf_api.services.strategy_config_service import compute_config_hash
 from quant_etf_api.services.strategy_lifecycle_service import StrategyLifecycleService
 from quant_etf_api.services.strategy_service import StrategyService
 
@@ -127,7 +138,7 @@ def recompute_valuation_percentiles() -> None:
         db.close()
 
 
-def _fail(message: str) -> None:
+def _fail(message: str) -> NoReturn:
     """输出错误信息到 stderr 并以非零码退出。"""
     print(json.dumps({"error": message}, ensure_ascii=False), file=sys.stderr)
     sys.exit(1)
@@ -229,6 +240,11 @@ def _resolve_knobs(args: argparse.Namespace) -> list[str] | None:
     return list(dict.fromkeys(knobs))
 
 
+def _execution_model(args: argparse.Namespace) -> str:
+    """读取命令的执行模型参数，缺省取研究缺省口径（t_plus_1_close）。"""
+    return getattr(args, "execution_model", None) or RESEARCH_DEFAULT_EXECUTION_MODEL
+
+
 def _add_json_flag(parser: argparse.ArgumentParser) -> None:
     """给子命令添加 --no-json 开关（默认 JSON 输出）。"""
     parser.add_argument("--no-json", action="store_true", help="以人类可读文本输出（默认 JSON）")
@@ -278,6 +294,10 @@ def _build_strategy_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--description", default="")
     p.add_argument("--frequency", default="daily")
     p.add_argument("--draft", action="store_true", help="以草稿状态创建（优化候选）")
+    p.add_argument(
+        "--lineage",
+        help="归入已有策略所在的研究线（给研究线中任一策略 ID）；N、试验预算与验证期留痕按研究线汇总",
+    )
     _add_json_flag(p)
 
     p = sub.add_parser("update", help="更新策略（文件、状态、名称等）")
@@ -287,6 +307,7 @@ def _build_strategy_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--name", dest="display_name")
     p.add_argument("--version")
     p.add_argument("--description")
+    p.add_argument("--lineage", help="改归已有策略所在的研究线（研究线根仍有成员时拒绝）")
     _add_json_flag(p)
 
     p = sub.add_parser("diff", help="对比两个策略的配置差异")
@@ -354,8 +375,8 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--execution-model",
         choices=EXECUTION_MODELS,
-        default=DEFAULT_EXECUTION_MODEL,
-        help="回测执行模型（默认 t_plus_1_open）：t_plus_1_open=T 日信号 T+1 开盘成交，"
+        default=RESEARCH_DEFAULT_EXECUTION_MODEL,
+        help="回测执行模型（默认 t_plus_1_close）：t_plus_1_open=T 日信号 T+1 开盘成交，"
         "t_plus_1_close=T 日信号 T+1 收盘成交；两种口径的逐日收益归属不同，指标不可互比",
     )
     p.add_argument("--async", dest="async_mode", action="store_true", help="入队后台执行")
@@ -586,9 +607,11 @@ def _build_robustness_group(subparsers: argparse._SubParsersAction) -> None:
         p.add_argument(
             "--execution-model",
             choices=EXECUTION_MODELS,
-            default=DEFAULT_EXECUTION_MODEL,
-            help="本批次回测执行模型（默认 t_plus_1_open）；验收的邻域证据须与会话同口径",
+            default=RESEARCH_DEFAULT_EXECUTION_MODEL,
+            help="本批次回测执行模型（默认 t_plus_1_close）；验收的邻域证据须与会话同口径",
         )
+        _add_hypothesis_id_flag(p)
+        _add_over_budget_flag(p)
         _add_json_flag(p)
 
     p = sub.add_parser("collect", help="等待并汇总批次结果")
@@ -681,10 +704,148 @@ def _build_research_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--execution-model",
         choices=EXECUTION_MODELS,
-        default=DEFAULT_EXECUTION_MODEL,
-        help="探索口径的执行模型（默认 t_plus_1_open）；须与后续正式回测/优化会话同口径，"
+        default=RESEARCH_DEFAULT_EXECUTION_MODEL,
+        help="探索口径的执行模型（默认 t_plus_1_close）；须与后续正式回测/优化会话同口径，"
         "否则探索结论无法迁移",
     )
+    _add_hypothesis_id_flag(p)
+    _add_over_budget_flag(p)
+    _add_json_flag(p)
+
+    _build_signal_lab_parsers(sub)
+    _build_ledger_parsers(sub)
+    _build_campaign_parsers(sub)
+    _build_factor_diagnostic_parsers(sub)
+
+
+def _add_research_window(parser: argparse.ArgumentParser) -> None:
+    """给研究诊断子命令添加 --start/--end（缺省研究期全段，越过研究期末端拒绝）。"""
+    parser.add_argument(
+        "--start", type=date.fromisoformat, help="起始日期（缺省研究期起点 2016-01-01）"
+    )
+    parser.add_argument(
+        "--end",
+        type=date.fromisoformat,
+        help="截止日期（缺省研究期末端 2025-12-31；越过研究期末端直接拒绝）",
+    )
+
+
+def _add_summary_flag(parser: argparse.ArgumentParser) -> None:
+    """给研究诊断子命令添加 --summary（去掉逐日序列，只保留指标与表格）。"""
+    parser.add_argument(
+        "--summary", action="store_true", help="精简输出：去掉逐日 / 逐期序列，只保留统计指标"
+    )
+
+
+def _add_factor_target(parser: argparse.ArgumentParser) -> None:
+    """给因子诊断子命令添加诊断对象参数：模板 + 参数，或策略中的因子引用。"""
+    parser.add_argument(
+        "--factor", dest="factor_id", help="因子模板 ID（与 --strategy/--ref 二选一）"
+    )
+    parser.add_argument("--params", help="模板参数 JSON 对象，如 '{\"period\": 20}'")
+    parser.add_argument(
+        "--strategy", dest="strategy_id", help="按该策略的 factor_aliases 解析 --ref"
+    )
+    parser.add_argument("--ref", help="策略中的因子引用名（别名或模板 ID）")
+    parser.add_argument(
+        "--aliases",
+        help="派生因子（--factor expr）依赖的额外别名声明 JSON，如 "
+        "'{\"dev60\": {\"template_id\": \"ma_deviation\", \"params\": {\"period\": 60}}}'；"
+        "与 --strategy 的 factor_aliases 叠加",
+    )
+
+
+def _build_signal_lab_parsers(sub: argparse._SubParsersAction) -> None:
+    """注册 research signal-lab 子命令组（研究台诊断，只读，复用 SignalLabService）。"""
+    group = sub.add_parser(
+        "signal-lab", help="研究台诊断：研报择时信号 / 市场级信号 / 截面因子（只读，不落库）"
+    )
+    lab_sub = group.add_subparsers(dest="lab_command", required=True)
+
+    p = lab_sub.add_parser("catalog", help="研究台目录：可用信号 / 截面因子 / 策略择时 / 指数")
+    _add_json_flag(p)
+
+    p = lab_sub.add_parser(
+        "timing",
+        help="单指数择时信号评估（IC fwd20/past20、翻转频率、持仓收益、分年）；"
+        "existing_composite + --strategy 时按该策略 timing 块走引擎口径",
+    )
+    p.add_argument("--index", dest="index_code", required=True, help="评估指数代码")
+    p.add_argument("--signal", required=True, help="择时信号键（见 catalog.timing_signals）")
+    p.add_argument(
+        "--strategy",
+        dest="strategy_id",
+        help="按该策略 timing 块计算（仅 existing_composite，不接受 --params）",
+    )
+    p.add_argument("--params", help="信号参数 JSON 对象")
+    _add_research_window(p)
+    _add_summary_flag(p)
+    _add_json_flag(p)
+
+    p = lab_sub.add_parser("market", help="市场级信号（GSISI）在代理指数上的评估")
+    p.add_argument("--signal", default="gsisi", help="市场级信号键（默认 gsisi）")
+    p.add_argument("--proxy", dest="proxy_code", default="000300", help="代理指数（默认 000300）")
+    p.add_argument("--params", help="信号参数 JSON 对象")
+    _add_research_window(p)
+    _add_summary_flag(p)
+    _add_json_flag(p)
+
+    p = lab_sub.add_parser(
+        "cross-section", help="研报截面因子的周频 Rank IC、三分组收益与现有评分因子相关性"
+    )
+    p.add_argument("--factor", dest="factor_key", required=True, help="截面因子键（见 catalog）")
+    p.add_argument("--horizon", type=int, default=5, help="未来收益窗口（交易日，1~60，默认 5）")
+    p.add_argument("--index-codes", dest="index_codes", help="逗号分隔指数代码，默认全部活跃指数")
+    p.add_argument("--params", help="因子参数 JSON 对象")
+    _add_research_window(p)
+    _add_summary_flag(p)
+    _add_json_flag(p)
+
+
+def _build_factor_diagnostic_parsers(sub: argparse._SubParsersAction) -> None:
+    """注册 research factor-ic / buckets（因子诊断，只读）。"""
+    p = sub.add_parser(
+        "factor-ic",
+        help="因子截面 Rank IC（与因子中心同一实现）：汇总、分年与逐日序列",
+    )
+    _add_factor_target(p)
+    p.add_argument("--forward-days", type=int, default=1, help="前瞻交易日数（1~20，默认 1）")
+    p.add_argument(
+        "--min-n", type=int, default=None, help="有效 IC 的最小横截面指数数量（默认 20）"
+    )
+    _add_research_window(p)
+    _add_summary_flag(p)
+    _add_json_flag(p)
+
+    p = sub.add_parser(
+        "buckets",
+        help="按因子值分桶统计未来 N 日收益（均值/胜率/t 值/样本数，可选前后两段一致性）",
+    )
+    _add_factor_target(p)
+    p.add_argument(
+        "--index",
+        dest="index_code",
+        help="计算因子值的指数；--strategy 且 --ref 为择时因子时缺省取其代理指数",
+    )
+    p.add_argument("--return-index", dest="return_index", help="计算收益的指数（缺省同 --index）")
+    p.add_argument("--horizons", default="1,5,20", help="持有交易日数，逗号分隔（默认 1,5,20）")
+    p.add_argument(
+        "--basis",
+        choices=["t_plus_1_open", "t_plus_1_close", "close_to_close"],
+        default=RESEARCH_DEFAULT_EXECUTION_MODEL,
+        help="收益口径：t_plus_1_close（默认，与研究缺省执行模型一致）/ t_plus_1_open / "
+        "close_to_close（与因子 IC 同口径）",
+    )
+    bucketing = p.add_mutually_exclusive_group(required=True)
+    bucketing.add_argument("--edges", help="分桶内部切点，逗号分隔（自动补 ±inf），如 0,0.5,1,1.5")
+    bucketing.add_argument("--quantiles", type=int, help="按全样本分位数等分的桶数")
+    split = p.add_mutually_exclusive_group()
+    split.add_argument("--split-halves", action="store_true", help="按样本对半切分，输出两段一致性")
+    split.add_argument(
+        "--split-date", type=date.fromisoformat, help="分段日（后段首日），输出两段一致性"
+    )
+    _add_research_window(p)
+    _add_summary_flag(p)
     _add_json_flag(p)
 
 
@@ -715,6 +876,197 @@ def _build_queue_group(subparsers: argparse._SubParsersAction) -> None:
     )
 
 
+def _add_hypothesis_id_flag(parser: argparse.ArgumentParser) -> None:
+    """为会产生试验的命令添加 --hypothesis-id（把本次检验挂到台账假设下）。"""
+    parser.add_argument(
+        "--hypothesis-id",
+        help="研究台账假设 ID（research hypothesis add 返回），把本次检验挂到该假设下；"
+        "假设已关闭时拒绝",
+    )
+
+
+def _add_over_budget_flag(parser: argparse.ArgumentParser) -> None:
+    """为会产生试验的命令添加 --over-budget（研究线超出试验预算时显式放行）。"""
+    parser.add_argument(
+        "--over-budget",
+        dest="over_budget",
+        metavar="REASON",
+        help="研究线试验次数已达预算时仍要执行的理由（写入研究台账，超出的试验照常计入 N）",
+    )
+
+
+def _build_campaign_parsers(sub: argparse._SubParsersAction) -> None:
+    """注册研究战役子命令（自动研究循环）：start/run/next/status/list/step-done/review/stop/report。"""
+    camp = sub.add_parser("campaign", help="研究战役：headless Claude Code 自动研究循环")
+    csub = camp.add_subparsers(dest="campaign_action", required=True)
+
+    p = csub.add_parser("start", help="开启战役（需要已存在的种子基线策略）")
+    p.add_argument("--objective", required=True, help="研究目标")
+    p.add_argument("--strategy", dest="strategy_id", required=True, help="种子基线策略 ID")
+    p.add_argument("--index-codes", help="研究范围指数，逗号分隔")
+    p.add_argument("--max-trials", type=int, default=30, help="本战役最多新增试验次数（默认 30）")
+    p.add_argument("--max-hours", type=float, default=6.0, help="墙钟时长上限（默认 6 小时）")
+    p.add_argument("--max-rounds", type=int, default=5, help="研究员轮数上限（默认 5）")
+    p.add_argument("--max-rejects", type=int, default=3, help="连续否决假设数上限（默认 3）")
+    p.add_argument(
+        "--max-diagnostics",
+        type=int,
+        default=DEFAULT_MAX_DIAGNOSTICS,
+        help=f"诊断命令（factor-ic/buckets/signal-lab）次数上限（默认 {DEFAULT_MAX_DIAGNOSTICS}）",
+    )
+    p.add_argument("--max-step-usd", type=float, help="单步 agent 花费上限（美元）")
+    p.add_argument("--model", help="agent 模型（缺省用 Claude Code 默认模型）")
+    p.add_argument("--by", dest="created_by", help="发起者标识")
+    _add_json_flag(p)
+
+    p = csub.add_parser("run", help="驱动战役：逐步启动全新的 headless claude 会话，直到停止")
+    p.add_argument("campaign_id")
+    p.add_argument("--max-steps", type=int, help="本次最多执行的步数（缺省直到战役停止）")
+    p.add_argument("--workers", type=int, default=4, help="传给 agent 的并行回测进程数（默认 4）")
+    p.add_argument(
+        "--step-timeout-hours", type=float, default=3.0, help="单步 agent 超时（默认 3 小时）"
+    )
+    p.add_argument("--claude-bin", default="claude", help="claude 可执行文件")
+    p.add_argument(
+        "--recover",
+        action="store_true",
+        help="上次中断遗留运行中步骤时将其标记为失败后继续（确认没有 agent 仍在运行）",
+    )
+    _add_json_flag(p)
+
+    p = csub.add_parser(
+        "begin-step",
+        help="桌面编排模式：取下一张任务卡并登记步骤，输出给新桌面会话的提示（prompt）",
+    )
+    p.add_argument("campaign_id")
+    p.add_argument(
+        "--orchestrator-session",
+        help="编排会话 ID（缺省取 CLAUDE_CODE_SESSION_ID）；步骤运行期间只有该会话不受战役模式约束",
+    )
+    _add_json_flag(p)
+
+    p = csub.add_parser(
+        "finalize-step", help="桌面编排模式：子会话结束后收口最近一步（未回报 step-done 判失败）"
+    )
+    p.add_argument("campaign_id")
+    p.add_argument("--agent-session", help="执行本步的桌面会话 ID（记录用）")
+    p.add_argument("--error", help="编排侧观察到的错误（给出即判本步失败，除非已回报）")
+    _add_json_flag(p)
+
+    p = csub.add_parser("next", help="预览下一步任务卡（触顶时会直接停止战役）")
+    p.add_argument("campaign_id")
+    _add_json_flag(p)
+
+    p = csub.add_parser("status", help="战役详情：进度、步骤、假设、花费")
+    p.add_argument("campaign_id")
+    _add_json_flag(p)
+
+    p = csub.add_parser("list", help="列出战役")
+    p.add_argument("--status", choices=["running", "stopped", "completed"])
+    p.add_argument("--limit", type=int, default=50)
+    _add_json_flag(p)
+
+    p = csub.add_parser("step-done", help="agent 回报本步完成（研究员给 --outcome）")
+    p.add_argument("campaign_id")
+    p.add_argument(
+        "--outcome",
+        choices=["review_requested", "rejected", "blocked", "no_idea"],
+        help="研究员回报结果",
+    )
+    p.add_argument("--summary", required=True, help="本步结论摘要")
+    p.add_argument("--hypothesis-id")
+    p.add_argument("--optimization-id")
+    _add_json_flag(p)
+
+    p = csub.add_parser("review", help="评审员记录评审结论")
+    p.add_argument("campaign_id")
+    p.add_argument("--optimization-id", required=True)
+    p.add_argument(
+        "--verdict", required=True, choices=["recommend_accept", "reject", "needs_more"]
+    )
+    p.add_argument("--reason", required=True, help="评审理由（逐项引用证据）")
+    _add_json_flag(p)
+
+    p = csub.add_parser("stop", help="人工停止战役")
+    p.add_argument("campaign_id")
+    p.add_argument("--reason", required=True)
+    _add_json_flag(p)
+
+    p = csub.add_parser("report", help="生成战役报告 Markdown")
+    p.add_argument("campaign_id")
+    p.add_argument("--file", help="写入文件路径")
+
+
+def _build_ledger_parsers(sub: argparse._SubParsersAction) -> None:
+    """注册研究台账子命令：hypothesis add|list|show|close|reopen、trial add、ledger。"""
+    hyp = sub.add_parser("hypothesis", help="研究假设台账（登记 → 检验 → 结论）")
+    hsub = hyp.add_subparsers(dest="hypothesis_action", required=True)
+
+    p = hsub.add_parser("add", help="登记假设（必须事先写定判定标准）")
+    p.add_argument("--statement", required=True, help="假设陈述")
+    p.add_argument("--category", required=True, choices=HYPOTHESIS_CATEGORIES, help="改动类别")
+    p.add_argument(
+        "--criteria",
+        required=True,
+        help="事先写定的判定标准（主要指标与通过阈值），检验后不得改写",
+    )
+    p.add_argument("--strategy", dest="strategy_id", help="关联策略 ID（指数级假设可省略）")
+    p.add_argument("--index-codes", help="涉及的指数代码，逗号分隔（如 000852,000905）")
+    p.add_argument("--tags", help="标签，逗号分隔（如 pv_resonance,exit）")
+    p.add_argument("--rationale", help="提出依据（诊断证据、前序假设结论等）")
+    p.add_argument(
+        "--execution-models",
+        help="必须通过的执行模型，逗号分隔（如 t_plus_1_open,t_plus_1_close）",
+    )
+    p.add_argument("--parent", dest="parent_id", help="父假设 ID（在已有结论上细化时填写）")
+    p.add_argument("--by", dest="created_by", help="登记者标识，如 claude / codex / human")
+    _add_json_flag(p)
+
+    p = hsub.add_parser("list", help="按策略 / 指数 / 标签 / 状态列出假设")
+    p.add_argument("--strategy", dest="strategy_id")
+    p.add_argument("--index", dest="index_code", help="指数代码")
+    p.add_argument("--tag")
+    p.add_argument("--status", help=f"状态，逗号分隔（{', '.join(HYPOTHESIS_STATUSES)}）")
+    p.add_argument("--limit", type=int, default=200)
+    _add_json_flag(p)
+
+    p = hsub.add_parser("show", help="查看假设详情（含全部试验与子假设）")
+    p.add_argument("hypothesis_id")
+    _add_json_flag(p)
+
+    p = hsub.add_parser("close", help="关闭假设并写入结论")
+    p.add_argument("hypothesis_id")
+    p.add_argument("--verdict", required=True, choices=HYPOTHESIS_VERDICTS)
+    p.add_argument("--reason", required=True, help="结论原因（数据支撑、失败点）")
+    _add_json_flag(p)
+
+    p = hsub.add_parser("reopen", help="重新打开受 schema 限制而搁置的假设")
+    p.add_argument("hypothesis_id")
+    p.add_argument("--reason", required=True, help="重开原因（如 schema 已支持）")
+    _add_json_flag(p)
+
+    trial = sub.add_parser("trial", help="研究试验台账（人工 / 历史补录）")
+    tsub = trial.add_subparsers(dest="trial_action", required=True)
+    p = tsub.add_parser(
+        "add",
+        help="记录平台外的人工 / 原型对比，或补录历史试验次数（计入 Deflated Sharpe 的 N）",
+    )
+    p.add_argument("--strategy", dest="strategy_id", required=True, help="N 归属的策略 ID")
+    p.add_argument("--count", type=int, required=True, help="试验次数（独立变体数）")
+    p.add_argument("--note", required=True, help="依据说明（来源报告、变体清单）")
+    p.add_argument("--hypothesis-id", help="所属假设 ID")
+    p.add_argument("--execution-model", choices=EXECUTION_MODELS)
+    p.add_argument("--estimated", action="store_true", help="标记为历史估算值")
+    _add_json_flag(p)
+
+    p = sub.add_parser("ledger", help="台账总览：开工前先读（进行中假设、近期结论、试验次数 N）")
+    p.add_argument("--strategy", dest="strategy_id", help="策略 ID（同时给出 N 拆分）")
+    p.add_argument("--index", dest="index_code", help="指数代码")
+    p.add_argument("--tag")
+    p.add_argument("--recent", type=int, default=20, help="返回最近关闭的假设条数")
+    _add_json_flag(p)
+
+
 def _build_optimization_group(subparsers: argparse._SubParsersAction) -> None:
     """注册 optimization 命令组（AI 自动优化闭环）。"""
     group = subparsers.add_parser("optimization", help="策略优化会话（AI 自动优化闭环）")
@@ -723,7 +1075,12 @@ def _build_optimization_group(subparsers: argparse._SubParsersAction) -> None:
     p = sub.add_parser("start", help="开始优化会话（创建草稿候选 + 会话记录）")
     p.add_argument("--strategy", dest="strategy_id", required=True, help="基线策略 ID")
     p.add_argument("--candidate-file", required=True, help="候选配置 JSON 文件")
-    p.add_argument("--hypothesis", required=True, help="本轮优化的假设")
+    p.add_argument(
+        "--hypothesis",
+        help="本轮优化的假设；给了 --hypothesis-id 时可省略（取台账中的假设陈述）",
+    )
+    _add_hypothesis_id_flag(p)
+    _add_over_budget_flag(p)
     p.add_argument("--start", type=date.fromisoformat, help="评估起始日期，默认今天往前 2 年")
     p.add_argument("--end", type=date.fromisoformat, help="评估截止日期，默认今天")
     p.add_argument("--folds", type=int, default=4, help="验证窗口数量，默认 4")
@@ -732,8 +1089,8 @@ def _build_optimization_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--execution-model",
         choices=EXECUTION_MODELS,
-        default=DEFAULT_EXECUTION_MODEL,
-        help="本次会话的回测执行模型（默认 t_plus_1_open）；写入会话后 evaluate 复用，"
+        default=RESEARCH_DEFAULT_EXECUTION_MODEL,
+        help="本次会话的回测执行模型（默认 t_plus_1_close）；写入会话后 evaluate 复用，"
         "基线与候选两侧必然同口径",
     )
     _add_json_flag(p)
@@ -772,7 +1129,11 @@ def _build_optimization_group(subparsers: argparse._SubParsersAction) -> None:
         "--no-strict",
         dest="strict",
         action="store_false",
-        help="跳过验收清单硬校验（不推荐，需在报告中说明理由）",
+        help="跳过验收清单硬校验（不推荐；accept 时必须同时给 --no-strict-reason）",
+    )
+    p.add_argument(
+        "--no-strict-reason",
+        help="非严格接受的理由（连同未通过项写入研究台账）",
     )
     _add_json_flag(p)
 
@@ -1052,6 +1413,7 @@ def _run_strategy(args: argparse.Namespace) -> None:
                 frequency=args.frequency,
                 config_json=config,
                 status="draft" if args.draft else "active",
+                lineage_id=getattr(args, "lineage", None),
             )
             detail = svc.create_config(req)
             _emit(detail.model_dump(), not args.no_json)
@@ -1067,6 +1429,8 @@ def _run_strategy(args: argparse.Namespace) -> None:
                 update["version"] = args.version
             if args.description is not None:
                 update["description"] = args.description
+            if getattr(args, "lineage", None):
+                update["lineage_id"] = args.lineage
             detail = svc.update_config(args.strategy_id, StrategyConfigUpdate(**update))
             if detail is None:
                 _fail(f"策略 {args.strategy_id} 不存在")
@@ -1242,7 +1606,7 @@ def _run_backtest(args: argparse.Namespace) -> None:
                 purpose=purpose,
                 purpose_reason=getattr(args, "purpose_reason", None),
                 cost_bps=getattr(args, "cost_bps", None),
-                execution_model=getattr(args, "execution_model", DEFAULT_EXECUTION_MODEL),
+                execution_model=_execution_model(args),
             )
             summary = svc.create_backtest(req)
             if args.async_mode:
@@ -1439,12 +1803,281 @@ def _run_lifecycle(args: argparse.Namespace) -> None:
         db.close()
 
 
+def _parse_json_object(raw: str | None, flag: str = "--params") -> dict[str, Any]:
+    """解析命令行给出的 JSON 对象参数。
+
+    Args:
+        raw: JSON 文本；None 或空串返回空字典。
+        flag: 参数名（用于错误提示）。
+
+    Returns:
+        参数字典。
+
+    Raises:
+        ValueError: 不是合法 JSON 对象时抛出。
+    """
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{flag} 必须是合法 JSON 对象：{exc}") from None
+    if not isinstance(data, dict):
+        raise ValueError(f"{flag} 必须是 JSON 对象")
+    return data
+
+
+def _parse_number_list(raw: str, flag: str, cast: type[float] | type[int] = float) -> list[Any]:
+    """解析逗号分隔的数字列表。
+
+    Raises:
+        ValueError: 含非法数字或为空时抛出。
+    """
+    values: list[Any] = []
+    for item in raw.split(","):
+        text = item.strip()
+        if not text:
+            continue
+        try:
+            values.append(cast(text))
+        except ValueError:
+            raise ValueError(f"{flag} 含非法数字：{text}") from None
+    if not values:
+        raise ValueError(f"{flag} 不能为空")
+    return values
+
+
+# 研究台 --summary 去掉的逐日序列字段
+_TIMING_SERIES_KEYS = ("dates", "close", "value", "on", "regime", "strategy_nav", "benchmark_nav")
+_CROSS_SECTION_SERIES_KEYS = ("dates", "ic", "cum_ic", "n_assets")
+
+
+def _summarize_signal_lab(data: dict[str, Any], kind: str) -> dict[str, Any]:
+    """研究台结果的精简视图：去掉逐日序列与长文本定义，保留指标、分年、覆盖与提示。
+
+    Args:
+        data: 研究台响应（JSON dict）。
+        kind: ``timing``（含 market）或 ``cross_section``。
+
+    Returns:
+        精简后的新字典（不修改入参）。
+    """
+    drop = _TIMING_SERIES_KEYS if kind == "timing" else _CROSS_SECTION_SERIES_KEYS
+    out = {k: v for k, v in data.items() if k not in drop}
+    for key in ("signal", "factor"):
+        if isinstance(out.get(key), dict):
+            definition = out[key]
+            out[key] = {k: definition.get(k) for k in ("key", "label", "source", "formula")}
+    if kind == "timing":
+        out["components"] = [c.get("key") for c in data.get("components", [])]
+    else:
+        # 截面覆盖只保留被剔除的指数，最新截面只保留前后各 3 名
+        out["coverage"] = [c for c in data.get("coverage", []) if not c.get("used", True)]
+        latest = data.get("latest", [])
+        out["latest"] = latest[:3] + latest[-3:] if len(latest) > 6 else latest
+    return out
+
+
+def _summarize_buckets(data: dict[str, Any]) -> dict[str, Any]:
+    """分桶诊断的精简视图：每桶只保留核心字段，两段只保留均值 / t 值 / 样本数。"""
+    keep = ("label", "n", "share", "mean_pct", "excess_pct", "hit_rate", "t_stat", "low_sample")
+    seg_keep = ("label", "n", "mean_pct", "t_stat")
+    tables: list[dict[str, Any]] = []
+    for table in data.get("tables", []):
+        full = table["full"]
+        item: dict[str, Any] = {
+            "horizon": table["horizon"],
+            "n": full["n"],
+            "mean_pct": full["mean_pct"],
+            "spread_pct": full["spread_pct"],
+            "monotonicity": full["monotonicity"],
+            "buckets": [{k: b.get(k) for k in keep} for b in full["buckets"]],
+        }
+        if "segments" in table:
+            item["segments"] = [
+                {
+                    "label": seg["label"],
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "spread_pct": seg["spread_pct"],
+                    "buckets": [{k: b.get(k) for k in seg_keep} for b in seg["buckets"]],
+                }
+                for seg in table["segments"]
+            ]
+            item["consistency"] = table["consistency"]
+        tables.append(item)
+    out = {k: v for k, v in data.items() if k not in ("tables", "notes")}
+    out["tables"] = tables
+    return out
+
+
+def _run_signal_lab(svc: Any, args: argparse.Namespace) -> None:
+    """执行 research signal-lab 子命令（研究台诊断，只读）。
+
+    Args:
+        svc: ResearchDiagnosticsService 实例。
+        args: argparse 解析结果。
+    """
+    as_json = not args.no_json
+    command = args.lab_command
+    if command == "catalog":
+        _emit(svc.signal_lab_catalog(), as_json)
+        return
+    params = _parse_json_object(args.params)
+    if command == "timing":
+        data = svc.signal_lab_timing(
+            args.index_code, args.signal, args.start, args.end, params, args.strategy_id
+        )
+        kind = "timing"
+    elif command == "market":
+        data = svc.signal_lab_market(args.signal, args.proxy_code, args.start, args.end, params)
+        kind = "timing"
+    elif command == "cross-section":
+        data = svc.signal_lab_cross_section(
+            args.factor_key,
+            args.start,
+            args.end,
+            args.horizon,
+            _split_codes(args.index_codes),
+            params,
+        )
+        kind = "cross_section"
+    else:
+        raise ValueError(f"未知的 research signal-lab 子命令: {command}")
+    _emit(_summarize_signal_lab(data, kind) if args.summary else data, as_json)
+
+
+def _run_factor_diagnostic(
+    svc: Any, args: argparse.Namespace, ledger: ResearchLedgerService | None = None
+) -> None:
+    """执行 research factor-ic / buckets（因子诊断，只读）。
+
+    诊断对象是派生因子时，诊断完成后把指纹记入研究台账（不计入 N），满足派生因子
+    进入研究批量评估与优化候选的前置门槛。
+
+    Args:
+        svc: ResearchDiagnosticsService 实例。
+        args: argparse 解析结果。
+        ledger: 研究台账服务（记录派生因子诊断）。
+    """
+    instance, proxy = svc.resolve_factor(
+        args.factor_id,
+        _parse_json_object(args.params),
+        args.strategy_id,
+        args.ref,
+        extra_aliases=_parse_json_object(getattr(args, "aliases", None), "--aliases"),
+    )
+    if args.subcommand == "factor-ic":
+        kwargs: dict[str, Any] = {"forward_days": args.forward_days}
+        if args.min_n is not None:
+            kwargs["min_n"] = args.min_n
+        data = svc.factor_ic(instance, args.start, args.end, **kwargs)
+        _record_derived_diagnostic(ledger, instance, args, "factor-ic", data)
+        if args.summary:
+            data = {k: v for k, v in data.items() if k != "series"}
+        _emit(data, not args.no_json)
+        return
+    factor_index = args.index_code or proxy
+    if not factor_index:
+        raise ValueError("必须给出 --index（仅当 --ref 是策略择时因子时可缺省为其代理指数）")
+    data = svc.bucket_returns(
+        instance,
+        factor_index,
+        args.start,
+        args.end,
+        horizons=_parse_number_list(args.horizons, "--horizons", int),
+        basis=args.basis,
+        return_index=args.return_index,
+        cut_points=_parse_number_list(args.edges, "--edges") if args.edges else None,
+        quantiles=args.quantiles,
+        split_at=args.split_date,
+        split_halves=args.split_halves,
+    )
+    _record_derived_diagnostic(ledger, instance, args, "buckets", data)
+    _emit(_summarize_buckets(data) if args.summary else data, not args.no_json)
+
+
+def _alias_view(config_json: dict[str, Any]) -> Any:
+    """只解析配置里的 factor_aliases（派生因子门槛只需要别名声明）。
+
+    完整配置的合法性由后续评估 / 会话创建负责校验并给出完整错误，这里解析失败的
+    别名按"无派生因子"处理，避免门槛先于正式校验抛出难懂的错误。
+
+    Args:
+        config_json: 策略 config_json。
+
+    Returns:
+        带 ``factor_aliases`` 属性的对象。
+    """
+    aliases: dict[str, FactorAliasConfig] = {}
+    for name, declaration in (config_json.get("factor_aliases") or {}).items():
+        try:
+            aliases[name] = FactorAliasConfig(**declaration)
+        except (TypeError, ValueError):
+            continue
+    return SimpleNamespace(factor_aliases=aliases)
+
+
+def _record_derived_diagnostic(
+    ledger: ResearchLedgerService | None,
+    instance: Any,
+    args: argparse.Namespace,
+    diagnostic: str,
+    data: dict[str, Any],
+) -> None:
+    """诊断对象是派生因子时，把诊断记入研究台账并在输出里带上指纹。
+
+    Args:
+        ledger: 研究台账服务；None 时不记录。
+        instance: 诊断的因子实例。
+        args: 命令行参数。
+        diagnostic: 诊断命令名。
+        data: 诊断结果（原地追加 derived 块）。
+    """
+    from quant_etf_api.factors.builtins.derived import ExpressionComputer  # noqa: PLC0415
+
+    computer = getattr(instance, "computer", None)
+    if ledger is None or not isinstance(computer, ExpressionComputer):
+        return
+    fingerprint = computer.fingerprint()
+    ledger.record_derived_diagnostic(
+        fingerprint=fingerprint,
+        expression=computer.parsed.text,
+        diagnostic=diagnostic,
+        strategy_id=getattr(args, "strategy_id", None),
+    )
+    data["derived"] = {
+        "expression": computer.parsed.text,
+        "fingerprint": fingerprint,
+        "dependencies": list(computer.dependencies),
+        "ledger": "已记录诊断，该派生因子可以进入研究批量评估与优化候选",
+    }
+
+
 def _run_research(args: argparse.Namespace) -> None:
-    """执行 research 命令组（研究批量评估，D-1）。"""
+    """执行 research 命令组（研究批量评估 D-1 + 只读研究诊断）。"""
     db = SessionLocal()
     try:
+        if args.subcommand in ("signal-lab", "factor-ic", "buckets"):
+            svc = ResearchDiagnosticsService(db)
+            if args.subcommand == "signal-lab":
+                _run_signal_lab(svc, args)
+            else:
+                _run_factor_diagnostic(svc, args, ResearchLedgerService(db))
+            return
+        if args.subcommand in ("hypothesis", "trial", "ledger"):
+            _run_ledger(ResearchLedgerService(db), args)
+            return
+        if args.subcommand == "campaign":
+            _run_campaign(ResearchCampaignService(db), args)
+            return
         if args.subcommand != "batch":
             raise ValueError(f"未知的 research 子命令: {args.subcommand}")
+        ledger = ResearchLedgerService(db)
+        hypothesis_id = getattr(args, "hypothesis_id", None)
+        if hypothesis_id:
+            # 先校验假设可挂试验，避免跑完十几分钟才发现假设已关闭
+            ledger.require_active_hypothesis(hypothesis_id)
         if not args.variants and not args.timing_attribution:
             raise ValueError("必须提供 --variants，或使用 --timing-attribution 只做择时归因")
         svc = ResearchBatchService(db)
@@ -1454,6 +2087,12 @@ def _run_research(args: argparse.Namespace) -> None:
             )
             if args.variants
             else []
+        )
+        for variant in variants:
+            # 派生因子前置门槛：未做过诊断的组合不能直接拿来批量试
+            ledger.ensure_derived_diagnosed(_alias_view(variant.config), f"变体 {variant.label}")
+        budget = ledger.ensure_budget(
+            args.strategy_id, len(variants), getattr(args, "over_budget", None)
         )
         result = svc.run(
             args.strategy_id,
@@ -1465,15 +2104,270 @@ def _run_research(args: argparse.Namespace) -> None:
             execution_model=args.execution_model,
             timing_attribution=args.timing_attribution,
         )
+        ledger_info = _record_research_batch(ledger, args, variants, result)
         if args.summary:
             # 摘要视图是"给人/agent 看的表"，不走 JSON 序列化
             print(result.to_summary_table())
+            print(
+                f"[ledger] trial={ledger_info.get('trial_id')} "
+                f"counted={ledger_info.get('trial_count')} "
+                f"hypothesis={ledger_info.get('hypothesis_id')} "
+                f"error={ledger_info.get('error')}"
+            )
+            print(
+                f"[budget] lineage={budget['lineage_id']} "
+                f"used={budget['used'] + int(ledger_info.get('trial_count') or 0)}"
+                f"/{budget['budget']}"
+            )
         else:
-            _emit(result.to_dict(), not args.no_json)
-    except ValueError as exc:
+            payload = result.to_dict()
+            payload["ledger"] = ledger_info
+            payload["budget"] = budget
+            _emit(payload, not args.no_json)
+    except (ValueError, LookupError) as exc:
         _fail(str(exc))
     finally:
         db.close()
+
+
+def _record_research_batch(
+    ledger: ResearchLedgerService,
+    args: argparse.Namespace,
+    variants: list[Any],
+    result: Any,
+) -> dict[str, Any]:
+    """把研究批量评估记入台账（不论是否挂假设都计入 N）。
+
+    台账写入失败不吞掉评估结果，但会在输出里显式标出 error，提醒 N 可能被低估。
+
+    Args:
+        ledger: 台账服务。
+        args: 命令行参数。
+        variants: 用户提交的变体（用于计算配置哈希）。
+        result: ``ResearchBatchResult``。
+
+    Returns:
+        {trial_id, trial_count, hypothesis_id} 或 {error}。
+    """
+    try:
+        trial = ledger.record_research_batch(
+            strategy_id=args.strategy_id,
+            variants=result.variants,
+            windows=result.windows,
+            execution_model=args.execution_model,
+            config_hashes=[compute_config_hash(item.config) for item in variants],
+            hypothesis_id=getattr(args, "hypothesis_id", None),
+        )
+    except Exception as exc:  # noqa: BLE001 - 台账失败不能让已跑完的评估结果丢失
+        logging.getLogger(__name__).warning("研究批量评估写入台账失败", exc_info=True)
+        return {"error": f"写入研究台账失败，N 可能被低估，请用 research trial add 补录: {exc}"}
+    return {
+        "trial_id": trial["trial_id"],
+        "trial_count": trial["trial_count"],
+        "hypothesis_id": trial["hypothesis_id"],
+    }
+
+
+def _split_list(raw: str | None) -> list[str] | None:
+    """把逗号分隔的参数拆成去空白的列表，空值返回 None。"""
+    if not raw:
+        return None
+    items = [item.strip() for item in raw.split(",") if item.strip()]
+    return items or None
+
+
+def _campaign_id() -> str | None:
+    """战役模式标记：驱动器给 agent 进程设置的 QUANT_CAMPAIGN_ID。"""
+    return os.environ.get("QUANT_CAMPAIGN_ID") or None
+
+
+def _campaign_mode(args: argparse.Namespace) -> str | None:
+    """本次调用所处的战役（``_guard_campaign_mode`` 判定的结果，缺省回退到环境变量）。"""
+    return getattr(args, "campaign_mode_id", None) or _campaign_id()
+
+
+def _caller_session_id() -> str | None:
+    """调用方所在的 Claude Code 会话 ID（桌面编排模式据此区分编排会话与子会话）。"""
+    return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+
+
+def _guard_campaign_mode(args: argparse.Namespace) -> None:
+    """判定战役模式并先校验命令（白名单、研究线范围、评审前置），拒绝时直接退出。
+
+    战役模式来自 headless 驱动器的 ``QUANT_CAMPAIGN_ID``，或桌面编排模式下的运行中
+    步骤（除编排会话外的调用都受约束）。判定结果写入 ``args.campaign_mode_id``。
+    不在任何 Claude Code 会话里的终端可以执行 ``research campaign stop`` 收口卡住的
+    桌面战役（停止后战役不再接受任何步骤，不会被利用来放宽约束）。
+
+    Args:
+        args: argparse 解析结果。
+    """
+    db = SessionLocal()
+    try:
+        svc = ResearchCampaignService(db)
+        try:
+            campaign_id = svc.resolve_mode(_campaign_id(), _caller_session_id())
+        except Exception as exc:  # noqa: BLE001 - 判定失败必须拒绝执行（失败即不放行）
+            _fail(f"无法判定是否处于研究战役模式（数据库不可用？）：{exc}")
+        args.campaign_mode_id = campaign_id
+        if not campaign_id:
+            return
+        human_stop = (
+            not _campaign_id()
+            and not _caller_session_id()
+            and args.command == "research"
+            and getattr(args, "subcommand", None) == "campaign"
+            and getattr(args, "campaign_action", None) == "stop"
+        )
+        if human_stop:
+            return
+        svc.guard_command(campaign_id, args.command, vars(args))
+    except ValueError as exc:
+        _fail(f"[战役模式 {args.campaign_mode_id}] {exc}")
+    finally:
+        db.close()
+
+
+def _run_campaign(svc: ResearchCampaignService, args: argparse.Namespace) -> None:
+    """执行 research campaign 子命令。"""
+    as_json = not getattr(args, "no_json", False)
+    action = args.campaign_action
+    if action == "start":
+        result: Any = svc.start(
+            objective=args.objective,
+            strategy_id=args.strategy_id,
+            index_codes=_split_list(args.index_codes),
+            max_trials=args.max_trials,
+            max_hours=args.max_hours,
+            max_rounds=args.max_rounds,
+            max_consecutive_rejects=args.max_rejects,
+            max_diagnostics=args.max_diagnostics,
+            max_step_usd=args.max_step_usd,
+            model=args.model,
+            created_by=args.created_by,
+        )
+    elif action == "run":
+        from quant_etf_api.services.campaign_driver import (  # noqa: PLC0415
+            DriverConfig,
+            run_campaign,
+        )
+
+        result = run_campaign(
+            args.campaign_id,
+            DriverConfig(
+                max_steps=args.max_steps,
+                workers=args.workers,
+                step_timeout_hours=args.step_timeout_hours,
+                claude_bin=args.claude_bin,
+                recover=args.recover,
+            ),
+        )
+    elif action == "begin-step":
+        result = svc.begin_desktop_step(
+            args.campaign_id, args.orchestrator_session or _caller_session_id() or ""
+        )
+    elif action == "finalize-step":
+        result = svc.finalize_desktop_step(
+            args.campaign_id, agent_session_id=args.agent_session, error=args.error
+        )
+    elif action == "next":
+        result = svc.next_task(args.campaign_id)
+    elif action == "status":
+        result = svc.status(args.campaign_id)
+    elif action == "list":
+        result = svc.list_campaigns(status=args.status, limit=args.limit)
+    elif action == "step-done":
+        result = svc.step_done(
+            args.campaign_id,
+            outcome=args.outcome,
+            summary=args.summary,
+            hypothesis_id=args.hypothesis_id,
+            optimization_id=args.optimization_id,
+        )
+    elif action == "review":
+        result = svc.review(
+            args.campaign_id,
+            optimization_id=args.optimization_id,
+            verdict=args.verdict,
+            reason=args.reason,
+        )
+    elif action == "stop":
+        result = svc.stop(args.campaign_id, args.reason)
+    elif action == "report":
+        markdown = svc.report(args.campaign_id)
+        if args.file:
+            with open(args.file, "w", encoding="utf-8") as f:
+                f.write(markdown)
+            print(f"# 报告已写入: {args.file}")
+        else:
+            print(markdown)
+        return
+    else:
+        raise ValueError(f"未知的 campaign 子命令: {action}")
+    _emit(result, as_json)
+
+
+def _run_ledger(svc: ResearchLedgerService, args: argparse.Namespace) -> None:
+    """执行研究台账子命令（hypothesis / trial / ledger）。"""
+    as_json = not args.no_json
+    if args.subcommand == "ledger":
+        _emit(
+            svc.ledger(
+                strategy_id=args.strategy_id,
+                index_code=args.index_code,
+                tag=args.tag,
+                recent_closed=args.recent,
+            ),
+            as_json,
+        )
+        return
+    if args.subcommand == "trial":
+        _emit(
+            svc.record_manual_trial(
+                strategy_id=args.strategy_id,
+                trial_count=args.count,
+                note=args.note,
+                hypothesis_id=args.hypothesis_id,
+                execution_model=args.execution_model,
+                is_estimated=args.estimated,
+            ),
+            as_json,
+        )
+        return
+    action = args.hypothesis_action
+    if action == "add":
+        result = svc.add_hypothesis(
+            statement=args.statement,
+            category=args.category,
+            criteria=args.criteria,
+            strategy_id=args.strategy_id,
+            index_codes=_split_list(args.index_codes),
+            tags=_split_list(args.tags),
+            rationale=args.rationale,
+            execution_models=_split_list(args.execution_models),
+            parent_id=args.parent_id,
+            created_by=args.created_by or ("campaign" if _campaign_mode(args) else None),
+            campaign_id=_campaign_mode(args),
+        )
+    elif action == "list":
+        result = svc.list_hypotheses(
+            strategy_id=args.strategy_id,
+            index_code=args.index_code,
+            tag=args.tag,
+            statuses=_split_list(args.status),
+            limit=args.limit,
+        )
+    elif action == "show":
+        result = svc.get_hypothesis(args.hypothesis_id)
+        if result is None:
+            _fail(f"假设 {args.hypothesis_id} 不存在")
+    elif action == "close":
+        result = svc.close_hypothesis(args.hypothesis_id, args.verdict, args.reason)
+    elif action == "reopen":
+        result = svc.reopen_hypothesis(args.hypothesis_id, args.reason)
+    else:
+        raise ValueError(f"未知的 hypothesis 子命令: {action}")
+    _emit(result, as_json)
 
 
 def _run_robustness(args: argparse.Namespace) -> None:
@@ -1482,6 +2376,13 @@ def _run_robustness(args: argparse.Namespace) -> None:
     try:
         svc = RobustnessService(db)
         if args.subcommand in ("scan", "ablate", "pool"):
+            ledger = ResearchLedgerService(db)
+            hypothesis_id = getattr(args, "hypothesis_id", None)
+            if hypothesis_id:
+                ledger.require_active_hypothesis(hypothesis_id)
+            budget = ledger.ensure_budget(
+                args.strategy_id, 1, getattr(args, "over_budget", None)
+            )
             result = svc.create(
                 strategy_id=args.strategy_id,
                 kind=args.subcommand,
@@ -1493,8 +2394,18 @@ def _run_robustness(args: argparse.Namespace) -> None:
                 knobs=_resolve_knobs(args),
                 preset=getattr(args, "preset", None),
                 parallel=getattr(args, "workers", 1),
-                execution_model=getattr(args, "execution_model", DEFAULT_EXECUTION_MODEL),
+                execution_model=_execution_model(args),
             )
+            if hypothesis_id:
+                result["ledger"] = ledger.link_session(
+                    kind="robustness",
+                    ref_id=result["robustness_id"],
+                    strategy_id=args.strategy_id,
+                    hypothesis_id=hypothesis_id,
+                    trial_count=int(result.get("variants") or 0),
+                    execution_model=_execution_model(args),
+                )
+            result["budget"] = budget
             _emit(result, not args.no_json)
         elif args.subcommand == "collect":
             deadline = time.monotonic() + args.timeout
@@ -1554,18 +2465,42 @@ def _run_optimization(args: argparse.Namespace) -> None:
             # 忘了写 --start 时会把"十年研究期评估"静默变成"最近两年"，
             # 而验收清单照常输出"通过"。
             start = args.start or date.fromisoformat(settings.research_period_start)
+            ledger = ResearchLedgerService(db)
+            hypothesis_text = args.hypothesis
+            hypothesis_id = getattr(args, "hypothesis_id", None)
+            if hypothesis_id:
+                hypothesis_row = ledger.require_active_hypothesis(hypothesis_id)
+                hypothesis_text = hypothesis_text or hypothesis_row.statement
+            if not hypothesis_text:
+                raise ValueError("必须提供 --hypothesis 或 --hypothesis-id")
+            budget = ledger.ensure_budget(
+                args.strategy_id, 1, getattr(args, "over_budget", None)
+            )
             candidate = _read_json_file(args.candidate_file)
+            ledger.ensure_derived_diagnosed(_alias_view(candidate), "候选配置")
             result = svc.start(
                 strategy_id=args.strategy_id,
                 candidate_config=candidate,
-                hypothesis=args.hypothesis,
+                hypothesis=hypothesis_text,
                 start_date=start,
                 end_date=end,
                 folds=args.folds,
                 candidate_strategy_id=args.candidate_strategy_id,
                 candidate_version=args.candidate_version,
-                execution_model=getattr(args, "execution_model", DEFAULT_EXECUTION_MODEL),
+                execution_model=_execution_model(args),
             )
+            if hypothesis_id:
+                result["ledger"] = ledger.link_session(
+                    kind="optimization",
+                    ref_id=result["optimization_id"],
+                    strategy_id=args.strategy_id,
+                    hypothesis_id=hypothesis_id,
+                    trial_count=1,
+                    execution_model=_execution_model(args),
+                    start_date=start,
+                    end_date=end,
+                )
+            result["budget"] = budget
             _emit(result, not args.no_json)
         elif args.subcommand == "evaluate":
             workers = getattr(args, "workers", 1)
@@ -1598,6 +2533,7 @@ def _run_optimization(args: argparse.Namespace) -> None:
                 report_text=report_text,
                 promote=args.promote,
                 strict=args.strict,
+                no_strict_reason=getattr(args, "no_strict_reason", None),
             )
             _emit(result, not args.no_json)
         elif args.subcommand == "show":
@@ -1660,8 +2596,8 @@ def _run_queue(args: argparse.Namespace) -> None:
     _emit({"total": len(items), "items": items}, not args.no_json)
 
 
-def main() -> None:
-    """CLI 入口。"""
+def _build_parser() -> argparse.ArgumentParser:
+    """构建完整的 CLI 参数解析器（供 main 与单测复用）。"""
     parser = argparse.ArgumentParser(description="量化研究平台 CLI 工具")
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
 
@@ -1680,7 +2616,12 @@ def main() -> None:
     _build_industry_group(subparsers)
     _build_index_group(subparsers)
     _build_stock_group(subparsers)
+    return parser
 
+
+def main() -> None:
+    """CLI 入口。"""
+    parser = _build_parser()
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -1693,6 +2634,7 @@ def main() -> None:
     )
 
     try:
+        _guard_campaign_mode(args)
         _dispatch(args)
     except TradingCalendarUnavailableError as exc:
         _fail(str(exc))

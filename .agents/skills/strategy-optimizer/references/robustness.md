@@ -17,7 +17,7 @@
 #    --sync --workers N = 本地多进程并行（回测是 CPU+DB 混合任务，线程会被 GIL 限制）
 python -m quant_etf_api.cli robustness scan --strategy <id> [--preset quick|standard] \
     [--windows 4] [--max-knobs 30] [--knobs timing.thresholds.offensive_score] [--knobs-file k.json] \
-    --sync --workers 6 [--execution-model t_plus_1_close]
+    --sync --workers 6 [--execution-model t_plus_1_open]   # 缺省 t_plus_1_close
 
 # 2) 因子消融：逐个移除评分因子与过滤条件，看边际贡献
 python -m quant_etf_api.cli robustness ablate --strategy <id> --windows 4 --sync --workers 6
@@ -90,16 +90,18 @@ python -m quant_etf_api.cli robustness abandon <robustness_id> --reason "回测�
 | `statistics.pbo.value` | stats | CSCV-PBO，约 0.5 相当于纯噪声；越高越可疑；**null = 窗口数不足（<4）**，看 `pbo.reason` |
 | `statistics.pbo.power_note` | stats | 对称切分 < 10 时的分辨率提示；PBO 取值只有粗粒度，别把 0.17 与 0.33 的差异当真 |
 | `statistics.deflated_sharpe.deflated_sharpe` | stats | 计入试验次数后的显著性概率；< 0.5 基本可以认为不显著 |
-| `statistics.n_trials_breakdown` | stats | N 的来源拆分（`robustness` 变体数 + `optimization` 已评估会话数，或 `explicit`） |
+| `statistics.n_trials_breakdown` | stats | N 的来源拆分（`robustness` 变体数 + `optimization` 已评估会话数 + `research_batch` 探索变体数 + `manual` 人工 / 补录；`estimated` 为其中估算部分；或 `explicit`） |
 | `statistics.bootstrap.lower/upper` | stats | 年化循环块自助法置信区间；跨 0 表示无法区分于噪声 |
 | `coverage.missing_windows` / `failed_windows` | 所有类型 | "回测已被删除"与"执行失败"分开报；前者说明证据缺失，不是执行问题 |
 
 ## 试验次数 N 的取法
 
 `stats` 默认 `--n-trials` 取自台账：**该策略历史所有稳健性批次的变体总数 + 已评估
-（`evaluated`/`accepted`/`rejected`）的优化会话数**，拆分见 `n_trials_breakdown`。
-若同一段时间内还做过多次不经批次/会话的手工对比，应显式 `--n-trials` 传入更大的估计值——
-多重检验的严重程度只会被低估，不会被高估。
+（`evaluated`/`accepted`/`rejected`）的优化会话数 + `research_trial` 中 `research_batch`
+与 `manual` 行的试验次数**，拆分见 `n_trials_breakdown`。`research batch` 每次运行自动记入；
+N **按研究线汇总**（基线 + 优化候选 + 稳健性变体 + 手工归入的策略，`n_trials_scope` 给出成员），
+在候选上跑 stats 也计入基线名下的探索。平台外的手工对比用 `research trial add` 补记，而不是只在 `stats` 里临时传 `--n-trials`
+（临时值不留痕，下一轮会话看不到）。多重检验的严重程度只会被低估，不会被高估。
 
 ## 验收清单第 6 项的证据匹配
 

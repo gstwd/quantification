@@ -19,10 +19,12 @@ from quant_etf_api.domain.strategies.timing_state import (
     TimingState,
     resolve_candidate_regime,
     resolve_effective_tier,
+    resolve_tier_exposure,
     step_timing_state,
 )
 from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.engine.config import TimingConfig
+from quant_etf_api.engine.filter import evaluate_rule_group
 
 # 实时路径重建择时状态时回放的交易日数（不含当日）。状态记忆超过该长度时，实时
 # 与"从回测起点一路推进"的结果可能不同；常用参数（确认 ≤60、持有 ≤250）下足够。
@@ -110,6 +112,7 @@ def evaluate_timing(
         regime = new_state.regime
 
     tier: int | None = None
+    tier_exposure: float | None = None
     if config.tiers:
         raw_tier = details.get("matched_tier")
         tier, tier_source = resolve_effective_tier(
@@ -123,9 +126,28 @@ def evaluate_timing(
         # 配置变更后回放出的旧序号可能越界：按无档位处理
         if tier is not None and not 0 <= tier < len(config.tiers):
             tier, tier_source = None, "none"
-        new_state = replace(new_state, tier=tier)
+        if tier is not None:
+            tier_cfg = config.tiers[tier]
+            tier_exposure = resolve_tier_exposure(
+                source=tier_source,
+                exposure=tier_cfg.exposure,
+                hold=tier_cfg.hold,
+                exposure_delta=tier_cfg.exposure_delta,
+                min_exposure=tier_cfg.min_exposure,
+                max_exposure=tier_cfg.max_exposure,
+                previous_exposure=previous.exposure if previous is not None else None,
+                base_exposure=config.tier_base_exposure,
+                max_step=state_cfg.max_exposure_step,
+            )
+        new_state = replace(new_state, tier=tier, exposure=tier_exposure)
         details = dict(details)
-        details["tier"] = _tier_detail(config, tier, tier_source, raw_tier)
+        details["tier"] = _tier_detail(config, tier, tier_source, raw_tier, tier_exposure)
+
+    cap, cap_label = None, None
+    if config.exposure_caps:
+        cap, cap_label, cap_details = _match_exposure_caps(config, context)
+        details = dict(details)
+        details["exposure_caps"] = cap_details
 
     if not state_cfg.is_identity:
         details = dict(details)
@@ -141,14 +163,50 @@ def evaluate_timing(
             factors=details,
             tier=tier,
             tier_label=tier_config.display_label(tier) if tier_config is not None else None,
-            exposure=tier_config.exposure if tier_config is not None else None,
+            exposure=tier_exposure,
+            exposure_cap=cap,
+            exposure_cap_label=cap_label,
         ),
         new_state,
     )
 
 
+def _match_exposure_caps(
+    config: TimingConfig, context: EngineContext
+) -> tuple[float | None, str | None, list[dict[str, Any]]]:
+    """评估条件仓位上限：命中的上限取最小值。
+
+    Args:
+        config: 择时配置（已配置 exposure_caps）。
+        context: 引擎上下文（市场级因子值）。
+
+    Returns:
+        (生效上限, 展示名, 逐条明细)；都未命中时上限为 None。
+    """
+    cap: float | None = None
+    label: str | None = None
+    details: list[dict[str, Any]] = []
+    for index, item in enumerate(config.exposure_caps):
+        hit = evaluate_rule_group(item.as_rule_group(), context.market_factors.get)
+        details.append(
+            {
+                "index": index,
+                "label": item.display_label(index),
+                "max_exposure": item.max_exposure,
+                "matched": hit,
+            }
+        )
+        if hit and (cap is None or item.max_exposure < cap):
+            cap, label = item.max_exposure, item.display_label(index)
+    return cap, label, details
+
+
 def _tier_detail(
-    config: TimingConfig, tier: int | None, source: str, matched: Any
+    config: TimingConfig,
+    tier: int | None,
+    source: str,
+    matched: Any,
+    exposure: float | None = None,
 ) -> dict[str, Any]:
     """构造择时明细中的有效档位字段。
 
@@ -157,18 +215,23 @@ def _tier_detail(
         tier: 有效档位序号；None 表示按 regime 仓位表。
         source: 有效档位来源（matched / held / none）。
         matched: 当日原始命中的档位序号（None 表示未命中）。
+        exposure: 当日有效档位的目标仓位（动态档位按上一仓位算出）。
 
     Returns:
-        含 index / label / exposure / source / matched_index 的字典。
+        含 index / label / exposure / source / matched_index 的字典；动态档位另含 mode。
     """
     tier_config = config.tiers[tier] if tier is not None else None
-    return {
+    detail: dict[str, Any] = {
         "index": tier,
         "label": tier_config.display_label(tier) if tier_config is not None else None,
-        "exposure": tier_config.exposure if tier_config is not None else None,
+        "exposure": exposure,
         "source": source,
         "matched_index": matched if isinstance(matched, int) else None,
     }
+    if tier_config is not None and tier_config.is_dynamic:
+        # 动态档位额外给出仓位方式（维持 / 增减），固定档位明细与改造前一致
+        detail["mode"] = tier_config.exposure_text()
+    return detail
 
 
 def _confidence(

@@ -71,3 +71,23 @@ class OptimizationRepository(BaseRepository):
             .limit(limit)
             .all()
         )
+
+    def find_by_statuses(
+        self, statuses: list[str], limit: int = 200
+    ) -> list[StrategyOptimizationModel]:
+        """按状态查询优化会话，按创建时间倒序。
+
+        Args:
+            statuses: 状态列表。
+            limit: 最大返回条数。
+
+        Returns:
+            会话记录列表。
+        """
+        return (
+            self._db.query(StrategyOptimizationModel)
+            .filter(StrategyOptimizationModel.status.in_(statuses))
+            .order_by(StrategyOptimizationModel.created_at.desc())
+            .limit(limit)
+            .all()
+        )

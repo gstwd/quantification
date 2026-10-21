@@ -44,6 +44,17 @@
           {{ choice }}
         </option>
       </select>
+      <!-- 文本参数（派生因子 expr 的表达式）：引用其他因子别名，失焦时提交 -->
+      <input
+        v-else-if="parameterSpec(key)?.type === 'text'"
+        :value="modelValue.params[key]"
+        type="text"
+        class="fp-input fp-expr"
+        maxlength="200"
+        :placeholder="parameterSpec(key)?.description || key"
+        :title="parameterSpec(key)?.description || key"
+        @change="updateChoiceParam(key, ($event.target as HTMLInputElement).value.trim())"
+      />
       <input
         v-else
         :value="modelValue.params[key]"
@@ -69,9 +80,9 @@
     </div>
 
     <select
-      :value="modelValue.transform || ''"
+      :value="linearRange ? LINEAR_OPTION : modelValue.transform || ''"
       class="fp-select fp-transform"
-      @change="updateField('transform', ($event.target as HTMLSelectElement).value || undefined)"
+      @change="onTransformChange(($event.target as HTMLSelectElement).value)"
     >
       <option value="">无变换</option>
       <option
@@ -82,7 +93,28 @@
       >
         {{ t.label }}
       </option>
+      <option :value="LINEAR_OPTION" title="把 [下限, 上限] 线性映射到 0-100 并截断；下限大于上限时方向反转">
+        线性映射…
+      </option>
     </select>
+    <template v-if="linearRange">
+      <input
+        :value="linearRange[0]"
+        type="number"
+        step="any"
+        class="fp-input fp-param"
+        title="映射到 0 分的值"
+        @change="updateLinear(0, ($event.target as HTMLInputElement).value)"
+      />
+      <input
+        :value="linearRange[1]"
+        type="number"
+        step="any"
+        class="fp-input fp-param"
+        title="映射到 100 分的值"
+        @change="updateLinear(1, ($event.target as HTMLInputElement).value)"
+      />
+    </template>
 
     <button class="fp-remove" @click="$emit('remove')" title="移除">×</button>
   </div>
@@ -128,7 +160,40 @@ const TRANSFORM_OPTIONS = [
   { value: 'trend_score', label: '趋势得分', description: 'MA 偏离度映射为 0-100 得分' },
   { value: 'clamp_0_100', label: '裁剪 0-100', description: '限制值在 0-100 范围内' },
   { value: 'resonance_score', label: '共振得分', description: '价量共振比 > 1 记 100 分，否则 0 分' },
+  { value: 'erp_score', label: '股债性价比得分', description: 'ERP 映射为 0-100 得分' },
+  { value: 'drawdown_score', label: '回撤得分', description: '当前回撤映射为 0-100 得分' },
+  { value: 'rsrs_score', label: 'RSRS 得分', description: 'RSRS 标准分 z ≤ -2 → 0，z ≥ 2 → 100' },
 ]
+
+/** 参数化线性映射在下拉框中的占位值（实际写入 linear(lo,hi)） */
+const LINEAR_OPTION = '__linear__'
+const LINEAR_PATTERN = /^linear\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)$/
+
+/** 当前变换为 linear(lo,hi) 时返回 [lo, hi]，否则为 null */
+const linearRange = computed<[number, number] | null>(() => {
+  const match = LINEAR_PATTERN.exec(props.modelValue.transform ?? '')
+  return match ? [parseFloat(match[1]), parseFloat(match[2])] : null
+})
+
+/** 切换变换函数：选择线性映射时给出默认区间 [-20, 20] */
+function onTransformChange(value: string): void {
+  if (value === LINEAR_OPTION) {
+    updateField('transform', 'linear(-20,20)')
+    return
+  }
+  updateField('transform', value || undefined)
+}
+
+/** 修改线性映射的下限 / 上限（二者相等时不更新，后端会拒绝该写法） */
+function updateLinear(index: 0 | 1, raw: string): void {
+  const range = linearRange.value ?? [-20, 20]
+  const value = parseFloat(raw)
+  if (isNaN(value)) return
+  const next: [number, number] = [range[0], range[1]]
+  next[index] = value
+  if (next[0] === next[1]) return
+  updateField('transform', `linear(${next[0]},${next[1]})`)
+}
 
 /** 按 category 分组模板 */
 const groupedFactors = computed(() => {
@@ -216,6 +281,7 @@ function updateNumber(key: keyof FactorRowValue, raw: string): void {
 .fp-factor { flex: 2; min-width: 0; }
 .fp-alias { flex: 1.2; min-width: 0; }
 .fp-param { width: 76px; text-align: center; }
+.fp-expr { flex: 2; min-width: 120px; }
 .fp-weight { width: 72px; text-align: center; }
 .fp-transform { flex: 1.2; min-width: 0; }
 

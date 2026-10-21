@@ -56,9 +56,7 @@ class _FakeVariantRepo:
     def find_variants(self, batch_id: str) -> list[StrategyConfigModel]:
         """返回该批次的变体行。"""
         return [
-            row
-            for row in self.rows.values()
-            if row.source_batch_id == batch_id and row.is_variant
+            row for row in self.rows.values() if row.source_batch_id == batch_id and row.is_variant
         ]
 
     def delete_by_id(self, strategy_id: str) -> bool:
@@ -82,6 +80,16 @@ class _FakeVariantRepo:
         elif note:
             row.validation_consumed_note = f"{row.validation_consumed_note}；{note}"
         return True
+
+    def find_by_id(self, strategy_id: str) -> StrategyConfigModel | None:
+        """按主键返回策略行。"""
+        return self.rows.get(strategy_id)
+
+    def find_lineage_members(self, lineage_id: str) -> list[StrategyConfigModel]:
+        """返回研究线成员（lineage_id 为空的行视同自身 ID）。"""
+        return [
+            row for row in self.rows.values() if (row.lineage_id or row.strategy_id) == lineage_id
+        ]
 
 
 def _service(rows: list[StrategyConfigModel], backtests: dict[str, list[str]]) -> tuple[Any, Any]:
@@ -188,15 +196,29 @@ class TestValidationConsumed:
         assert repo.rows["base_v1"].validation_consumed_at == first_at
         assert "又跑了一条 monitor 回测" in repo.rows["base_v1"].validation_consumed_note
 
+    def test_consumption_spreads_to_lineage_members(self) -> None:
+        """验证期消费按研究线生效：同线其他成员一并留痕，其他研究线不受影响。"""
+        base = _variant_row("base_v1")
+        base.is_variant = False
+        base.source_batch_id = None
+        candidate = _variant_row("base_v1__opt_x")
+        candidate.lineage_id = "base_v1"
+        other = _variant_row("other")
+        other.is_variant = False
+        svc, repo = _service([base, candidate, other], {})
+
+        assert svc.mark_validation_consumed("base_v1__opt_x", "看了 2026 段") is True
+        assert repo.rows["base_v1"].validation_consumed_at is not None
+        assert "base_v1__opt_x" in repo.rows["base_v1"].validation_consumed_note
+        assert repo.rows["other"].validation_consumed_at is None
+
     def test_unknown_strategy_returns_false(self) -> None:
         """策略不存在时返回 False（CLI 据此报错退出）。"""
         svc, _ = _service([], {})
 
         assert svc.mark_validation_consumed("nope") is False
 
-    def test_validation_backtest_marks_consumption(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_validation_backtest_marks_consumption(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """创建验证期回测即自动留痕（不需要人工再补一步）。"""
         recorded: list[tuple[str, str | None]] = []
 

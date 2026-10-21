@@ -26,7 +26,12 @@ from quant_etf_api.factors.base import (
     FactorComputer,
     period_lookback_days,
 )
-from quant_etf_api.factors.templates import FactorTemplate, ParameterSpec, build_template
+from quant_etf_api.factors.templates import (
+    PARAM_TYPE_TEXT,
+    FactorTemplate,
+    ParameterSpec,
+    build_template,
+)
 
 # ── 可调参模板的参数声明 ────────────────────────────────────────────────
 # 单周期窗口统一走「交易日周期」口径，交易日 → 自然日的折算系数见
@@ -223,6 +228,8 @@ class FactorTemplateRegistry:
         self,
         ref: str,
         factor_aliases: Mapping[str, FactorAliasLike] | None = None,
+        *,
+        _stack: tuple[str, ...] = (),
     ) -> FactorInstance:
         """把策略中的因子引用解析成可执行实例。
 
@@ -255,16 +262,51 @@ class FactorTemplateRegistry:
 
         try:
             resolved = template.resolve_params(params)
+            computer = template.build_computer(resolved)
         except ValueError as exc:
             raise FactorResolutionError(f"因子 {ref} 参数不合法：{exc}") from exc
 
-        return FactorInstance(
+        instance = FactorInstance(
             instance_id=ref,
             label=template.label(resolved),
             template=template,
             params=resolved,
-            computer=template.build_computer(resolved),
+            computer=computer,
         )
+        self._bind_derived(instance, factor_aliases, (*_stack, ref))
+        return instance
+
+    def _bind_derived(
+        self,
+        instance: FactorInstance,
+        factor_aliases: Mapping[str, FactorAliasLike] | None,
+        stack: tuple[str, ...],
+    ) -> None:
+        """派生因子（expr 模板）：递归解析表达式引用的依赖并绑定到计算器。
+
+        Args:
+            instance: 刚解析出的实例。
+            factor_aliases: 策略别名声明。
+            stack: 当前解析链（用于发现循环引用）。
+
+        Raises:
+            FactorResolutionError: 依赖无法解析或存在循环引用。
+        """
+        from quant_etf_api.factors.builtins.derived import ExpressionComputer  # noqa: PLC0415
+
+        computer = instance.computer
+        if not isinstance(computer, ExpressionComputer):
+            return
+        dependencies: dict[str, FactorInstance] = {}
+        for dep in computer.refs:
+            if dep in stack:
+                raise FactorResolutionError(
+                    f"派生因子 {instance.instance_id} 存在循环引用：{' → '.join((*stack, dep))}"
+                )
+            if len(stack) > _MAX_DERIVED_DEPTH:
+                raise FactorResolutionError(f"派生因子嵌套超过 {_MAX_DERIVED_DEPTH} 层")
+            dependencies[dep] = self.resolve(dep, factor_aliases, _stack=stack)
+        computer.bind_dependencies(dependencies)
 
     def resolve_params(
         self,
@@ -288,13 +330,16 @@ class FactorTemplateRegistry:
         if template is None:
             raise FactorResolutionError(f"未知因子模板 {template_id}：可用模板 {self.ids()}")
         resolved = template.resolve_params(params)
-        return FactorInstance(
+        instance = FactorInstance(
             instance_id=template_id,
             label=template.label(resolved),
             template=template,
             params=resolved,
             computer=template.build_computer(resolved),
         )
+        # 直接按模板查询派生因子时，依赖只能是模板 ID（默认参数）
+        self._bind_derived(instance, None, (template_id,))
+        return instance
 
     def resolve_all(
         self,
@@ -440,6 +485,15 @@ def _months_label(suffix: str) -> Callable[[Mapping[str, Any]], str]:
         return f"{params['months']}{suffix}"
 
     return _label
+
+
+# 派生因子最多嵌套层数（派生因子引用派生因子）
+_MAX_DERIVED_DEPTH = 4
+
+
+def _expression_label(params: Mapping[str, Any]) -> str:
+    """派生因子实例展示名。"""
+    return f"派生：{params.get('expr', '')}"
 
 
 def build_default_templates() -> list[FactorTemplate]:
@@ -870,6 +924,32 @@ def build_default_templates() -> list[FactorTemplate]:
     for template_id, factory in zero_param:
         templates.append(build_template(template_id, factory))
 
+    # ── 派生因子 ────────────────────────────────────────────────────────
+    from quant_etf_api.factors.builtins.derived import (  # noqa: PLC0415
+        DEFAULT_EXPRESSION,
+        DERIVED_TEMPLATE_ID,
+        ExpressionComputer,
+    )
+
+    templates.append(
+        build_template(
+            DERIVED_TEMPLATE_ID,
+            lambda p: ExpressionComputer(str(p["expr"])),
+            parameter_schema={
+                "expr": ParameterSpec(
+                    type=PARAM_TYPE_TEXT,
+                    minimum=None,
+                    maximum=None,
+                    default=DEFAULT_EXPRESSION,
+                    description=(
+                        "表达式：引用其他因子别名 / 模板 ID，支持 + - * / ** 与 "
+                        "abs/min/max/log/sqrt/sign，如 dev250 - dev60"
+                    ),
+                )
+            },
+            instance_label=_expression_label,
+        )
+    )
     return templates
 
 

@@ -7,10 +7,11 @@ AND / OR 逻辑组合。
 from __future__ import annotations
 
 import logging
-from typing import Protocol
+from collections.abc import Callable
+from typing import Any, Protocol
 
 from quant_etf_api.engine.base import EngineContext
-from quant_etf_api.engine.config import FilterConfig
+from quant_etf_api.engine.config import FilterConfig, FilterRule
 from quant_etf_api.engine.pipeline_detail import AssetFilterDetail, FilterRuleResult
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,59 @@ def _check_rule(value: float | None, op: str, threshold: float | list[float]) ->
     return cmp(value, threshold)
 
 
+# 单条规则的判定回调：(规则序号, 规则, 因子值, 参照值, 是否通过, 是否缺失, 子组路径)
+RuleObserver = Callable[[int, FilterRule, float | None, Any, bool, bool, str], None]
+
+
+def evaluate_rule_group(
+    group: FilterConfig,
+    lookup: Callable[[str], float | None],
+    *,
+    short_circuit: bool = False,
+    observer: RuleObserver | None = None,
+    path: str = "",
+) -> bool:
+    """按 ``logic`` 求值规则组（规则在前、子规则组在后，子组可嵌套）。
+
+    规则口径与过滤规则一致：比较原值；因子值或参照值缺失时按 ``missing_strategy``
+    处理（pass=视为满足，fail/exclude=视为不满足）。没有任何规则的（子）组视为不满足。
+
+    Args:
+        group: 规则组。
+        lookup: 因子引用 → 因子值（资产级或市场级）。
+        short_circuit: True 时 AND 遇到不满足、OR 遇到满足立即返回（过滤引擎逐资产求值用）。
+        observer: 每条规则求值后的回调（用于收集明细）。
+        path: 当前子组路径（顶层为空串）。
+
+    Returns:
+        是否满足。
+    """
+    if group.is_empty:
+        return False
+    use_and = group.logic == "AND"
+    flags: list[bool] = []
+    for index, rule in enumerate(group.rules):
+        value = lookup(rule.factor)
+        compare_value = lookup(rule.compare_to) if rule.compare_to is not None else None
+        target = compare_value if rule.compare_to is not None else rule.value
+        missing = value is None or target is None
+        passed = rule.missing_strategy == "pass" if missing else _check_rule(value, rule.op, target)
+        if observer is not None:
+            observer(index, rule, value, compare_value, passed, missing, path)
+        flags.append(passed)
+        if short_circuit and (passed != use_and):
+            return passed
+    for index, child in enumerate(group.groups):
+        child_path = f"{path}.{index}" if path else str(index)
+        passed = evaluate_rule_group(
+            child, lookup, short_circuit=short_circuit, observer=observer, path=child_path
+        )
+        flags.append(passed)
+        if short_circuit and (passed != use_and):
+            return passed
+    return all(flags) if use_and else any(flags)
+
+
 class DefaultFilterEngine:
     """默认过滤引擎。"""
 
@@ -98,7 +152,7 @@ class DefaultFilterEngine:
         Returns:
             过滤后的资产得分。
         """
-        if not config.rules:
+        if config.is_empty:
             return assets
 
         result: dict[str, float] = {}
@@ -159,52 +213,44 @@ class DefaultFilterEngine:
         use_and: bool,
         rule_results: list[FilterRuleResult] | None = None,
     ) -> bool:
-        """评估单个资产是否通过所有过滤规则。
+        """评估单个资产是否通过过滤规则组（含嵌套子组）。
 
         支持两种比较模式：
         - 因子 vs 固定阈值：使用 rule.value。
         - 因子 vs 因子（跨因子比较）：使用 rule.compare_to 引用另一个因子的值。
+        缺失判定：因子值或参照值为 None 时按 missing_strategy 处理。pass=规则视为通过，
+        fail/exclude=规则不满足（exclude 在语义上标记"因子缺失导致的排除"，便于调试定位）。
         """
-        for i, rule in enumerate(config.rules):
-            factor_value = context.asset_factors.get((code, rule.factor))
-            compare_value = None
 
-            if rule.compare_to is not None:
-                # 跨因子比较模式
-                compare_value = context.asset_factors.get((code, rule.compare_to))
-                threshold = rule.compare_to
-                missing = factor_value is None or compare_value is None
-            else:
-                threshold = rule.value
-                missing = factor_value is None or threshold is None
-
-            # 缺失判定：因子值或参照值为 None 时按 missing_strategy 处理。
-            # pass=规则视为通过，fail/exclude=规则不满足（exclude 在语义上
-            # 标记"因子缺失导致的排除"，与普通规则不满足区分，便于调试定位）。
-            if missing:
-                rule_passed = rule.missing_strategy == "pass"
-            else:
-                compare_target = compare_value if rule.compare_to is not None else rule.value
-                rule_passed = _check_rule(factor_value, rule.op, compare_target)
-
-            if rule_results is not None:
-                rule_results.append(
-                    FilterRuleResult(
-                        rule_index=i,
-                        factor=rule.factor,
-                        op=rule.op,
-                        threshold=threshold,
-                        factor_value=factor_value,
-                        compare_value=compare_value,
-                        passed=rule_passed,
-                        missing=missing,
-                        missing_strategy=rule.missing_strategy,
-                    )
+        def _observe(
+            index: int,
+            rule: FilterRule,
+            value: float | None,
+            compare_value: Any,
+            passed: bool,
+            missing: bool,
+            path: str,
+        ) -> None:
+            if rule_results is None:
+                return
+            rule_results.append(
+                FilterRuleResult(
+                    rule_index=index,
+                    factor=rule.factor,
+                    op=rule.op,
+                    threshold=rule.compare_to if rule.compare_to is not None else rule.value,
+                    factor_value=value,
+                    compare_value=compare_value,
+                    passed=passed,
+                    missing=missing,
+                    missing_strategy=rule.missing_strategy,
+                    group_path=path,
                 )
+            )
 
-            if use_and and not rule_passed:
-                return False
-            if not use_and and rule_passed:
-                return True
-
-        return use_and
+        return evaluate_rule_group(
+            config,
+            lambda ref: context.asset_factors.get((code, ref)),
+            short_circuit=True,
+            observer=_observe,
+        )

@@ -195,6 +195,14 @@
                   状态层沿用前一 regime 时同时沿用上一档位
                 </span>
               </div>
+              <div v-if="timingConfig.tier_base_exposure != null" class="config-row">
+                <span class="config-key">动态档位起点</span>
+                <span class="config-val">{{ (timingConfig.tier_base_exposure * 100).toFixed(0) }}%（维持 / 增减档位没有上一仓位时）</span>
+              </div>
+              <div v-for="cap in timingCapRows" :key="cap.index" class="config-row">
+                <span class="config-key">仓位上限 {{ cap.index + 1 }}</span>
+                <span class="config-val">{{ cap.text }}</span>
+              </div>
               <div v-if="timingStateText" class="config-row">
                 <span class="config-key">状态层</span>
                 <span class="config-val">{{ timingStateText }}</span>
@@ -212,7 +220,10 @@
         <div class="config-card">
           <div class="config-header">过滤模块 (Filter)</div>
           <div class="config-body">
-            <div v-if="filterConfig && filterConfig.rules && filterConfig.rules.length > 0" class="config-section">
+            <div
+              v-if="filterConfig && ((filterConfig.rules?.length ?? 0) > 0 || (filterConfig.groups?.length ?? 0) > 0)"
+              class="config-section"
+            >
               <div class="config-row">
                 <span class="config-key">逻辑</span>
                 <span class="config-val">{{ filterConfig.logic || 'AND' }}</span>
@@ -226,6 +237,10 @@
                     （缺失:{{ rule.missing_strategy === 'pass' ? '通过' : '排除' }}）
                   </span>
                 </span>
+              </div>
+              <div v-for="(group, i) in filterConfig.groups ?? []" :key="`g${i}`" class="config-row">
+                <span class="config-key">子规则组 {{ i + 1 }}</span>
+                <span class="config-val mono">{{ ruleGroupText(group) }}</span>
               </div>
             </div>
             <div v-else class="config-empty">未配置（无过滤）</div>
@@ -634,6 +649,12 @@
                 {{ allocation.timing.tier_label }}（档位仓位 {{ (allocation.timing.exposure * 100).toFixed(0) }}%）
               </span>
             </div>
+            <div v-if="allocation.timing.exposure_cap != null" class="alloc-row">
+              <span class="alloc-key">条件上限</span>
+              <span class="alloc-val">
+                {{ allocation.timing.exposure_cap_label }}：总仓位不超过 {{ (allocation.timing.exposure_cap * 100).toFixed(0) }}%
+              </span>
+            </div>
           </div>
         </div>
 
@@ -987,6 +1008,8 @@ import type {
   RobustnessDetail,
   RobustnessSummary,
   TimingConfigJson,
+  TimingRuleGroupJson,
+  TimingTierJson,
   TimingDetailValue,
   TimingFactorDetail,
   TimingOnDegraded,
@@ -1050,7 +1073,7 @@ function onDegradedLabel(policy: TimingOnDegraded | undefined): string {
   if (policy === 'hold_previous') return '沿用上一决策日（实时回放最近交易日得到）'
   return '按中性（默认）'
 }
-const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string; missing_strategy?: string }> } | undefined)
+const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string; missing_strategy?: string }>; groups?: TimingRuleGroupJson[] } | undefined)
 const rankConfig = computed(() => configJson.value.rank as { order?: string; top_n?: number; bottom_n?: number; momentum_factor?: string; valuation_factor?: string } | undefined)
 
 /** 因子别名声明：别名 → 模板与参数 */
@@ -1360,27 +1383,52 @@ const timingCombineText = computed((): string => {
   return hasTiers ? '因子加权综合分过阈值 · 多档仓位（综合分分段映射总仓位）' : '因子加权综合分过阈值'
 })
 
+/** 规则组（含嵌套子组）的展示文本，子组加括号 */
+function ruleGroupText(group: TimingRuleGroupJson): string {
+  const joiner = group.logic === 'OR' ? ' 或 ' : ' 且 '
+  const parts = (group.rules ?? []).map(rule => {
+    const target = rule.compare_to ? factorLabel(rule.compare_to) : JSON.stringify(rule.value)
+    return `${factorLabel(rule.factor)} ${rule.op} ${target}`
+  })
+  for (const child of group.groups ?? []) parts.push(`（${ruleGroupText(child)}）`)
+  return parts.join(joiner)
+}
+
+/** 档位仓位方式的展示文本：固定 / 维持 / 相对增减 */
+function tierExposureText(tier: TimingTierJson): string {
+  if (tier.hold) return '维持上一仓位'
+  if (tier.exposure_delta != null) {
+    const sign = tier.exposure_delta >= 0 ? '+' : ''
+    const low = ((tier.min_exposure ?? 0) * 100).toFixed(0)
+    const high = ((tier.max_exposure ?? 1) * 100).toFixed(0)
+    return `仓位 ${sign}${(tier.exposure_delta * 100).toFixed(0)}%（夹在 ${low}%~${high}%）`
+  }
+  return `仓位 ${((tier.exposure ?? 0) * 100).toFixed(0)}%`
+}
+
 /** 多档仓位配置的逐档展示文本 */
 const timingTierRows = computed((): Array<{ index: number; text: string }> => {
   const timing = timingConfig.value
   const tiers = timing?.tiers ?? []
   return tiers.map((tier, index) => {
     const name = tier.label || `档位${index + 1}`
-    const exposure = `仓位 ${((tier.exposure ?? 0) * 100).toFixed(0)}%`
+    const exposure = tierExposureText(tier)
     if (timing?.combine === 'rules') {
-      const joiner = tier.logic === 'OR' ? ' 或 ' : ' 且 '
-      const condition = (tier.rules ?? [])
-        .map(rule => {
-          const target = rule.compare_to ? factorLabel(rule.compare_to) : JSON.stringify(rule.value)
-          return `${factorLabel(rule.factor)} ${rule.op} ${target}`
-        })
-        .join(joiner)
+      const condition = ruleGroupText(tier)
       const regime = REGIME_TEXT[tier.regime ?? 'neutral'] ?? tier.regime
       return { index, text: `${name}：${condition || '（无规则）'} → ${regime}，${exposure}` }
     }
     return { index, text: `${name}：综合分 ≥ ${tier.min_score ?? '—'} → ${exposure}` }
   })
 })
+
+/** 条件仓位上限的逐条展示文本 */
+const timingCapRows = computed((): Array<{ index: number; text: string }> =>
+  (timingConfig.value?.exposure_caps ?? []).map((cap, index) => ({
+    index,
+    text: `${cap.label || `上限${index + 1}`}：${ruleGroupText(cap) || '（无规则）'} → 总仓位不超过 ${(cap.max_exposure * 100).toFixed(0)}%`,
+  })),
+)
 
 /** 状态层配置的展示文本；恒等（全部缺省）时为空串 */
 const timingStateText = computed((): string => {
@@ -1391,6 +1439,7 @@ const timingStateText = computed((): string => {
   if (state.hold_on_neutral) parts.push('无信号维持前值')
   if ((state.confirm_days ?? 1) > 1) parts.push(`连续 ${state.confirm_days} 日确认才切换`)
   if ((state.min_hold_days ?? 0) > 0) parts.push(`切换后最短持有 ${state.min_hold_days} 日`)
+  if (state.max_exposure_step != null) parts.push(`档位仓位每次最多变动 ${(state.max_exposure_step * 100).toFixed(0)}%`)
   return parts.join('，')
 })
 

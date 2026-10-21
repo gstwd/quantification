@@ -197,15 +197,38 @@
               placeholder="下限"
             />
             <span class="threshold-hint">仓位</span>
-            <input
-              v-model.number="tier.exposure"
-              type="number"
-              min="0"
-              max="100"
-              step="5"
-              class="fp-input exposure-input"
-            />
-            <span class="exposure-unit">%</span>
+            <select v-model="tier.mode" class="fp-select fr-mode" title="仓位方式">
+              <option value="fixed">固定仓位</option>
+              <option value="hold">维持上一仓位</option>
+              <option value="delta">相对增减</option>
+            </select>
+            <template v-if="tier.mode === 'fixed'">
+              <input
+                v-model.number="tier.exposure"
+                type="number"
+                min="0"
+                max="100"
+                step="5"
+                class="fp-input exposure-input"
+              />
+              <span class="exposure-unit">%</span>
+            </template>
+            <template v-else-if="tier.mode === 'delta'">
+              <input
+                v-model.number="tier.delta"
+                type="number"
+                min="-100"
+                max="100"
+                step="5"
+                class="fp-input exposure-input"
+                title="在上一仓位上增减（如 +25 表示加一档）"
+              />
+              <span class="exposure-unit">%，夹在</span>
+              <input v-model.number="tier.min_exposure" type="number" min="0" max="100" step="5" class="fp-input exposure-input" />
+              <span class="fr-sep">~</span>
+              <input v-model.number="tier.max_exposure" type="number" min="0" max="100" step="5" class="fp-input exposure-input" />
+              <span class="exposure-unit">%</span>
+            </template>
             <input v-model="tier.label" class="fp-input fr-factor" maxlength="40" placeholder="档位名称（可选）" />
             <button class="fp-remove" @click="removeTimingTier(i)" title="移除">×</button>
           </div>
@@ -228,6 +251,12 @@
                 <option value="defensive">防守</option>
               </select>
               <span class="threshold-hint">仓位</span>
+              <select v-model="timingTiers[block.tierIndex].mode" class="fp-select fr-mode" title="仓位方式">
+              <option value="fixed">固定仓位</option>
+              <option value="hold">维持上一仓位</option>
+              <option value="delta">相对增减</option>
+            </select>
+            <template v-if="timingTiers[block.tierIndex].mode === 'fixed'">
               <input
                 v-model.number="timingTiers[block.tierIndex].exposure"
                 type="number"
@@ -237,6 +266,23 @@
                 class="fp-input exposure-input"
               />
               <span class="exposure-unit">%</span>
+            </template>
+            <template v-else-if="timingTiers[block.tierIndex].mode === 'delta'">
+              <input
+                v-model.number="timingTiers[block.tierIndex].delta"
+                type="number"
+                min="-100"
+                max="100"
+                step="5"
+                class="fp-input exposure-input"
+                title="在上一仓位上增减（如 +25 表示加一档）"
+              />
+              <span class="exposure-unit">%，夹在</span>
+              <input v-model.number="timingTiers[block.tierIndex].min_exposure" type="number" min="0" max="100" step="5" class="fp-input exposure-input" />
+              <span class="fr-sep">~</span>
+              <input v-model.number="timingTiers[block.tierIndex].max_exposure" type="number" min="0" max="100" step="5" class="fp-input exposure-input" />
+              <span class="exposure-unit">%</span>
+            </template>
               <button
                 class="fp-remove"
                 :disabled="block.tierIndex === 0"
@@ -337,10 +383,22 @@
               </template>
               <button class="fp-remove" @click="removeTimingRule(block.group, i)" title="移除">×</button>
             </div>
+            <span v-if="block.group.groups.length > 0" class="threshold-hint">
+              另含 {{ block.group.groups.length }} 个嵌套子规则组：表单不支持编辑，保存时原样保留（用 CLI 或配置 JSON 修改）
+            </span>
             <button class="add-btn" @click="addTimingRule(block.group)">+ 添加{{ block.short }}规则</button>
           </div>
           <button v-if="timingTiersEnabled" class="add-btn" @click="addTimingTier">+ 添加档位</button>
         </template>
+
+        <div v-if="timingTiersEnabled && hasDynamicTier" class="sub-field">
+          <label class="sub-label">动态档位起点仓位</label>
+          <div class="threshold-input-wrap">
+            <input v-model.number="timingTierBase" type="number" min="0" max="100" step="5" class="fp-input exposure-input" />
+            <span class="exposure-unit">%</span>
+            <span class="threshold-hint">“维持 / 相对增减”档位在没有上一仓位（首日、上一日未命中档位）时以此为起点</span>
+          </div>
+        </div>
 
         <div v-if="timingCombine === 'weighted'" class="threshold-row">
           <div class="threshold-field">
@@ -417,6 +475,13 @@
                 <span class="threshold-hint">切换后至少持有的交易日数，0=不限制</span>
               </div>
             </div>
+            <div class="threshold-field">
+              <label class="sub-label">单次仓位变动上限（%）</label>
+              <div class="threshold-input-wrap">
+                <input v-model.number="timingMaxStep" type="number" min="0" max="100" step="5" class="fp-input" />
+                <span class="threshold-hint">档位决定的仓位每个决策日最多变动多少（如 25=每次最多一档），0=不限制</span>
+              </div>
+            </div>
           </div>
           <label class="radio-opt">
             <input type="checkbox" v-model="timingHoldOnNeutral" /> 无信号（中性）时维持前一 regime
@@ -424,6 +489,28 @@
           <span class="threshold-hint">
             实时分配会回放最近 250 个交易日重建状态，与回测同一实现
           </span>
+        </div>
+        <div class="sub-field">
+          <label class="sub-label">条件仓位上限（可选）</label>
+          <span class="threshold-hint">
+            规则组满足时封顶总仓位（如“估值分位 ≥ 80 时不超过 50%”），多条命中取最小值；规则比较择时代理上的因子原值，
+            因子需先在上方因子列表中声明（加权模式下权重填 0 即只声明不参与综合分）
+          </span>
+          <div v-for="(cap, i) in timingCaps" :key="i" class="cap-block">
+            <div class="filter-rule-row">
+              <input v-model="cap.label" class="fp-input fr-factor" maxlength="40" placeholder="上限名称（可选）" />
+              <span class="threshold-hint">命中时总仓位不超过</span>
+              <input v-model.number="cap.max_exposure" type="number" min="0" max="100" step="5" class="fp-input exposure-input" />
+              <span class="exposure-unit">%</span>
+              <button class="fp-remove" title="移除上限" @click="timingCaps.splice(i, 1)">×</button>
+            </div>
+            <RuleGroupEditor
+              :model-value="cap.group"
+              :factor-options="timingRuleFactorOptions"
+              @update:model-value="cap.group = $event"
+            />
+          </div>
+          <button class="add-btn" @click="addTimingCap">+ 添加仓位上限</button>
         </div>
         <div class="sub-field">
           <label class="sub-label">择时因子全部缺失时</label>
@@ -453,6 +540,9 @@
       </div>
       <div v-show="filterEnabled && expanded.filter" class="module-body">
         <div class="module-desc">按条件过滤不符合要求的资产。多条规则可选 AND（全部满足）或 OR（任一满足）。</div>
+        <span v-if="filterGroups.length > 0" class="threshold-hint">
+          另含 {{ filterGroups.length }} 个嵌套子规则组：表单不支持编辑，保存时原样保留（用 CLI 或配置 JSON 修改）
+        </span>
 
         <div class="sub-field">
           <label class="sub-label">规则逻辑</label>
@@ -945,6 +1035,8 @@ import type {
   TimingOnDegraded,
 } from '../types/api'
 import FactorPicker from './FactorPicker.vue'
+import RuleGroupEditor from './RuleGroupEditor.vue'
+import type { RuleGroupValue } from './RuleGroupEditor.vue'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
 
@@ -1158,10 +1250,11 @@ const timingCombine = ref<TimingCombineMode>('weighted')
 /** 择时规则组的键 */
 type TimingRuleGroupKey = 'offensive' | 'defensive'
 
-/** 单个择时规则组的表单状态 */
+/** 单个择时规则组的表单状态（groups 为表单不编辑的嵌套子组，原样保留） */
 interface TimingRuleGroupValue {
   logic: string
   rules: FilterRuleValue[]
+  groups: unknown[]
 }
 
 /** 规则组展示顺序：防守优先判定，因此排在前面 */
@@ -1171,17 +1264,25 @@ const TIMING_RULE_GROUPS: Array<{ key: TimingRuleGroupKey; label: string; short:
 ]
 
 const timingRules = ref<Record<TimingRuleGroupKey, TimingRuleGroupValue>>({
-  defensive: { logic: 'OR', rules: [] },
-  offensive: { logic: 'AND', rules: [] },
+  defensive: { logic: 'OR', rules: [], groups: [] },
+  offensive: { logic: 'AND', rules: [], groups: [] },
 })
 
 /** 择时 regime 取值 */
 type TimingRegimeValue = 'offensive' | 'neutral' | 'defensive'
 
-/** 单个仓位档位的表单状态（exposure 以百分数编辑，序列化时转为 0-1） */
+/** 档位仓位方式：固定仓位 / 维持上一仓位 / 相对上一仓位增减 */
+type TimingTierMode = 'fixed' | 'hold' | 'delta'
+
+/** 单个仓位档位的表单状态（仓位类字段以百分数编辑，序列化时转为 0-1） */
 interface TimingTierValue extends TimingRuleGroupValue {
   label: string
+  mode: TimingTierMode
   exposure: number
+  // 相对增减（mode=delta）：增减幅度与夹取区间
+  delta: number
+  min_exposure: number
+  max_exposure: number
   // 加权模式的综合分下限；规则模式不使用
   min_score: number | null
   // 规则模式命中该档时的 regime；加权模式不使用
@@ -1208,6 +1309,48 @@ const timingHysteresis = ref(0)
 const timingHoldOnNeutral = ref(false)
 const timingConfirmDays = ref(1)
 const timingMinHoldDays = ref(0)
+// 档位仓位单次变动上限（%），0=不限制，不写入 config_json
+const timingMaxStep = ref(0)
+// 动态档位（维持 / 相对增减）的起点仓位（%）
+const timingTierBase = ref(50)
+
+/** 条件仓位上限的表单状态（max_exposure 以百分数编辑） */
+interface TimingCapValue {
+  label: string
+  max_exposure: number
+  group: RuleGroupValue
+}
+const timingCaps = ref<TimingCapValue[]>([])
+
+/** 是否存在依赖上一仓位的档位 */
+const hasDynamicTier = computed(() => timingTiers.value.some(tier => tier.mode !== 'fixed'))
+
+/** 新增一条条件仓位上限 */
+function addTimingCap(): void {
+  timingCaps.value.push({ label: '', max_exposure: 50, group: { logic: 'AND', rules: [], groups: [] } })
+}
+
+/** 递归收集原始（不透明）规则组里引用的因子，保证其别名声明不丢失 */
+function collectRawGroupRefs(groups: unknown[], refs: string[]): void {
+  for (const raw of groups) {
+    const group = (raw ?? {}) as Record<string, unknown>
+    for (const rule of (group.rules ?? []) as Array<Record<string, unknown>>) {
+      if (typeof rule.factor === 'string' && rule.factor) refs.push(rule.factor)
+      if (typeof rule.compare_to === 'string' && rule.compare_to) refs.push(rule.compare_to)
+    }
+    collectRawGroupRefs(Array.isArray(group.groups) ? group.groups : [], refs)
+  }
+}
+
+/** 条件仓位上限引用的因子 */
+function timingCapRefs(): string[] {
+  const refs: string[] = []
+  for (const cap of timingCaps.value) {
+    for (const rule of cap.group.rules) if (rule.factor) refs.push(rule.factor)
+    collectRawGroupRefs(cap.group.groups, refs)
+  }
+  return refs
+}
 
 /** 把 config_json 中的规则组解析为表单状态 */
 function parseTimingRuleGroup(raw: unknown, defaultLogic: string): TimingRuleGroupValue {
@@ -1221,6 +1364,7 @@ function parseTimingRuleGroup(raw: unknown, defaultLogic: string): TimingRuleGro
       compare_to: (r.compare_to as string | null | undefined) ?? undefined,
       missing_strategy: r.missing_strategy as string | undefined,
     })),
+    groups: Array.isArray(group.groups) ? group.groups : [],
   }
 }
 
@@ -1236,6 +1380,7 @@ function timingRuleRefs(): string[] {
       if (rule.factor) refs.push(rule.factor)
       if (rule.compare_to) refs.push(rule.compare_to)
     }
+    collectRawGroupRefs(group.groups, refs)
   }
   return refs
 }
@@ -1250,10 +1395,15 @@ function parseTimingTiers(raw: unknown): TimingTierValue[] {
   if (!Array.isArray(raw)) return []
   return raw.map(item => {
     const tier = (item ?? {}) as Record<string, unknown>
+    const mode: TimingTierMode = tier.hold === true ? 'hold' : typeof tier.exposure_delta === 'number' ? 'delta' : 'fixed'
     return {
       ...parseTimingRuleGroup(tier, 'AND'),
       label: typeof tier.label === 'string' ? tier.label : '',
+      mode,
       exposure: Math.round((typeof tier.exposure === 'number' ? tier.exposure : 0.5) * 100),
+      delta: Math.round((typeof tier.exposure_delta === 'number' ? tier.exposure_delta : 0.25) * 100),
+      min_exposure: Math.round((typeof tier.min_exposure === 'number' ? tier.min_exposure : 0) * 100),
+      max_exposure: Math.round((typeof tier.max_exposure === 'number' ? tier.max_exposure : 1) * 100),
       min_score: typeof tier.min_score === 'number' ? tier.min_score : null,
       regime: parseTierRegime(tier.regime),
     }
@@ -1286,11 +1436,16 @@ function addTimingTier(): void {
   const nextMin = last && last.min_score !== null ? Math.max(0, last.min_score - 15) : 80
   timingTiers.value.push({
     label: '',
+    mode: 'fixed',
     exposure: 50,
+    delta: 25,
+    min_exposure: 0,
+    max_exposure: 100,
     min_score: nextMin,
     regime: 'neutral',
     logic: 'AND',
     rules: [],
+    groups: [],
   })
 }
 
@@ -1388,6 +1543,9 @@ function initTiming(): void {
     timingOnDegraded.value = 'neutral'
     timingTiersEnabled.value = false
     timingTiers.value = []
+    timingCaps.value = []
+    timingMaxStep.value = 0
+    timingTierBase.value = 50
     return
   }
   timingEnabled.value = true
@@ -1407,11 +1565,19 @@ function initTiming(): void {
     weight,
     transform: transforms[ref] || undefined,
   }))
-  // 规则模式引用的因子不在 factors 中：补成因子行，保证别名声明不丢失
-  if (timingCombine.value === 'rules') {
-    for (const ref of Array.from(new Set(timingRuleRefs()))) {
-      if (!rows.some(row => row.alias === ref)) rows.push({ ...resolveFactorRow(ref, aliases), weight: 0 })
-    }
+  timingCaps.value = ((timing.exposure_caps ?? []) as Array<Record<string, unknown>>).map(cap => ({
+    label: typeof cap.label === 'string' ? cap.label : '',
+    max_exposure: Math.round((typeof cap.max_exposure === 'number' ? cap.max_exposure : 0.5) * 100),
+    group: parseTimingRuleGroup(cap, 'AND'),
+  }))
+  timingTierBase.value = Math.round(
+    (typeof timing.tier_base_exposure === 'number' ? timing.tier_base_exposure : 0.5) * 100,
+  )
+  // 规则模式引用的因子不在 factors 中：补成因子行，保证别名声明不丢失；
+  // 条件仓位上限在两种模式下都只声明别名（加权模式下以权重 0 的行承载）
+  const declaredOnly = [...(timingCombine.value === 'rules' ? timingRuleRefs() : []), ...timingCapRefs()]
+  for (const ref of Array.from(new Set(declaredOnly))) {
+    if (!rows.some(row => row.alias === ref)) rows.push({ ...resolveFactorRow(ref, aliases), weight: 0 })
   }
   timingFactors.value = rows
   const proxies = (timing.factor_proxies ?? {}) as Record<string, string[]>
@@ -1423,6 +1589,7 @@ function initTiming(): void {
   timingHoldOnNeutral.value = state.hold_on_neutral === true
   timingConfirmDays.value = typeof state.confirm_days === 'number' ? state.confirm_days : 1
   timingMinHoldDays.value = typeof state.min_hold_days === 'number' ? state.min_hold_days : 0
+  timingMaxStep.value = typeof state.max_exposure_step === 'number' ? Math.round(state.max_exposure_step * 100) : 0
   const thresholds = (timing.thresholds ?? {}) as Record<string, number>
   timingOffensive.value = thresholds.offensive ?? 65
   timingDefensive.value = thresholds.defensive ?? 35
@@ -1496,12 +1663,15 @@ const timingRuleFactorOptions = computed(() => {
 const filterEnabled = ref(false)
 const filterLogic = ref('AND')
 const filterRules = ref<FilterRuleValue[]>([])
+// 过滤的嵌套子组：表单不编辑，原样保留
+const filterGroups = ref<unknown[]>([])
 
 function initFilter(): void {
   const filters = props.modelValue.filters as Record<string, unknown> | undefined
-  if (!filters) { filterEnabled.value = false; return }
+  if (!filters) { filterEnabled.value = false; filterGroups.value = []; return }
   filterEnabled.value = true
   filterLogic.value = (filters.logic as string) || 'AND'
+  filterGroups.value = Array.isArray(filters.groups) ? filters.groups : []
   filterRules.value = ((filters.rules ?? []) as Array<Record<string, unknown>>).map(r => ({
     factor: r.factor as string || '',
     op: r.op as string || 'gt',
@@ -1695,7 +1865,15 @@ const errors = computed((): string[] => {
     if (timingTiers.value.length === 0) errs.push('择时模块：已启用多档仓位但未配置档位')
     let previousMin: number | null = null
     timingTiers.value.forEach((tier, i) => {
-      if (!(tier.exposure >= 0 && tier.exposure <= 100)) errs.push(`择时模块：档位 ${i + 1} 仓位必须在 0-100% 之间`)
+      if (tier.mode === 'fixed' && !(tier.exposure >= 0 && tier.exposure <= 100)) {
+        errs.push(`择时模块：档位 ${i + 1} 仓位必须在 0-100% 之间`)
+      }
+      if (tier.mode === 'delta') {
+        if (!(tier.delta >= -100 && tier.delta <= 100)) errs.push(`择时模块：档位 ${i + 1} 增减幅度必须在 -100%~100% 之间`)
+        if (!(tier.min_exposure >= 0 && tier.max_exposure <= 100 && tier.min_exposure <= tier.max_exposure)) {
+          errs.push(`择时模块：档位 ${i + 1} 增减后的区间必须在 0-100% 内且下限不大于上限`)
+        }
+      }
       if (timingCombine.value === 'weighted') {
         if (tier.min_score === null || !Number.isFinite(tier.min_score)) {
           errs.push(`择时模块：档位 ${i + 1} 未填写综合分下限`)
@@ -1706,7 +1884,7 @@ const errors = computed((): string[] => {
         }
         previousMin = tier.min_score
       } else {
-        if (tier.rules.length === 0) errs.push(`择时模块：档位 ${i + 1} 至少需要一条命中规则`)
+        if (tier.rules.length === 0 && tier.groups.length === 0) errs.push(`择时模块：档位 ${i + 1} 至少需要一条命中规则`)
         tier.rules.forEach((rule, j) => {
           if (!rule.factor) errs.push(`择时模块：档位 ${i + 1} 规则 ${j + 1} 未选择因子`)
           if (rule.compare_to !== undefined && rule.compare_to === '') {
@@ -1714,6 +1892,17 @@ const errors = computed((): string[] => {
           }
         })
       }
+    })
+  }
+  if (timingEnabled.value) {
+    timingCaps.value.forEach((cap, i) => {
+      if (!(cap.max_exposure >= 0 && cap.max_exposure <= 100)) errs.push(`择时模块：仓位上限 ${i + 1} 必须在 0-100% 之间`)
+      if (cap.group.rules.length === 0 && cap.group.groups.length === 0) {
+        errs.push(`择时模块：仓位上限 ${i + 1} 至少需要一条规则`)
+      }
+      cap.group.rules.forEach((rule, j) => {
+        if (!rule.factor) errs.push(`择时模块：仓位上限 ${i + 1} 规则 ${j + 1} 未选择因子`)
+      })
     })
   }
   if (timingEnabled.value && timingCombine.value === 'rules' && !timingTiersEnabled.value) {
@@ -1797,10 +1986,13 @@ function buildConfig(): Record<string, unknown> {
   if (timingEnabled.value) {
     const tFactors: Record<string, number> = {}
     const tTransforms: Record<string, string> = {}
+    const capRefs = new Set(timingCapRefs())
     for (const f of timingFactors.value) {
       if (!f.alias || !f.template_id) continue
-      // 规则模式下因子行只用于声明别名，不写入 factors 权重
-      if (timingCombine.value === 'weighted') {
+      // 规则模式下因子行只用于声明别名，不写入 factors 权重；
+      // 加权模式下只被条件仓位上限引用、权重为 0 的行同样只声明别名
+      const declarationOnly = f.weight === 0 && capRefs.has(f.alias)
+      if (timingCombine.value === 'weighted' && !declarationOnly) {
         tFactors[f.alias] = f.weight
         if (f.transform) tTransforms[f.alias] = f.transform
       }
@@ -1816,7 +2008,11 @@ function buildConfig(): Record<string, unknown> {
         for (const { key } of TIMING_RULE_GROUPS) {
           const group = timingRules.value[key]
           const groupRules = serializeTimingRules(group.rules)
-          if (groupRules.length > 0) rules[key] = { logic: group.logic, rules: groupRules }
+          if (groupRules.length > 0 || group.groups.length > 0) {
+            const item: Record<string, unknown> = { logic: group.logic, rules: groupRules }
+            if (group.groups.length > 0) item.groups = group.groups
+            rules[key] = item
+          }
         }
         timingConfig.rules = rules
       }
@@ -1835,6 +2031,7 @@ function buildConfig(): Record<string, unknown> {
     if (timingHoldOnNeutral.value) state.hold_on_neutral = true
     if (timingConfirmDays.value > 1) state.confirm_days = timingConfirmDays.value
     if (timingMinHoldDays.value > 0) state.min_hold_days = timingMinHoldDays.value
+    if (timingMaxStep.value > 0) state.max_exposure_step = timingMaxStep.value / 100
     if (Object.keys(state).length > 0) timingConfig.state = state
     const proxyCodes = timingProxyIndexCodes.value
       .split(',')
@@ -1844,7 +2041,16 @@ function buildConfig(): Record<string, unknown> {
     if (timingOnDegraded.value !== 'neutral') timingConfig.on_degraded = timingOnDegraded.value
     if (timingTiersEnabled.value && timingTiers.value.length > 0) {
       timingConfig.tiers = timingTiers.value.map(tier => {
-        const item: Record<string, unknown> = { exposure: Math.round(tier.exposure) / 100 }
+        const item: Record<string, unknown> = {}
+        if (tier.mode === 'hold') {
+          item.hold = true
+        } else if (tier.mode === 'delta') {
+          item.exposure_delta = Math.round(tier.delta) / 100
+          if (tier.min_exposure !== 0) item.min_exposure = Math.round(tier.min_exposure) / 100
+          if (tier.max_exposure !== 100) item.max_exposure = Math.round(tier.max_exposure) / 100
+        } else {
+          item.exposure = Math.round(tier.exposure) / 100
+        }
         if (tier.label.trim()) item.label = tier.label.trim()
         if (timingCombine.value === 'weighted') {
           item.min_score = tier.min_score
@@ -1852,7 +2058,21 @@ function buildConfig(): Record<string, unknown> {
           item.regime = tier.regime
           item.logic = tier.logic
           item.rules = serializeTimingRules(tier.rules)
+          if (tier.groups.length > 0) item.groups = tier.groups
         }
+        return item
+      })
+      if (hasDynamicTier.value) timingConfig.tier_base_exposure = Math.round(timingTierBase.value) / 100
+    }
+    if (timingCaps.value.length > 0) {
+      timingConfig.exposure_caps = timingCaps.value.map(cap => {
+        const item: Record<string, unknown> = {
+          max_exposure: Math.round(cap.max_exposure) / 100,
+          logic: cap.group.logic,
+          rules: serializeTimingRules(cap.group.rules),
+        }
+        if (cap.label.trim()) item.label = cap.label.trim()
+        if (cap.group.groups.length > 0) item.groups = cap.group.groups
         return item
       })
     }
@@ -1865,8 +2085,9 @@ function buildConfig(): Record<string, unknown> {
   }
 
   // 过滤
-  if (filterEnabled.value && filterRules.value.length > 0) {
+  if (filterEnabled.value && (filterRules.value.length > 0 || filterGroups.value.length > 0)) {
     config.filters = {
+      ...(filterGroups.value.length > 0 ? { groups: filterGroups.value } : {}),
       logic: filterLogic.value,
       rules: filterRules.value.filter(r => r.factor).map(r => {
         const rule: Record<string, unknown> = { factor: r.factor, op: r.op }
@@ -1939,7 +2160,31 @@ function buildConfig(): Record<string, unknown> {
     config.rebalance = { selection, risk }
   }
 
+  preserveUnmanaged(config)
   return config
+}
+
+// 表单直接编辑的顶层字段；其余字段（如 regime_rules、schema_version）保存时原样保留
+const MANAGED_TOP_LEVEL_KEYS = new Set([
+  'index_codes', 'score', 'timing', 'factor_aliases', 'filters', 'rank', 'portfolio', 'risk', 'rebalance',
+])
+
+/**
+ * 保留表单不渲染的配置：顶层未管理字段原样带回；仍被引用但表单没有生成声明的
+ * 因子别名（嵌套子组、regime_rules 等引用）从原配置补回，避免一次保存静默丢掉配置。
+ */
+function preserveUnmanaged(config: Record<string, unknown>): void {
+  const original = props.modelValue ?? {}
+  for (const [key, value] of Object.entries(original)) {
+    if (!MANAGED_TOP_LEVEL_KEYS.has(key) && !(key in config)) config[key] = value
+  }
+  const originalAliases = (original.factor_aliases ?? {}) as Record<string, unknown>
+  const aliases = { ...((config.factor_aliases ?? {}) as Record<string, unknown>) }
+  const body = JSON.stringify({ ...config, factor_aliases: undefined })
+  for (const [alias, declaration] of Object.entries(originalAliases)) {
+    if (!(alias in aliases) && body.includes(JSON.stringify(alias))) aliases[alias] = declaration
+  }
+  if (Object.keys(aliases).length > 0) config.factor_aliases = aliases
 }
 
 function emitConfig(): void {
@@ -1957,6 +2202,7 @@ watch(
     timingEnabled, timingFactors, timingOffensive, timingDefensive, timingProxyIndexCodes, timingOnDegraded,
     timingCombine, timingRules, timingFactorProxiesText, timingTiersEnabled, timingTiers,
     timingHysteresis, timingHoldOnNeutral, timingConfirmDays, timingMinHoldDays,
+    timingMaxStep, timingTierBase, timingCaps, filterGroups,
     filterEnabled, filterLogic, filterRules,
     rankOrder, rankTopN, rankBottomN, rankMomentumFactor, rankValuationFactor,
     portfolioMethod, portfolioDefaultExposure, exposureOffensive, exposureNeutral, exposureDefensive,
@@ -2098,6 +2344,15 @@ watch(() => props.modelValue, () => {
 .fh-factor { flex: 2; }
 .fh-weight { width: 72px; text-align: center; }
 .fh-transform { flex: 1.2; }
+.cap-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 6px;
+}
 .fh-action { width: 28px; }
 
 /* 添加按钮 */

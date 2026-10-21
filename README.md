@@ -9,7 +9,8 @@
 - 配置化策略引擎：择时、评分、过滤、排序、调仓、仓位分配和风险约束。
 - 参数化因子：35 个内置模板；策略可用 `factor_aliases` 将同一模板以不同参数重复引用。因子值按请求或任务从原始数据现算，不持久化。
 - 可审计回测：策略配置快照、交易日历来源、执行模型、候选池、换手和基准等口径均随结果保存。
-- 研究治理：研究期固定为 2016-01-01 至 2025-12-31，2026-01-01 起为验证期；稳健性扫描、优化会话与验证期消费留痕均受该边界约束。
+- 研究治理：研究期固定为 2016-01-01 至 2025-12-31，2026-01-01 起为验证期；稳健性扫描、优化会话与验证期消费留痕均受该边界约束。研究台账记录假设、试验次数 N 与结论，N 与试验预算按研究线汇总，优化验收共 10 项。
+- 自动研究循环：`research campaign` 以 headless Claude Code 会话交替执行研究员与评审员步骤，平台负责限额、停止条件与命令拦截；接受需评审推荐且通过全部验收项，promote 仍由人工执行。
 - 生命周期监控：LIVE/SUSPENDED/RETIRED 仅人工变更；系统提供健康诊断，不自动调参或自动升级策略。
 - 数据管理：非新闻外部数据通过统一数据管理入口、持久化任务队列和 `data_health_snapshot` 维护。
 
@@ -29,7 +30,7 @@ HTTP → api/routers → services → engine
 [可选] Timing → Score → [可选] Filter → Rank → [可选] Portfolio → [可选] Risk
 ```
 
-回测中由 Rebalance 控制选股和风险调整的执行日；默认执行模型为 `t_plus_1_open`（T 日信号、T+1 开盘成交），也可显式选择 `t_plus_1_close`。不同执行模型的结果不可直接比较。
+回测中由 Rebalance 控制选股和风险调整的执行日；系统级默认执行模型为 `t_plus_1_open`（T 日信号、T+1 开盘成交），也可显式选择 `t_plus_1_close`；研究与优化 CLI（`backtest run`、`research batch|buckets`、`robustness`、`optimization start`）缺省为 `t_plus_1_close`。不同执行模型的结果不可直接比较。
 T+1 收盘模式先成交昨日指令，再以今日成交后的持仓合成下一笔双腿目标；仅调整仓位时保持成交后的成分，清仓后不会恢复旧持仓。
 
 ## 数据与因子
@@ -93,6 +94,9 @@ python -m quant_etf_api.cli backtest run --strategy <id>
 python -m quant_etf_api.cli backtest show <id> --cost-ladder 0,10,20,30,50
 python -m quant_etf_api.cli robustness scan --strategy <id> --preset quick
 python -m quant_etf_api.cli optimization start --strategy <id> --candidate-file candidates.json --hypothesis "..."
+python -m quant_etf_api.cli research ledger --strategy <id>
+python -m quant_etf_api.cli research campaign start --strategy <id> --objective "..." --max-trials 30
+python -m quant_etf_api.cli research campaign run <campaign_id>
 ```
 
 默认回测和优化使用研究期边界；如需使用 2026 年起的数据，须明确以 validation 或 monitor 用途运行，系统会留痕。

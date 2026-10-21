@@ -40,6 +40,7 @@
 |------|------|------|--------|------|
 | `logic` | str | 否 | `"AND"` | `AND`(全满足)/`OR`(任一满足) |
 | `rules` | list[FilterRule] | 否 | `[]` | 过滤规则列表 |
+| `groups` | list[FilterConfig] | 否 | `[]` | 嵌套子规则组，与 `rules` 同级按 `logic` 组合，最多 3 层；如 `{"logic":"OR","rules":[乖离≤−15],"groups":[{"logic":"AND","rules":[RSI≤25, 乖离≤−10]}]}`。择时规则组、规则档位、条件仓位上限同样支持 |
 
 ### FilterRule
 
@@ -107,7 +108,8 @@
 - 有 `timing_exposure`：按择时 regime（offensive/neutral/defensive）查表；**只写部分 regime 时缺失档位回退到 `default_exposure`**（不是默认三档表），校验给 warning，应三档写全
 - 有择时信号但无 `timing_exposure`：使用默认三档表 `engine/portfolio._DEFAULT_TIMING_EXPOSURE`（进攻 0.80/观望 0.50/防守 0.20）
 - 无择时：使用 `default_exposure`（默认 0.50）
-- 配置 `timing.tiers` 且命中档位：直接取档位 `exposure`（优先于以上查表），见 TimingTierConfig
+- 配置 `timing.tiers` 且命中档位：直接取档位仓位（优先于以上查表），见 TimingTierConfig
+- 配置 `timing.exposure_caps` 且命中：总仓位再取上限（多条命中取最小），在组合级风控之前施加
 
 ## TimingConfig
 
@@ -123,6 +125,8 @@
 | `on_degraded` | str | 否 | `neutral` | 择时因子全部缺失时的回退：`neutral` / `defensive` / `hold_previous`（沿用上一决策日有效 regime；实时由回放最近交易日得到）。降级回退不受状态层确认 / 最短持有约束 |
 | `state` | TimingStateConfig | 否 | 恒等 | 状态层，见下表 |
 | `tiers` | list[TimingTierConfig] | 否 | `[]` | 多档仓位，见下文；空列表=按 regime 查 `portfolio.timing_exposure` |
+| `tier_base_exposure` | float | 动态档位时是 | `null` | `hold` / `exposure_delta` 档位在没有上一仓位（首日、上一日未命中档位）时的起点 [0, 1] |
+| `exposure_caps` | list[TimingExposureCapConfig] | 否 | `[]` | 条件仓位上限：`{label, max_exposure, logic, rules, groups}`，规则比较择时代理上的因子原值（引用的因子与择时因子一起按代理现算），命中时总仓位不超过 `max_exposure`，多条命中取最小值。例：5 年 PE 分位 ≥ 80 → 不超过 0.5 |
 
 ### TimingStateConfig（择时状态层）
 
@@ -132,6 +136,7 @@
 | `hold_on_neutral` | bool | false | 候选 regime 为中性（无信号）时沿用上一有效 regime |
 | `confirm_days` | int | 1 | 新 regime 需连续出现的决策日数才切换，1=当日切换 |
 | `min_hold_days` | int | 0 | 切换后最短持有的决策日数 |
+| `max_exposure_step` | float | null | 档位决定的仓位每个决策日最多变动的幅度（如 0.25=每次最多一档）；只约束 `tiers` 决定的仓位 |
 
 施加顺序：滞回 → 无信号维持 → 确认 → 最短持有。默认值下为恒等变换。回测按决策日逐日推进；实时回放最近 250 个交易日重建状态（`engine/timing.TIMING_STATE_REPLAY_DAYS`）。
 
@@ -142,12 +147,15 @@
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `label` | str | `""` | 档位展示名 |
-| `exposure` | float | 必填 | 命中时的目标总仓位 [0, 1] |
+| `exposure` | float | null | 命中时的固定目标总仓位 [0, 1]；与 `hold`、`exposure_delta` **三选一** |
+| `hold` | bool | false | 命中时维持上一仓位（灰区不动、中枢重置：灰区档 `hold`，中枢档固定 0.5） |
+| `exposure_delta` | float | null | 命中时在上一仓位上增减 [−1, 1]（如 +0.25 加一档），结果夹在 `[min_exposure, max_exposure]`（默认 0~1） |
 | `min_score` | float | null | 加权模式：综合分 ≥ 该值命中；各档必须严格降序。regime 仍由 `thresholds` 判定 |
 | `regime` | str | null | 规则模式必填：命中该档时的 regime |
-| `logic` / `rules` | — | `AND` / `[]` | 规则模式的命中规则组（同 FilterConfig，比较原值）；与 `rules.offensive/defensive` 互斥 |
+| `logic` / `rules` / `groups` | — | `AND` / `[]` / `[]` | 规则模式的命中规则组（同 FilterConfig，比较原值，可嵌套）；与 `rules.offensive/defensive` 互斥 |
 
 状态层只约束 regime：沿用前一 regime（滞回 / 确认中 / 无信号维持 / 最短持有）时同时沿用上一档位；同 regime 内换档当日生效。`hold_on_neutral` 对 neutral 档位同样生效（命中中性档位也会沿用前值，校验给 warning）。例：中证1000 年线乖离 5 档 = 规则模式 `≤−20→100%`、`≤−15→75%`、`≥25→0%`、`≥15→25%`、`−5~5→50%`（neutral），灰区不命中按中性仓位。
+需要"灰区维持上次仓位、回到中枢才重置"时，把灰区写成 `hold: true` 的档位（而不是全局 `hold_on_neutral`，后者也会吞掉中性中枢档）；"恐慌日加一档"写成 `exposure_delta: 0.25` 的档位；"每周最多动一档"用 `state.max_exposure_step: 0.25`。动态档位依赖上一仓位，实时路径会回放历史重建。
 
 ### TimingThresholds
 

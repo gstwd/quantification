@@ -19,7 +19,7 @@ from quant_etf_api.engine.config import (
     iter_factor_refs,
 )
 from quant_etf_api.engine.portfolio import _DEFAULT_TIMING_EXPOSURE
-from quant_etf_api.engine.transforms import list_transform_names
+from quant_etf_api.engine.transforms import is_valid_transform, transform_hints
 from quant_etf_api.factors.catalog import (
     FactorResolutionError,
     FactorTemplateRegistry,
@@ -28,6 +28,7 @@ from quant_etf_api.factors.catalog import (
 from quant_etf_api.factors.templates import FactorParameterError
 from quant_etf_api.infra.db.models.core import StrategyConfigModel, StrategyLifecycleModel
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
+from quant_etf_api.infra.db.repositories.research_ledger import ResearchLedgerRepository
 from quant_etf_api.infra.db.repositories.strategy_config import StrategyConfigRepository
 from quant_etf_api.infra.db.repositories.strategy_research import StrategyResearchRepository
 from quant_etf_api.infra.time import utcnow_aware
@@ -75,6 +76,7 @@ class StrategyConfigService:
         self._db = db
         self._repo = StrategyConfigRepository(db)
         self._research_repo = StrategyResearchRepository(db)
+        self._ledger_repo = ResearchLedgerRepository(db)
 
     def list_configs(self) -> list[StrategySummary]:
         """返回所有启用的策略配置摘要。"""
@@ -101,6 +103,7 @@ class StrategyConfigService:
             index_codes=(row.config_json or {}).get("index_codes", []),
             is_variant=getattr(row, "is_variant", False),
             source_batch_id=getattr(row, "source_batch_id", None),
+            lineage_id=getattr(row, "lineage_id", None) or row.strategy_id,
             validation_consumed_at=getattr(row, "validation_consumed_at", None),
             validation_consumed_note=getattr(row, "validation_consumed_note", None),
         )
@@ -127,9 +130,76 @@ class StrategyConfigService:
             updated_at=row.updated_at,
             is_variant=getattr(row, "is_variant", False),
             source_batch_id=getattr(row, "source_batch_id", None),
+            lineage_id=getattr(row, "lineage_id", None) or row.strategy_id,
             validation_consumed_at=getattr(row, "validation_consumed_at", None),
             validation_consumed_note=getattr(row, "validation_consumed_note", None),
         )
+
+    def lineage_of(self, strategy_id: str) -> str:
+        """返回策略所在研究线 ID（策略不存在或未设研究线时取自身 ID）。
+
+        Args:
+            strategy_id: 策略标识。
+
+        Returns:
+            研究线 ID。
+        """
+        row = self._repo.find_by_id(strategy_id)
+        if row is None:
+            return strategy_id
+        return getattr(row, "lineage_id", None) or row.strategy_id
+
+    def lineage_members(self, strategy_id: str) -> list[str]:
+        """返回策略所在研究线的全部成员策略 ID（至少含自身）。
+
+        Args:
+            strategy_id: 策略标识。
+
+        Returns:
+            成员策略 ID 列表。
+        """
+        lineage_id = self.lineage_of(strategy_id)
+        members = [row.strategy_id for row in self._repo.find_lineage_members(lineage_id)]
+        if strategy_id not in members:
+            members.append(strategy_id)
+        return members
+
+    def _resolve_lineage(self, target: str) -> str:
+        """把"归入某策略的研究线"解析为研究线根 ID。
+
+        Args:
+            target: 已有策略 ID（可以是研究线中任一成员）。
+
+        Returns:
+            研究线 ID。
+
+        Raises:
+            ValueError: 目标策略不存在。
+        """
+        row = self._repo.find_by_id(target)
+        if row is None:
+            raise ValueError(f"研究线目标策略 {target} 不存在")
+        return getattr(row, "lineage_id", None) or row.strategy_id
+
+    def _inherit_validation_consumed(self, model: StrategyConfigModel, lineage_id: str) -> None:
+        """新成员加入研究线时继承该线的验证期消费留痕。
+
+        同一研究线的成员共享研究过程：只要线上任一策略看过验证期，
+        新加入的策略也不能再把验证期当作样本外。
+
+        Args:
+            model: 新加入的策略行。
+            lineage_id: 研究线 ID。
+        """
+        if model.validation_consumed_at is not None:
+            return
+        for member in self._repo.find_lineage_members(lineage_id):
+            if member.strategy_id != model.strategy_id and member.validation_consumed_at:
+                model.validation_consumed_at = member.validation_consumed_at
+                model.validation_consumed_note = (
+                    f"继承研究线 {lineage_id} 的验证期消费留痕（{member.strategy_id}）"
+                )
+                return
 
     def create_config(self, req: StrategyConfigCreate) -> StrategyDetail:
         """创建策略配置。
@@ -156,6 +226,9 @@ class StrategyConfigService:
         config_json = dict(req.config_json)
         config_json.setdefault("schema_version", "2")
 
+        lineage_id = (
+            self._resolve_lineage(req.lineage_id) if req.lineage_id else req.strategy_id
+        )
         model = StrategyConfigModel(
             strategy_id=req.strategy_id,
             display_name=req.display_name,
@@ -166,7 +239,10 @@ class StrategyConfigService:
             status=req.status,
             is_variant=req.is_variant,
             source_batch_id=req.source_batch_id,
+            lineage_id=lineage_id,
         )
+        if lineage_id != req.strategy_id:
+            self._inherit_validation_consumed(model, lineage_id)
         self._repo.upsert(model)
         self._db.commit()
 
@@ -224,9 +300,66 @@ class StrategyConfigService:
             existing.config_json = req.config_json
         if req.status is not None:
             existing.status = req.status
+        if req.lineage_id is not None:
+            self._move_lineage(existing, req.lineage_id)
 
         self._db.commit()
         return self.get_config(strategy_id)
+
+    def _move_lineage(self, existing: StrategyConfigModel, target: str) -> None:
+        """把策略改归到目标策略所在的研究线。
+
+        研究线根若已有其他成员则拒绝改归：成员仍指向旧根 ID，静默拆线会让
+        N 与验证期留痕按错误的分组统计。普通成员自身已有试验时同样拒绝移出：
+        试验按策略归属，移出会把这些试验从原研究线的 N 中拿走（等于重置 N）。
+        独立策略归入其他研究线、无试验的成员改归不受限制。
+
+        Args:
+            existing: 待改归的策略行。
+            target: 目标研究线中的任一策略 ID。
+
+        Raises:
+            ValueError: 目标不存在、待改归策略是仍有成员的研究线根，或成员自身已有试验。
+        """
+        new_line = self._resolve_lineage(target)
+        old_line = getattr(existing, "lineage_id", None) or existing.strategy_id
+        if new_line == old_line:
+            return
+        others = [
+            row.strategy_id
+            for row in self._repo.find_lineage_members(old_line)
+            if row.strategy_id != existing.strategy_id
+        ]
+        if others and old_line == existing.strategy_id:
+            raise ValueError(
+                f"策略 {existing.strategy_id} 是研究线根，仍有成员 {', '.join(others[:5])}，"
+                "不能改归其他研究线"
+            )
+        if others:
+            own_trials = self._own_trial_count(existing.strategy_id)
+            if own_trials > 0:
+                raise ValueError(
+                    f"策略 {existing.strategy_id} 已在研究线 {old_line} 上产生 {own_trials} 次试验，"
+                    "移出会把这些试验从原研究线的 N 中拿走，不能改归"
+                )
+        existing.lineage_id = new_line
+        self._inherit_validation_consumed(existing, new_line)
+
+    def _own_trial_count(self, strategy_id: str) -> int:
+        """统计归属于该策略自身的试验次数（稳健性变体 + 已评估会话 + 台账计入项）。
+
+        Args:
+            strategy_id: 策略 ID。
+
+        Returns:
+            试验次数（不做"至少 1"的下限处理）。
+        """
+        members = [strategy_id]
+        return (
+            self._ledger_repo.sum_robustness_trials(members)
+            + self._ledger_repo.count_evaluated_optimizations(members)
+            + sum(self._ledger_repo.sum_ledger_trials(members).values())
+        )
 
     def delete_config(self, strategy_id: str) -> bool:
         """删除策略配置。
@@ -432,11 +565,18 @@ class StrategyConfigService:
         Returns:
             是否写入成功（策略不存在返回 False）。
         """
-        consumed = self._repo.mark_validation_consumed(
-            strategy_id, note, consumed_at=utcnow_aware()
-        )
+        consumed_at = utcnow_aware()
+        consumed = self._repo.mark_validation_consumed(strategy_id, note, consumed_at=consumed_at)
         if not consumed:
             return False
+        # 验证期消费按研究线生效：同线其他成员一并留痕（只写首次时间，不覆盖已有记录）
+        lineage_id = self.lineage_of(strategy_id)
+        for member in self._repo.find_lineage_members(lineage_id):
+            if member.strategy_id != strategy_id and member.validation_consumed_at is None:
+                member.validation_consumed_at = consumed_at
+                member.validation_consumed_note = (
+                    f"同研究线 {lineage_id} 的 {strategy_id} 已消费验证期：{note or '未填写说明'}"
+                )
         self._db.commit()
         logger.info("验证期消费留痕: strategy_id=%s note=%s", strategy_id, note)
         return True
@@ -600,8 +740,11 @@ class StrategyConfigService:
                         (portfolio.timing_exposure or {}).values()
                         or _DEFAULT_TIMING_EXPOSURE.values()
                     )
-                    # 多档仓位命中时直接取档位仓位
-                    exposures.extend(tier.exposure for tier in config.timing.tiers)
+                    # 多档仓位命中时直接取档位仓位；动态档位取其上限
+                    exposures.extend(
+                        tier.exposure if tier.exposure is not None else tier.max_exposure
+                        for tier in config.timing.tiers
+                    )
                 if config.risk.max_asset_weight < max(exposures):
                     warnings.append(
                         f"winner_take_all 的目标仓位最高 {max(exposures):.0%}，但 "
@@ -676,6 +819,15 @@ class StrategyConfigService:
                     errors.append(f"{where}：between 的下限不能大于上限")
             elif isinstance(rule.value, list):
                 errors.append(f"{where}：{rule.op} 操作符需要单个数值 value")
+        for index, group in enumerate(filters.groups):
+            where = f"{prefix}{block}.groups[{index}]"
+            if group.is_empty:
+                errors.append(f"{where} 是空规则组：至少需要一条规则或一个非空子组")
+                continue
+            # 子组沿用同一套跨字段校验，路径逐层展开
+            errors.extend(
+                StrategyConfigService._filter_block_errors("", group, block=where)
+            )
         return errors
 
     @staticmethod
@@ -873,10 +1025,10 @@ class StrategyConfigService:
 
         errors: list[str] = []
         for factor_id, transform_name in transforms.items():
-            if transform_name and transform_name not in list_transform_names():
+            if transform_name and not is_valid_transform(transform_name):
                 errors.append(
                     f"未知变换函数 '{transform_name}'（用于因子 {factor_id}），"
-                    f"可用: {list_transform_names()}"
+                    f"可用: {transform_hints()}"
                 )
         return errors
 
@@ -931,7 +1083,10 @@ class StrategyConfigService:
         tier_errors, tier_warnings = StrategyConfigService._timing_tier_issues(timing)
         errors.extend(tier_errors)
         warnings.extend(tier_warnings)
-        refs = set(timing.factor_refs())
+        dynamic_errors, dynamic_warnings = StrategyConfigService._timing_dynamic_issues(timing)
+        errors.extend(dynamic_errors)
+        warnings.extend(dynamic_warnings)
+        refs = set(timing.market_refs())
         for ref, codes in timing.factor_proxies.items():
             if not codes:
                 errors.append(f"timing.factor_proxies.{ref} 不能为空列表")
@@ -964,9 +1119,10 @@ class StrategyConfigService:
             previous: float | None = None
             for index, tier in enumerate(timing.tiers):
                 where = f"timing.tiers[{index}]"
-                if tier.rules:
+                if not tier.as_rule_group().is_empty:
                     errors.append(
-                        f"{where}：加权模式按综合分匹配档位，不能配置 rules（规则档位需 combine=rules）"
+                        f"{where}：加权模式按综合分匹配档位，不能配置 rules / groups"
+                        "（规则档位需 combine=rules）"
                     )
                 if tier.regime is not None:
                     warnings.append(
@@ -994,8 +1150,8 @@ class StrategyConfigService:
                 errors.append(
                     f"{where}.regime 必填（规则模式：命中该档时的 offensive / neutral / defensive）"
                 )
-            if not tier.rules:
-                errors.append(f"{where} 至少需要一条命中规则")
+            if tier.as_rule_group().is_empty:
+                errors.append(f"{where} 至少需要一条命中规则（或非空子规则组）")
             if tier.min_score is not None:
                 warnings.append(f"{where}.min_score 仅在加权模式生效，规则模式下被忽略")
             errors.extend(
@@ -1004,8 +1160,42 @@ class StrategyConfigService:
         if timing.state.hold_on_neutral and any(tier.regime == "neutral" for tier in timing.tiers):
             warnings.append(
                 "timing.state.hold_on_neutral 对 neutral 档位同样生效：命中 neutral 档位时"
-                "也会沿用上一决策日的 regime 与档位，中性档位的仓位不会生效"
+                "也会沿用上一决策日的 regime 与档位，中性档位的仓位不会生效；"
+                "只想让灰区维持仓位时，改用该档位的 hold: true"
             )
+        return errors, warnings
+
+    @staticmethod
+    def _timing_dynamic_issues(timing: TimingConfig) -> tuple[list[str], list[str]]:
+        """校验动态档位、步长限制与条件仓位上限。
+
+        Args:
+            timing: 择时配置。
+
+        Returns:
+            (错误列表, 警告列表)。
+        """
+        errors: list[str] = []
+        warnings: list[str] = []
+        if timing.state.max_exposure_step is not None and not timing.tiers:
+            warnings.append(
+                "timing.state.max_exposure_step 只约束由 timing.tiers 决定的仓位；"
+                "未配置档位时不起作用"
+            )
+        for index, tier in enumerate(timing.tiers):
+            if tier.exposure_delta == 0:
+                warnings.append(
+                    f"timing.tiers[{index}].exposure_delta=0 等同于 hold，建议直接用 hold: true"
+                )
+        for index, cap in enumerate(timing.exposure_caps):
+            where = f"timing.exposure_caps[{index}]"
+            if cap.as_rule_group().is_empty:
+                errors.append(f"{where} 至少需要一条命中规则（或非空子规则组）")
+            errors.extend(
+                StrategyConfigService._filter_block_errors("", cap.as_rule_group(), block=where)
+            )
+            if cap.max_exposure >= 1.0:
+                warnings.append(f"{where}.max_exposure=100% 不会封顶任何仓位")
         return errors, warnings
 
     @staticmethod
@@ -1039,7 +1229,7 @@ class StrategyConfigService:
                 continue
             errors.append(
                 f"择时因子 {ref}（模板 {template.template_id}）原值不在 0-100 评分空间，"
-                f"必须在 timing.transforms 中配置变换函数（可用: {list_transform_names()}），"
+                f"必须在 timing.transforms 中配置变换函数（可用: {transform_hints()}），"
                 "否则择时综合分会静默失真"
             )
         return errors

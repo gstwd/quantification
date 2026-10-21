@@ -218,10 +218,10 @@ class TestFactorTemplateRegistry:
     """模板注册表与引用解析。"""
 
     def test_default_registry_shape(self) -> None:
-        """默认注册表包含 36 个模板，其中 26 个可调参。"""
+        """默认注册表包含 37 个模板（含派生因子 expr），其中 27 个可调参。"""
         registry = build_default_registry()
-        assert len(registry.all()) == 36
-        assert sum(1 for template in registry.all() if template.tunable) == 26
+        assert len(registry.all()) == 37
+        assert sum(1 for template in registry.all() if template.tunable) == 27
         assert set(registry.ids()) >= {"sma", "return", "return_std", "rsi", "atr"}
 
     def test_no_legal_params_exceed_backtest_warmup(self) -> None:
@@ -334,7 +334,8 @@ class TestMergedTemplateEquivalence:
     def test_parameter_ranges_are_complete(self) -> None:
         """每个可调参模板的默认值都落在自身声明的区间内。"""
         for template in self._REGISTRY.all():
-            if not template.tunable:
+            # 派生因子的参数是表达式文本，没有数值区间
+            if not template.tunable or template.template_id == "expr":
                 continue
             for name, parameter in template.parameter_schema.items():
                 default = template.default_params[name]
@@ -362,7 +363,8 @@ class TestMergedTemplateEquivalence:
     def test_out_of_range_rejected_for_every_tunable_template(self) -> None:
         """每个可调参模板都拒绝超出声明范围的取值。"""
         for template in self._REGISTRY.all():
-            if not template.tunable:
+            # 派生因子的参数是表达式文本，没有数值区间（表达式校验见 test_stage4_derived）
+            if not template.tunable or template.template_id == "expr":
                 continue
             for name, parameter in template.parameter_schema.items():
                 if parameter.type == "choice":

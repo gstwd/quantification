@@ -11,15 +11,15 @@ class FactorParameterSpecResponse(BaseModel):
     """模板单个可覆盖参数的声明。
 
     Attributes:
-        type: 参数类型，integer / number / choice（枚举取值）。
+        type: 参数类型，integer / number / choice（枚举取值）/ text（派生因子表达式）。
         minimum: 允许的最小值（含），None 表示不设下界；choice 类型为 None。
         maximum: 允许的最大值（含），None 表示不设上界；choice 类型为 None。
-        default: 默认值（choice 类型为字符串）。
+        default: 默认值（choice / text 类型为字符串）。
         description: 参数中文说明。
         choices: choice 类型的可选取值；数值类型为 None。
     """
 
-    type: Literal["integer", "number", "choice"]
+    type: Literal["integer", "number", "choice", "text"]
     minimum: float | None = None
     maximum: float | None = None
     default: float | str

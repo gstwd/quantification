@@ -47,11 +47,48 @@ description: >
 
 ## 工作流程
 
+0. **读台账、登记假设**（开工第一步）：
+   ```bash
+   python -m quant_etf_api.cli research ledger --strategy <id>      # 进行中假设、近期结论、N 拆分
+   python -m quant_etf_api.cli research hypothesis list --index <指数代码> --status rejected
+   ```
+   已被否决的方向不要换个说法重试；要在旧结论上细化时用 `--parent <旧假设>` 登记子假设。
+   确定本轮方向后**先登记再检验**，判定标准检验前写定、检验后不改：
+   ```bash
+   python -m quant_etf_api.cli research hypothesis add --strategy <id> --category timing \
+       --statement "<假设>" --criteria "<主要指标与通过阈值>" \
+       --execution-models t_plus_1_open,t_plus_1_close --index-codes 000852 --tags pv_resonance
+   ```
+   之后的 `research batch` / `optimization start` / `robustness scan|ablate|pool` 都带
+   `--hypothesis-id <hid>`。
 1. **读基线**：`strategy show <id>`，拿到完整 config_json 与元数据。
 2. **跑基线回测**（未跑过时）：`backtest run --strategy <id> --start 2016-01-01 --end 2025-12-31`
-   （研究与验收都用 T+1 收盘口径时加 `--execution-model t_plus_1_close`，见「关键约束」），
+   （研究与验收统一按 T+1 收盘口径，CLI 缺省即 `t_plus_1_close`，见「关键约束」），
    记录年化/夏普/回撤/超额等指标作为对照。
-3. **探索**：`research batch` 先筛掉没价值的想法（不落库、分钟级、与平台同一条执行路径）：
+3. **诊断（先于变体探索）**：想看"某因子/信号到底有没有预测力、阈值切在哪"时，
+   **用平台诊断命令，不要在 `candidates/` 里手写 pandas 原型脚本**（手写脚本的收益口径、
+   数据清洗与研究期边界都和平台不一致，结论无法迁移）。这些命令只读、秒级、不落库，
+   区间缺省为研究期全段、越过 2025-12-31 直接拒绝，前瞻收益也不越过研究期末端：
+
+   ```bash
+   # 因子值分桶 → 各桶未来 N 日收益均值 / 胜率 / t 值 / 样本数 + 前后两段一致性
+   python -m quant_etf_api.cli research buckets --strategy <id> --ref <因子别名> \
+       --edges 0.5,1,1.2,1.5 --horizons 1,5,20 --split-halves --summary
+   # 截面 Rank IC（与因子中心同一实现）：汇总 + 分年
+   python -m quant_etf_api.cli research factor-ic --factor <模板ID> --params '{"period": 60}' \
+       --forward-days 5 --summary
+   # 策略 timing 块走引擎口径的择时评估（IC fwd20/past20、翻转频率、持仓收益、分年）
+   python -m quant_etf_api.cli research signal-lab timing --index <评估指数> \
+       --signal existing_composite --strategy <id> --summary
+   ```
+
+   `research buckets` 的 `--ref` 是策略择时因子时缺省在其代理指数上计算；收益口径
+   `--basis` 缺省 `t_plus_1_close`，须与后续回测的执行模型一致。`--quantiles` 的边界取自
+   全样本，只作描述性诊断；**桶的切点/阈值不得反复按诊断结果微调后直接写进候选**——
+   诊断用来提出假设，阈值是否稳健仍由 `research batch` / `robustness scan` 判定。
+   命令清单见 [references/cli.md](references/cli.md) 的「research 诊断」。
+
+   **探索**：`research batch` 先筛掉没价值的想法（不落库、分钟级、与平台同一条执行路径）：
 
    ```bash
    python -m quant_etf_api.cli research batch --strategy <基线> --variants variants.json \
@@ -84,7 +121,8 @@ description: >
    （市场级因子，放 timing / filters，勿放横截面评分）。
 4. **写候选文件并校验**：完整 config_json 存入 `candidates/` 下的 JSON 文件，`strategy validate --file <path>` 通过后再用。**一轮只改一处、可解释的地方**（打分权重、过滤阈值、top_n、调仓频率、择时等），其余保持不变。
 5. **开会话**：
-   `optimization start --strategy <基线> --candidate-file <path> --hypothesis "<假设>" --version <新版本> [--start 2016-01-01 --end 2025-12-31] --folds 4 [--execution-model ...]`。
+   `optimization start --strategy <基线> --candidate-file <path> --hypothesis-id <hid> --version <新版本> [--start 2016-01-01 --end 2025-12-31] --folds 4 [--execution-model ...]`
+   （`--hypothesis` 缺省取台账中的假设陈述）。
    `--version` 必传：promote 时基线版本取该值，不传会沿用旧版本号导致版本不递增。
 6. **评估（并行）**：
    ```bash
@@ -105,10 +143,14 @@ description: >
    详见 [references/robustness.md](references/robustness.md)。
    **证据必须与本次会话同配置哈希、同执行口径**，否则第 6 项清单不通过（见下）。
 8. **出报告**：`optimization report <opt_id> --file <path>` 生成骨架，补写"分析结论"：假设是否成立、数据支持（含净口径与稳健性数字）、风险、下一步方向。
-9. **收尾**：对照验收清单（共 7 项，`finish` **默认强制**，只有 `--no-strict` 才跳过）——
+9. **收尾**：对照验收清单（共 10 项，`finish` **默认强制**，只有 `--no-strict` 才跳过）——
    - 通过 → `optimization finish <opt_id> --verdict accept --report-file <path> --promote`
    - 未通过 → `--verdict reject`（不 promote），会话保留作审计。
-   - 确需在清单未全过时接受时用 `--no-strict`，并在报告的"分析结论"里写明哪一项没过、为什么不构成否决。
+   - 确需在清单未全过时接受时用 `--no-strict --no-strict-reason "<理由>"`（理由必填，连同未通过项写入
+     研究台账），并在报告的"分析结论"里写明哪一项没过、为什么不构成否决。
+   - **关闭假设**：`research hypothesis close <hid> --verdict accepted|rejected|inconclusive|blocked_by_schema --reason "<数据支撑与失败点>"`。
+     会话 verdict 是一个候选的结论，假设结论要综合全部试验；配置写不出来时用
+     `blocked_by_schema`（schema 补齐后 `research hypothesis reopen`）。关闭后的假设不再接收试验。
 10. **确认落地**：`strategy show <基线>` 验证 promote 生效，必要时用 `strategy update --version` 补版本号。
 11. **收尾清理**：这一轮产生的稳健性变体草稿策略（`<基线>__rbXXXX_*`）用
     `strategy prune-variants --batch <批次>` 预演、确认后 `--apply` 清理（变体已被回测引用时
@@ -154,7 +196,8 @@ description: >
 - **回测区间下限（用户约定）**：所有回测、对比与优化评估的 `--start` 一律取 2016-01-01，不使用 2016 年之前的数据；滚动分段的第一段即 2016-01-01 起。
 - **执行模型是口径，必须两侧一致**：`--execution-model t_plus_1_open|t_plus_1_close`
   （`backtest run` / `optimization start` / `robustness scan|ablate|pool` / `research batch` 均支持，
-  缺省 `t_plus_1_open`）。会话与批次会把该值落库，`evaluate` / `finish` 一律复用会话值，
+  CLI 缺省 `t_plus_1_close`，即研究与验收的统一口径；`t_plus_1_open` 只作专项对照时显式传）。
+  会话与批次会把该值落库，`evaluate` / `finish` 一律复用会话值，
   探索（`research batch`）、验收（`backtest run`）与邻域证据（`robustness scan`）必须同口径，
   否则比较的是两种执行假设而不是两个配置。**切换执行模型会改变可交易资产域**：
   缺历史开盘价的指数在 `t_plus_1_open` 下按 `EXECUTION_PRICE_MISSING` 被剔出候选池
@@ -162,7 +205,7 @@ description: >
 - **净口径成本**：回测汇总为毛收益口径，验收必须同时看净口径指标
   （成本默认取系统配置 `default_cost_bps`，`backtest run --cost-bps` 可覆盖）。
   净收益 = 毛收益 − 单边换手 × 成本；换手越高，成本对结论的影响越大。
-- **验收清单默认阈值**（`finish` 默认强制 accept，共 7 项；`--no-strict` 可显式跳过）：
+- **验收清单默认阈值**（`finish` 默认强制 accept，共 10 项；`--no-strict` 可显式跳过，须给理由）：
   1. 验证窗平均夏普 ≥ 基线；
   2. 平均最大回撤劣化 ≤ 2pct；
   3. 夏普胜出折数 ≥ 50%（只统计基线/候选两侧都有值的**配对折**）；
@@ -172,11 +215,31 @@ description: >
      `baseline_config_hash` 必须等于**本次会话的基线或候选配置哈希**、`execution_model`
      与会话相同——promote 之后上一轮的旧批次、或另一执行口径下的批次都不再被复用；
      未提供匹配证据直接判不通过）；
-  7. **分段一致性**：剔除最好折后候选夏普仍不低于基线。
+  7. **分段一致性**：剔除最好折后候选夏普仍不低于基线；
+  8. **统计显著性**：候选相对基线的全区间逐日**超额**净收益（候选 − 基线，默认成本）的
+     Deflated Sharpe ≥ 0.95，N 取**研究线**累计试验数（`acceptance_min_deflated_sharpe`）；
+     检验的是改进本身而非候选绝对夏普（后者只在证据里作参考）；N 统计失败时本项判不通过；
+  9. **分年度一致性**：逐自然年比较净夏普，剔除候选领先最多的一年后候选年均夏普仍 ≥ 基线，
+     且胜出年数不少于一半（需 ≥ 3 个完整年份）；
+  10. **差异事件数**：候选与基线逐日净收益差异 > 1bp 的交易日（间隔 ≤ 2 日合并为一段）
+      至少 8 段、40 天（`acceptance_min_diff_episodes` / `acceptance_min_diff_days`）——
+      改善只来自少数几个事件时不可与运气区分。
 - **试验次数台账**：`robustness stats --n-trials` 缺省取"该策略历史所有稳健性批次的
-  变体总数 + 已评估的优化会话数"（`statistics.n_trials_breakdown` 给出拆分）；
-  但**它不含 `research batch` 的探索变体**，手工做过但不入批次/会话的对比也要显式补，
-  多重检验的 N 只会被低估不会被高估。做过多轮探索时按累计口径显式传 `--n-trials`。
+  变体总数 + 已评估的优化会话数 + `research batch` 评估过的变体数 + 人工 / 补录试验"
+  （`statistics.n_trials_breakdown` 给出拆分，`estimated` 为其中的历史估算部分）。
+  `research batch` 每次运行都自动记入台账（不论是否挂假设，输出里的 `ledger` 块给出
+  试验 ID；写入失败会显式报错，须用 `research trial add` 补录）。平台外的原型 / 手工对比用
+  `research trial add --strategy <id> --count N --note "<依据>"` 补记。
+- **研究线（lineage）**：N 按研究线汇总——`optimization start` 的候选与稳健性变体自动继承基线的
+  研究线，手工另建的派生策略用 `strategy create --lineage <研究线中任一策略>` 归入（已有策略用
+  `strategy update --lineage`；仍有成员的研究线根、自身已有试验的成员不能改归——移出等于拿走 N）。在候选上跑 `robustness stats` 也会计入基线名下的探索
+  （`statistics.n_trials_scope` 给出研究线与成员）。验证期消费同样按研究线生效：线上任一策略
+  看过验证期，全线留痕。
+- **试验预算**：每条研究线累计 N 上限 `research_trial_budget`（默认 100）。达到后
+  `research batch` / `optimization start` / `robustness scan|ablate|pool` 直接拒绝；确需继续时加
+  `--over-budget "<理由>"`，理由写入研究台账、超出的试验照常计入 N。预算用尽通常意味着
+  该研究线应收尾（关闭假设、换方向），而不是继续调参。`research ledger --strategy <id>`
+  的 `budget` 块给出已用 / 剩余。
 - **改动要小且可解释**；候选明显更差时先 reject 换假设，不要在同一轮叠加多个改动。
 - **并行前提与上限**：并发度受 CPU、**内存**（每个子进程各自加载行情与因子缓存）与远端
   数据库连接预算共同约束；默认自动推导上限 8，可用 `--workers` 或

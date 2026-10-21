@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.domain.strategies.timing_proxy import TimingProxySelection
 from quant_etf_api.factors.base import FactorContext
+from quant_etf_api.factors.builtins.derived import with_dependencies
 from quant_etf_api.factors.catalog import FactorInstance, FactorTemplateRegistry
 from quant_etf_api.factors.compute import FactorComputeService, FactorMatrix
 
@@ -102,7 +103,11 @@ class FactorProvider:
     def resolve_instances(
         self, config: "StrategyConfig", include_display: bool = False
     ) -> dict[str, FactorInstance]:
-        """把策略中的全部因子引用解析为模板实例。
+        """把策略中的全部因子引用解析为模板实例（含派生因子的依赖）。
+
+        派生因子（expr 模板）的依赖一并返回：面板构建、估值预加载、全市场行情补加载、
+        回望窗口与口径指纹都按依赖所需的数据计算，否则派生因子在回测路径会因依赖数据
+        缺失而静默为空。
 
         Args:
             config: 策略配置。
@@ -113,9 +118,11 @@ class FactorProvider:
         """
         if self._registry is None:
             return {}
-        return self._registry.resolve_all(
-            self.collect_required_factor_ids(config, include_display=include_display),
-            config.factor_aliases,
+        return with_dependencies(
+            self._registry.resolve_all(
+                self.collect_required_factor_ids(config, include_display=include_display),
+                config.factor_aliases,
+            )
         )
 
     def market_shape_refs(self, config: "StrategyConfig") -> set[str]:

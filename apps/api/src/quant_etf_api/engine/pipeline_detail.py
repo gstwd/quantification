@@ -68,6 +68,7 @@ class FilterRuleResult:
         passed: 是否通过该条规则。
         missing: 因子值（或 compare_to 参照值）是否缺失。
         missing_strategy: 缺失时的处理策略（pass/fail/exclude）。
+        group_path: 所在子规则组的路径（如 "0"、"1.0"）；顶层规则为空串。
     """
 
     rule_index: int
@@ -79,6 +80,7 @@ class FilterRuleResult:
     passed: bool = False
     missing: bool = False
     missing_strategy: str = "fail"
+    group_path: str = ""
 
 
 @dataclass

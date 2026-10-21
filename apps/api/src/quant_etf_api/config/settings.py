@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# apps/api/.env 的绝对路径：从仓库根目录运行 CLI（如研究战役的 agent 会话）时也读同一份配置，
+# 否则会静默连到缺省的本机数据库。工作目录下的 .env 排在后面，存在时优先。
+_API_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="QUANT_ETF_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="QUANT_ETF_", env_file=(str(_API_ENV_FILE), ".env"), extra="ignore"
+    )
 
     app_name: str = "Quant ETF Research Platform"
     app_env: str = Field(default="development")
@@ -124,6 +131,30 @@ class Settings(BaseSettings):
         default=0.1,
         gt=0.0,
         description="参数邻域扰动的稳定度容差（|Δ指标| ≤ 容差记为仍在高原内）",
+    )
+
+    # 研究线试验预算：一条研究线（基线 + 派生候选/变体）累计试验次数 N 的上限。
+    # 超出后 research batch / optimization start / robustness 拒绝执行，
+    # 需 --over-budget "<理由>" 显式放行并在研究台账留痕
+    research_trial_budget: int = Field(
+        default=100, ge=1, description="单条研究线的试验次数预算（超出需显式放行并留痕）"
+    )
+    # 优化验收清单的统计门槛（finish 默认强制）
+    acceptance_min_deflated_sharpe: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description="验收第 8 项：候选全区间净收益的 Deflated Sharpe 下限（N 取研究线累计值）",
+    )
+    acceptance_min_diff_episodes: int = Field(
+        default=8,
+        ge=1,
+        description="验收第 10 项：候选与基线逐日收益出现差异的独立区段数下限",
+    )
+    acceptance_min_diff_days: int = Field(
+        default=40,
+        ge=1,
+        description="验收第 10 项：候选与基线逐日收益出现差异的交易日数下限",
     )
 
     # LLM 配置（可选，不配置则 AI 分析功能不可用）

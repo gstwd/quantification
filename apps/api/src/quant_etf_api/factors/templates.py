@@ -26,7 +26,11 @@ from quant_etf_api.factors.base import (
 PARAM_TYPE_INTEGER = "integer"
 PARAM_TYPE_NUMBER = "number"
 PARAM_TYPE_CHOICE = "choice"
-ParameterType = Literal["integer", "number", "choice"]
+# 文本参数：目前只用于派生因子的表达式（expr 模板），语法由模板自身校验
+PARAM_TYPE_TEXT = "text"
+ParameterType = Literal["integer", "number", "choice", "text"]
+# 文本参数的长度上限
+MAX_TEXT_PARAM_LENGTH = 200
 
 
 class FactorParameterError(ValueError):
@@ -38,7 +42,7 @@ class ParameterSpec:
     """模板单个可覆盖参数的声明。
 
     Attributes:
-        type: 参数类型，integer / number / choice。
+        type: 参数类型，integer / number / choice / text。
         minimum: 允许的最小值（含），None 表示不设下界；choice 类型为 None。
         maximum: 允许的最大值（含），None 表示不设上界；choice 类型为 None。
         default: 默认值，未显式给参数时使用。
@@ -67,6 +71,12 @@ class ParameterSpec:
             FactorParameterError: 取值不是有限数值、类型不符、超出取值范围，或
                 choice 取值不在可选列表中。
         """
+        if self.type == PARAM_TYPE_TEXT:
+            if not isinstance(value, str) or not value.strip():
+                raise FactorParameterError(f"参数 {name} 必须是非空文本，实际为 {value!r}")
+            if len(value.strip()) > MAX_TEXT_PARAM_LENGTH:
+                raise FactorParameterError(f"参数 {name} 不能超过 {MAX_TEXT_PARAM_LENGTH} 个字符")
+            return value.strip()
         if self.type == PARAM_TYPE_CHOICE:
             if not isinstance(value, str) or value not in self.choices:
                 raise FactorParameterError(

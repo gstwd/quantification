@@ -18,6 +18,7 @@ import IndexListPage from '../pages/IndexListPage.vue'
 import IndustryDetailPage from '../pages/IndustryDetailPage.vue'
 import IndustryListPage from '../pages/IndustryListPage.vue'
 import LifecyclePage from '../pages/LifecyclePage.vue'
+import ResearchPage from '../pages/ResearchPage.vue'
 import MacroPage from '../pages/MacroPage.vue'
 import RRGLabPage from '../pages/RRGLabPage.vue'
 import StockListPage from '../pages/StockListPage.vue'
@@ -38,6 +39,7 @@ const router = createRouter({
     { path: '/strategies', component: StrategiesPage },
     { path: '/strategies/:strategyId', component: StrategyDetailPage, props: true },
     { path: '/lifecycle', component: LifecyclePage },
+    { path: '/research', component: ResearchPage },
     { path: '/ai-factors', component: AIFactorsPage },
     { path: '/keyword-tags', component: KeywordTagsPage },
     { path: '/factors', component: FactorsPage },

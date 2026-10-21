@@ -21,6 +21,7 @@ from quant_etf_api.api.routers import (
     keyword_tags,
     market_data,
     queue as queue_router,
+    research,
     robustness,
     runs,
     signal_lab,
@@ -120,6 +121,7 @@ app.include_router(runs.router, prefix=settings.api_prefix)
 app.include_router(queue_router.router, prefix=settings.api_prefix)
 app.include_router(backtests.router, prefix=settings.api_prefix)
 app.include_router(robustness.router, prefix=settings.api_prefix)
+app.include_router(research.router, prefix=settings.api_prefix)
 app.include_router(ai_factors.router, prefix=settings.api_prefix)
 app.include_router(keyword_tags.router, prefix=settings.api_prefix)
 

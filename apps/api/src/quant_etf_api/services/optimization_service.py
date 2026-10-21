@@ -31,7 +31,16 @@ from quant_etf_api.domain.research.periods import (
     PURPOSE_RESEARCH,
     validate_backtest_period,
 )
-from quant_etf_api.domain.research.stability import compute_stability_metrics
+from quant_etf_api.domain.research.acceptance import (
+    difference_episodes,
+    yearly_sharpe_comparison,
+)
+from quant_etf_api.domain.research.ledger import total_trials
+from quant_etf_api.domain.research.robustness import deflated_sharpe_ratio
+from quant_etf_api.domain.research.stability import (
+    compute_stability_metrics,
+    net_return_series,
+)
 from quant_etf_api.domain.research.walk_forward import compute_folds
 from quant_etf_api.engine.config import StrategyConfig
 from quant_etf_api.infra.db.base import utcnow
@@ -47,6 +56,7 @@ from quant_etf_api.schemas.strategy import StrategyConfigCreate, StrategyConfigU
 from quant_etf_api.services.backtest_reference_service import BacktestReferenceService
 from quant_etf_api.services.backtest_service import BacktestService
 from quant_etf_api.services.period_config import load_period_boundaries
+from quant_etf_api.services.research_ledger_service import ResearchLedgerService
 from quant_etf_api.services.strategy_config_service import (
     StrategyConfigService,
     compute_config_hash,
@@ -173,6 +183,8 @@ class OptimizationService:
                 frequency=baseline.frequency,
                 config_json=candidate_config,
                 status="draft",
+                # 候选归入基线的研究线：N、试验预算与验证期留痕按研究线汇总
+                lineage_id=strategy_id,
             )
         )
 
@@ -323,6 +335,7 @@ class OptimizationService:
         report_text: str | None = None,
         promote: bool = False,
         strict: bool = True,
+        no_strict_reason: str | None = None,
     ) -> dict[str, Any]:
         """结束会话：记录结论与报告，可选将候选配置提升为基线。
 
@@ -335,6 +348,8 @@ class OptimizationService:
                 验收清单是平台的防过拟合底线，历史默认 False 使"未验证的
                 accept"成为沉默默认；确需在清单未全过时接受，必须显式传入
                 False（CLI 对应 ``--no-strict``）并在报告中说明理由。
+            no_strict_reason: 非严格接受的理由；``strict=False`` 且 accept 时必填，
+                连同未通过项写入研究台账留痕。
 
         Returns:
             会话摘要字典。
@@ -360,6 +375,11 @@ class OptimizationService:
             if failed:
                 details = "; ".join(item["description"] for item in failed)
                 raise ValueError(f"严格验收未通过: {details}")
+        if verdict == "accept" and not strict:
+            reason = (no_strict_reason or "").strip()
+            if not reason:
+                raise ValueError("非严格接受必须写明理由（--no-strict-reason），理由会写入研究台账")
+            self._record_no_strict(session, reason)
 
         fields: dict[str, Any] = {
             "status": "accepted" if verdict == "accept" else "rejected",
@@ -419,6 +439,28 @@ class OptimizationService:
         payload["missing_backtest_ids"] = self._missing_backtest_ids(session)
         # 验收清单随详情返回（F-15）：7 项清单此前只在 finish（会改状态、不可逆）
         # 内部计算，agent 想在收尾前知道"哪一项没过、差多少"只能先结束会话
+        payload["acceptance_checklist"] = (
+            self._acceptance_checklist(session) if session.fold_summary is not None else []
+        )
+        return payload
+
+    def inspect(self, optimization_id: str) -> dict[str, Any] | None:
+        """只读查看会话详情（供 HTTP GET 与研究看板使用）。
+
+        与 :meth:`show` 的区别：不会在回测完成后补写指标汇总（GET 读路径必须只读）；
+        尚未汇总的会话验收清单为空。
+
+        Args:
+            optimization_id: 优化会话 ID。
+
+        Returns:
+            会话字典（含 missing_backtest_ids 与 acceptance_checklist），不存在返回 None。
+        """
+        session = self._repo.find_by_id(optimization_id)
+        if session is None:
+            return None
+        payload = self._to_dict(session)
+        payload["missing_backtest_ids"] = self._missing_backtest_ids(session)
         payload["acceptance_checklist"] = (
             self._acceptance_checklist(session) if session.fold_summary is not None else []
         )
@@ -813,7 +855,187 @@ class OptimizationService:
         items.append(self._check_net_cost(session))
         items.append(self._check_neighborhood(session))
         items.append(self._check_segment_consistency(session))
+        full_series = self._full_period_net_series(session)
+        items.append(self._check_deflated_sharpe(session, full_series))
+        items.append(self._check_yearly_consistency(full_series))
+        items.append(self._check_difference_events(full_series))
         return items
+
+    def _full_period_net_series(
+        self, session: StrategyOptimizationModel
+    ) -> tuple[dict[date, float], dict[date, float]] | None:
+        """读取全区间基线与候选的逐日净收益（%，系统默认成本）。
+
+        Args:
+            session: 优化会话 ORM 行。
+
+        Returns:
+            (基线, 候选) 两个 {交易日: 日净收益} 字典；任一侧缺失时返回 None。
+        """
+        cost_bps = get_settings().default_cost_bps
+        base = self._daily_net_series(session.baseline_backtest_id, cost_bps)
+        cand = self._daily_net_series(session.candidate_backtest_id, cost_bps)
+        if not base or not cand:
+            return None
+        return base, cand
+
+    def _daily_net_series(self, backtest_id: str | None, cost_bps: float) -> dict[date, float]:
+        """把一条成功回测的逐日结果折算为 {交易日: 日净收益（%）}。
+
+        Args:
+            backtest_id: 回测 ID。
+            cost_bps: 往返交易成本（基点，按单边换手折算）。
+
+        Returns:
+            逐日净收益字典；回测缺失或未成功时为空。
+        """
+        if not backtest_id:
+            return {}
+        row = self._backtest_repo.find_by_id(backtest_id)
+        if row is None or row.status != "success":
+            return {}
+        daily = self._backtest_repo.find_daily_results(backtest_id)
+        if not daily:
+            return {}
+        net = net_return_series(
+            [item.portfolio_return for item in daily],
+            [getattr(item, "turnover", None) for item in daily],
+            float(cost_bps),
+        )
+        return {item.trade_date: value for item, value in zip(daily, net)}
+
+    def _check_deflated_sharpe(
+        self,
+        session: StrategyOptimizationModel,
+        series: tuple[dict[date, float], dict[date, float]] | None,
+    ) -> dict[str, Any]:
+        """第 8 项：候选相对基线的逐日超额净收益，其 Deflated Sharpe 达到门槛。
+
+        检验的是"改进本身"而不是候选的绝对夏普：基线本身很强时，任何改动的
+        绝对夏普都能轻松过门槛，统计检验就失去意义。超额序列取两侧共同交易日的
+        「候选 − 基线」日净收益；两侧完全相同（零波动）时 DSR 为 0、不通过。
+        研究线越长、试验越多，同样的超额越可能只是运气；N 来自研究台账
+        （稳健性变体 + 已评估会话 + 研究批量评估 + 人工补录，按研究线汇总）。
+        N 统计失败时本项判为不通过（不退回兜底值）。候选绝对夏普的 DSR 只作参考。
+
+        Args:
+            session: 优化会话 ORM 行。
+            series: 全区间 (基线, 候选) 逐日净收益。
+
+        Returns:
+            单条验收清单项。
+        """
+        threshold = get_settings().acceptance_min_deflated_sharpe
+        description = (
+            f"统计显著性：候选相对基线的超额净收益 Deflated Sharpe ≥ {threshold:g}"
+            "（N=研究线累计试验数）"
+        )
+        if series is None or len(series[1]) < 3:
+            return self._check_item("deflated_sharpe", description + "（缺少全区间回测）", False)
+        baseline, candidate = series
+        common = sorted(set(baseline) & set(candidate))
+        if len(common) < 3:
+            return self._check_item("deflated_sharpe", description + "（共同交易日不足）", False)
+        ledger = ResearchLedgerService(self._db)
+        try:
+            breakdown = ledger.trial_breakdown(session.strategy_id)
+        except Exception as exc:
+            logger.warning("统计试验次数失败，第 8 项判为不通过", exc_info=True)
+            self._db.rollback()
+            return self._check_item(
+                "deflated_sharpe",
+                description + "（试验次数 N 统计失败）",
+                False,
+                evidence={"error": str(exc)},
+            )
+        n_trials = total_trials(breakdown)
+        excess = [(candidate[d] - baseline[d]) / 100 for d in common]
+        dsr = deflated_sharpe_ratio(excess, n_trials)
+        absolute = deflated_sharpe_ratio([candidate[d] / 100 for d in common], n_trials)
+        return self._check_item(
+            "deflated_sharpe",
+            description,
+            dsr.deflated_sharpe >= threshold,
+            evidence={
+                "basis": "excess_vs_baseline",
+                "deflated_sharpe": dsr.deflated_sharpe,
+                "sharpe_annualized": dsr.sharpe_annualized,
+                "expected_max_sharpe_annualized": dsr.expected_max_sharpe_annualized,
+                "candidate_deflated_sharpe": absolute.deflated_sharpe,
+                "candidate_sharpe_annualized": absolute.sharpe_annualized,
+                "common_days": len(common),
+                "n_trials": n_trials,
+                "n_trials_breakdown": breakdown,
+                "lineage_id": ledger.lineage_scope(session.strategy_id)["lineage_id"],
+                "threshold": threshold,
+            },
+        )
+
+    def _check_yearly_consistency(
+        self, series: tuple[dict[date, float], dict[date, float]] | None
+    ) -> dict[str, Any]:
+        """第 9 项：剔除最好年份后候选年均夏普仍不低于基线，且胜出年数不少于一半。
+
+        Args:
+            series: 全区间 (基线, 候选) 逐日净收益。
+
+        Returns:
+            单条验收清单项。
+        """
+        description = "分年度一致性：剔除最好年份后候选年均净夏普 ≥ 基线且胜出年数不少于一半"
+        if series is None:
+            return self._check_item("yearly_consistency", description + "（缺少全区间回测）", False)
+        comparison = yearly_sharpe_comparison(series[0], series[1])
+        return self._check_item(
+            "yearly_consistency",
+            description,
+            bool(comparison["pass"]),
+            evidence=comparison,
+        )
+
+    def _check_difference_events(
+        self, series: tuple[dict[date, float], dict[date, float]] | None
+    ) -> dict[str, Any]:
+        """第 10 项：候选与基线的差异来自足够多的独立事件。
+
+        Args:
+            series: 全区间 (基线, 候选) 逐日净收益。
+
+        Returns:
+            单条验收清单项。
+        """
+        settings = get_settings()
+        min_episodes = settings.acceptance_min_diff_episodes
+        min_days = settings.acceptance_min_diff_days
+        description = (
+            f"差异事件数：候选与基线收益差异区段 ≥ {min_episodes} 段且差异日 ≥ {min_days} 天"
+        )
+        if series is None:
+            return self._check_item("difference_events", description + "（缺少全区间回测）", False)
+        stats = difference_episodes(series[0], series[1])
+        return self._check_item(
+            "difference_events",
+            description,
+            stats["episodes"] >= min_episodes and stats["diff_days"] >= min_days,
+            evidence={**stats, "min_episodes": min_episodes, "min_days": min_days},
+        )
+
+    def _record_no_strict(self, session: StrategyOptimizationModel, reason: str) -> None:
+        """把非严格接受连同未通过项写入研究台账（关联行，不计入 N）。
+
+        Args:
+            session: 优化会话 ORM 行。
+            reason: 非严格接受理由。
+        """
+        failed = [item["key"] for item in self._acceptance_checklist(session) if not item["pass"]]
+        ResearchLedgerService(self._db).record_trial(
+            kind="optimization",
+            strategy_id=session.strategy_id,
+            trial_count=0,
+            ref_id=session.optimization_id,
+            execution_model=getattr(session, "execution_model", None),
+            note=f"--no-strict 接受（未通过：{', '.join(failed) or '无'}）：{reason}",
+        )
 
     def _check_net_cost(self, session: StrategyOptimizationModel) -> dict[str, Any]:
         """按净成本口径比较候选与基线（毛口径好看但扣成本后失效应被拒绝）。

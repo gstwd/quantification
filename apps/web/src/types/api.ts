@@ -13,6 +13,8 @@ export interface StrategySummary {
   is_variant?: boolean
   /** 派生来源批次 ID（稳健性验证批次），手工策略为 null（D-4） */
   source_batch_id?: string | null
+  /** 研究线 ID（研究线根策略 ID）；试验次数 N、试验预算与验证期消费按研究线汇总 */
+  lineage_id?: string | null
   /** 验证期（2026-01-01 起）数据首次被消费的时间（D-5） */
   validation_consumed_at?: string | null
   /** 验证期消费说明（D-5） */
@@ -805,7 +807,7 @@ export interface DateRange {
 }
 
 /** 因子模板参数类型：integer / number 为数值，choice 为枚举取值（如估值字段 pe / pb） */
-export type FactorParameterType = 'integer' | 'number' | 'choice'
+export type FactorParameterType = 'integer' | 'number' | 'choice' | 'text'
 
 /** 因子模板参数取值：数值类参数为 number，choice 参数为 string */
 export type FactorParameterValue = number | string
@@ -1000,10 +1002,11 @@ export interface TimingRuleJson {
   missing_strategy?: string
 }
 
-/** 择时规则组：logic=AND 全部满足 / OR 任一满足 */
+/** 择时规则组：logic=AND 全部满足 / OR 任一满足；groups 为嵌套子组（与 rules 同级组合） */
 export interface TimingRuleGroupJson {
   logic?: 'AND' | 'OR'
   rules?: TimingRuleJson[]
+  groups?: TimingRuleGroupJson[]
 }
 
 /**
@@ -1012,12 +1015,28 @@ export interface TimingRuleGroupJson {
  */
 export interface TimingTierJson {
   label?: string
-  /** 命中该档时的目标总仓位（0-1） */
-  exposure: number
+  /** 命中该档时的目标总仓位（0-1）；与 hold / exposure_delta 三选一 */
+  exposure?: number | null
+  /** 命中时维持上一仓位（灰区不动） */
+  hold?: boolean
+  /** 命中时在上一仓位上增减（-1~1），夹在 [min_exposure, max_exposure] */
+  exposure_delta?: number | null
+  min_exposure?: number
+  max_exposure?: number
   min_score?: number | null
   regime?: 'offensive' | 'neutral' | 'defensive' | null
   logic?: 'AND' | 'OR'
   rules?: TimingRuleJson[]
+  groups?: TimingRuleGroupJson[]
+}
+
+/** 条件仓位上限（timing.exposure_caps 的一项）：规则组满足时封顶总仓位 */
+export interface TimingExposureCapJson {
+  label?: string
+  max_exposure: number
+  logic?: 'AND' | 'OR'
+  rules?: TimingRuleJson[]
+  groups?: TimingRuleGroupJson[]
 }
 
 /** 择时状态层：滞回、无信号维持、确认天数、最短持有（缺省为恒等） */
@@ -1026,6 +1045,8 @@ export interface TimingStateJson {
   hold_on_neutral?: boolean
   confirm_days?: number
   min_hold_days?: number
+  /** 档位仓位每个决策日最多变动的幅度（0-1） */
+  max_exposure_step?: number | null
 }
 
 /** 策略 config_json 中的择时模块（timing） */
@@ -1045,6 +1066,10 @@ export interface TimingConfigJson {
   state?: TimingStateJson
   /** 多档仓位（缺省不启用，按 regime 查 portfolio.timing_exposure） */
   tiers?: TimingTierJson[]
+  /** 动态档位（hold / exposure_delta）在没有上一仓位时的起点（0-1） */
+  tier_base_exposure?: number | null
+  /** 条件仓位上限，命中多条取最小值 */
+  exposure_caps?: TimingExposureCapJson[]
 }
 
 /** 择时因子明细（pipeline_detail.timing_detail 中以因子引用为键的值） */
@@ -1093,6 +1118,10 @@ export interface AllocationTiming {
   tier_label?: string | null
   /** 档位决定的目标总仓位（0-1，风控上限之前）；null 表示按 regime 仓位表 */
   exposure?: number | null
+  /** 命中的条件仓位上限（0-1）；null 表示无上限 */
+  exposure_cap?: number | null
+  /** 生效上限的展示名 */
+  exposure_cap_label?: string | null
 }
 
 export interface AllocationRanking {
@@ -1619,4 +1648,183 @@ export interface SignalLabCrossSectionResponse {
   coverage: SignalLabCoverage[]
   issues: SignalLabIssue[]
   notes: string[]
+}
+
+// ── 研究看板（只读）：研究线、假设台账、研究战役与待确认候选 ──────────────
+
+/** 研究线试验预算 */
+export interface ResearchTrialBudget {
+  budget: number
+  used: number
+  remaining: number
+}
+
+/** 研究线摘要：基线与其派生候选 / 变体共享试验次数 N 与预算 */
+export interface ResearchLineage {
+  lineage_id: string
+  root_display_name: string
+  /** 成员策略（不含稳健性变体草稿） */
+  members: string[]
+  /** 稳健性变体草稿数量 */
+  variant_count: number
+  n_trials: number
+  n_trials_breakdown: Record<string, number>
+  budget: ResearchTrialBudget
+  hypothesis_counts: Record<string, number>
+  validation_consumed: boolean
+  running_campaigns: number
+  /** N 统计失败时的错误信息（此时 N 与预算不可用） */
+  error: string | null
+}
+
+/** 研究假设 */
+export interface ResearchHypothesis {
+  hypothesis_id: string
+  strategy_id: string | null
+  index_codes: string[]
+  tags: string[]
+  category: string
+  statement: string
+  rationale: string | null
+  pre_registration: { criteria?: string; execution_models?: string[] } | null
+  status: string
+  conclusion: string | null
+  parent_id: string | null
+  campaign_id: string | null
+  created_by: string | null
+  created_at: string | null
+  closed_at: string | null
+  trial_rows: number
+}
+
+/** 研究试验 */
+export interface ResearchTrial {
+  trial_id: string
+  hypothesis_id: string | null
+  strategy_id: string
+  kind: string
+  ref_id: string | null
+  execution_model: string | null
+  start_date: string | null
+  end_date: string | null
+  trial_count: number
+  counted_in_n: boolean
+  is_estimated: boolean
+  note: string | null
+  summary: Record<string, unknown> | null
+  created_at: string | null
+}
+
+/** 假设详情 */
+export interface ResearchHypothesisDetail extends ResearchHypothesis {
+  trials: ResearchTrial[]
+  children: Array<{ hypothesis_id: string; status: string }>
+}
+
+/** 台账查询结果 */
+export interface ResearchLedgerResponse {
+  lineage: ResearchLineage | null
+  hypotheses: ResearchHypothesis[]
+}
+
+/** 研究战役摘要 */
+export interface ResearchCampaign {
+  campaign_id: string
+  objective: string
+  strategy_id: string
+  lineage_id: string
+  index_codes: string[]
+  status: string
+  max_trials: number
+  max_hours: number
+  max_rounds: number
+  max_consecutive_rejects: number
+  /** 战役内诊断命令（factor-ic / buckets / signal-lab）次数上限 */
+  max_diagnostics: number
+  /** 战役内已执行的诊断命令次数 */
+  diagnostics_used: number
+  max_step_usd: number | null
+  model: string | null
+  trials_at_start: number
+  stop_reason: string | null
+  created_by: string | null
+  created_at: string | null
+  finished_at: string | null
+}
+
+/** 研究战役步骤 */
+export interface ResearchCampaignStep {
+  step_id: string
+  round: number
+  role: string
+  status: string
+  outcome: string | null
+  hypothesis_id: string | null
+  optimization_id: string | null
+  summary: string | null
+  error: string | null
+  cost_usd: number | null
+  agent_session_id: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+/** 研究战役进度（只读计算） */
+export interface ResearchCampaignProgress {
+  trials_used?: number
+  max_trials?: number
+  rounds_done?: number
+  max_rounds?: number
+  consecutive_rejects?: number
+  max_consecutive_rejects?: number
+  diagnostics_used?: number
+  max_diagnostics?: number
+  elapsed_hours?: number
+  max_hours?: number
+  stop_reason?: string | null
+  lineage_budget?: ResearchTrialBudget & { lineage_id?: string }
+  next?: { role: string; round: number; optimization_id?: string | null } | null
+}
+
+/** 研究战役详情 */
+export interface ResearchCampaignDetail extends ResearchCampaign {
+  progress: ResearchCampaignProgress
+  steps: ResearchCampaignStep[]
+  hypotheses: Array<{ hypothesis_id: string; status: string; statement: string; conclusion: string | null }>
+  total_cost_usd: number
+}
+
+/** 验收清单单项 */
+export interface AcceptanceChecklistItem {
+  key: string
+  description: string
+  pass: boolean
+  evidence: Record<string, unknown> | null
+}
+
+/** 待人工确认的优化候选 */
+export interface ResearchCandidate {
+  optimization_id: string
+  strategy_id: string
+  candidate_strategy_id: string
+  lineage_id: string
+  hypothesis: string
+  status: string
+  promoted: boolean
+  /** 已采用候选配置的其他策略（另建策略落地） */
+  landed_strategy_ids: string[]
+  review_verdict: string | null
+  campaign_id: string | null
+  execution_model: string | null
+  created_at: string | null
+  finished_at: string | null
+}
+
+/** 候选详情 */
+export interface ResearchCandidateDetail extends ResearchCandidate {
+  metrics_full: Record<string, Record<string, number | null>> | null
+  fold_summary: Record<string, unknown> | null
+  acceptance_checklist: AcceptanceChecklistItem[]
+  missing_backtest_ids: string[]
+  review_reason: string | null
 }

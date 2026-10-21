@@ -10,6 +10,10 @@ from typing import Literal, get_args
 # 必须解析到同一组取值，否则同一条策略会在不同执行口径下产出不可比较的指标。
 ExecutionModel = Literal["t_plus_1_open", "t_plus_1_close"]
 DEFAULT_EXECUTION_MODEL: ExecutionModel = "t_plus_1_open"
+# 研究与优化 CLI 的缺省执行模型（用户约定：研究、探索与验收统一按 T+1 收盘口径）。
+# 系统级缺省（API 请求体、存量回测 / 会话行缺失执行模型时的解释）仍为
+# DEFAULT_EXECUTION_MODEL，避免改变历史记录的口径含义。
+RESEARCH_DEFAULT_EXECUTION_MODEL: ExecutionModel = "t_plus_1_close"
 EXECUTION_MODELS: tuple[str, ...] = get_args(ExecutionModel)
 
 

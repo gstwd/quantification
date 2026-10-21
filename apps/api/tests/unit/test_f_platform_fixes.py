@@ -175,11 +175,15 @@ class TestOptimizationShowChecklist:
 
         assert payload is not None
         checklist = payload["acceptance_checklist"]
-        assert len(checklist) == 7
+        # 7 项基础清单 + 阶段 2 的统计显著性 / 分年度一致性 / 差异事件数
+        assert len(checklist) == 10
         assert {item["key"] for item in checklist} >= {
             "sharpe_nonnegative",
             "net_cost_nonnegative",
             "neighborhood",
+            "deflated_sharpe",
+            "yearly_consistency",
+            "difference_events",
         }
 
 
@@ -257,7 +261,10 @@ class TestPromoteVersionHistory:
             ),
         ]
 
-        svc.finish("opt1", verdict="accept", promote=True, strict=False)
+        svc._record_no_strict = MagicMock()
+        svc.finish(
+            "opt1", verdict="accept", promote=True, strict=False, no_strict_reason="只测 promote"
+        )
 
         update = svc._config_svc.update_config.call_args
         assert update.args[0] == "base"

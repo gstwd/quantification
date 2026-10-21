@@ -3,11 +3,23 @@
 策略配置中的 transforms 引用的变换函数统一在此注册。
 新增变换只需调用 register_transform()，无需改动评分器本体，
 降低"配置驱动、无需代码"定位与硬编码因子语义之间的摩擦（7.4#1）。
+
+除注册表中的命名变换外，还支持参数化的 ``linear(lo,hi)``：把 [lo, hi] 线性映射到
+[0, 100] 并截断（lo > hi 时方向反转，值越小得分越高），用于内置变换饱和区间不合适
+的因子，例如年线乖离在 ±10% 处饱和的 ``trend_score`` 可改用 ``linear(-20,20)``。
 """
 
 from __future__ import annotations
 
+import re
 from typing import Callable
+
+# 参数化线性映射：linear(lo,hi)，lo / hi 为数值（可负、可带小数），二者不得相等
+_LINEAR_PATTERN = re.compile(
+    r"^linear\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)$"
+)
+# 参数化变换的展示写法（错误信息与前端提示用）
+PARAMETRIC_TRANSFORM_HINTS: tuple[str, ...] = ("linear(lo,hi)",)
 
 # 变换函数注册表：name → 单参数纯函数（float → float）
 _TRANSFORM_REGISTRY: dict[str, Callable[[float], float]] = {}
@@ -40,18 +52,66 @@ def get_transform(name: str) -> Callable[[float], float]:
     Raises:
         KeyError: 未知的变换函数名称。
     """
-    if name not in _TRANSFORM_REGISTRY:
-        raise KeyError(f"未知的变换函数: {name}，可用: {list(_TRANSFORM_REGISTRY.keys())}")
-    return _TRANSFORM_REGISTRY[name]
+    if name in _TRANSFORM_REGISTRY:
+        return _TRANSFORM_REGISTRY[name]
+    linear = _parse_linear(name)
+    if linear is not None:
+        return linear
+    raise KeyError(
+        f"未知的变换函数: {name}，可用: {[*_TRANSFORM_REGISTRY.keys(), *PARAMETRIC_TRANSFORM_HINTS]}"
+    )
+
+
+def is_valid_transform(name: str) -> bool:
+    """判断变换名称是否可用（注册表命名变换或合法的参数化变换）。
+
+    Args:
+        name: 变换名称。
+
+    Returns:
+        可用时为 True。
+    """
+    return name in _TRANSFORM_REGISTRY or _parse_linear(name) is not None
+
+
+def _parse_linear(name: str) -> Callable[[float], float] | None:
+    """解析 ``linear(lo,hi)``，非法或 lo == hi 时返回 None。
+
+    Args:
+        name: 变换名称。
+
+    Returns:
+        映射函数：(value - lo) / (hi - lo) × 100，截断到 [0, 100]。
+    """
+    match = _LINEAR_PATTERN.match(name.strip()) if isinstance(name, str) else None
+    if match is None:
+        return None
+    low, high = float(match.group(1)), float(match.group(2))
+    if low == high:
+        return None
+
+    def _linear(value: float) -> float:
+        return max(0.0, min(100.0, (value - low) / (high - low) * 100.0))
+
+    return _linear
 
 
 def list_transform_names() -> list[str]:
-    """返回所有已注册变换函数的名称列表（排序）。
+    """返回所有已注册变换函数的名称列表（排序，不含参数化变换）。
 
     Returns:
         排序后的变换函数名称列表。
     """
     return sorted(_TRANSFORM_REGISTRY.keys())
+
+
+def transform_hints() -> list[str]:
+    """可用变换的展示清单：命名变换 + 参数化写法（错误信息与前端提示用）。
+
+    Returns:
+        名称列表。
+    """
+    return [*list_transform_names(), *PARAMETRIC_TRANSFORM_HINTS]
 
 
 def invert_percentile(value: float) -> float:

@@ -30,6 +30,7 @@ from quant_etf_api.domain.common.enums import (
     parse_execution_model,
 )
 from quant_etf_api.domain.common.numeric import mean_or_none, median_or_none
+from quant_etf_api.domain.research.ledger import total_trials
 from quant_etf_api.domain.research.periods import PURPOSE_RESEARCH
 from quant_etf_api.domain.research.robustness import (
     block_bootstrap_sharpe_ci,
@@ -45,7 +46,6 @@ from quant_etf_api.infra.db.models.core import (
     BacktestRunModel,
     IndexDailyBarModel,
     RobustnessRunModel,
-    StrategyOptimizationModel,
 )
 from quant_etf_api.infra.db.repositories.backtest import BacktestRepository
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
@@ -60,6 +60,7 @@ from quant_etf_api.schemas.strategy import StrategyConfigCreate
 from quant_etf_api.services.backtest_reference_service import BacktestReferenceService
 from quant_etf_api.services.backtest_service import BacktestService
 from quant_etf_api.services.period_config import load_period_boundaries
+from quant_etf_api.services.research_ledger_service import ResearchLedgerService
 from quant_etf_api.services.strategy_config_service import (
     StrategyConfigService,
     compute_config_hash,
@@ -413,7 +414,8 @@ class RobustnessService:
         if async_mode:
             for backtest_id in pending:
                 self._enqueue_variant_backtest(backtest_id, robustness_id, priority)
-        elif parallel > 1:
+        elif parallel != 1:
+            # 0 表示按环境变量 / CPU 与内存自动推导并发度（与 CLI 帮助一致），不是串行
             self._run_backtests_parallel(pending, parallel)
         else:
             for backtest_id in pending:
@@ -737,12 +739,18 @@ class RobustnessService:
                 "power_note": _pbo_power_note(0),
             }
         baseline_returns = self._baseline_daily_returns(row, cost_bps)
+        trials_scope: dict[str, Any] | None = None
         if n_trials is not None:
             trials = n_trials
             trials_breakdown: dict[str, int] = {"explicit": int(n_trials)}
         else:
+            # 缺省按研究线汇总：在候选上跑统计时也要计入基线名下的探索
             trials_breakdown = self._trial_ledger_breakdown(row.strategy_id)
-            trials = max(1, trials_breakdown["robustness"] + trials_breakdown["optimization"])
+            trials = total_trials(trials_breakdown)
+            try:
+                trials_scope = ResearchLedgerService(self._db).lineage_scope(row.strategy_id)
+            except Exception:
+                logger.warning("读取研究线范围失败", exc_info=True)
         dsr = (
             deflated_sharpe_ratio(baseline_returns, trials) if len(baseline_returns) >= 3 else None
         )
@@ -753,8 +761,11 @@ class RobustnessService:
         )
         statistics = {
             "n_trials": trials,
-            # 台账来源拆分：便于复核 N 是否被低估（稳健性变体 / 优化会话 / 显式指定）
+            # 台账来源拆分：便于复核 N 是否被低估（稳健性变体 / 优化会话 / 研究批量评估 /
+            # 人工补录 / 显式指定）
             "n_trials_breakdown": trials_breakdown,
+            # N 的统计范围（研究线 ID 与成员）；显式 --n-trials 时为 None
+            "n_trials_scope": trials_scope,
             "n_windows": n_blocks,
             "cost_bps": (cost_bps if cost_bps is not None else get_settings().default_cost_bps),
             "is_partial": row.status == "partial",
@@ -1015,6 +1026,8 @@ class RobustnessService:
                     # （strategy prune-variants --batch <id>）
                     is_variant=True,
                     source_batch_id=robustness_id,
+                    # 变体归入基线的研究线：N 与验证期留痕按研究线汇总
+                    lineage_id=baseline.strategy_id,
                 )
             )
         except Exception:
@@ -1301,44 +1314,22 @@ class RobustnessService:
         return [r / 100 for r in series]
 
     def _trial_ledger_breakdown(self, strategy_id: str) -> dict[str, int]:
-        """按来源拆分试验次数台账：稳健性批次变体 + 已评估优化会话数。
+        """按来源拆分试验次数台账（委托研究台账服务统计）。
 
-        台账由两部分组成（N 只会被低估、不会被高估）：
+        台账由四部分组成（N 只会被低估、不会被高估）：
         - 稳健性批次：``robustness_run.trial_count`` 累加（每个变体 = 一次试验）；
-        - 优化会话：已评估过的会话数（每个会话 = 一个候选配置被试验一次），
-          历史实现漏计这部分，使 Deflated Sharpe 的 N 偏小而偏乐观。
-
-        手工跑过但未入批次/会话的对比仍需通过 ``--n-trials`` 显式补充。
+        - 优化会话：已评估过的会话数（每个会话 = 一个候选配置被试验一次）；
+        - 研究批量评估：``research_trial`` 中 research_batch 行的变体数（每次运行自动记录）；
+        - 人工 / 补录：``research_trial`` 中 manual 行（含历史估算，``estimated`` 单列复核）。
 
         Args:
             strategy_id: 策略 ID。
 
         Returns:
-            {"robustness": int, "optimization": int}；查询失败时返回
-            {"robustness": 1, "optimization": 0}（保持"至少一次试验"的历史行为）。
+            {"robustness", "optimization", "research_batch", "manual", "estimated"}；
+            查询失败时异常上抛（统计门槛失败即不通过，不退回兜底值）。
         """
-        try:
-            robustness_total = (
-                self._db.query(sa.func.coalesce(sa.func.sum(RobustnessRunModel.trial_count), 0))
-                .filter(RobustnessRunModel.strategy_id == strategy_id)
-                .scalar()
-            )
-            optimization_total = (
-                self._db.query(sa.func.count())
-                .select_from(StrategyOptimizationModel)
-                .filter(
-                    StrategyOptimizationModel.strategy_id == strategy_id,
-                    StrategyOptimizationModel.status.in_(("evaluated", "accepted", "rejected")),
-                )
-                .scalar()
-            )
-        except Exception:
-            logger.warning("统计试验次数台账失败", exc_info=True)
-            return {"robustness": 1, "optimization": 0}
-        return {
-            "robustness": int(robustness_total or 0),
-            "optimization": int(optimization_total or 0),
-        }
+        return ResearchLedgerService(self._db).trial_breakdown(strategy_id)
 
     def _trial_ledger(self, strategy_id: str) -> int:
         """统计该策略历史上的试验次数（至少为 1），作为多重检验的 N。
@@ -1349,8 +1340,7 @@ class RobustnessService:
         Returns:
             试验次数（至少为 1）。
         """
-        parts = self._trial_ledger_breakdown(strategy_id)
-        return max(1, parts["robustness"] + parts["optimization"])
+        return total_trials(self._trial_ledger_breakdown(strategy_id))
 
     def _find(self, robustness_id: str) -> RobustnessRunModel | None:
         """读取批次行，不存在时返回 None。"""

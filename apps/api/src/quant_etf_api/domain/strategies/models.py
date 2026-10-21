@@ -99,6 +99,8 @@ class TimingSignal:
         tier_label: 有效仓位档位展示名；无档位时为 None。
         exposure: 有效仓位档位决定的目标总仓位（0-1，风控上限之前）；None 表示
             按 regime 查 ``portfolio.timing_exposure``（存量口径）。
+        exposure_cap: 命中的条件仓位上限（``timing.exposure_caps`` 取最小值）；None 表示无上限。
+        exposure_cap_label: 生效上限的展示名。
     """
 
     regime: str
@@ -108,6 +110,8 @@ class TimingSignal:
     tier: int | None = None
     tier_label: str | None = None
     exposure: float | None = None
+    exposure_cap: float | None = None
+    exposure_cap_label: str | None = None
 
 
 @dataclass

@@ -323,6 +323,34 @@ def test_service_strategy_timing_uses_strategy_block(monkeypatch: pytest.MonkeyP
     assert definition.params == []
 
 
+def test_strategy_definition_rules_mode_does_not_crash() -> None:
+    """规则模式的策略择时定义可生成（阈值参考线取配置默认值，回归 UnboundLocalError）。"""
+    config = StrategyConfig(
+        strategy_id="rules_timing",
+        display_name="规则择时",
+        version="1.0.0",
+        score=ScoreConfig(factors={}),
+        factor_aliases={"pv_res": {"template_id": "pv_resonance", "params": {}}},
+        timing={
+            "combine": "rules",
+            "proxy_index_codes": ["000852"],
+            "rules": {
+                "offensive": {
+                    "logic": "AND",
+                    "rules": [{"factor": "pv_res", "op": "gt", "value": 1}],
+                },
+                "defensive": {
+                    "logic": "AND",
+                    "rules": [{"factor": "pv_res", "op": "lte", "value": 1}],
+                },
+            },
+        },
+    )
+    definition = svc_module._strategy_definition(config)
+    assert definition.formula.startswith("规则模式：")
+    assert len(definition.reference_lines) == 2
+
+
 def test_catalog_lists_only_active_non_variant_timing_strategies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
