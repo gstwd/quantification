@@ -207,6 +207,66 @@ export interface DailyBar {
   source: string
 }
 
+/** 混合基准中的一个指数 */
+export interface BenchmarkMixItem {
+  index_code: string
+  /** 权重（0-1） */
+  weight: number
+}
+
+/** 收益归因：单个资产贡献 */
+export interface AttributionAssetItem {
+  index_code: string
+  /** Σ 权重 × 资产收益（百分点） */
+  contribution_pct: number
+  held_days: number
+  average_weight: number
+  win_rate: number
+  missing_days: number
+}
+
+/** 收益归因：区间分解（百分点，逐日算术和） */
+export interface AttributionBucketItem {
+  label: string
+  days: number
+  portfolio_pct: number
+  benchmark_pct?: number | null
+  timing_pct?: number | null
+  selection_pct?: number | null
+  explained_pct: number
+  residual_pct: number
+}
+
+/** 回测收益归因 */
+export interface BacktestAttribution {
+  backtest_id: string
+  execution_model: string
+  approximate: boolean
+  has_benchmark: boolean
+  benchmark_label?: string | null
+  total: AttributionBucketItem
+  yearly: AttributionBucketItem[]
+  assets: AttributionAssetItem[]
+  note: string
+}
+
+/** 站内告警 */
+export interface AlertItem {
+  id: number
+  kind: string
+  severity: 'info' | 'warning' | 'critical' | string
+  strategy_id?: string | null
+  title: string
+  detail?: Record<string, unknown> | null
+  created_at?: string | null
+  read_at?: string | null
+}
+
+export interface AlertListResponse {
+  items: AlertItem[]
+  unread_count: number
+}
+
 export interface BacktestCreateRequest {
   strategy_id: string
   start_date: string
@@ -218,6 +278,8 @@ export interface BacktestCreateRequest {
   enable_benchmark?: boolean
   /** 基准指数代码，默认 000300（沪深300） */
   benchmark_index_code?: string
+  /** 混合基准（恒定比例，权重和不足 1 的部分为现金）；给出时覆盖 benchmark_index_code */
+  benchmark_mix?: BenchmarkMixItem[] | null
   execution_model?: 't_plus_1_open' | 't_plus_1_close'
   data_quality_mode?: 'warn' | 'strict'
   /** 回测用途：research=研究期研究（不得越过研究期末端），validation=验证期验收，monitor=上线后监控 */
@@ -776,6 +838,16 @@ export interface MacroIndicator {
   source: string
 }
 
+/** 日频市场指标观测（10 年国债、两融、股指期货基差、股指期权 PCR） */
+export interface MarketIndicatorPoint {
+  indicator_code: string
+  indicator_name: string
+  unit: string
+  /** 交易日（YYYY-MM-DD） */
+  trade_date: string
+  value: number
+}
+
 export interface BenchmarkIndex {
   index_code: string
   index_name: string
@@ -1134,11 +1206,56 @@ export interface AllocationRanking {
   details: Record<string, unknown>
 }
 
+/** 路径依赖配置（排名缓冲 / 偏离调仓 / 风控叠加层）回放后的今日决策状态 */
+export interface AllocationPathState {
+  /** 回放起点（YYYY-MM-DD）：LIVE 取上线日，其余约一年前 */
+  replay_start: string
+  /** 今日是否需要成交 */
+  rebalance_due: boolean
+  /** 额外原因：band_drift / band_skip / risk_stop */
+  reason?: string | null
+  /** 回放得到的调仓前实际持仓 */
+  current_holdings: Record<string, number>
+  /** 回撤止损剩余冷却决策日（未启用为 null） */
+  drawdown_stop_days_left?: number | null
+  /** 移动止损冷却中的资产 → 剩余决策日 */
+  trailing_stop_cooldowns?: Record<string, number>
+}
+
+/** 组合策略实时分配中的成员明细 */
+export interface AllocationMember {
+  strategy_id: string
+  weight: number
+  positions: Record<string, number>
+}
+
 export interface AllocationPlan {
   positions: Record<string, number>
   total_exposure: number
   cash_ratio: number
   method: string
+  /** 路径依赖配置的回放状态 */
+  path_state?: AllocationPathState | null
+  /** 组合策略的成员明细 */
+  members?: AllocationMember[]
+  /** 组合策略的现金权重 */
+  cash_weight?: number
+}
+
+/** 组合策略成员 */
+export interface CompositeMember {
+  strategy_id: string
+  /** 目标权重（0-1） */
+  weight: number
+}
+
+/** 组合策略 config_json（kind=composite） */
+export interface CompositeConfigJson {
+  kind: 'composite'
+  members: CompositeMember[]
+  cash_weight?: number
+  rebalance?: { frequency: string; day_of_week?: number; week_parity?: string; day_of_month?: number }
+  schema_version?: string
 }
 
 export interface AllocationResponse {

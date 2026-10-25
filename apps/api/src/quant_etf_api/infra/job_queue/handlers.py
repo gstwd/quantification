@@ -252,12 +252,77 @@ def handle_data_management_operation(payload: dict) -> dict[str, Any]:
 
 
 def handle_data_sync_all(payload: dict) -> None:
-    """执行每日全局同步。
+    """执行每日全局同步，之后记录同步失败告警并入队 LIVE 策略定时体检。
 
     因子值在实时分配与因子查询时按策略实际参数现算，不做批量预计算，
-    因此同步完成后无需再驱动任何因子链路。
+    因此同步完成后无需再驱动任何因子链路。体检只做诊断与站内告警，
+    不改配置、不改生命周期状态；``lifecycle_auto_refresh_enabled=False`` 时不入队。
     """
-    handle_data_management_operation({**payload, "operation": "sync_latest"})
+    from quant_etf_api.config.settings import get_settings
+    from quant_etf_api.infra.job_queue.queue import get_job_queue
+    from quant_etf_api.infra.time import today_cn
+
+    result = handle_data_management_operation({**payload, "operation": "sync_latest"})
+    today = today_cn().isoformat()
+    _alert_sync_failures(result, today)
+    if get_settings().lifecycle_auto_refresh_enabled:
+        get_job_queue().enqueue(
+            "lifecycle_refresh_all",
+            {"trigger_date": today},
+            job_key=f"lifecycle_refresh_all:{today}",
+        )
+
+
+def _alert_sync_failures(result: dict[str, Any] | None, today: str) -> None:
+    """每日同步有失败 / 部分失败的数据集时写一条站内告警（同一天只记一条）。
+
+    Args:
+        result: 数据管理操作结果（含 items）。
+        today: 业务日期。
+    """
+    items = [
+        item
+        for item in (result or {}).get("items") or []
+        if item.get("status") in ("failed", "partial_success")
+    ]
+    if not items:
+        return
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.services.alert_service import KIND_DATA_SYNC_FAILED, AlertService
+
+    db = SessionLocal()
+    try:
+        AlertService(db).raise_alert(
+            kind=KIND_DATA_SYNC_FAILED,
+            severity="warning",
+            title=f"每日数据同步有 {len(items)} 个数据集失败或部分失败",
+            detail={
+                "datasets": [
+                    {
+                        "dataset_key": item.get("dataset_key"),
+                        "status": item.get("status"),
+                        "errors": (item.get("errors") or [])[:5],
+                    }
+                    for item in items
+                ]
+            },
+            dedupe_key=f"{KIND_DATA_SYNC_FAILED}:{today}",
+        )
+    finally:
+        db.close()
+
+
+def handle_lifecycle_refresh_all(payload: dict) -> None:
+    """刷新全部 LIVE 策略健康快照（定时体检），恶化或失败写站内告警。"""
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.services.strategy_lifecycle_service import StrategyLifecycleService
+
+    db = SessionLocal()
+    try:
+        summary = StrategyLifecycleService(db).refresh_all_live()
+        logger.info("LIVE 策略定时体检完成: %s", summary)
+    finally:
+        db.close()
 
 
 def handle_warm_calendar(payload: dict) -> None:
@@ -282,6 +347,7 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "data_fill": handle_data_fill,
     "data_manage_operation": handle_data_management_operation,
     "data_sync_all": handle_data_sync_all,
+    "lifecycle_refresh_all": handle_lifecycle_refresh_all,
     "warm_calendar": handle_warm_calendar,
 }
 

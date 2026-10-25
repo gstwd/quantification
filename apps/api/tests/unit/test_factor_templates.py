@@ -218,10 +218,10 @@ class TestFactorTemplateRegistry:
     """模板注册表与引用解析。"""
 
     def test_default_registry_shape(self) -> None:
-        """默认注册表包含 37 个模板（含派生因子 expr），其中 27 个可调参。"""
+        """默认注册表包含 42 个模板（含派生因子 expr、3 个成分聚合因子与 2 个指标序列模板），其中 34 个可调参。"""
         registry = build_default_registry()
-        assert len(registry.all()) == 37
-        assert sum(1 for template in registry.all() if template.tunable) == 27
+        assert len(registry.all()) == 42
+        assert sum(1 for template in registry.all() if template.tunable) == 34
         assert set(registry.ids()) >= {"sma", "return", "return_std", "rsi", "atr"}
 
     def test_no_legal_params_exceed_backtest_warmup(self) -> None:

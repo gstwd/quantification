@@ -75,8 +75,23 @@
           </select>
         </div>
 
-        <!-- 配置区域 -->
         <div class="form-group">
+          <label class="form-label">策略类型</label>
+          <div class="radio-row">
+            <label class="radio-opt"><input v-model="strategyKind" type="radio" value="single" /> 普通策略</label>
+            <label class="radio-opt">
+              <input v-model="strategyKind" type="radio" value="composite" /> 组合策略（多策略持仓级合成）
+            </label>
+          </div>
+        </div>
+
+        <div v-if="strategyKind === 'composite'" class="form-group">
+          <label class="form-label">组合配置</label>
+          <CompositeStrategyForm v-model="compositeConfig" />
+        </div>
+
+        <!-- 配置区域 -->
+        <div v-else class="form-group">
           <div class="config-header-row">
             <label class="form-label">策略配置</label>
             <button class="toggle-json-btn" @click="advancedMode = !advancedMode">
@@ -141,6 +156,7 @@ import { onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import StrategyConfigForm from '../components/StrategyConfigForm.vue'
+import CompositeStrategyForm from '../components/CompositeStrategyForm.vue'
 import { useStrategyStore } from '../stores/strategies'
 import { fetchLifecycles } from '../api/lifecycle'
 import type { LifecycleSummary } from '../types/api'
@@ -205,6 +221,11 @@ const configJson = ref<Record<string, unknown>>({
   factor_aliases: {},
 })
 
+/** 新建策略类型：普通策略 / 组合策略 */
+const strategyKind = ref<'single' | 'composite'>('single')
+/** 组合策略的 config_json */
+const compositeConfig = ref<Record<string, unknown>>({ kind: 'composite', members: [] })
+
 /** 高级模式下的 JSON 文本 */
 const configJsonText = ref(
   '{\n  "schema_version": "2",\n  "score": {\n    "factors": {}\n  },\n  "factor_aliases": {}\n}',
@@ -219,6 +240,8 @@ watch(showCreate, (val) => {
       '{\n  "schema_version": "2",\n  "score": {\n    "factors": {}\n  },\n  "factor_aliases": {}\n}'
     jsonError.value = ''
     advancedMode.value = false
+    strategyKind.value = 'single'
+    compositeConfig.value = { kind: 'composite', members: [] }
     store.validationResult = null
   }
 })
@@ -244,7 +267,9 @@ async function handleToggleStar(item: { strategy_id: string; is_starred: boolean
 async function handleCreate(): Promise<void> {
   jsonError.value = ''
   let finalConfig: Record<string, unknown>
-  if (advancedMode.value) {
+  if (strategyKind.value === 'composite') {
+    finalConfig = compositeConfig.value
+  } else if (advancedMode.value) {
     try {
       finalConfig = JSON.parse(configJsonText.value)
     } catch {
@@ -482,6 +507,8 @@ onMounted(() => {
 
 .form-group { display: flex; flex-direction: column; gap: 6px; }
 .form-label { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+.radio-row { display: flex; gap: 16px; flex-wrap: wrap; }
+.radio-opt { display: flex; align-items: center; gap: 4px; font-size: 13px; }
 .form-input, .form-textarea, .form-select {
   padding: 8px 12px;
   background: var(--surface-2);

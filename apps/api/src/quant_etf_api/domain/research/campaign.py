@@ -65,6 +65,9 @@ _ALLOWED_COMMANDS: dict[str, frozenset[str] | None] = {
     "optimization": None,
     "queue": frozenset({"stats", "jobs"}),
 }
+# 整组放行的命令组里仍须拒绝的子命令：(命令组, 子命令)。
+# dsr-calibrate 校准的是验收门槛本身，属于平台治理，不是战役内的研究动作
+_DENIED_SUBCOMMANDS: frozenset[tuple[str, str]] = frozenset({("research", "dsr-calibrate")})
 # research campaign 子命令中 agent 可用的部分：不得自行开新战役、驱动战役或停止战役
 _ALLOWED_CAMPAIGN_ACTIONS: frozenset[str] = frozenset(
     {"status", "list", "step-done", "review", "report"}
@@ -292,6 +295,8 @@ def check_command_allowed(
         return f"战役模式不允许执行 {command} 命令组"
     allowed = _ALLOWED_COMMANDS[command]
     if allowed is not None and subcommand not in allowed:
+        return f"战役模式不允许执行 {command} {subcommand}"
+    if (command, subcommand) in _DENIED_SUBCOMMANDS:
         return f"战役模式不允许执行 {command} {subcommand}"
     if command == "research" and subcommand == "campaign":
         action = flags.get("campaign_action")

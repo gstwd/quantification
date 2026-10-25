@@ -23,6 +23,7 @@ from quant_etf_api.factors.base import (
     USAGE_RANK,
     USAGE_SCORE,
     USAGE_TIMING,
+    VALUE_SHAPE_MARKET,
     FactorComputer,
     period_lookback_days,
 )
@@ -172,7 +173,18 @@ class FactorInstance:
 
     @property
     def lookback_days(self) -> int:
-        """该实例所需的回望自然日数。"""
+        """该实例所需的回望自然日数。
+
+        派生因子模板自身回望为 0：实例回望取依赖的最大回望，再加上时序函数窗口
+        折算的自然日（依赖要在向前扩展的交易日上也有值）。
+        """
+        from quant_etf_api.factors.builtins.derived import ExpressionComputer  # noqa: PLC0415
+
+        computer = self.computer
+        if isinstance(computer, ExpressionComputer):
+            deps = max((dep.lookback_days for dep in computer.dependencies.values()), default=0)
+            window = computer.series_window
+            return deps + (period_lookback_days(window) if window else 0)
         return self.template.lookback_days(self.params)
 
     def to_payload(self) -> dict[str, Any]:
@@ -426,10 +438,7 @@ def _low_amplitude_label(params: Mapping[str, Any]) -> str:
     Returns:
         形如「160日低振幅动量（70%）」的展示名。
     """
-    return (
-        f"{params['period']}日低振幅动量"
-        f"（{int(float(params['low_amplitude_ratio']) * 100)}%）"
-    )
+    return f"{params['period']}日低振幅动量（{int(float(params['low_amplitude_ratio']) * 100)}%）"
 
 
 def _sharpe_label(params: Mapping[str, Any]) -> str:
@@ -494,6 +503,185 @@ _MAX_DERIVED_DEPTH = 4
 def _expression_label(params: Mapping[str, Any]) -> str:
     """派生因子实例展示名。"""
     return f"派生：{params.get('expr', '')}"
+
+
+_COVERAGE_SPEC = ParameterSpec(
+    "number", 0.5, 1.0, 0.8, "有效样本权重占比下限（成分股数据不全时缺失）"
+)
+
+
+def _constituent_templates() -> list[FactorTemplate]:
+    """成分股聚合因子模板（个股每日指标 / 资金流向 → 指数级）。
+
+    Returns:
+        模板列表。
+    """
+    from quant_etf_api.factors.builtins.constituent import (  # noqa: PLC0415
+        ConstituentMainflowComputer,
+        ConstituentTurnoverComputer,
+        ConstituentValuationComputer,
+    )
+
+    return [
+        build_template(
+            "constituent_turnover",
+            lambda p: ConstituentTurnoverComputer(
+                str(p["field"]), int(p["window"]), float(p["min_coverage"])
+            ),
+            parameter_schema={
+                "field": ParameterSpec(
+                    "choice",
+                    None,
+                    None,
+                    "turnover_rate_f",
+                    "换手率口径：turnover_rate_f 自由流通 / turnover_rate 总股本",
+                    choices=("turnover_rate_f", "turnover_rate"),
+                ),
+                "window": ParameterSpec("integer", 1, 120, 20, "滚动均值窗口（交易日）"),
+                "min_coverage": _COVERAGE_SPEC,
+            },
+            compute_lookback_days=lambda p: period_lookback_days(int(p["window"])),
+            instance_label=lambda p: f"成分股{p['window']}日换手率（{p['field']}）",
+            name="成分股加权换手率",
+            description=(
+                "成分股换手率（%）按指数权重加权（成分不全带权重时等权）后的 N 日均值；"
+                "反映指数整体交易拥挤度。数据来自 Tushare 个股每日指标，覆盖率不足时缺失。"
+            ),
+            category="constituent",
+            required_data=("index_membership", "stock_daily_basic"),
+        ),
+        build_template(
+            "constituent_mainflow",
+            lambda p: ConstituentMainflowComputer(int(p["window"]), float(p["min_coverage"])),
+            parameter_schema={
+                "window": ParameterSpec("integer", 1, 60, 5, "累计窗口（交易日）"),
+                "min_coverage": _COVERAGE_SPEC,
+            },
+            compute_lookback_days=lambda p: period_lookback_days(int(p["window"])),
+            instance_label=lambda p: f"成分股{p['window']}日主力净流入占比",
+            name="成分股主力净流入占比",
+            description=(
+                "N 日内成分股（大单 + 特大单）净买入额之和 / 全部买入额之和 × 100（%），"
+                "分子分母同为资金流向表金额；正值表示主力资金净流入。"
+            ),
+            category="constituent",
+            required_data=("index_membership", "stock_moneyflow"),
+        ),
+        build_template(
+            "constituent_valuation",
+            lambda p: ConstituentValuationComputer(
+                str(p["field"]), str(p["stat"]), float(p["min_coverage"])
+            ),
+            parameter_schema={
+                "field": ParameterSpec(
+                    "choice",
+                    None,
+                    None,
+                    "pe_ttm",
+                    "估值字段：pe_ttm / pb / dv_ttm（股息率）",
+                    choices=("pe_ttm", "pb", "dv_ttm"),
+                ),
+                "stat": ParameterSpec(
+                    "choice",
+                    None,
+                    None,
+                    "median",
+                    "汇总方式：median 中位数 / harmonic 权重调和平均（与指数整体估值同口径）",
+                    choices=("median", "harmonic"),
+                ),
+                "min_coverage": _COVERAGE_SPEC,
+            },
+            compute_lookback_days=lambda _p: period_lookback_days(1),
+            instance_label=lambda p: f"成分股{p['field']}（{p['stat']}）",
+            name="成分股估值汇总",
+            description=(
+                "当日成分股 PE(TTM) / PB / 股息率的中位数或按指数权重的调和平均；"
+                "PE、PB 剔除非正值（亏损 / 净资产为负）。可配合 expr 的 ts_rank 得到估值分位。"
+            ),
+            category="constituent",
+            required_data=("index_membership", "stock_daily_basic"),
+        ),
+    ]
+
+
+def _series_templates() -> list[FactorTemplate]:
+    """宏观 / 日频市场指标序列模板（市场级，择时与过滤使用）。
+
+    Returns:
+        模板列表。
+    """
+    from quant_etf_api.domain.market_data.indicators import MARKET_INDICATORS  # noqa: PLC0415
+    from quant_etf_api.factors.builtins.series import (  # noqa: PLC0415
+        SERIES_MODES,
+        MacroSeriesComputer,
+        MarketSeriesComputer,
+        macro_series_lookback_days,
+        market_series_lookback_days,
+    )
+
+    mode_desc = "level 当前值（日频为窗口均值）/ change 差值 / pct_change 变化率%"
+    return [
+        build_template(
+            "macro_series",
+            lambda p: MacroSeriesComputer(str(p["code"]), str(p["mode"]), int(p["months"])),
+            parameter_schema={
+                "code": ParameterSpec(
+                    "choice",
+                    None,
+                    None,
+                    "m1_yoy",
+                    "宏观指标：m1_yoy / m2_yoy / sf_stock（社融存量）/ pmi / cpi / lpr1y / lpr5y",
+                    choices=("m1_yoy", "m2_yoy", "sf_stock", "pmi", "cpi", "lpr1y", "lpr5y"),
+                ),
+                "mode": ParameterSpec(
+                    "choice", None, None, "level", mode_desc, choices=SERIES_MODES
+                ),
+                "months": ParameterSpec("integer", 1, 24, 3, "change / pct_change 的回看月数"),
+            },
+            compute_lookback_days=lambda p: macro_series_lookback_days(int(p["months"])),
+            instance_label=lambda p: f"宏观 {p['code']}（{p['mode']}，{p['months']}月）",
+            name="宏观指标序列",
+            description=(
+                "截止当日已公布的最新一期宏观指标，或相对约 N 个月前一期的差值 / 变化率；"
+                "月度指标按发布滞后可见（M1/M2/社融次月 20 日、CPI 次月 15 日、PMI 次月 1 日）。"
+                "社融存量同比用 code=sf_stock、mode=pct_change、months=12。"
+            ),
+            category="macro",
+            value_shape=VALUE_SHAPE_MARKET,
+            usage=("timing", "filter"),
+            required_data=("macro_indicators",),
+        ),
+        build_template(
+            "market_series",
+            lambda p: MarketSeriesComputer(str(p["code"]), str(p["mode"]), int(p["window"])),
+            parameter_schema={
+                "code": ParameterSpec(
+                    "choice",
+                    None,
+                    None,
+                    "margin_rzye",
+                    "日频市场指标：10 年国债、两融、股指期货基差、股指期权 PCR 等",
+                    choices=tuple(MARKET_INDICATORS),
+                ),
+                "mode": ParameterSpec(
+                    "choice", None, None, "level", mode_desc, choices=SERIES_MODES
+                ),
+                "window": ParameterSpec("integer", 1, 250, 20, "窗口 / 回看交易日数"),
+            },
+            compute_lookback_days=lambda p: market_series_lookback_days(int(p["window"])),
+            instance_label=lambda p: f"市场 {p['code']}（{p['mode']}，{p['window']}日）",
+            name="日频市场指标序列",
+            description=(
+                "日频市场指标（10 年国债收益率、沪深两融余额与买入额、股指期货主力基差与年化基差、"
+                "股指期权认沽认购比）的 N 日均值，或相对 N 个交易日前的差值 / 变化率；"
+                "最新观测超过 15 天未更新视为缺失。期权 2019-12 起、IM/MO 2022 年起才有数据。"
+            ),
+            category="market",
+            value_shape=VALUE_SHAPE_MARKET,
+            usage=("timing", "filter"),
+            required_data=("macro_indicators",),
+        ),
+    ]
 
 
 def build_default_templates() -> list[FactorTemplate]:
@@ -712,9 +900,7 @@ def build_default_templates() -> list[FactorTemplate]:
             compute_lookback_days=_period_lookback,
             instance_label=_period_label("日均线乖离率"),
             name="N 日均线乖离率",
-            description=(
-                "当前收盘价相对 N 日均线的偏离百分比（%），正值表示价格位于均线上方。"
-            ),
+            description=("当前收盘价相对 N 日均线的偏离百分比（%），正值表示价格位于均线上方。"),
             category="technical",
         ),
         build_template(
@@ -907,6 +1093,50 @@ def build_default_templates() -> list[FactorTemplate]:
         ),
     ]
     templates.extend(tunable)
+    templates.extend(_constituent_templates())
+    templates.extend(_series_templates())
+    rate_source = {
+        "rate_source": ParameterSpec(
+            "choice",
+            None,
+            None,
+            "lpr",
+            "无风险利率：lpr（1 年期 LPR，缺省）/ cgb10y（10 年期国债收益率）",
+            choices=("lpr", "cgb10y"),
+        )
+    }
+    erp_spec, erp_pct_spec = ERPComputer().spec, ERPPercentileComputer().spec
+    templates.append(
+        build_template(
+            "erp",
+            lambda p: ERPComputer(str(p["rate_source"])),
+            parameter_schema=rate_source,
+            compute_lookback_days=lambda _p: erp_spec.lookback_days,
+            name=erp_spec.name,
+            version="1.1.0",
+            description=(
+                "股权风险溢价 ERP = (1/PE × 100) − 无风险利率；rate_source 选 1 年期 LPR（缺省）"
+                "或 10 年期国债收益率。ERP 越高表示股票相对债券越有吸引力。"
+            ),
+            category="valuation",
+        )
+    )
+    templates.append(
+        build_template(
+            "erp_percentile",
+            lambda p: ERPPercentileComputer(str(p["rate_source"])),
+            parameter_schema=rate_source,
+            compute_lookback_days=lambda _p: erp_pct_spec.lookback_days,
+            name=erp_pct_spec.name,
+            version="3.1.0",
+            description=(
+                "当前 ERP 在目标日前 2 年历史 ERP 分布中的百分位（0-100），历史各日用当日已公布的"
+                "无风险利率（rate_source：lpr 缺省 / cgb10y）。"
+            ),
+            category="valuation",
+            native_0_100=True,
+        )
+    )
 
     # ── 零参数模板 ──────────────────────────────────────────────────────
     zero_param: list[tuple[str, Any]] = [
@@ -916,8 +1146,6 @@ def build_default_templates() -> list[FactorTemplate]:
         ("monthly_up_streak", lambda _p: MonthlyStreakComputer()),
         ("pe_percentile", lambda _p: PEPercentileComputer()),
         ("pb_percentile", lambda _p: PBPercentileComputer()),
-        ("erp", lambda _p: ERPComputer()),
-        ("erp_percentile", lambda _p: ERPPercentileComputer()),
         ("index_diffusion_ratio", lambda _p: IndexDiffusionRatioComputer()),
         ("rrg_industry_match_score", lambda _p: RRGIndustryMatchComputer()),
     ]
@@ -943,7 +1171,8 @@ def build_default_templates() -> list[FactorTemplate]:
                     default=DEFAULT_EXPRESSION,
                     description=(
                         "表达式：引用其他因子别名 / 模板 ID，支持 + - * / ** 与 "
-                        "abs/min/max/log/sqrt/sign，如 dev250 - dev60"
+                        "abs/min/max/log/sqrt/sign，时序函数 delay/delta/ts_mean/ts_std/"
+                        "ts_zscore/ts_rank(x, 窗口)，如 dev250 - dev60、ts_zscore(vr, 60)"
                     ),
                 )
             },

@@ -45,6 +45,16 @@ class MacroIndicatorSchema(BaseModel):
     source: str = "akshare"
 
 
+class MarketIndicatorPointSchema(BaseModel):
+    """日频市场指标的一条观测。"""
+
+    indicator_code: str
+    indicator_name: str
+    unit: str
+    trade_date: date
+    value: float
+
+
 class BenchmarkIndex(BaseModel):
     """基准指数基本信息。"""
 

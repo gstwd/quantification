@@ -32,6 +32,8 @@ from quant_etf_api.domain.research.ledger import HYPOTHESIS_CATEGORIES
 from quant_etf_api.engine.config import FactorAliasConfig
 from quant_etf_api.schemas.strategy import StrategyConfigCreate, StrategyConfigUpdate
 from quant_etf_api.services.backtest_service import BacktestService
+from quant_etf_api.services.dsr_calibration_service import DsrCalibrationService
+from quant_etf_api.services.dsr_calibration_service import render_markdown as render_dsr_markdown
 from quant_etf_api.services.factor_admin_service import FactorAdminService
 from quant_etf_api.services.optimization_service import OptimizationService
 from quant_etf_api.services.research_batch_service import ResearchBatchService
@@ -358,6 +360,11 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--universe", choices=["all", "subset"], default="all")
     p.add_argument("--index-codes", dest="index_codes", help="逗号分隔的指数代码")
     p.add_argument("--benchmark", dest="benchmark_index", default="000300")
+    p.add_argument(
+        "--benchmark-mix",
+        dest="benchmark_mix",
+        help="混合基准，如 000300:0.6,000905:0.2（权重和不足 1 的部分为现金）；给出时覆盖 --benchmark",
+    )
     p.add_argument("--no-benchmark", action="store_true")
     p.add_argument(
         "--purpose",
@@ -716,6 +723,7 @@ def _build_research_group(subparsers: argparse._SubParsersAction) -> None:
     _build_ledger_parsers(sub)
     _build_campaign_parsers(sub)
     _build_factor_diagnostic_parsers(sub)
+    _build_dsr_calibration_parser(sub)
 
 
 def _add_research_window(parser: argparse.ArgumentParser) -> None:
@@ -846,6 +854,26 @@ def _build_factor_diagnostic_parsers(sub: argparse._SubParsersAction) -> None:
     )
     _add_research_window(p)
     _add_summary_flag(p)
+    _add_json_flag(p)
+
+
+def _build_dsr_calibration_parser(sub: argparse._SubParsersAction) -> None:
+    """注册 research dsr-calibrate（验收第 8 项 Deflated Sharpe 门槛校准，只读）。"""
+    p = sub.add_parser(
+        "dsr-calibrate",
+        help="用已评估优化会话与稳健性批次的超额序列做零假设模拟，"
+        "输出各门槛的假阳性率与功效（只读，不改门槛）",
+    )
+    p.add_argument(
+        "--strategy", dest="strategy_id", help="只校准该策略所在研究线（缺省全部研究记录）"
+    )
+    p.add_argument("--sims", type=int, default=1000, help="零假设模拟次数（默认 1000）")
+    p.add_argument(
+        "--power-sims", type=int, default=500, help="功效曲线每个注入值的模拟次数（默认 500）"
+    )
+    p.add_argument("--block", type=int, default=20, help="循环块长度（交易日，默认 20）")
+    p.add_argument("--seed", type=int, default=20261024, help="随机种子（默认固定值）")
+    p.add_argument("--file", help="把 markdown 报告写入该文件（缺省打印）")
     _add_json_flag(p)
 
 
@@ -1603,6 +1631,7 @@ def _run_backtest(args: argparse.Namespace) -> None:
                 index_codes=index_codes,
                 enable_benchmark=not args.no_benchmark,
                 benchmark_index_code=args.benchmark_index,
+                benchmark_mix=_parse_benchmark_mix(getattr(args, "benchmark_mix", None)),
                 purpose=purpose,
                 purpose_reason=getattr(args, "purpose_reason", None),
                 cost_bps=getattr(args, "cost_bps", None),
@@ -2054,6 +2083,51 @@ def _record_derived_diagnostic(
     }
 
 
+def _parse_benchmark_mix(text: str | None) -> list[dict[str, Any]] | None:
+    """解析 --benchmark-mix（代码:权重,代码:权重）。
+
+    Args:
+        text: 参数原文。
+
+    Returns:
+        [{"index_code", "weight"}]；未给出时为 None。
+    """
+    if not text:
+        return None
+    items: list[dict[str, Any]] = []
+    for part in text.split(","):
+        code, _, weight = part.strip().partition(":")
+        if not code or not weight:
+            _fail(f"--benchmark-mix 格式应为 代码:权重，收到 {part!r}")
+        items.append({"index_code": code.strip(), "weight": float(weight)})
+    return items
+
+
+def _run_dsr_calibration(svc: DsrCalibrationService, args: argparse.Namespace) -> None:
+    """执行 research dsr-calibrate：输出 JSON，或写入 / 打印 markdown 报告。
+
+    Args:
+        svc: DsrCalibrationService 实例。
+        args: argparse 解析结果。
+    """
+    report = svc.calibrate(
+        args.strategy_id,
+        n_sims=args.sims,
+        power_sims=args.power_sims,
+        block=args.block,
+        seed=args.seed,
+    )
+    if args.file:
+        with open(args.file, "w", encoding="utf-8") as f:
+            f.write(render_dsr_markdown(report))
+        print(f"# 报告已写入: {args.file}")
+        return
+    if args.no_json:
+        print(render_dsr_markdown(report))
+        return
+    _emit(report, True)
+
+
 def _run_research(args: argparse.Namespace) -> None:
     """执行 research 命令组（研究批量评估 D-1 + 只读研究诊断）。"""
     db = SessionLocal()
@@ -2070,6 +2144,9 @@ def _run_research(args: argparse.Namespace) -> None:
             return
         if args.subcommand == "campaign":
             _run_campaign(ResearchCampaignService(db), args)
+            return
+        if args.subcommand == "dsr-calibrate":
+            _run_dsr_calibration(DsrCalibrationService(db), args)
             return
         if args.subcommand != "batch":
             raise ValueError(f"未知的 research 子命令: {args.subcommand}")

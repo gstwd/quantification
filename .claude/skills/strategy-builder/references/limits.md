@@ -16,9 +16,10 @@
 - 不支持："保留排名前 25% 的资产"、"保留得分高于中位数的资产"
 - 变通方案：用 `scoring_mode: "rank"` + `top_n` 实现排名筛选；用"全部过滤=空仓"实现全局条件
 
-### 3. 因子权重分配方法仅 3 种
-- `equal_weight`、`score_weight`、`winner_take_all`
-- 不支持：风险平价、目标波动率、Black-Litterman、最小方差
+### 3. 权重分配方法 5 种
+- `equal_weight`、`score_weight`、`winner_take_all`、`inverse_vol`、`risk_parity`
+- 波动率目标、回撤止损、移动止损在 `risk` 叠加层（见 config_model.md）
+- 不支持：Black-Litterman、最小方差、均值方差优化
 
 ### 4. 过滤器操作符仅 7 种
 - `gt`、`lt`、`gte`、`lte`、`eq`、`neq`、`between`

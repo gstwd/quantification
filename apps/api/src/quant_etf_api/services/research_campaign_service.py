@@ -10,6 +10,7 @@ headless agent 会话执行，结束后 ``finalize_step`` 收口。agent 在会�
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from collections.abc import Mapping, Sequence
@@ -22,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.domain.research import campaign as rules
+from quant_etf_api.engine.config import is_composite_config
 from quant_etf_api.infra.db.models.core import ResearchCampaignModel, ResearchCampaignStepModel
 from quant_etf_api.infra.db.repositories.optimization import OptimizationRepository
 from quant_etf_api.infra.db.repositories.research_campaign import ResearchCampaignRepository
@@ -718,6 +720,11 @@ class ResearchCampaignService:
                 raise ValueError(
                     f"战役内新建的策略必须用 --lineage {row.strategy_id} 归入研究线 {row.lineage_id}"
                 )
+        if command == "strategy" and subcommand in ("create", "update"):
+            self._reject_composite_file(flags.get("file"))
+        strategy_id = flags.get("strategy_id")
+        if strategy_id and self._config_svc.is_composite(str(strategy_id)):
+            raise ValueError("战役模式不支持组合策略：成员可能在研究线外，组合研究由人工进行")
         self._guard_scoped_ids(row, command, subcommand, flags, members)
         if command == "optimization" and subcommand in ("evaluate", "finish"):
             session = self._opt_repo.find_by_id(flags.get("optimization_id") or "")
@@ -741,6 +748,26 @@ class ResearchCampaignService:
             # 放行即计数（命令随后失败也算一次），保证配额不被反复失败的命令绕过
             self._repo.increment_diagnostics(campaign_id)
             self._db.commit()
+
+    @staticmethod
+    def _reject_composite_file(path: Any) -> None:
+        """战役内新建 / 修改策略时拒绝组合策略配置文件。
+
+        Args:
+            path: ``--file`` 参数（可为空）。
+
+        Raises:
+            ValueError: 配置文件是组合策略时抛出；文件不可读时交给命令本身报错。
+        """
+        if not path:
+            return
+        try:
+            data = json.loads(Path(str(path)).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        config_json = data.get("config_json", data) if isinstance(data, dict) else None
+        if is_composite_config(config_json):
+            raise ValueError("战役模式不支持组合策略：成员可能在研究线外，组合研究由人工进行")
 
     def _guard_scoped_ids(
         self,

@@ -220,6 +220,29 @@ class BacktestRepository(BaseRepository):
             BacktestIndexResultModel.index_code.asc(),
         ).all()
 
+    def find_held_index_returns(self, backtest_id: str) -> list[tuple[date, str, float | None]]:
+        """投影读取持有资产的逐日收益（归因用，只取 in_portfolio 行的三列）。
+
+        Args:
+            backtest_id: 回测标识。
+
+        Returns:
+            (交易日, 指数代码, 收益 %) 列表。
+        """
+        rows = (
+            self._db.query(
+                BacktestIndexResultModel.trade_date,
+                BacktestIndexResultModel.index_code,
+                BacktestIndexResultModel.index_return,
+            )
+            .filter(
+                BacktestIndexResultModel.backtest_id == backtest_id,
+                BacktestIndexResultModel.in_portfolio.is_(True),
+            )
+            .all()
+        )
+        return [(d, str(code), None if ret is None else float(ret)) for d, code, ret in rows]
+
     def update_progress(self, backtest_id: str, progress: int) -> None:
         """更新回测执行进度（0-100）。
 

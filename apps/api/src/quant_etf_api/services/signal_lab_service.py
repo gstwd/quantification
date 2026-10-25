@@ -35,6 +35,7 @@ from quant_etf_api.infra.db.repositories.industry import (
     IndustryUniverseRepository,
 )
 from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
+from quant_etf_api.infra.db.repositories.market_indicator import MarketIndicatorRepository
 from quant_etf_api.infra.db.repositories.strategy_config import StrategyConfigRepository
 from quant_etf_api.schemas.signal_lab import (
     SignalLabCatalog,
@@ -509,7 +510,10 @@ class SignalLabService:
         """
         if StrategyConfigRepository(self._db).find_by_id(strategy_id) is None:
             raise SignalLabNotFound(f"策略 {strategy_id} 不存在")
-        config = StrategyConfigService(self._db).get_parsed_config(strategy_id)
+        config_svc = StrategyConfigService(self._db)
+        if config_svc.is_composite(strategy_id):
+            raise SignalLabError(f"{strategy_id} 是组合策略：请对其成员策略做信号诊断")
+        config = config_svc.get_parsed_config(strategy_id)
         if config is None:
             raise SignalLabError(f"策略 {strategy_id} 的配置无法解析")
         if config.timing is None:
@@ -581,9 +585,8 @@ class SignalLabService:
             instances = provider.resolve_instances(config)
         except FactorResolutionError as exc:
             raise SignalLabError(f"择时因子无法解析：{exc}") from exc
-        lookback = max(
-            (inst.template.lookback_days(inst.params) for inst in instances.values()), default=0
-        )
+        # 实例回望：派生因子含依赖回望与时序窗口（模板级回望恒为 0）
+        lookback = max((inst.lookback_days for inst in instances.values()), default=0)
         first_day = calendar[0].date() if len(calendar) else start
         load_start = first_day - timedelta(days=lookback + 10)
         load_end = bars_index[-1].date()
@@ -601,6 +604,7 @@ class SignalLabService:
         )
         valuation = IndexValuationRepository(self._db).find_range(load_start, load_end, proxies)
         macro = MacroIndicatorRepository(self._db).find_all_as_map()
+        macro.update(MarketIndicatorRepository(self._db).find_all_as_map())
         matrix = provider.precompute_backtest_factors(
             config, [ts.date() for ts in calendar], proxies, all_bars, valuation, macro
         )

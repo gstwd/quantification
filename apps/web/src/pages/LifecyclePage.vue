@@ -3,8 +3,9 @@
     策略生命周期页面。
 
     只展示"人工标记上线之后"的监控与诊断：上线策略列表、单策略的冻结快照、
-    最新健康体检结论与历史快照。健康数据由页面按钮手动触发同步计算，
-    系统不会自动变更状态、也不会自动调整策略参数。
+    最新健康体检结论与历史快照。健康数据可由页面按钮手动刷新，也会在每日数据同步后
+    由定时任务自动刷新（只做诊断，等级恶化写站内告警）；系统不会自动变更状态、也不会
+    自动调整策略参数。
   -->
   <div class="page">
     <div class="page-header">
@@ -17,6 +18,14 @@
           </p>
         </div>
         <button class="btn-primary" @click="showOnline = true">标记上线</button>
+      </div>
+    </div>
+
+    <div v-if="strategyAlerts.length > 0" class="alert-card">
+      <div class="alert-card-title">最近告警（定时体检）</div>
+      <div v-for="item in strategyAlerts" :key="item.id" :class="['alert-row', `sev-${item.severity}`]">
+        <span class="alert-time">{{ formatCnTime(item.created_at ?? '') }}</span>
+        <span>{{ item.title }}</span>
       </div>
     </div>
 
@@ -378,7 +387,8 @@ import {
   updateLifecycleStatus,
 } from '../api/lifecycle'
 import { useStrategyStore } from '../stores/strategies'
-import type { LifecycleDetail, LifecycleSummary } from '../types/api'
+import type { AlertItem, LifecycleDetail, LifecycleSummary } from '../types/api'
+import { fetchAlerts } from '../api/alerts'
 import { formatCnTime, todayCn } from '../utils/date'
 
 // 上线策略摘要列表
@@ -711,16 +721,34 @@ function shortHash(hash: string): string {
   return hash ? `${hash.slice(0, 12)}…` : '—'
 }
 
+/** 与策略相关的最近告警（健康恶化、定时体检失败） */
+const strategyAlerts = ref<AlertItem[]>([])
+
+async function loadAlerts(): Promise<void> {
+  try {
+    const data = await fetchAlerts(false, 20)
+    strategyAlerts.value = data.items.filter(item => item.strategy_id).slice(0, 8)
+  } catch {
+    strategyAlerts.value = []
+  }
+}
+
 onMounted(async () => {
   if (!strategyStore.items.length) {
     await strategyStore.loadAll()
   }
-  await loadList()
+  await Promise.all([loadList(), loadAlerts()])
 })
 </script>
 
 <style scoped>
 .page { display: flex; flex-direction: column; gap: 20px; }
+.alert-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; background: var(--surface); }
+.alert-card-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.alert-row { display: flex; gap: 10px; font-size: 12px; padding: 3px 0 3px 8px; border-left: 3px solid transparent; }
+.alert-row.sev-critical { border-left-color: var(--danger, #ef4444); }
+.alert-row.sev-warning { border-left-color: #f59e0b; }
+.alert-time { color: var(--text-muted); min-width: 130px; }
 .header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .page-title { font-size: 22px; font-weight: 700; }
 .subtitle { font-size: 13px; color: var(--text-muted); margin-top: 4px; max-width: 720px; }

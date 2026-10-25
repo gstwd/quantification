@@ -1,7 +1,10 @@
-"""股权风险溢价（ERP）因子：基于指数 PE 和 LPR 计算。
+"""股权风险溢价（ERP）因子：基于指数 PE 和无风险利率计算。
 
 ERP = 盈利收益率 - 无风险利率
-    = (1 / PE × 100) - LPR 1年期
+    = (1 / PE × 100) - 无风险利率
+
+无风险利率由参数 ``rate_source`` 选择：``lpr``（缺省，1 年期 LPR，报价日可见）或
+``cgb10y``（10 年期国债收益率，日频市场指标，交易日当日可见）。缺省口径与改造前逐位一致。
 
 ERP 越高表示股票相对债券越有吸引力，常用于判断市场整体估值水平。
 数据来源：PE 来自 index_valuation 表，LPR 来自 macro_indicator 表。
@@ -25,18 +28,21 @@ _ERP_HISTORY_DAYS = 730
 # ERP 百分位所需的最少历史样本数
 _ERP_MIN_HISTORY = 10
 _LPR_CODE = "lpr1y"
+# rate_source → 宏观 / 市场指标代码
+RATE_SOURCE_CODES: dict[str, str] = {"lpr": _LPR_CODE, "cgb10y": "cgb10y"}
 
 
 class _LprLookup:
-    """按发布可见日二分查询「截止某日已公布的最近一期 LPR」。"""
+    """按发布可见日二分查询「截止某日已公布的最近一期无风险利率」（缺省 LPR）。"""
 
-    def __init__(self, ctx: FactorContext) -> None:
+    def __init__(self, ctx: FactorContext, code: str = _LPR_CODE) -> None:
         """从上下文的宏观序列构建查询表。
 
         Args:
-            ctx: FactorContext，需包含 macro_indicators["lpr1y"]。
+            ctx: FactorContext，需包含 macro_indicators[code]。
+            code: 利率指标代码（lpr1y / cgb10y）。
         """
-        records = ctx.macro_series(_LPR_CODE)
+        records = ctx.macro_series(code)
         self._available = [record[0] for record in records]
         self._records = records
 
@@ -77,7 +83,19 @@ class ERPComputer:
     PE 来自 index_valuation 表（当日），LPR 来自 macro_indicator 表
     （截止 trade_date 已公布的最近一期报价，避免使用未来才公布的 LPR）。
     ERP 为正表示股票预期收益高于无风险利率，越高越有吸引力。
+
+    Args:
+        rate_source: 无风险利率来源（lpr / cgb10y）。
     """
+
+    def __init__(self, rate_source: str = "lpr") -> None:
+        """初始化。
+
+        Args:
+            rate_source: 无风险利率来源。
+        """
+        self._rate_source = rate_source
+        self._rate_code = RATE_SOURCE_CODES[rate_source]
 
     @property
     def spec(self) -> FactorSpec:
@@ -113,7 +131,7 @@ class ERPComputer:
         Returns:
             key=交易日, value=FactorValue 的字典；PE 或 LPR 缺失时 numeric 为 None。
         """
-        lpr = _LprLookup(ctx)
+        lpr = _LprLookup(ctx, self._rate_code)
         result: dict[date, FactorValue] = {}
         for trade_date in dates:
             row = ctx.index_valuation.get((index_code, trade_date))
@@ -130,16 +148,25 @@ class ERPComputer:
                 continue
             latest_period, latest_lpr = latest
             earnings_yield = 1.0 / pe * 100.0
+            payload: dict[str, Any] = {
+                "index_code": index_code,
+                "pe": round(pe, 2),
+                "earnings_yield": round(earnings_yield, 4),
+            }
+            if self._rate_source == "lpr":
+                payload.update({"lpr_1y": latest_lpr, "lpr_period": latest_period})
+            else:
+                payload.update(
+                    {
+                        "rate_source": self._rate_source,
+                        "rate": latest_lpr,
+                        "rate_period": latest_period,
+                    }
+                )
             result[trade_date] = FactorValue(
                 factor_id=self.spec.factor_id,
                 numeric=round(earnings_yield - latest_lpr, 4),
-                payload={
-                    "index_code": index_code,
-                    "pe": round(pe, 2),
-                    "earnings_yield": round(earnings_yield, 4),
-                    "lpr_1y": latest_lpr,
-                    "lpr_period": latest_period,
-                },
+                payload=payload,
             )
         return result
 
@@ -159,7 +186,19 @@ class ERPPercentileComputer:
     历史上每个估值日的 ERP 使用**该日已公布**的 LPR，而不是统一套用当前 LPR——
     后者等价于 1/PE 的百分位，利率变化完全不起作用。
     ERP 百分位 > 80 表示股票相对债券极具吸引力，常用于熊市超跌判断。
+
+    Args:
+        rate_source: 无风险利率来源（lpr / cgb10y）。
     """
+
+    def __init__(self, rate_source: str = "lpr") -> None:
+        """初始化。
+
+        Args:
+            rate_source: 无风险利率来源。
+        """
+        self._rate_source = rate_source
+        self._rate_code = RATE_SOURCE_CODES[rate_source]
 
     @property
     def spec(self) -> FactorSpec:
@@ -200,7 +239,7 @@ class ERPPercentileComputer:
         Returns:
             key=交易日, value=FactorValue 的字典；历史样本不足 10 个时 numeric 为 None。
         """
-        lpr = _LprLookup(ctx)
+        lpr = _LprLookup(ctx, self._rate_code)
         valuation_dates, rows = ctx.valuation_for(index_code)
         erp_dates: list[date] = []
         erp_values: list[float] = []
@@ -238,8 +277,15 @@ class ERPPercentileComputer:
                     "current_erp": round(current_erp, 4),
                     "history_count": len(history),
                     "history_start": str(erp_dates[start]),
-                    "lpr_1y": latest[1],
-                    "lpr_period": latest[0],
+                    **(
+                        {"lpr_1y": latest[1], "lpr_period": latest[0]}
+                        if self._rate_source == "lpr"
+                        else {
+                            "rate_source": self._rate_source,
+                            "rate": latest[1],
+                            "rate_period": latest[0],
+                        }
+                    ),
                 },
             )
         return result

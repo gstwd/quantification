@@ -73,3 +73,16 @@
 - 所有因子以 `index_code` 为计算单位（如 `000300`、`000905`），不是 ETF 代码
 - 估值因子（pe_percentile、pb_percentile）仅宽基指数有数据，行业/主题指数通常返回 None
 - `return_*d` 因子数据不足时返回 None（与返回 0.0 不同），过滤规则遇到 None 会自动失败
+
+## 成分聚合、宏观与日频市场指标模板
+
+| 模板 | 参数 | 说明 |
+|---|---|---|
+| `constituent_turnover` | field（turnover_rate_f / turnover_rate）、window、min_coverage | 成分股加权换手率 N 日均值（%），个股每日指标聚合，资产级 |
+| `constituent_mainflow` | window、min_coverage | 成分股主力（大单+特大单）净流入 / 全部买入额（%），资产级 |
+| `constituent_valuation` | field（pe_ttm / pb / dv_ttm）、stat（median / harmonic）、min_coverage | 成分股估值汇总，资产级；配合 expr 的 ts_rank 得到估值分位 |
+| `macro_series` | code（m1_yoy / m2_yoy / sf_stock / pmi / cpi / lpr1y / lpr5y）、mode（level / change / pct_change）、months | 市场级，按发布滞后可见；只用于择时 / 过滤 |
+| `market_series` | code（cgb10y、margin_*、fut_*_basis(_ann)、opt_*_pcr_*）、mode、window | 市场级日频序列；期权 2019-12 起、IM/MO 2022 年起才有数据，早期为缺失 |
+| `erp` / `erp_percentile` | rate_source（lpr 缺省 / cgb10y） | 无风险利率可改为 10 年期国债收益率 |
+
+成分聚合因子首次装配需按日期区间扫描个股表（数据库冷缓存时每张表约 20 秒），实时决策引用时注意延迟。

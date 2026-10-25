@@ -462,6 +462,74 @@ class TushareMacroClient(_TushareBaseMixin, BaseDataClient):
                     )
         return results
 
+    def fetch_money_supply(self) -> list[MacroIndicator]:
+        """拉取货币供应量 M1 / M2 同比（cn_m）。
+
+        Returns:
+            MacroIndicator 列表（m1_yoy、m2_yoy），period 为 'YYYY-MM'。
+        """
+        current = today_cn().strftime("%Y%m")
+        df = self._fetch("cn_m", start_m="201001", end_m=current)
+        results: list[MacroIndicator] = []
+        if df is None or df.empty:
+            return results
+        for _, row in df.iterrows():
+            month = str(row.get("month") or "").strip()
+            if not re.fullmatch(r"\d{6}", month):
+                continue
+            period = f"{month[:4]}-{month[4:]}"
+            for code, column, name in (
+                ("m1_yoy", "m1_yoy", "狭义货币(M1)同比"),
+                ("m2_yoy", "m2_yoy", "广义货币(M2)同比"),
+            ):
+                value = _to_float(row.get(column))
+                if value is None:
+                    continue
+                results.append(
+                    MacroIndicator(
+                        indicator_code=code,
+                        indicator_name=name,
+                        period=period,
+                        value=value,
+                        unit="%",
+                        period_date=f"{period}-01",
+                        source="tushare",
+                    )
+                )
+        return results
+
+    def fetch_social_financing(self) -> list[MacroIndicator]:
+        """拉取社会融资规模存量（sf_month.stk_endval，万亿元）。
+
+        同比由因子按 12 个月前的存量现算，不在入库时派生。
+
+        Returns:
+            MacroIndicator 列表（sf_stock），period 为 'YYYY-MM'。
+        """
+        current = today_cn().strftime("%Y%m")
+        df = self._fetch("sf_month", start_m="201501", end_m=current)
+        results: list[MacroIndicator] = []
+        if df is None or df.empty:
+            return results
+        for _, row in df.iterrows():
+            month = str(row.get("month") or "").strip()
+            value = _to_float(row.get("stk_endval"))
+            if not re.fullmatch(r"\d{6}", month) or value is None:
+                continue
+            period = f"{month[:4]}-{month[4:]}"
+            results.append(
+                MacroIndicator(
+                    indicator_code="sf_stock",
+                    indicator_name="社会融资规模存量",
+                    period=period,
+                    value=value,
+                    unit="万亿元",
+                    period_date=f"{period}-01",
+                    source="tushare",
+                )
+            )
+        return results
+
     def health_check(self) -> HealthStatus:
         """通过拉取最近 PMI 检测连通性。"""
         if not self.is_configured():

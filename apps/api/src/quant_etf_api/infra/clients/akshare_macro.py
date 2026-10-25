@@ -169,6 +169,58 @@ class AkShareMacroClient(BaseDataClient):
         return results
 
     # ------------------------------------------------------------------
+    # 货币供应量（Tushare cn_m 的兜底）
+    # ------------------------------------------------------------------
+
+    def fetch_money_supply(self) -> list[MacroIndicator]:
+        """拉取 M1 / M2 同比（macro_china_money_supply）。
+
+        Returns:
+            MacroIndicator 列表（m1_yoy、m2_yoy），period 为 'YYYY-MM'。
+        """
+        endpoint = "macro_china_money_supply"
+        self._log_request(endpoint)
+        start = time.perf_counter()
+        try:
+            df = ak.macro_china_money_supply()
+        except Exception as e:
+            self._log_error(endpoint, e, (time.perf_counter() - start) * 1000)
+            raise
+        results: list[MacroIndicator] = []
+        for _, row in df.iterrows():
+            match = re.search(r"(\d{4})\D+(\d{1,2})", str(row.get("月份") or ""))
+            if match is None:
+                continue
+            period = f"{match.group(1)}-{int(match.group(2)):02d}"
+            for code, column, name in (
+                ("m1_yoy", "货币(M1)-同比增长", "狭义货币(M1)同比"),
+                ("m2_yoy", "货币和准货币(M2)-同比增长", "广义货币(M2)同比"),
+            ):
+                value = row.get(column)
+                if value is None or (isinstance(value, float) and value != value):
+                    continue
+                results.append(
+                    MacroIndicator(
+                        indicator_code=code,
+                        indicator_name=name,
+                        period=period,
+                        value=float(value),
+                        unit="%",
+                        period_date=f"{period}-01",
+                    )
+                )
+        self._log_response(endpoint, len(results), (time.perf_counter() - start) * 1000)
+        return results
+
+    def fetch_social_financing(self) -> list[MacroIndicator]:
+        """社融存量没有稳定的 AkShare 对应接口：兜底返回空（只用 Tushare）。
+
+        Returns:
+            空列表。
+        """
+        return []
+
+    # ------------------------------------------------------------------
     # 便捷方法：拉取所有宏观指标
     # ------------------------------------------------------------------
 

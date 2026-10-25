@@ -18,8 +18,10 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
+import numpy as np
 from sqlalchemy.orm import Session
 
+from quant_etf_api.domain.market_data.indicators import MACRO_INDICATOR_CODES
 from quant_etf_api.domain.strategies.timing_proxy import (
     TimingProxySelection,
     select_grouped_timing_proxy_values,
@@ -38,6 +40,7 @@ from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRe
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
 from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
+from quant_etf_api.infra.db.repositories.market_indicator import MarketIndicatorRepository
 from quant_etf_api.schemas.factor import CrossSectionRow
 from quant_etf_api.schemas.signal import FactorRow
 
@@ -53,12 +56,16 @@ _PANEL_DATA_NAMES = {
     "stock_closes",
     "industry_selection",
     "index_industry_exposure",
+    "stock_daily_basic",
+    "stock_moneyflow",
 }
+# 个股日频表依赖：成分聚合因子按需装配 交易日 × 个股 字段数组
+_STOCK_TABLE_DATA_NAMES = ("stock_daily_basic", "stock_moneyflow")
 # 行业面板类依赖：仅这些依赖需要装配 RRG 行业选择与暴露
 _INDUSTRY_PANEL_DATA_NAMES = {"industry_selection", "index_industry_exposure"}
 
 # 因子计算所需的宏观指标口径
-_MACRO_CODES = ["lpr1y", "lpr5y", "cpi", "pmi"]
+_MACRO_CODES = list(MACRO_INDICATOR_CODES)
 
 
 @dataclass
@@ -203,7 +210,7 @@ class FactorComputeService:
             index_valuation=IndexValuationRepository(self._db).find_range(
                 start_date, end_date, list(index_codes)
             ),
-            macro_indicators=self._load_macro_indicators(),
+            macro_indicators=self._load_macro_indicators(_needs_market_indicators(instance_list)),
         )
         if not include_panels:
             return ctx
@@ -263,10 +270,23 @@ class FactorComputeService:
             _INDUSTRY_PANEL_DATA_NAMES.intersection(instance.template.required_data)
             for instance in panel_instances
         )
-        return self._build_panels(list(index_codes), list(dates), lookback, include_industry)
+        stock_tables = [
+            table
+            for table in _STOCK_TABLE_DATA_NAMES
+            if any(table in instance.template.required_data for instance in panel_instances)
+        ]
+        include_closes = any(
+            "stock_closes" in instance.template.required_data for instance in panel_instances
+        )
+        return self._build_panels(
+            list(index_codes), list(dates), lookback, include_industry, stock_tables, include_closes
+        )
 
-    def _load_macro_indicators(self) -> dict[str, dict[str, float]]:
+    def _load_macro_indicators(self, include_market: bool = False) -> dict[str, dict[str, float]]:
         """加载宏观指标全量历史，供逐日时点过滤使用。
+
+        Args:
+            include_market: 是否同时加载日频市场指标（只有引用它们的模板需要）。
 
         Returns:
             key=indicator_code, value={period: value} 的映射。
@@ -275,6 +295,9 @@ class FactorComputeService:
         for row in MacroIndicatorRepository(self._db).find_by_codes(_MACRO_CODES):
             code = row.indicator_code
             indicators.setdefault(code, {})[str(row.period_date or row.period)] = row.value
+        # 日频市场指标与宏观指标共用同一个时点映射（交易日当日可见）
+        if include_market:
+            indicators.update(MarketIndicatorRepository(self._db).find_all_as_map())
         return indicators
 
     def _panel_calculation_dates(self, start_date: date, end_date: date) -> list[date]:
@@ -304,6 +327,8 @@ class FactorComputeService:
         dates: list[date],
         lookback_days: int,
         include_industry_panels: bool,
+        stock_tables: Sequence[str] = (),
+        include_stock_closes: bool = True,
     ) -> dict[str, Any]:
         """装配复合因子面板。
 
@@ -312,6 +337,8 @@ class FactorComputeService:
             dates: 面板所需的连续交易日轴。
             lookback_days: 本次最大回望自然日数。
             include_industry_panels: 是否装配 RRG 所需的行业选择与暴露面板。
+            stock_tables: 需要装配的个股日频表（成分聚合因子）。
+            include_stock_closes: 是否加载成员股收盘序列（成分扩散类模板需要）。
 
         Returns:
             面板字典；输入不完整时为空字典。
@@ -325,6 +352,8 @@ class FactorComputeService:
             dates=dates,
             lookback_natural_days=lookback_days,
             include_industry_panels=include_industry_panels,
+            stock_tables=stock_tables,
+            include_stock_closes=include_stock_closes,
         )
 
     # ==================================================================
@@ -348,7 +377,9 @@ class FactorComputeService:
         同一模板 + 同一规范化参数的多个别名只创建一个计算器、只算一次，结果按实例
         ID 展开。支持批量协议的模板一次遍历覆盖所有交易日，其余模板按交易日逐点计算。
         派生因子（expr 模板）不直接计算：先把它们绑定的依赖并入本次计算，算完后
-        按依赖顺序逐日逐指数求表达式（依赖值也会出现在结果中）。
+        按依赖顺序逐日逐指数求表达式（依赖值也会出现在结果中）。含时序函数的派生
+        因子需要更早的依赖值：计算轴向前扩展 ``series_window`` 个交易日并补齐目标日
+        之间的全部交易日（时序函数沿完整交易日轴步进），算完后只保留目标日。
 
         Args:
             instances: 本次计算的因子实例。
@@ -370,7 +401,9 @@ class FactorComputeService:
             return FactorMatrix()
         _assert_unique_instance_ids(instance_list)
         instance_list, derived = _expand_derived(instance_list)
-        matrix = FactorMatrix(values={day: {} for day in target_dates})
+        series_window = max(
+            (getattr(item.computer, "series_window", 0) for item in derived), default=0
+        )
 
         context = ctx or self.build_context(
             instance_list,
@@ -379,9 +412,16 @@ class FactorComputeService:
             panel_dates=panel_dates,
             include_panels=include_panels,
         )
-        base_axis = sorted(calculation_dates) if calculation_dates else target_dates
+        # 求值轴：不含时序函数时即目标日（与改造前一致）；含时序函数时向前扩展
+        eval_dates = (
+            _series_axis(target_dates, series_window, calculation_dates, context, index_codes)
+            if series_window
+            else target_dates
+        )
+        matrix = FactorMatrix(values={day: {} for day in eval_dates})
+        base_axis = sorted(calculation_dates) if calculation_dates else eval_dates
         batch_ctx = calculation_ctx or context
-        target_set = set(target_dates)
+        target_set = set(eval_dates)
 
         groups = _group_instances(instance_list)
         batch_groups = [
@@ -435,7 +475,7 @@ class FactorComputeService:
                                 day_values[(target_code, instance_id)] = value.numeric
 
         if point_groups:
-            for trade_date in target_dates:
+            for trade_date in eval_dates:
                 dated_ctx = _as_of_context(context, trade_date)
                 for code in index_codes:
                     for _key, computer, instance_ids in point_groups:
@@ -455,7 +495,11 @@ class FactorComputeService:
                             matrix.values[trade_date][(code, instance_id)] = value.numeric
 
         if derived:
-            _evaluate_derived(matrix, derived, index_codes, target_dates)
+            _evaluate_derived(matrix, derived, index_codes, eval_dates)
+        if series_window:
+            # 扩展出来的预热日只服务于时序函数，不出现在结果里
+            keep = set(target_dates)
+            matrix.values = {day: row for day, row in matrix.values.items() if day in keep}
 
         elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
         filled = sum(
@@ -677,6 +721,27 @@ class FactorComputeService:
         return {row[0]: row[1] for row in rows}
 
 
+def _needs_market_indicators(instances: Sequence[FactorInstance]) -> bool:
+    """本次实例是否引用日频市场指标（market_series，或以 10 年国债为利率的 ERP）。
+
+    Args:
+        instances: 本次计算的实例（已含派生依赖）。
+
+    Returns:
+        需要时为 True。
+    """
+    for instance in instances:
+        template_id = instance.template.template_id
+        if template_id == "market_series":
+            return True
+        if (
+            template_id in ("erp", "erp_percentile")
+            and instance.params.get("rate_source") == "cgb10y"
+        ):
+            return True
+    return False
+
+
 def _expand_derived(
     instances: Sequence[FactorInstance],
 ) -> tuple[list[FactorInstance], list[FactorInstance]]:
@@ -717,31 +782,105 @@ def _expand_derived(
     return base, derived
 
 
+def _series_axis(
+    target_dates: Sequence[date],
+    window: int,
+    calculation_dates: Sequence[date] | None,
+    context: FactorContext,
+    index_codes: Sequence[str],
+) -> list[date]:
+    """含时序函数时的求值轴：目标日之间的全部交易日 + 首个目标日前 window 个交易日。
+
+    交易日轴优先取调用方给出的计算轴（回测为全部预加载行情日），否则取上下文行情里
+    这些指数出现过的日期。
+
+    Args:
+        target_dates: 目标交易日（升序）。
+        window: 时序函数需要的额外交易日数。
+        calculation_dates: 调用方给出的计算轴。
+        context: 已装配的上下文。
+        index_codes: 指数代码。
+
+    Returns:
+        升序求值轴（含全部目标日）。
+    """
+    if calculation_dates:
+        axis = sorted(set(calculation_dates))
+    else:
+        codes = set(index_codes)
+        axis = sorted({day for (code, day) in context.index_bars if code in codes})
+    first, last = target_dates[0], target_dates[-1]
+    before = [day for day in axis if day < first][-window:]
+    between = [day for day in axis if first <= day <= last]
+    return sorted(set(before) | set(between) | set(target_dates))
+
+
 def _evaluate_derived(
     matrix: FactorMatrix,
     derived: Sequence[FactorInstance],
     index_codes: Sequence[str],
     dates: Sequence[date],
 ) -> None:
-    """逐日逐指数求派生因子（依赖缺失或数学错误时为 None）。
+    """求派生因子（依赖缺失或数学错误时为 None）。
+
+    不含时序函数的表达式逐日逐指数标量求值；含时序函数的表达式把依赖整理成
+    交易日 × 指数 数组后一次求值（沿交易日轴步进）。
 
     Args:
         matrix: 已写入依赖值的矩阵（原地写入派生值）。
         derived: 按依赖顺序排列的派生实例。
         index_codes: 指数代码。
-        dates: 交易日。
+        dates: 交易日（升序求值轴）。
     """
+    codes = list(index_codes)
+    ordered = sorted(dates)
     for instance in derived:
         computer = instance.computer
         refs = computer.refs  # type: ignore[attr-defined]
         if matrix.failed.intersection(refs):
             matrix.failed.add(instance.instance_id)
+        if getattr(computer, "series_window", 0):
+            _evaluate_series(matrix, instance, codes, ordered)
+            continue
         for trade_date in dates:
             day_values = matrix.values.setdefault(trade_date, {})
             for code in index_codes:
                 day_values[(code, instance.instance_id)] = computer.evaluate(  # type: ignore[attr-defined]
                     lambda ref, _code=code, _day=day_values: _day.get((_code, ref))
                 )
+
+
+def _evaluate_series(
+    matrix: FactorMatrix,
+    instance: FactorInstance,
+    codes: list[str],
+    dates: list[date],
+) -> None:
+    """按数组求含时序函数的派生因子并写回矩阵。
+
+    Args:
+        matrix: 已写入依赖值的矩阵（原地写入）。
+        instance: 派生实例。
+        codes: 指数代码（列顺序）。
+        dates: 升序交易日（行顺序）。
+    """
+    computer = instance.computer
+    rows = [matrix.values.setdefault(day, {}) for day in dates]
+
+    def _lookup(ref: str) -> np.ndarray:
+        values = np.full((len(dates), len(codes)), np.nan)
+        for i, day_values in enumerate(rows):
+            for j, code in enumerate(codes):
+                value = day_values.get((code, ref))
+                if value is not None:
+                    values[i, j] = value
+        return values
+
+    result = computer.evaluate_series(_lookup)  # type: ignore[attr-defined]
+    for i, day_values in enumerate(rows):
+        for j, code in enumerate(codes):
+            value = result[i, j]
+            day_values[(code, instance.instance_id)] = None if np.isnan(value) else float(value)
 
 
 def _assert_unique_instance_ids(instances: Sequence[FactorInstance]) -> None:

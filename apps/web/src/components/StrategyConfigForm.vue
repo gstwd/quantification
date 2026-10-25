@@ -703,6 +703,21 @@
             />
           </div>
           <div class="sub-field">
+            <label class="sub-label">排名缓冲带（可选，需 Top N）</label>
+            <input
+              v-model="rankBufferN"
+              type="number"
+              min="1"
+              max="50"
+              class="fp-input"
+              placeholder="留空=不启用"
+              :disabled="rankTopN === ''"
+            />
+            <span class="threshold-hint">
+              已持有资产排名仍在 Top N + 缓冲名次内时继续保留，减少名次边缘的来回换仓；实时决策会回放历史重建持仓。
+            </span>
+          </div>
+          <div class="sub-field">
             <label class="sub-label">动量子排名因子（仅展示，可选）</label>
             <select v-model="rankMomentumFactor" class="fp-select">
               <option value="">不展示</option>
@@ -745,7 +760,31 @@
             <label class="radio-opt">
               <input type="radio" v-model="portfolioMethod" value="winner_take_all" /> 赢家通吃（最高分独占）
             </label>
+            <label class="radio-opt">
+              <input type="radio" v-model="portfolioMethod" value="inverse_vol" /> 波动率倒数加权
+            </label>
+            <label class="radio-opt">
+              <input type="radio" v-model="portfolioMethod" value="risk_parity" /> 风险平价（等风险贡献）
+            </label>
           </div>
+        </div>
+
+        <div v-if="portfolioMethod === 'inverse_vol'" class="sub-field">
+          <label class="sub-label">波动率因子（权重 ∝ 1 / 因子值）</label>
+          <select v-model="portfolioVolFactor" class="fp-select">
+            <option value="">请选择已声明的因子别名</option>
+            <option v-for="alias in declaredAliases" :key="alias" :value="alias">{{ alias }}</option>
+          </select>
+          <span class="threshold-hint">
+            一般选 volatility / return_std 的别名；该因子缺失的资产在评分前剔除。
+          </span>
+        </div>
+        <div v-if="portfolioMethod === 'risk_parity'" class="sub-field">
+          <label class="sub-label">协方差窗口（交易日）</label>
+          <input v-model.number="portfolioCovWindow" type="number" min="20" max="250" class="fp-input" />
+          <span class="threshold-hint">
+            按近 N 个交易日日收益的协方差求等风险贡献权重；入选资产共同有效天数不足一半时退回等权。
+          </span>
         </div>
 
         <div class="sub-field">
@@ -896,6 +935,75 @@
             </div>
           </div>
         </div>
+
+        <div class="module-desc">
+          路径依赖风控（可选）：在每日合成目标后施加，只降仓不加仓；止损触发后次日即成交，不等调仓日。
+          实时决策会回放历史重建净值与持仓状态。
+        </div>
+        <div class="sub-field">
+          <label class="sub-label">
+            <input type="checkbox" v-model="volTargetEnabled" />
+            波动率目标
+          </label>
+          <div v-if="volTargetEnabled" class="exposure-row">
+            <div class="exposure-field">
+              <span class="exposure-label">目标年化波动</span>
+              <input v-model.number="volTarget" type="number" min="1" max="100" class="fp-input exposure-input" />
+              <span class="exposure-unit">%</span>
+            </div>
+            <div class="exposure-field">
+              <span class="exposure-label">窗口</span>
+              <input v-model.number="volTargetWindow" type="number" min="20" max="250" class="fp-input exposure-input" />
+              <span class="exposure-unit">日</span>
+            </div>
+            <div class="exposure-field">
+              <span class="exposure-label">仓位下限</span>
+              <input v-model.number="volTargetFloor" type="number" min="0" max="100" class="fp-input exposure-input" />
+              <span class="exposure-unit">%</span>
+            </div>
+          </div>
+        </div>
+        <div class="sub-field">
+          <label class="sub-label">
+            <input type="checkbox" v-model="drawdownStopEnabled" />
+            组合回撤止损
+          </label>
+          <div v-if="drawdownStopEnabled" class="exposure-row">
+            <div class="exposure-field">
+              <span class="exposure-label">触发回撤</span>
+              <input v-model.number="drawdownThreshold" type="number" min="1" max="90" class="fp-input exposure-input" />
+              <span class="exposure-unit">%</span>
+            </div>
+            <div class="exposure-field">
+              <span class="exposure-label">止损仓位</span>
+              <input v-model.number="drawdownExposure" type="number" min="0" max="100" class="fp-input exposure-input" />
+              <span class="exposure-unit">%</span>
+            </div>
+            <div class="exposure-field">
+              <span class="exposure-label">冷却</span>
+              <input v-model.number="drawdownCooldown" type="number" min="1" max="250" class="fp-input exposure-input" />
+              <span class="exposure-unit">日</span>
+            </div>
+          </div>
+        </div>
+        <div class="sub-field">
+          <label class="sub-label">
+            <input type="checkbox" v-model="trailingStopEnabled" />
+            单资产移动止损
+          </label>
+          <div v-if="trailingStopEnabled" class="exposure-row">
+            <div class="exposure-field">
+              <span class="exposure-label">自高点回撤</span>
+              <input v-model.number="trailingThreshold" type="number" min="1" max="90" class="fp-input exposure-input" />
+              <span class="exposure-unit">%</span>
+            </div>
+            <div class="exposure-field">
+              <span class="exposure-label">冷却</span>
+              <input v-model.number="trailingCooldown" type="number" min="1" max="250" class="fp-input exposure-input" />
+              <span class="exposure-unit">日</span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1005,6 +1113,27 @@
 
         <div v-if="!timingEnabled" class="threshold-hint">
           提示：未启用择时模块时风险腿只会把总仓位缩放到组合模块的默认仓位（default_exposure），不会随市场状态变化。
+        </div>
+
+        <div class="sub-field">
+          <label class="sub-label">偏离阈值调仓（可选）</label>
+          <div class="exposure-row">
+            <div class="exposure-field">
+              <span class="exposure-label">最小换手</span>
+              <input v-model="bandMinTurnover" type="number" min="0.5" max="100" step="0.5"
+                class="fp-input exposure-input" placeholder="不启用" />
+              <span class="exposure-unit">%</span>
+            </div>
+            <div class="exposure-field">
+              <span class="exposure-label">最大偏离</span>
+              <input v-model="bandMaxDrift" type="number" min="0.5" max="100" step="0.5"
+                class="fp-input exposure-input" placeholder="不启用" />
+              <span class="exposure-unit">%</span>
+            </div>
+          </div>
+          <span class="threshold-hint">
+            最小换手：调仓日所需单边换手低于该值则跳过本次调仓；最大偏离：非调仓日任一资产实际权重偏离最近目标超过该值时，按最近目标再平衡（不重新选股）。
+          </span>
         </div>
       </div>
     </div>
@@ -1720,6 +1849,7 @@ const rankTopN = ref<string>('')
 const rankBottomN = ref<string>('')
 const rankMomentumFactor = ref('')
 const rankValuationFactor = ref('')
+const rankBufferN = ref<string>('')
 
 function initRank(): void {
   const rank = props.modelValue.rank as Record<string, unknown> | undefined
@@ -1729,6 +1859,7 @@ function initRank(): void {
   rankBottomN.value = rank.bottom_n != null ? String(rank.bottom_n) : ''
   rankMomentumFactor.value = (rank.momentum_factor as string) || ''
   rankValuationFactor.value = (rank.valuation_factor as string) || ''
+  rankBufferN.value = rank.buffer_n != null ? String(rank.buffer_n) : ''
 }
 
 // ── 组合模块 ──────────────────────────────────────────────────────
@@ -1737,6 +1868,8 @@ const portfolioDefaultExposure = ref(50)
 const exposureOffensive = ref(80)
 const exposureNeutral = ref(50)
 const exposureDefensive = ref(20)
+const portfolioVolFactor = ref('')
+const portfolioCovWindow = ref(60)
 
 function initPortfolio(): void {
   const portfolio = props.modelValue.portfolio as Record<string, unknown> | undefined
@@ -1747,6 +1880,8 @@ function initPortfolio(): void {
   exposureOffensive.value = Math.round((te.offensive ?? 0.8) * 100)
   exposureNeutral.value = Math.round((te.neutral ?? 0.5) * 100)
   exposureDefensive.value = Math.round((te.defensive ?? 0.2) * 100)
+  portfolioVolFactor.value = (portfolio.vol_factor as string) || ''
+  portfolioCovWindow.value = (portfolio.cov_window as number) ?? 60
 }
 
 // ── 风控模块 ──────────────────────────────────────────────────────
@@ -1754,6 +1889,27 @@ const riskEnabled = ref(false)
 const riskMaxAssetWeight = ref(30)
 const riskMaxPortfolioExposure = ref(100)
 const riskMinCashRatio = ref(0)
+const volTargetEnabled = ref(false)
+const volTarget = ref(15)
+const volTargetWindow = ref(60)
+const volTargetFloor = ref(0)
+const drawdownStopEnabled = ref(false)
+const drawdownThreshold = ref(15)
+const drawdownExposure = ref(0)
+const drawdownCooldown = ref(20)
+const trailingStopEnabled = ref(false)
+const trailingThreshold = ref(12)
+const trailingCooldown = ref(20)
+
+/** 小数 → 百分数（保留两位小数，避免 0.15 × 100 的浮点尾数） */
+function toPct(value: unknown, fallback: number): number {
+  return typeof value === 'number' ? Math.round(value * 10000) / 100 : fallback
+}
+
+/** 百分数 → 小数（4 位） */
+function fromPct(value: number): number {
+  return Math.round(value * 100) / 10000
+}
 
 function initRisk(): void {
   const risk = props.modelValue.risk as Record<string, unknown> | undefined
@@ -1762,6 +1918,20 @@ function initRisk(): void {
   riskMaxAssetWeight.value = Math.round(((risk.max_asset_weight as number) ?? 0.3) * 100)
   riskMaxPortfolioExposure.value = Math.round(((risk.max_portfolio_exposure as number) ?? 1.0) * 100)
   riskMinCashRatio.value = Math.round(((risk.min_cash_ratio as number) ?? 0) * 100)
+  const vt = risk.vol_target as Record<string, unknown> | null | undefined
+  volTargetEnabled.value = !!vt
+  volTarget.value = toPct(vt?.target, 15)
+  volTargetWindow.value = (vt?.window as number) ?? 60
+  volTargetFloor.value = toPct(vt?.floor, 0)
+  const dd = risk.drawdown_stop as Record<string, unknown> | null | undefined
+  drawdownStopEnabled.value = !!dd
+  drawdownThreshold.value = toPct(dd?.threshold, 15)
+  drawdownExposure.value = toPct(dd?.exposure, 0)
+  drawdownCooldown.value = (dd?.cooldown_days as number) ?? 20
+  const ts = risk.trailing_stop as Record<string, unknown> | null | undefined
+  trailingStopEnabled.value = !!ts
+  trailingThreshold.value = toPct(ts?.threshold, 12)
+  trailingCooldown.value = (ts?.cooldown_days as number) ?? 20
 }
 
 // ── 调仓模块 ──────────────────────────────────────────────────────
@@ -1776,6 +1946,8 @@ const riskFrequency = ref('daily')
 const riskDayOfWeek = ref<number | null>(null)
 const riskWeekParity = ref('even')
 const riskDayOfMonth = ref<number | null>(null)
+const bandMinTurnover = ref<string>('')
+const bandMaxDrift = ref<string>('')
 
 /** 判断两条腿的日程是否等价（用于回显"同频"开关） */
 function schedulesEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
@@ -1798,12 +1970,24 @@ function initRebalance(): void {
   riskDayOfWeek.value = (risk.day_of_week as number) ?? null
   riskWeekParity.value = (risk.week_parity as string) || 'even'
   riskDayOfMonth.value = (risk.day_of_month as number) ?? null
+  const band = rebalance.band as Record<string, unknown> | null | undefined
+  bandMinTurnover.value = typeof band?.min_turnover === 'number' ? String(toPct(band.min_turnover, 0)) : ''
+  bandMaxDrift.value = typeof band?.max_drift === 'number' ? String(toPct(band.max_drift, 0)) : ''
 }
 
 // ── 校验 ──────────────────────────────────────────────────────────
 const errors = computed((): string[] => {
   const errs: string[] = []
   const validFactors = scoreFactors.value.filter(f => f.alias && f.template_id)
+  if (portfolioMethod.value === 'inverse_vol' && !portfolioVolFactor.value) {
+    errs.push('组合模块：波动率倒数加权需要选择波动率因子')
+  }
+  if (rankBufferN.value !== '' && rankTopN.value === '') {
+    errs.push('排名模块：缓冲带需要同时设置 Top N')
+  }
+  if (rebalanceEnabled.value && bandMaxDrift.value !== '' && Number(bandMaxDrift.value) <= 0) {
+    errs.push('调仓模块：最大偏离必须大于 0')
+  }
   if (validFactors.length === 0) {
     errs.push('评分模块：至少需要 1 个因子')
   }
@@ -2113,6 +2297,7 @@ function buildConfig(): Record<string, unknown> {
   // 子排名因子仅用于结果展示，不参与排序
   if (rankMomentumFactor.value) rank.momentum_factor = rankMomentumFactor.value
   if (rankValuationFactor.value) rank.valuation_factor = rankValuationFactor.value
+  if (rankBufferN.value !== '' && rankTopN.value !== '') rank.buffer_n = parseInt(rankBufferN.value, 10)
   config.rank = rank
 
   // 组合
@@ -2123,6 +2308,12 @@ function buildConfig(): Record<string, unknown> {
     defensive: exposureDefensive.value / 100,
   }
   if (portfolioDefaultExposure.value !== 50) portfolio.default_exposure = portfolioDefaultExposure.value / 100
+  if (portfolioMethod.value === 'inverse_vol' && portfolioVolFactor.value) {
+    portfolio.vol_factor = portfolioVolFactor.value
+  }
+  if (portfolioMethod.value === 'risk_parity' && portfolioCovWindow.value !== 60) {
+    portfolio.cov_window = portfolioCovWindow.value
+  }
   config.portfolio = portfolio
 
   // 风控
@@ -2131,6 +2322,22 @@ function buildConfig(): Record<string, unknown> {
       max_asset_weight: riskMaxAssetWeight.value / 100,
       max_portfolio_exposure: riskMaxPortfolioExposure.value / 100,
       min_cash_ratio: riskMinCashRatio.value / 100,
+    }
+    const risk = config.risk as Record<string, unknown>
+    if (volTargetEnabled.value) {
+      const vt: Record<string, unknown> = { target: fromPct(volTarget.value), window: volTargetWindow.value }
+      if (volTargetFloor.value > 0) vt.floor = fromPct(volTargetFloor.value)
+      risk.vol_target = vt
+    }
+    if (drawdownStopEnabled.value) {
+      risk.drawdown_stop = {
+        threshold: fromPct(drawdownThreshold.value),
+        exposure: fromPct(drawdownExposure.value),
+        cooldown_days: drawdownCooldown.value,
+      }
+    }
+    if (trailingStopEnabled.value) {
+      risk.trailing_stop = { threshold: fromPct(trailingThreshold.value), cooldown_days: trailingCooldown.value }
     }
   }
 
@@ -2157,7 +2364,12 @@ function buildConfig(): Record<string, unknown> {
     const risk = riskSameAsSelection.value
       ? { ...selection }
       : buildSchedule(riskFrequency.value, riskDayOfWeek.value, riskWeekParity.value, riskDayOfMonth.value)
-    config.rebalance = { selection, risk }
+    const rebalanceConfig: Record<string, unknown> = { selection, risk }
+    const band: Record<string, unknown> = {}
+    if (bandMinTurnover.value !== '') band.min_turnover = fromPct(Number(bandMinTurnover.value))
+    if (bandMaxDrift.value !== '') band.max_drift = fromPct(Number(bandMaxDrift.value))
+    if (Object.keys(band).length > 0) rebalanceConfig.band = band
+    config.rebalance = rebalanceConfig
   }
 
   preserveUnmanaged(config)
@@ -2169,20 +2381,104 @@ const MANAGED_TOP_LEVEL_KEYS = new Set([
   'index_codes', 'score', 'timing', 'factor_aliases', 'filters', 'rank', 'portfolio', 'risk', 'rebalance',
 ])
 
+/** 段内字段保留规则：managed 为表单直接编辑的键，nested 为需要递归处理的子对象。 */
+interface SectionKeySpec {
+  managed: Set<string>
+  nested?: Record<string, SectionKeySpec>
+}
+
 /**
- * 保留表单不渲染的配置：顶层未管理字段原样带回；仍被引用但表单没有生成声明的
- * 因子别名（嵌套子组、regime_rules 等引用）从原配置补回，避免一次保存静默丢掉配置。
+ * 各管理段内表单直接编辑的键。段内不在此列的键（新增配置能力、表单尚未渲染的字段）
+ * 保存时从原配置带回；在此列的键由表单全权决定，buildConfig 省略即表示恢复缺省值，
+ * 不能回填（否则用户改回缺省值的字段会被旧值复活）。
+ */
+const MANAGED_SECTION_KEYS: Record<string, SectionKeySpec> = {
+  score: { managed: new Set(['factors', 'transforms', 'missing_factor_strategy', 'scoring_mode']) },
+  timing: {
+    managed: new Set([
+      'combine', 'factors', 'transforms', 'thresholds', 'rules', 'proxy_index_codes', 'factor_proxies',
+      'on_degraded', 'state', 'tiers', 'tier_base_exposure', 'exposure_caps',
+    ]),
+    nested: {
+      state: {
+        managed: new Set(['hysteresis', 'hold_on_neutral', 'confirm_days', 'min_hold_days', 'max_exposure_step']),
+      },
+    },
+  },
+  filters: { managed: new Set(['logic', 'rules', 'groups']) },
+  rank: { managed: new Set(['order', 'top_n', 'bottom_n', 'momentum_factor', 'valuation_factor', 'buffer_n']) },
+  portfolio: { managed: new Set(['method', 'timing_exposure', 'default_exposure', 'vol_factor', 'cov_window']) },
+  risk: {
+    managed: new Set([
+      'max_asset_weight', 'max_portfolio_exposure', 'min_cash_ratio', 'vol_target', 'drawdown_stop', 'trailing_stop',
+    ]),
+  },
+  rebalance: { managed: new Set(['selection', 'risk', 'band']) },
+}
+
+/** 判断值是否为普通对象（非数组、非 null）。 */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * 把原段对象里表单未管理的键带回新段对象；新段整段缺失（用户关闭了该模块）时不恢复。
+ */
+function mergeSectionUnmanaged(
+  built: Record<string, unknown>,
+  original: Record<string, unknown>,
+  spec: SectionKeySpec,
+): void {
+  for (const [key, value] of Object.entries(original)) {
+    const nestedSpec = spec.nested?.[key]
+    if (nestedSpec && isPlainObject(value)) {
+      const target = isPlainObject(built[key]) ? (built[key] as Record<string, unknown>) : {}
+      mergeSectionUnmanaged(target, value, nestedSpec)
+      if (Object.keys(target).length > 0) built[key] = target
+      continue
+    }
+    if (!spec.managed.has(key) && !(key in built)) built[key] = value
+  }
+}
+
+/** 从派生因子表达式文本中提取可能的引用名（函数名不会命中别名表，无需排除）。 */
+function expressionNames(expr: unknown): string[] {
+  return typeof expr === 'string' ? (expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) : []
+}
+
+/**
+ * 保留表单不渲染的配置：顶层未管理字段、各管理段内未管理的键原样带回；仍被引用但表单
+ * 没有生成声明的因子别名（嵌套子组、regime_rules、派生因子表达式等引用）从原配置补回，
+ * 避免一次保存静默丢掉配置。
  */
 function preserveUnmanaged(config: Record<string, unknown>): void {
   const original = props.modelValue ?? {}
   for (const [key, value] of Object.entries(original)) {
     if (!MANAGED_TOP_LEVEL_KEYS.has(key) && !(key in config)) config[key] = value
   }
+  for (const [section, spec] of Object.entries(MANAGED_SECTION_KEYS)) {
+    const built = config[section]
+    const source = original[section]
+    if (isPlainObject(built) && isPlainObject(source)) mergeSectionUnmanaged(built, source, spec)
+  }
   const originalAliases = (original.factor_aliases ?? {}) as Record<string, unknown>
   const aliases = { ...((config.factor_aliases ?? {}) as Record<string, unknown>) }
   const body = JSON.stringify({ ...config, factor_aliases: undefined })
   for (const [alias, declaration] of Object.entries(originalAliases)) {
     if (!(alias in aliases) && body.includes(JSON.stringify(alias))) aliases[alias] = declaration
+  }
+  // 派生因子的依赖名只出现在 params.expr 文本里：按依赖闭包补回原声明
+  const pending = Object.keys(aliases)
+  while (pending.length > 0) {
+    const declaration = aliases[pending.pop() as string]
+    if (!isPlainObject(declaration) || declaration.template_id !== 'expr') continue
+    const params = isPlainObject(declaration.params) ? declaration.params : {}
+    for (const name of expressionNames(params.expr)) {
+      if (!(name in aliases) && name in originalAliases) {
+        aliases[name] = originalAliases[name]
+        pending.push(name)
+      }
+    }
   }
   if (Object.keys(aliases).length > 0) config.factor_aliases = aliases
 }
@@ -2204,11 +2500,16 @@ watch(
     timingHysteresis, timingHoldOnNeutral, timingConfirmDays, timingMinHoldDays,
     timingMaxStep, timingTierBase, timingCaps, filterGroups,
     filterEnabled, filterLogic, filterRules,
-    rankOrder, rankTopN, rankBottomN, rankMomentumFactor, rankValuationFactor,
+    rankOrder, rankTopN, rankBottomN, rankMomentumFactor, rankValuationFactor, rankBufferN,
     portfolioMethod, portfolioDefaultExposure, exposureOffensive, exposureNeutral, exposureDefensive,
+    portfolioVolFactor, portfolioCovWindow,
     riskEnabled, riskMaxAssetWeight, riskMaxPortfolioExposure, riskMinCashRatio,
+    volTargetEnabled, volTarget, volTargetWindow, volTargetFloor,
+    drawdownStopEnabled, drawdownThreshold, drawdownExposure, drawdownCooldown,
+    trailingStopEnabled, trailingThreshold, trailingCooldown,
     rebalanceEnabled, selectionFrequency, selectionDayOfWeek, selectionWeekParity, selectionDayOfMonth,
     riskSameAsSelection, riskFrequency, riskDayOfWeek, riskWeekParity, riskDayOfMonth,
+    bandMinTurnover, bandMaxDrift,
   ],
   () => emitConfig(),
   { deep: true },

@@ -257,6 +257,7 @@ class ResearchBatchService:
         detail = self._config_svc.get_config(strategy_id)
         if detail is None:
             raise ValueError(f"基线策略 {strategy_id} 不存在")
+        self._config_svc.require_single(strategy_id, "研究批量评估")
         return _deep_copy_config(detail.config_json)
 
     @staticmethod

@@ -403,6 +403,14 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
       label: '5年期 LPR',
       description: '五年期贷款市场报价利率。<br>主要影响中长期贷款，尤其是房贷利率的定价基准。<br>5Y LPR 下调 → 房贷成本降低 → 利好房地产及相关产业链。<br>与 1Y LPR 的利差反映银行对长期风险的定价。',
     },
+    m1_yoy: {
+      label: 'M1 / M2 同比',
+      description: '狭义货币 M1 与广义货币 M2 的同比增速（人民银行月度发布，策略中按次月 20 日起可见）。<br>M1 − M2 剪刀差回升常被视为企业活期资金活化、风险偏好改善的信号。<br>因子：macro_series（code=m1_yoy / m2_yoy）。',
+    },
+    cgb10y: {
+      label: '10 年国债 / 融资余额',
+      description: '10 年期国债收益率（AkShare，交易日当日可见）与沪深两市融资余额（Tushare，亿元）。<br>国债收益率可替代 LPR 作为 ERP 的无风险利率（erp 的 rate_source=cgb10y）；融资余额变化反映杠杆资金情绪。<br>因子：market_series。',
+    },
   },
 }
 

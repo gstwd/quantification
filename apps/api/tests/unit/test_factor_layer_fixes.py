@@ -42,7 +42,13 @@ from quant_etf_api.services import index_factor_panel_service as panel_module
 from quant_etf_api.services.index_factor_panel_service import IndexFactorPanelService
 
 # 复合面板类模板依赖 DB 装配的面板，单独覆盖，不进入通用一致性测试
-_PANEL_TEMPLATES = {"index_diffusion_ratio", "rrg_industry_match_score"}
+_PANEL_TEMPLATES = {
+    "index_diffusion_ratio",
+    "rrg_industry_match_score",
+    "constituent_turnover",
+    "constituent_mainflow",
+    "constituent_valuation",
+}
 
 
 @dataclass
@@ -105,18 +111,25 @@ def _synthetic_valuation(code: str, start: date, days: int) -> dict[tuple[str, d
 
 
 def _synthetic_macro(start: date, days: int) -> dict[str, dict[str, float]]:
-    """构造月度 PMI 与每月 20 日报价的 LPR。"""
+    """构造月度 PMI / M1 同比、每月 20 日报价的 LPR 与日频两融余额。"""
     pmi: dict[str, float] = {}
+    m1: dict[str, float] = {}
     lpr: dict[str, float] = {}
     cursor = date(start.year, start.month, 1)
     end = start + timedelta(days=days)
     index = 0
     while cursor <= end:
         pmi[cursor.isoformat()] = 49.0 + 1.5 * math.sin(index / 3.0)
+        m1[cursor.isoformat()] = 5.0 + 2.0 * math.cos(index / 4.0)
         lpr[date(cursor.year, cursor.month, 20).isoformat()] = 4.0 - 0.05 * index
         index += 1
         cursor = date(cursor.year + (cursor.month == 12), cursor.month % 12 + 1, 1)
-    return {"pmi": pmi, "lpr1y": lpr}
+    margin = {
+        (start + timedelta(days=d)).isoformat(): 15000.0 + 10.0 * d
+        for d in range(days + 1)
+        if (start + timedelta(days=d)).weekday() < 5
+    }
+    return {"pmi": pmi, "m1_yoy": m1, "lpr1y": lpr, "margin_rzye": margin}
 
 
 START = date(2021, 1, 1)

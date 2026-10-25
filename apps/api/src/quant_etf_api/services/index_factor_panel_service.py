@@ -14,8 +14,11 @@ from __future__ import annotations
 import bisect
 import logging
 import threading
+from collections.abc import Sequence
 from datetime import date, timedelta
 from typing import Any
+
+import numpy as np
 
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -26,10 +29,15 @@ from quant_etf_api.domain.industry.selection import (
     IndustryRotationInput,
     IndustrySelectionConfig,
 )
+from quant_etf_api.factors.builtins.constituent import STOCK_PANEL_FIELDS
 from quant_etf_api.factors.builtins.index_panel_factors import _UNMAPPED_INDUSTRY
 from quant_etf_api.infra.db.models.core import IndexMemberEventModel
 from quant_etf_api.infra.db.models.industry import IndustryMembershipEventModel
 from quant_etf_api.infra.db.repositories.index_member import IndexMemberEventRepository
+from quant_etf_api.infra.db.repositories.stock_daily import (
+    StockDailyBasicRepository,
+    StockMoneyflowRepository,
+)
 from quant_etf_api.infra.db.repositories.industry import (
     IndustryDailyBarRepository,
     StockDailyCloseRepository,
@@ -94,6 +102,8 @@ class IndexFactorPanelService:
         lookback_natural_days: int = 820,
         include_industry_panels: bool = True,
         calculate_industry_selection: bool = False,
+        stock_tables: Sequence[str] = (),
+        include_stock_closes: bool = True,
     ) -> dict[str, Any]:
         """构建指定区间内复合因子需要的全部数据面板。
 
@@ -104,6 +114,9 @@ class IndexFactorPanelService:
             include_industry_panels: 是否加载 RRG 匹配度所需的行业选择和行业暴露面板。
                 单日扩散调试只需成分与个股收盘，传 False 可避免无关的行业表查询。
             calculate_industry_selection: 保留兼容参数，行业选择始终从原始行业行情即时计算。
+            stock_tables: 需要装配的个股日频表（``stock_daily_basic`` / ``stock_moneyflow``），
+                供成分聚合因子使用；缺省不加载。
+            include_stock_closes: 是否加载成员股收盘序列（只有成分扩散类模板需要）。
 
         Returns:
             panels 字典（index_membership / stock_closes /
@@ -120,7 +133,11 @@ class IndexFactorPanelService:
             include_industry_panels,
         )
         membership = self._build_membership(index_codes, dates)
-        closes = self._build_stock_closes(membership, dates, lookback_natural_days)
+        closes = (
+            self._build_stock_closes(membership, dates, lookback_natural_days)
+            if include_stock_closes
+            else {}
+        )
         # 行业选择直接从原始行业日线计算，避免依赖独立的行业因子物化表。
         selection = (
             self._build_industry_selection_from_source(dates) if include_industry_panels else {}
@@ -140,6 +157,9 @@ class IndexFactorPanelService:
             len(members) for daily in membership.values() for members in daily.values()
         )
         stock_close_points = sum(len(series) for series in closes.values())
+        stock_fields = (
+            self._build_stock_fields(membership, dates, stock_tables) if stock_tables else {}
+        )
         result = {
             "calculation_dates": dates,
             "index_membership": membership,
@@ -147,6 +167,7 @@ class IndexFactorPanelService:
             "industry_selection": selection,
             "index_industry_exposure": exposure,
             "index_industry_exposure_meta": exposure_meta,
+            "stock_fields": stock_fields,
             # 记录真实加载规模，便于后台任务监控成本，实时链路不应出现该面板。
             "panel_metrics": {
                 "calculation_date_count": len(dates),
@@ -230,6 +251,68 @@ class IndexFactorPanelService:
         for trade_date, stock_code, close in rows:
             closes.setdefault(stock_code, {})[trade_date] = close
         return closes
+
+    def _build_stock_fields(
+        self,
+        membership: dict[str, dict[date, list[dict[str, Any]]]],
+        dates: list[date],
+        stock_tables: Sequence[str],
+    ) -> dict[str, Any]:
+        """把成员股的日频指标装配成 交易日 × 个股 的 float32 数组（缺失为 NaN）。
+
+        按列投影流式读取，避免逐行 ORM 对象与嵌套字典带来的内存放大：一千只成分股、
+        十年交易日的单个字段约 10MB。
+
+        Args:
+            membership: 指数成分面板。
+            dates: 面板交易日轴（升序）。
+            stock_tables: 需要装配的个股日频表。
+
+        Returns:
+            ``{"dates", "date_index", "stock_index", "fields": {字段: 数组}}``；无成员时为空。
+        """
+        stock_codes = sorted(
+            {
+                member["stock_code"]
+                for daily in membership.values()
+                for members in daily.values()
+                for member in members
+            }
+        )
+        if not stock_codes or not dates:
+            return {}
+        date_index = {day: i for i, day in enumerate(dates)}
+        stock_index = {code: j for j, code in enumerate(stock_codes)}
+        fields: dict[str, np.ndarray] = {}
+        for table in stock_tables:
+            names = STOCK_PANEL_FIELDS.get(table)
+            if not names:
+                continue
+            repo: StockDailyBasicRepository | StockMoneyflowRepository = (
+                StockDailyBasicRepository(self._db)
+                if table == "stock_daily_basic"
+                else StockMoneyflowRepository(self._db)
+            )
+            arrays = {
+                name: np.full((len(dates), len(stock_codes)), np.nan, dtype=np.float32)
+                for name in names
+            }
+            for row in repo.iter_field_rows(names, dates[0], dates[-1], stock_codes):
+                i = date_index.get(row[0])
+                j = stock_index.get(row[1])
+                if i is None or j is None:
+                    continue
+                for offset, name in enumerate(names):
+                    value = row[2 + offset]
+                    if value is not None:
+                        arrays[name][i, j] = value
+            fields.update(arrays)
+        return {
+            "dates": list(dates),
+            "date_index": date_index,
+            "stock_index": stock_index,
+            "fields": fields,
+        }
 
     def _build_industry_selection_from_source(
         self,

@@ -54,7 +54,7 @@
 
 | 命令 | 说明 |
 | --- | --- |
-| `backtest run --strategy <id> [--start] [--end] [--universe all\|subset] [--index-codes a,b] [--benchmark 000300] [--no-benchmark] [--purpose research\|validation\|monitor] [--purpose-reason] [--cost-bps] [--execution-model t_plus_1_open\|t_plus_1_close] [--async] [--priority N]` | 创建并执行回测；默认同步；`purpose=research` 时 `--end` 缺省为研究期末端（2025-12-31），其他用途缺省为今天；`--start` 缺省为 end 往前 2 年且不早于 2016-01-01；**研究期内任意跨度（1 个月~10 年）都可单次执行，不存在跨度上限，也不再要求分段**；`--execution-model` 缺省 `t_plus_1_close`（T 日信号 T+1 收盘成交，研究与验收统一口径），`t_plus_1_open` 为 T 日信号 T+1 开盘成交 |
+| `backtest run --strategy <id> [--start] [--end] [--universe all\|subset] [--index-codes a,b] [--benchmark 000300] [--benchmark-mix 000300:0.6,000905:0.2] [--no-benchmark] [--purpose research\|validation\|monitor] [--purpose-reason] [--cost-bps] [--execution-model t_plus_1_open\|t_plus_1_close] [--async] [--priority N]` | 创建并执行回测；默认同步；`purpose=research` 时 `--end` 缺省为研究期末端（2025-12-31），其他用途缺省为今天；`--start` 缺省为 end 往前 2 年且不早于 2016-01-01；**研究期内任意跨度（1 个月~10 年）都可单次执行，不存在跨度上限，也不再要求分段**；`--execution-model` 缺省 `t_plus_1_close`（T 日信号 T+1 收盘成交，研究与验收统一口径），`t_plus_1_open` 为 T 日信号 T+1 开盘成交 |
 
 > **执行模型是口径，不是参数**：两种模型的逐日收益归属不同（收盘口径下信号日不持仓），
 > 指标不可互比；口径指纹见 `backtest show` 的 `stability.execution_model`。缺历史开盘价的指数
@@ -99,6 +99,7 @@
 | `robustness cancel\|pause\|resume <id>` | 整批取消 / 暂停 / 恢复（运行中的任务在安全检查点退出） |
 | `robustness abandon <id> [--reason "..."]` | 作废批次（把长期 running 的批次显式收口，证据与试验台账保留） |
 | `robustness stats <id> [--n-trials] [--cost-bps] [--block 20] [--bootstrap 2000]` | CSCV-PBO / Deflated Sharpe / 块自助法置信区间；窗口数 <4 时 `pbo.value=null` + `reason` |
+| `research dsr-calibrate [--strategy <id>] [--sims 1000] [--power-sims 500] [--block 20] [--file 报告.md]` | 验收第 8 项门槛校准（只读、战役模式拒绝）：用已评估会话与稳健性批次的超额序列做零假设模拟，输出各门槛的假阳性率与功效；不改门槛 |
 | `robustness show <id>` / `robustness list [--limit]` | 批次详情（含 `scan_params` 扫描口径与 `execution_model`）/ 列表（含 `is_stale` 停滞提示） |
 
 ## research（批量变体探索，不落库）

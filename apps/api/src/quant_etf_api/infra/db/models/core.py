@@ -752,6 +752,79 @@ class StrategyOptimizationModel(Base):
     )
 
 
+class SystemAlertModel(Base):
+    """站内告警：LIVE 策略健康等级恶化、定时体检失败、每日数据同步失败等。
+
+    只记录"需要人看一眼"的事件，不驱动任何自动调参或上下线；``dedupe_key`` 保证同一
+    事件（如同一策略同一天的恶化）只记一条。
+    """
+
+    __tablename__ = "system_alert"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_system_alert_dedupe"),
+        Index("ix_system_alert_created_at", "created_at"),
+        Index("ix_system_alert_read_at", "read_at"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, comment="自增主键"
+    )
+    kind: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        comment="告警类型：health_degraded / lifecycle_refresh_failed / data_sync_failed",
+    )
+    severity: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="严重程度：info / warning / critical"
+    )
+    strategy_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="相关策略 ID（数据类告警为空）"
+    )
+    title: Mapped[str] = mapped_column(String(200), nullable=False, comment="告警标题")
+    detail: Mapped[dict | None] = mapped_column(JSONB, comment="告警明细（结构化）")
+    dedupe_key: Mapped[str] = mapped_column(
+        String(128), nullable=False, comment="去重键：同一事件只记一条"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow_aware, comment="告警时间（UTC）"
+    )
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="标记已读时间（UTC），未读为空"
+    )
+
+
+class MarketIndicatorModel(Base):
+    """日频市场指标（国债收益率、两融、股指期货主力、股指期权 PCR），按指标代码 + 交易日唯一。
+
+    与按发布周期入库的 ``macro_indicator`` 分开：这些序列按交易日更新，新鲜度按交易日判定；
+    因子计算时与宏观指标并入同一个时点映射（交易日当日可见）。
+    """
+
+    __tablename__ = "market_indicator"
+    __table_args__ = (
+        UniqueConstraint("indicator_code", "trade_date", name="uq_market_indicator"),
+        Index("ix_market_indicator_code_date", "indicator_code", "trade_date"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, comment="自增主键"
+    )
+    indicator_code: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        comment="指标代码：cgb10y / margin_rzye / margin_rzmre / fut_if_close / fut_if_dte /"
+        " opt_io_pcr_vol 等，见 domain.market_data.indicators",
+    )
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="交易日")
+    value: Mapped[float] = mapped_column(Float, nullable=False, comment="指标数值")
+    source: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="tushare", comment="数据来源：tushare / akshare"
+    )
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow_aware, comment="数据入库时间（UTC）"
+    )
+
+
 class MacroIndicatorModel(Base):
     """宏观经济指标数据，按指标代码 + 周期唯一。
 

@@ -46,6 +46,36 @@
         </div>
         <div v-else ref="lprChartEl" class="chart-container"></div>
       </div>
+
+      <!-- 货币供应 -->
+      <div class="chart-card">
+        <div class="card-header">
+          <span class="card-title">货币供应 M1 / M2 同比 <HelpTip :text="macroHelp('m1_yoy')" /></span>
+          <div class="card-header-right">
+            <span v-if="m1.length" class="card-badge">M1: {{ m1[m1.length - 1].value.toFixed(1) }}%</span>
+            <span v-if="m2.length" class="card-badge">M2: {{ m2[m2.length - 1].value.toFixed(1) }}%</span>
+          </div>
+        </div>
+        <div v-if="m1.length === 0 && m2.length === 0" class="chart-placeholder">
+          暂无货币供应数据，请到<router-link to="/data-management?dataset=macro_indicator">数据管理页</router-link>执行同步
+        </div>
+        <div v-else ref="moneyChartEl" class="chart-container"></div>
+      </div>
+
+      <!-- 日频市场指标 -->
+      <div class="chart-card">
+        <div class="card-header">
+          <span class="card-title">10 年期国债收益率 / 沪深融资余额 <HelpTip :text="macroHelp('cgb10y')" /></span>
+          <div class="card-header-right">
+            <span v-if="cgb10y.length" class="card-badge">10Y: {{ cgb10y[cgb10y.length - 1].value.toFixed(3) }}%</span>
+            <span v-if="margin.length" class="card-badge">融资余额: {{ margin[margin.length - 1].value.toFixed(0) }} 亿</span>
+          </div>
+        </div>
+        <div v-if="cgb10y.length === 0 && margin.length === 0" class="chart-placeholder">
+          暂无日频市场指标，请到<router-link to="/data-management?dataset=market_indicator">数据管理页</router-link>执行同步
+        </div>
+        <div v-else ref="marketChartEl" class="chart-container"></div>
+      </div>
     </template>
   </div>
 </template>
@@ -54,8 +84,8 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import { fetchMacroIndicator } from '../api/market_data'
-import type { MacroIndicator } from '../types/api'
+import { fetchMacroIndicator, fetchMarketIndicator } from '../api/market_data'
+import type { MacroIndicator, MarketIndicatorPoint } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
 
@@ -68,6 +98,16 @@ const cpi = ref<MacroIndicator[]>([])
 const pmi = ref<MacroIndicator[]>([])
 const lpr1y = ref<MacroIndicator[]>([])
 const lpr5y = ref<MacroIndicator[]>([])
+const m1 = ref<MacroIndicator[]>([])
+const m2 = ref<MacroIndicator[]>([])
+const cgb10y = ref<MarketIndicatorPoint[]>([])
+const margin = ref<MarketIndicatorPoint[]>([])
+const moneyChartEl = ref<HTMLElement | null>(null)
+const marketChartEl = ref<HTMLElement | null>(null)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let moneyChart: any = null
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let marketChart: any = null
 const loading = ref(true)
 
 const cpiChartEl = ref<HTMLElement | null>(null)
@@ -82,16 +122,24 @@ let lprChart: any = null
 
 async function loadData() {
   try {
-    const [c, p, l1, l5] = await Promise.all([
+    const [c, p, l1, l5, mm1, mm2, bond, rz] = await Promise.all([
       fetchMacroIndicator('cpi', 120),
       fetchMacroIndicator('pmi', 120),
       fetchMacroIndicator('lpr1y', 60),
       fetchMacroIndicator('lpr5y', 60),
+      fetchMacroIndicator('m1_yoy', 120),
+      fetchMacroIndicator('m2_yoy', 120),
+      fetchMarketIndicator('cgb10y', 750),
+      fetchMarketIndicator('margin_rzye', 750),
     ])
     cpi.value = c
     pmi.value = p
     lpr1y.value = l1
     lpr5y.value = l5
+    m1.value = mm1
+    m2.value = mm2
+    cgb10y.value = bond
+    margin.value = rz
   } catch {
     // 拉取失败时保持空状态
   } finally {
@@ -160,6 +208,58 @@ async function initCharts() {
   }
 }
 
+/** 双序列折线（可选右轴），用于 M1/M2 与国债 / 两融 */
+function makeDualOption(
+  dates: string[],
+  series: { name: string; values: (number | null)[]; color: string; rightAxis?: boolean }[],
+) {
+  const hasRight = series.some(s => s.rightAxis)
+  const axis = { scale: true, splitLine: { lineStyle: { color: '#334155', type: 'dashed' } }, axisLabel: { color: '#94a3b8', fontSize: 11 } }
+  return {
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis', backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#f1f5f9', fontSize: 12 } },
+    legend: { data: series.map(s => s.name), textStyle: { color: '#94a3b8' }, top: 4 },
+    grid: { left: 60, right: hasRight ? 70 : 20, top: 40, bottom: 40 },
+    xAxis: { type: 'category', data: dates, axisLine: { lineStyle: { color: '#334155' } }, axisLabel: { color: '#94a3b8', fontSize: 11 } },
+    yAxis: hasRight ? [axis, { ...axis, splitLine: { show: false } }] : axis,
+    dataZoom: [{ type: 'inside', start: 0, end: 100 }, { type: 'slider', bottom: 6, height: 24, borderColor: '#334155', fillerColor: 'rgba(59,130,246,0.1)', handleStyle: { color: '#3b82f6' }, textStyle: { color: '#94a3b8', fontSize: 10 } }],
+    series: series.map(s => ({
+      name: s.name, type: 'line', data: s.values, smooth: false, symbol: 'none',
+      lineStyle: { color: s.color, width: 2 }, yAxisIndex: s.rightAxis ? 1 : 0,
+    })),
+  }
+}
+
+async function initExtraCharts() {
+  const echarts = await import('echarts')
+  if (moneyChartEl.value && (m1.value.length || m2.value.length)) {
+    moneyChart?.dispose()
+    moneyChart = echarts.init(moneyChartEl.value, null, { renderer: 'canvas' })
+    const periods = [...new Set([...m1.value.map(v => v.period), ...m2.value.map(v => v.period)])].sort()
+    const m1Map = new Map(m1.value.map(v => [v.period, v.value]))
+    const m2Map = new Map(m2.value.map(v => [v.period, v.value]))
+    moneyChart.setOption(makeDualOption(periods, [
+      { name: 'M1 同比', values: periods.map(p => m1Map.get(p) ?? null), color: '#3b82f6' },
+      { name: 'M2 同比', values: periods.map(p => m2Map.get(p) ?? null), color: '#f59e0b' },
+    ]))
+  }
+  if (marketChartEl.value && (cgb10y.value.length || margin.value.length)) {
+    marketChart?.dispose()
+    marketChart = echarts.init(marketChartEl.value, null, { renderer: 'canvas' })
+    const days = [...new Set([...cgb10y.value.map(v => v.trade_date), ...margin.value.map(v => v.trade_date)])].sort()
+    const bondMap = new Map(cgb10y.value.map(v => [v.trade_date, v.value]))
+    const marginMap = new Map(margin.value.map(v => [v.trade_date, v.value]))
+    marketChart.setOption(makeDualOption(days, [
+      { name: '10Y 国债收益率（%）', values: days.map(d => bondMap.get(d) ?? null), color: '#22c55e' },
+      { name: '融资余额（亿元）', values: days.map(d => marginMap.get(d) ?? null), color: '#a855f7', rightAxis: true },
+    ]))
+  }
+}
+
+watch([m1, m2, cgb10y, margin, moneyChartEl, marketChartEl], () => {
+  if (!loading.value) initExtraCharts()
+}, { flush: 'post' })
+
 watch([cpi, pmi, lpr1y, lpr5y, cpiChartEl, pmiChartEl, lprChartEl], () => {
   if (!loading.value) initCharts()
 }, { flush: 'post' })
@@ -170,6 +270,8 @@ onUnmounted(() => {
   cpiChart?.dispose()
   pmiChart?.dispose()
   lprChart?.dispose()
+  moneyChart?.dispose()
+  marketChart?.dispose()
 })
 </script>
 

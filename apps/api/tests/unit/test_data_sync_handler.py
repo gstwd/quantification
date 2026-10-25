@@ -28,6 +28,12 @@ def _patch_sync_env(monkeypatch, items: list[dict]) -> MagicMock:
     monkeypatch.setattr(
         "quant_etf_api.infra.job_queue.queue.get_job_queue", lambda: fake_queue
     )
+    # 同步失败告警写库由单独测试覆盖，这里只记录调用
+    alerts: list[tuple[dict, str]] = []
+    monkeypatch.setattr(
+        handlers, "_alert_sync_failures", lambda result, today: alerts.append((result, today))
+    )
+    fake_queue.alerts = alerts
     return fake_queue
 
 
@@ -44,8 +50,43 @@ def test_industry_failure_still_completes_index_sync(monkeypatch) -> None:
 
     handlers.handle_data_sync_all({})
 
-    # 因子值改为按需现算，同步完成后不再入队任何因子计算任务
+    # 因子值改为按需现算，同步完成后只入队 LIVE 策略定时体检，不再入队任何因子任务
+    job_types = [call.args[0] for call in fake_queue.enqueue.call_args_list]
+    assert job_types == ["lifecycle_refresh_all"]
+    # 行业数据部分失败 → 交给同步失败告警
+    assert len(fake_queue.alerts) == 1
+
+
+def test_refresh_not_enqueued_when_disabled(monkeypatch) -> None:
+    """关闭 lifecycle_auto_refresh_enabled 时不入队定时体检。"""
+    from quant_etf_api.config.settings import get_settings
+
+    fake_queue = _patch_sync_env(monkeypatch, [_item("index_daily_bar")])
+    monkeypatch.setattr(get_settings(), "lifecycle_auto_refresh_enabled", False)
+    handlers.handle_data_sync_all({})
     fake_queue.enqueue.assert_not_called()
+
+
+def test_sync_alert_only_for_failures(monkeypatch) -> None:
+    """全部成功时不写告警；有失败时按日去重写一条。"""
+    raised: list[dict] = []
+
+    class FakeAlertService:
+        def __init__(self, _db) -> None:
+            pass
+
+        def raise_alert(self, **kwargs) -> bool:
+            raised.append(kwargs)
+            return True
+
+    monkeypatch.setattr("quant_etf_api.services.alert_service.AlertService", FakeAlertService)
+    monkeypatch.setattr("quant_etf_api.infra.db.base.SessionLocal", MagicMock)
+    handlers._alert_sync_failures({"items": [_item("index_daily_bar")]}, "2026-10-24")
+    assert raised == []
+    handlers._alert_sync_failures(
+        {"items": [_item("index_daily_bar", status="failed")]}, "2026-10-24"
+    )
+    assert raised[0]["dedupe_key"] == "data_sync_failed:2026-10-24"
 
 
 def test_no_new_records_does_not_requeue_any_factor(monkeypatch) -> None:

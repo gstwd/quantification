@@ -44,6 +44,7 @@ def decision_required_refs(config: StrategyConfig) -> set[str]:
     口径与各模块的缺失语义一致，只在缺失必然导致资产出局时提前剔除：
 
     - 评分 ``missing_factor_strategy=exclude`` 的全部评分因子；
+    - ``portfolio.method=inverse_vol`` 的波动率因子；
     - AND 逻辑下 ``missing_strategy`` 为 fail/exclude 的过滤规则因子（含 compare_to）。
 
     ignore / zero / pass 以及 OR 逻辑下的缺失交给各模块按原语义处理，不能在此
@@ -58,6 +59,9 @@ def decision_required_refs(config: StrategyConfig) -> set[str]:
     required: set[str] = set()
     if config.score.missing_factor_strategy == "exclude":
         required.update(config.score.factors)
+    if config.portfolio.method == "inverse_vol" and config.portfolio.vol_factor:
+        # 波动率缺失的资产无法按倒数加权，必须在评分前出局
+        required.add(config.portfolio.vol_factor)
     if config.filters and config.filters.logic == "AND":
         for rule in config.filters.rules:
             if rule.missing_strategy in ("fail", "exclude"):
@@ -186,7 +190,7 @@ class StrategyEngine:
 
         # 5. 仓位分配（必选）
         allocator = build_allocator(effective.portfolio.method)
-        positions = allocator.allocate(effective.portfolio, rankings, timing)
+        positions = allocator.allocate(effective.portfolio, rankings, timing, context)
         pre_risk_positions = dict(positions)
 
         # 6. 风控裁剪（可选）

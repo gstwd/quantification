@@ -483,6 +483,7 @@ const DATA_PAGE_BY_DATASET: Record<string, { label: string; path: string }> = {
   stock_daily_basic: { label: '个股数据', path: '/stocks' },
   stock_moneyflow: { label: '个股数据', path: '/stocks' },
   macro_indicator: { label: '宏观指标', path: '/macro' },
+  market_indicator: { label: '宏观指标', path: '/macro' },
 }
 
 /** 运行状态中文标签。 */

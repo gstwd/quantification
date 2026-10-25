@@ -141,6 +141,9 @@ class ResearchCampaignRepository(BaseRepository):
     def has_review(self, campaign_id: str, optimization_id: str, verdict: str) -> bool:
         """战役内是否已有评审员对该优化会话给出指定结论。
 
+        只认运行中（评审员刚 review、随后 finish）与已完成的评审步骤：失败步骤里
+        留下的结论不可信（agent 中途出错），其重试步骤必须重新评审，不能沿用。
+
         Args:
             campaign_id: 战役 ID。
             optimization_id: 优化会话 ID。
@@ -156,6 +159,7 @@ class ResearchCampaignRepository(BaseRepository):
                 ResearchCampaignStepModel.role == "reviewer",
                 ResearchCampaignStepModel.optimization_id == optimization_id,
                 ResearchCampaignStepModel.outcome == verdict,
+                ResearchCampaignStepModel.status.in_(("running", "done")),
             )
             .first()
         )

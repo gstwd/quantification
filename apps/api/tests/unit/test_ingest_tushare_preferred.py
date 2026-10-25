@@ -206,6 +206,14 @@ class _FakeMacroClient:
         """返回 CPI 组。"""
         return self._fetch("CPI")
 
+    def fetch_money_supply(self) -> list[MacroIndicator]:
+        """返回货币供应组（缺省为空）。"""
+        return self._fetch("M")
+
+    def fetch_social_financing(self) -> list[MacroIndicator]:
+        """返回社融组（缺省为空）。"""
+        return self._fetch("SF")
+
     def fetch_pmi(self) -> list[MacroIndicator]:
         """返回 PMI 组。"""
         return self._fetch("PMI")

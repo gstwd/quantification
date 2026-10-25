@@ -86,6 +86,7 @@
 | `order` | str | 否 | `"desc"` | `desc`(降序)/`asc`(升序) |
 | `top_n` | int | 否 | null | 取前 N 名，null = 全选 |
 | `bottom_n` | int | 否 | null | 取后 N 名（与 top_n 互斥） |
+| `buffer_n` | int | 否 | null | 排名缓冲带（需 top_n）：老持仓排名 ≤ top_n + buffer_n 时保留，剩余名额按排名补足；路径依赖，实时决策会回放历史 |
 
 ## PortfolioConfig
 
@@ -94,6 +95,8 @@
 | `method` | str | **是** | - | 权重方法 |
 | `timing_exposure` | dict[str,float] | 否 | null | 择时 regime → 总仓位映射 |
 | `default_exposure` | float | 否 | 0.50 | 无择时时的默认总仓位 |
+| `vol_factor` | str | inverse_vol 必填 | null | 波动率因子引用（volatility / return_std 别名）；缺失的资产评分前剔除 |
+| `cov_window` | int | 否 | 60 | risk_parity 协方差窗口（20-250 交易日） |
 
 ### 权重方法
 
@@ -102,6 +105,8 @@
 | `equal_weight` | 等权分配：总仓位 / 资产数 |
 | `score_weight` | 得分加权：权重 ∝ 得分，过滤掉 ≤0 分的资产 |
 | `winner_take_all` | 赢家通吃：全部仓位给第 1 名，适用于集中持仓策略 |
+| `inverse_vol` | 波动率倒数加权：权重 ∝ 1 / vol_factor |
+| `risk_parity` | 风险平价：按近 cov_window 日收益协方差求等风险贡献；入选资产共同有效天数不足一半时退回等权 |
 
 ### 择时仓位控制
 
@@ -173,6 +178,12 @@
 | `max_asset_weight` | float | 0.30 | 单资产仓位上限 (0-1] |
 | `max_portfolio_exposure` | float | 1.0 | 组合总仓位上限 |
 | `min_cash_ratio` | float | 0.0 | 最低现金比例 [0-1) |
+| `vol_target` | {target, window=60, floor=0} | null | 事前波动率目标：协方差估算组合年化波动超过 target 时等比降仓（只降不加） |
+| `drawdown_stop` | {threshold, exposure=0, cooldown_days=20} | null | 策略净值回撤 ≥ threshold 后总仓位压到 exposure，冷却期后恢复并重置峰值 |
+| `trailing_stop` | {threshold, cooldown_days=20} | null | 单资产自入场高点回撤 ≥ threshold 清出，冷却期内不再入选 |
+
+后三项是路径依赖叠加层：在回测主循环合成当日目标后施加，新触发的止损次日即成交（不等调仓日）；
+实时决策回放历史重建状态（LIVE 取上线日，其余约一年），回测 params 写 `_risk_overlay_model`。
 
 ## RebalanceConfig
 
@@ -183,3 +194,20 @@
 | `day_of_month` | int | null | 月度：目标日 (1-31)。默认 1 号 |
 
 非交易日自动顺延至下一交易日。
+
+`band`（可选）：`{min_turnover, max_drift}`，至少一项。`min_turnover`：日历调仓日所需单边换手低于该值则跳过；
+`max_drift`：非调仓日任一资产实际权重偏离最近一次目标超过该值时按最近目标再平衡（不重新选股）。
+
+## 派生因子时序函数（expr 模板）
+
+`delay(x, n)` / `delta(x, n)` / `ts_mean(x, n)` / `ts_std(x, n)` / `ts_zscore(x, n)` / `ts_rank(x, n)`，
+n 为 1~250 的整数字面量（ts_* 至少 2），沿全局交易日轴步进、窗口内任一缺失即缺失；嵌套窗口累加后
+不超过 250，派生实例回望 = 依赖回望 + 窗口折算，超过回测预加载被校验拒绝。截面函数（cs_rank 等）
+不提供：用评分 `scoring_mode: rank|zscore`。
+
+## 组合策略（kind=composite）
+
+`{"kind": "composite", "members": [{"strategy_id", "weight"}], "cash_weight": 0, "rebalance": {...}}`：
+成员为普通策略（不可嵌套），成员权重 + 现金 = 1；成员各自决策，组合持仓按权重合成、换手轧差，成员
+权重在 rebalance 日程（缺省每日）调回目标。回测快照内嵌成员快照；不支持稳健性 / 优化 / 研究批量 /
+战役模式。

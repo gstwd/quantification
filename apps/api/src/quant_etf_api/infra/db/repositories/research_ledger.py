@@ -210,3 +210,37 @@ class ResearchLedgerRepository(BaseRepository):
             .all()
         )
         return {(str(kind), bool(estimated)): int(total or 0) for kind, estimated, total in rows}
+
+    def find_evaluated_optimizations(
+        self, strategy_ids: Sequence[str] | None = None
+    ) -> list[StrategyOptimizationModel]:
+        """查询已评估（产生过全区间回测）的优化会话，按创建时间升序。
+
+        Args:
+            strategy_ids: 基线策略 ID 列表；None 表示全部策略。
+
+        Returns:
+            会话行列表。
+        """
+        query = self._db.query(StrategyOptimizationModel).filter(
+            StrategyOptimizationModel.status.in_(_EVALUATED_OPTIMIZATION_STATUSES)
+        )
+        if strategy_ids is not None:
+            query = query.filter(StrategyOptimizationModel.strategy_id.in_(list(strategy_ids)))
+        return query.order_by(StrategyOptimizationModel.created_at.asc()).all()
+
+    def find_successful_robustness_runs(
+        self, strategy_ids: Sequence[str] | None = None
+    ) -> list[RobustnessRunModel]:
+        """查询已成功完成的稳健性批次，按创建时间升序。
+
+        Args:
+            strategy_ids: 基线策略 ID 列表；None 表示全部策略。
+
+        Returns:
+            批次行列表。
+        """
+        query = self._db.query(RobustnessRunModel).filter(RobustnessRunModel.status == "success")
+        if strategy_ids is not None:
+            query = query.filter(RobustnessRunModel.strategy_id.in_(list(strategy_ids)))
+        return query.order_by(RobustnessRunModel.created_at.asc()).all()

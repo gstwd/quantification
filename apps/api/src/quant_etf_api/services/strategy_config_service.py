@@ -11,16 +11,19 @@ from sqlalchemy.orm import Session
 
 from quant_etf_api.engine.config import (
     SUPPORTED_SCHEMA_VERSIONS,
+    CompositeStrategyConfig,
     FilterConfig,
     PortfolioConfig,
     RankConfig,
     StrategyConfig,
     TimingConfig,
+    is_composite_config,
     iter_factor_refs,
 )
 from quant_etf_api.engine.portfolio import _DEFAULT_TIMING_EXPOSURE
 from quant_etf_api.engine.transforms import is_valid_transform, transform_hints
 from quant_etf_api.factors.catalog import (
+    STRATEGY_SCOPED_VALUATION_TEMPLATE_IDS,
     FactorResolutionError,
     FactorTemplateRegistry,
     get_factor_template_registry,
@@ -41,6 +44,25 @@ from quant_etf_api.schemas.strategy import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _backtest_preload_days(registry: FactorTemplateRegistry) -> int:
+    """回测行情预加载的自然日数（与 ``BacktestService._get_lookback_days`` 同一口径）。
+
+    Args:
+        registry: 因子模板注册表。
+
+    Returns:
+        全部模板（不含按策略单独扩展估值预加载的模板）默认参数回望的最大值。
+    """
+    return max(
+        (
+            template.lookback_days()
+            for template in registry.all()
+            if template.template_id not in STRATEGY_SCOPED_VALUATION_TEMPLATE_IDS
+        ),
+        default=90,
+    )
 
 
 def compute_config_hash(config_json: dict[str, Any]) -> str:
@@ -217,8 +239,12 @@ class StrategyConfigService:
         if existing is not None:
             raise ValueError(f"策略 {req.strategy_id} 已存在")
 
-        # 校验配置
-        validation = self.validate_config(req.config_json)
+        # 校验配置（组合策略按成员与权重规则校验）
+        validation = (
+            self.validate_composite(req.config_json, req.strategy_id)
+            if is_composite_config(req.config_json)
+            else self.validate_config(req.config_json)
+        )
         if not validation.valid:
             raise ValueError(f"配置校验失败: {'; '.join(validation.errors)}")
 
@@ -281,7 +307,11 @@ class StrategyConfigService:
                     "如需变更请先将生命周期状态改为 SUSPENDED，"
                     "或走优化会话生成候选策略后 promote 新版本。"
                 )
-            validation = self.validate_config(req.config_json)
+            validation = (
+                self.validate_composite(req.config_json, strategy_id)
+                if is_composite_config(req.config_json)
+                else self.validate_config(req.config_json)
+            )
             if not validation.valid:
                 raise ValueError(f"配置校验失败: {'; '.join(validation.errors)}")
             # 归一化：保留已显式声明的 schema_version，缺失时写入当前版本
@@ -590,6 +620,8 @@ class StrategyConfigService:
         Returns:
             校验结果。
         """
+        if is_composite_config(config_json):
+            return self.validate_composite(config_json)
         try:
             # strategy_id 和 display_name 存储在顶层列中，校验时补入占位值
             validation_input = {
@@ -604,6 +636,178 @@ class StrategyConfigService:
             return StrategyValidationResult(valid=False, errors=[f"配置解析失败: {e}"])
 
         return self.validate_parsed(config)
+
+    def validate_composite(
+        self, config_json: dict[str, Any], strategy_id: str = "_validate_"
+    ) -> StrategyValidationResult:
+        """校验组合策略配置：结构与权重、成员存在且为有效的普通策略。
+
+        Args:
+            config_json: 组合策略 config_json（``kind=composite``）。
+            strategy_id: 组合策略自身 ID（用于拒绝"包含自身"）。
+
+        Returns:
+            校验结果。
+        """
+        try:
+            composite = CompositeStrategyConfig(
+                **{"strategy_id": strategy_id, "display_name": "_validate_", **config_json}
+            )
+        except Exception as e:
+            return StrategyValidationResult(valid=False, errors=[f"组合策略配置解析失败: {e}"])
+        errors: list[str] = []
+        warnings: list[str] = []
+        for member in composite.members:
+            row = self._repo.find_by_id(member.strategy_id)
+            if row is None:
+                errors.append(f"成员策略 {member.strategy_id} 不存在")
+                continue
+            if is_composite_config(row.config_json):
+                errors.append(f"成员策略 {member.strategy_id} 是组合策略：不支持嵌套组合")
+                continue
+            parsed = self.get_parsed_config(member.strategy_id)
+            if parsed is None:
+                errors.append(f"成员策略 {member.strategy_id} 配置解析失败")
+                continue
+            result = self.validate_parsed(parsed)
+            errors.extend(f"成员 {member.strategy_id}：{err}" for err in result.errors)
+        if composite.cash_weight > 0:
+            warnings.append(
+                f"组合保留 {composite.cash_weight:.0%} 现金（收益按 0 计），成员各自的择时仓位之外再打折"
+            )
+        return StrategyValidationResult(valid=not errors, errors=errors, warnings=warnings)
+
+    def get_composite_config(self, strategy_id: str) -> CompositeStrategyConfig | None:
+        """获取组合策略配置；策略不存在或不是组合策略时返回 None。
+
+        Args:
+            strategy_id: 策略标识。
+
+        Returns:
+            组合策略配置。
+        """
+        row = self._repo.find_by_id(strategy_id)
+        if row is None or not is_composite_config(row.config_json):
+            return None
+        return CompositeStrategyConfig(
+            strategy_id=row.strategy_id,
+            display_name=row.display_name,
+            version=row.version,
+            description=row.description or "",
+            frequency=row.frequency,
+            **row.config_json,
+        )
+
+    def is_composite(self, strategy_id: str) -> bool:
+        """策略是否为组合策略。
+
+        Args:
+            strategy_id: 策略标识。
+
+        Returns:
+            组合策略时为 True；策略不存在时为 False。
+        """
+        row = self._repo.find_by_id(strategy_id)
+        return row is not None and is_composite_config(getattr(row, "config_json", None))
+
+    def require_single(self, strategy_id: str, action: str) -> None:
+        """拒绝对组合策略执行只支持普通策略的操作（给出可操作的提示）。
+
+        Args:
+            strategy_id: 策略标识。
+            action: 操作名称，如"稳健性扫描"。
+
+        Raises:
+            ValueError: 策略为组合策略时抛出。
+        """
+        if self.is_composite(strategy_id):
+            raise ValueError(
+                f"{strategy_id} 是组合策略，{action}只支持普通策略：请对其成员策略分别执行"
+            )
+
+    def build_composite_snapshot(
+        self, composite: CompositeStrategyConfig
+    ) -> tuple[dict[str, Any], str]:
+        """构造组合策略回测快照：组合配置 + 各成员当时的配置快照与哈希。
+
+        成员快照随组合回测固化，成员之后被修改不会改变这次回测的结果；组合哈希
+        覆盖组合配置与全部成员哈希。
+
+        Args:
+            composite: 组合策略配置。
+
+        Returns:
+            (快照, 组合配置哈希)。
+
+        Raises:
+            ValueError: 成员不存在时抛出。
+        """
+        members: dict[str, Any] = {}
+        for member in composite.members:
+            detail = self.get_config(member.strategy_id)
+            if detail is None:
+                raise ValueError(f"成员策略 {member.strategy_id} 不存在")
+            members[member.strategy_id] = {
+                "strategy_id": detail.strategy_id,
+                "display_name": detail.display_name,
+                "version": detail.version,
+                "frequency": detail.frequency,
+                "config_json": detail.config_json,
+                "config_hash": compute_config_hash(detail.config_json),
+            }
+        config_json = composite.model_dump(
+            exclude={"strategy_id", "display_name", "version", "description", "frequency"}
+        )
+        snapshot = {
+            "strategy_id": composite.strategy_id,
+            "display_name": composite.display_name,
+            "version": composite.version,
+            "frequency": composite.frequency,
+            "config_json": config_json,
+            "members": members,
+        }
+        digest = compute_config_hash(
+            {
+                "composite": config_json,
+                "members": {sid: item["config_hash"] for sid, item in members.items()},
+            }
+        )
+        return snapshot, digest
+
+    @staticmethod
+    def parse_composite_snapshot(
+        snapshot: dict[str, Any],
+    ) -> tuple[CompositeStrategyConfig, dict[str, StrategyConfig]] | None:
+        """从组合回测快照重建组合配置与成员配置。
+
+        Args:
+            snapshot: :meth:`build_composite_snapshot` 写入的快照。
+
+        Returns:
+            (组合配置, 成员 ID → 成员配置)；不是组合快照或解析失败时为 None。
+        """
+        config_json = snapshot.get("config_json") or {}
+        if not is_composite_config(config_json):
+            return None
+        try:
+            composite = CompositeStrategyConfig(
+                strategy_id=snapshot.get("strategy_id", "_snapshot_"),
+                display_name=snapshot.get("display_name", ""),
+                **{k: v for k, v in config_json.items() if k not in ("strategy_id", "display_name")},
+            )
+        except Exception:
+            logger.exception("解析组合回测快照失败")
+            return None
+        members: dict[str, StrategyConfig] = {}
+        for member in composite.members:
+            member_snapshot = (snapshot.get("members") or {}).get(member.strategy_id)
+            parsed = (
+                StrategyConfigService.parse_snapshot(member_snapshot) if member_snapshot else None
+            )
+            if parsed is None:
+                return None
+            members[member.strategy_id] = parsed
+        return composite, members
 
     def validate_parsed(self, config: StrategyConfig) -> StrategyValidationResult:
         """校验已解析的 StrategyConfig（供运行时路径复用，避免二次解析）。
@@ -779,6 +983,27 @@ class StrategyConfigService:
                     "选股腿与风险腿日程不同：选股腿日只替换成分、维持当前总仓位，"
                     "总仓位仅在风险腿日按择时目标调整"
                 )
+            band = config.rebalance.band
+            daily_legs = (
+                config.rebalance.selection.frequency == "daily"
+                and config.rebalance.risk.frequency == "daily"
+            )
+            if band is not None and band.max_drift is not None and daily_legs:
+                warnings.append(
+                    "rebalance.band.max_drift 只在非调仓日检查：两腿都是每日调仓时永远不会触发"
+                )
+
+        # 路径依赖风控叠加层：参数组合本身无效时提示
+        if config.risk and config.risk.drawdown_stop is not None:
+            if config.risk.drawdown_stop.exposure >= config.risk.max_portfolio_exposure:
+                warnings.append(
+                    "risk.drawdown_stop.exposure 不低于组合总仓位上限：回撤止损触发后不会降仓"
+                )
+        if config.needs_path_state:
+            warnings.append(
+                "配置含路径依赖功能（排名缓冲带 / 偏离调仓 / 风控叠加层）：实时决策需回放历史"
+                "重建持仓与净值状态，结果取决于回放起点（LIVE 取上线日，其余约一年）"
+            )
 
         return errors, warnings
 
@@ -988,8 +1213,17 @@ class StrategyConfigService:
                 errors.append(str(exc))
                 continue
             template = instance.template
+            if template.template_id == "expr":
+                limit = _backtest_preload_days(registry)
+                if instance.lookback_days > limit:
+                    errors.append(
+                        f"派生因子 {ref} 需要回望约 {instance.lookback_days} 个自然日（依赖回望 + "
+                        f"时序窗口），超过回测行情预加载 {limit} 日：请缩短时序窗口或依赖周期"
+                    )
             usage = list(template.usage)
-            if usage and module_key not in usage:
+            # 组合波动率因子（inverse_vol）逐资产取值，用途按评分口径校验
+            usage_key = "score" if module_key == "portfolio" else module_key
+            if usage and usage_key not in usage:
                 errors.append(
                     f"因子 {ref}（模板 {template.template_id}）不适用于{module_label}位置"
                     f"（usage={usage}），请调整配置或选择其他因子"
@@ -1247,6 +1481,9 @@ class StrategyConfigService:
         row = self._repo.find_by_id(strategy_id)
         if row is None:
             return None
+        if is_composite_config(row.config_json):
+            # 组合策略没有引擎管线配置：由 get_composite_config 读取
+            return None
         try:
             full_config = {
                 "strategy_id": row.strategy_id,
@@ -1277,6 +1514,9 @@ class StrategyConfigService:
 
         """
         config_json = snapshot.get("config_json") or {}
+        if is_composite_config(config_json):
+            # 组合策略快照由 parse_composite_snapshot 解析
+            return None
         try:
             full_config = {
                 "strategy_id": snapshot.get("strategy_id", "_snapshot_"),

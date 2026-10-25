@@ -29,6 +29,7 @@ from quant_etf_api.infra.db.models.core import (
     IndexMemberEventModel,
     IndexValuationModel,
     MacroIndicatorModel,
+    MarketIndicatorModel,
     TradingCalendarModel,
 )
 from quant_etf_api.infra.db.models.industry import (
@@ -45,6 +46,7 @@ from quant_etf_api.infra.db.models.stock import (
 from quant_etf_api.infra.time import today_cn
 from quant_etf_api.infra.trading_calendar import TradingCalendar, validate_calendar_completeness
 from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
+from quant_etf_api.domain.market_data.indicators import MACRO_INDICATOR_CODES, MARKET_INDICATORS
 from quant_etf_api.schemas.data_management import (
     DataManagementOverview,
     DataPartitionHealth,
@@ -174,6 +176,15 @@ DATASETS: tuple[DataSetDefinition, ...] = (
         "指标",
         ("sync_latest", "check", "repair_gaps", "rebuild"),
         ("发布周期新鲜度", "数值字段完整性"),
+    ),
+    DataSetDefinition(
+        "market_indicator",
+        "日频市场指标",
+        "日频",
+        "AkShare（10 年国债）/ Tushare（两融、股指期货、股指期权）",
+        "指标",
+        ("sync_latest", "check", "repair_gaps", "rebuild"),
+        ("交易日新鲜度", "数值字段完整性"),
     ),
     DataSetDefinition(
         "index_membership",
@@ -702,6 +713,26 @@ class DataManagementService:
                 _add_fallbacks(service)
             except Exception as exc:  # noqa: PERF203
                 _fail("macro_indicator", exc)
+        elif dataset_key == "market_indicator":
+            from quant_etf_api.services.market_indicator_service import MarketIndicatorService
+
+            try:
+                result = MarketIndicatorService(self._db).sync(
+                    expected,
+                    partition_key=partition_key,
+                    from_epoch=operation in {"repair_gaps", "rebuild"},
+                    overwrite=operation == "rebuild",
+                )
+            except Exception as exc:  # noqa: BLE001
+                _fail(partition_key or "market_indicator", exc)
+            else:
+                _add_records(int(result["records"]))
+                for error in result["errors"]:
+                    errors.append(error)
+                    stats["failed_partitions"].append(error.split(":", 1)[0])
+                for source, count in result["sources"].items():
+                    stats["source_usage"][source] = stats["source_usage"].get(source, 0) + count
+                stats["requested_ranges"] = result["ranges"]
         elif dataset_key == "index_membership":
             codes = self._partitions(dataset_key) if not partition_key else [partition_key]
             if operation == "sync_latest" and codes and not force:
@@ -1362,9 +1393,13 @@ class DataManagementService:
                 .all()
             ]
         if dataset_key == "macro_indicator":
-            return [
+            stored = [
                 r[0] for r in self._db.query(MacroIndicatorModel.indicator_code).distinct().all()
-            ] or ["cpi", "pmi", "lpr1y", "lpr5y"]
+            ]
+            # 已定义但尚未同步过的指标也作为分区显示，便于发现缺失
+            return list(dict.fromkeys([*stored, *MACRO_INDICATOR_CODES]))
+        if dataset_key == "market_indicator":
+            return list(MARKET_INDICATORS)
         if dataset_key == "industry_daily_bar":
             return [
                 r[0]
@@ -2559,6 +2594,12 @@ class DataManagementService:
                 MacroIndicatorModel.period_date,
                 MacroIndicatorModel.source,
             ),
+            "market_indicator": (
+                MarketIndicatorModel,
+                MarketIndicatorModel.indicator_code,
+                MarketIndicatorModel.trade_date,
+                MarketIndicatorModel.source,
+            ),
             "index_membership": (
                 IndexMemberEventModel,
                 IndexMemberEventModel.index_code,
@@ -2620,6 +2661,7 @@ class DataManagementService:
             "stock_daily_basic",
             "stock_moneyflow",
             "trading_calendar",
+            "market_indicator",
         }:
             return self._latest_trading_day(local_only=local_calendar)
         if dataset_key in {"index_membership", "industry_membership"}:
@@ -2714,6 +2756,8 @@ class DataManagementService:
             )
         if dataset_key == "macro_indicator":
             return MacroIndicatorModel.value.is_(None), false
+        if dataset_key == "market_indicator":
+            return MarketIndicatorModel.value.is_(None), false
         if dataset_key == "industry_universe":
             return or_(
                 IndustryUniverseModel.industry_code == "", IndustryUniverseModel.name_cn == ""

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+from quant_etf_api.domain.portfolio.risk_model import ReturnPanel
 from quant_etf_api.domain.strategies.models import (
     AssetRanking,
     StrategyResult,
@@ -42,6 +43,9 @@ class EngineContext:
             在择时因子全部缺失时沿用；有 ``timing_state`` 时以其 regime 为准。
         timing_state: 上一决策日结束时的择时状态层状态（回测主循环逐日传递，
             实时路径由 ``ContextBuilder`` 回放历史重建）；None 表示无历史。
+        current_holdings: 调仓前实际持仓（回测为执行器的 ``composition_base``，实时
+            由状态回放重建）；排名缓冲带据此保留老持仓。None 表示不可用。
+        return_panel: 逐日收益面板（风险平价与波动率目标使用）；配置不需要时为 None。
     """
 
     trade_date: date
@@ -55,6 +59,8 @@ class EngineContext:
     timing_proxy: TimingProxySelection | None = None
     previous_timing_regime: str | None = None
     timing_state: TimingState | None = None
+    current_holdings: dict[str, float] | None = None
+    return_panel: ReturnPanel | None = None
 
 
 @dataclass

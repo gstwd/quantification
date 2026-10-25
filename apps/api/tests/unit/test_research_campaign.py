@@ -78,6 +78,17 @@ class TestPlanNextStep:
         nxt = rules.plan_next_step([_view(2, "researcher", outcome="rejected")])
         assert nxt == rules.NextStep(role="researcher", round=3)
 
+    @pytest.mark.parametrize("verdict", ["recommend_accept", "reject"])
+    def test_reviewer_verdict_starts_fresh_round(self, verdict: str) -> None:
+        """评审员给出接受推荐或否决后，下一轮研究员从新方向开始（不带评审对象）。"""
+        nxt = rules.plan_next_step(
+            [
+                _view(1, "researcher", outcome="review_requested", optimization_id="o1"),
+                _view(1, "reviewer", outcome=verdict, optimization_id="o1", hypothesis_id="h1"),
+            ]
+        )
+        assert nxt == rules.NextStep(role="researcher", round=2)
+
 
 class TestStopRules:
     """停止条件。"""
@@ -163,6 +174,7 @@ class TestCommandAllowlist:
             ("strategy", "update", {"lineage": "other"}),
             ("strategy", "create", {}),
             ("strategy", "create", {"draft": False, "lineage": "base"}),
+            ("research", "dsr-calibrate", {}),
         ],
     )
     def test_denied(self, command: str, sub: str | None, flags: dict[str, Any]) -> None:
@@ -272,6 +284,7 @@ def _service(
     svc._config_svc = MagicMock()
     svc._config_svc.lineage_members.return_value = ["base", "base__opt_a"]
     svc._config_svc.lineage_of.side_effect = lambda sid: "base" if sid.startswith("base") else sid
+    svc._config_svc.is_composite.return_value = False
     svc._opt_repo = MagicMock()
     return svc
 
@@ -396,6 +409,82 @@ class TestCampaignService:
         result = svc.finalize_step("s1", exit_code=exit_code, cost_usd=1.25)
         assert result["status"] == expected
         assert result["cost_usd"] == 1.25
+
+    def test_recommend_accept_full_chain(self) -> None:
+        """评审员推荐接受的全链：review → finish accept 放行 → step-done → 收口为完成。"""
+        step = _step(role="reviewer", optimization_id="o1", hypothesis_id="h1")
+        svc = _service(_campaign(), [step])
+        svc._repo.find_step.return_value = step
+        svc._opt_repo.find_by_id.return_value = SimpleNamespace(
+            strategy_id="base__opt_a", status="evaluated"
+        )
+        # 仓库语义：只认 running / done 步骤上的结论
+        svc._repo.has_review.side_effect = lambda cid, oid, verdict: (
+            step.optimization_id == oid
+            and step.outcome == verdict
+            and step.status in ("running", "done")
+        )
+        finish = {"subcommand": "finish", "optimization_id": "o1", "verdict": "accept"}
+        with pytest.raises(ValueError, match="recommend_accept"):
+            svc.guard_command("c1", "optimization", {**finish, "strict": True})
+        svc.review("c1", optimization_id="o1", verdict="recommend_accept", reason="10 项全过")
+        assert step.outcome == "recommend_accept"
+        svc.guard_command("c1", "optimization", {**finish, "strict": True})
+        done = svc.step_done("c1", outcome=None, summary="推荐接受，已严格 finish")
+        assert done["status"] == "done"
+        assert done["outcome"] == "recommend_accept"
+        assert svc.finalize_step("s1", exit_code=0)["status"] == "done"
+
+    def test_failed_review_does_not_unlock_accept(self) -> None:
+        """失败评审步骤留下的 recommend_accept 不能在重试步骤里解锁 finish accept。"""
+        failed = _step(
+            role="reviewer", status="failed", outcome="recommend_accept", optimization_id="o1"
+        )
+        retry = _step(step_id="s2", role="reviewer", optimization_id="o1")
+        steps = [failed, retry]
+        svc = _service(_campaign(), steps)
+        svc._opt_repo.find_by_id.return_value = SimpleNamespace(strategy_id="base")
+        svc._repo.has_review.side_effect = lambda cid, oid, verdict: any(
+            s.optimization_id == oid and s.outcome == verdict and s.status in ("running", "done")
+            for s in steps
+        )
+        flags = {
+            "subcommand": "finish",
+            "optimization_id": "o1",
+            "verdict": "accept",
+            "strict": True,
+        }
+        with pytest.raises(ValueError, match="recommend_accept"):
+            svc.guard_command("c1", "optimization", flags)
+
+    def test_review_overwrites_previous_verdict(self) -> None:
+        """同一评审步骤重复 review 时以最后一次为准。"""
+        step = _step(role="reviewer")
+        svc = _service(_campaign(), [step])
+        svc._opt_repo.find_by_id.return_value = SimpleNamespace(
+            strategy_id="base", status="evaluated"
+        )
+        svc.review("c1", optimization_id="o1", verdict="needs_more", reason="缺邻域证据")
+        svc.review("c1", optimization_id="o1", verdict="reject", reason="补证后仍不过")
+        assert (step.outcome, step.summary) == ("reject", "补证后仍不过")
+
+    def test_review_rejected_outside_reviewer_or_lineage(self) -> None:
+        """研究员步骤不能记评审；研究线外的会话不能被评审。"""
+        researcher = _step()
+        svc = _service(_campaign(), [researcher])
+        svc._opt_repo.find_by_id.return_value = SimpleNamespace(
+            strategy_id="base", status="evaluated"
+        )
+        with pytest.raises(ValueError, match="只有评审员"):
+            svc.review("c1", optimization_id="o1", verdict="reject", reason="r")
+        reviewer = _step(role="reviewer")
+        svc = _service(_campaign(), [reviewer])
+        svc._opt_repo.find_by_id.return_value = SimpleNamespace(
+            strategy_id="other", status="evaluated"
+        )
+        with pytest.raises(ValueError, match="不在研究线"):
+            svc.review("c1", optimization_id="o1", verdict="reject", reason="r")
+        assert reviewer.outcome is None
 
     def test_guard_scopes_strategy_to_lineage(self) -> None:
         """战役只能检验研究线内的策略。"""
@@ -861,3 +950,57 @@ class TestCliCampaignMode:
             ["research", "campaign", "finalize-step", "c1", "--agent-session", "a", "--error", "e"]
         )
         assert (done.agent_session, done.error) == ("a", "e")
+
+
+class TestCampaignRepositorySql:
+    """战役仓库查询的 PostgreSQL 方言编译校验。"""
+
+    def test_has_review_only_counts_running_or_done(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """has_review 只认 running / done 步骤（失败步骤的结论不算）。"""
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.orm import Query, Session
+
+        from quant_etf_api.infra.db.repositories.research_campaign import (
+            ResearchCampaignRepository,
+        )
+
+        captured: list[Any] = []
+
+        def _first(query: Query) -> None:
+            captured.append(query.statement)
+            return None
+
+        monkeypatch.setattr(Query, "first", _first)
+        repo = ResearchCampaignRepository(Session())
+        assert repo.has_review("c1", "o1", "recommend_accept") is False
+        compiled = captured[0].compile(dialect=postgresql.dialect())
+        sql = str(compiled)
+        assert "research_campaign_step.status IN" in sql
+        values = [v for v in compiled.params.values() if isinstance(v, (list, tuple))]
+        assert ["running", "done"] in [list(v) for v in values]
+
+
+class TestCampaignRejectsComposite:
+    """战役模式不支持组合策略。"""
+
+    def test_guard_rejects_composite_strategy_and_file(self, tmp_path: Path) -> None:
+        """组合策略 ID 与组合策略配置文件都被拒绝。"""
+        svc = _service(_campaign())
+        svc._config_svc.is_composite.return_value = True
+        with pytest.raises(ValueError, match="组合策略"):
+            svc.guard_command("c1", "research", {"subcommand": "batch", "strategy_id": "base"})
+        svc._config_svc.is_composite.return_value = False
+        path = tmp_path / "c.json"
+        path.write_text(
+            json.dumps({"kind": "composite", "members": [{"strategy_id": "a", "weight": 1}]}),
+            encoding="utf-8",
+        )
+        flags = {
+            "subcommand": "create",
+            "lineage": "base",
+            "draft": True,
+            "file": str(path),
+            "strategy_id": "base__x",
+        }
+        with pytest.raises(ValueError, match="组合策略"):
+            svc.guard_command("c1", "strategy", flags)

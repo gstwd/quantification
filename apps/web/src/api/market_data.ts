@@ -1,5 +1,5 @@
 import { apiClient } from './client'
-import type { BenchmarkIndex, DailyBar, DateRange, IndexCreatePayload, IndexSummary, IndexValuation, MacroIndicator } from '../types/api'
+import type { BenchmarkIndex, DailyBar, DateRange, IndexCreatePayload, IndexSummary, IndexValuation, MacroIndicator, MarketIndicatorPoint } from '../types/api'
 
 /** 获取所有基准指数列表 */
 export async function fetchBenchmarkIndexes(): Promise<BenchmarkIndex[]> {
@@ -61,6 +61,20 @@ export async function fetchPreviousTradingDay(): Promise<string | null> {
 }
 
 /** 宏观指标数据（cpi / pmi / lpr1y / lpr5y） */
+/**
+ * 获取日频市场指标最近 N 条（未同步时为空数组）。
+ *
+ * @param indicatorCode 指标代码，如 cgb10y、margin_rzye、fut_if_basis_ann
+ * @param limit 条数上限
+ */
+export async function fetchMarketIndicator(indicatorCode: string, limit = 250): Promise<MarketIndicatorPoint[]> {
+  const { data } = await apiClient.get<MarketIndicatorPoint[]>(
+    `/market-data/market-indicators/${indicatorCode}`,
+    { params: { limit } },
+  )
+  return data
+}
+
 export async function fetchMacroIndicator(
   indicatorCode: string,
   limit = 60,

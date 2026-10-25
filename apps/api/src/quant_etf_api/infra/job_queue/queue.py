@@ -32,7 +32,8 @@ LANE_BACKTEST = "backtest"
 LANE_GENERAL = "general"
 
 # 回测 lane 承载的任务类型；其余任务类型统一归入通用 lane
-BACKTEST_LANE_JOB_TYPES: tuple[str, ...] = ("backtest", "comparison")
+# （LIVE 策略定时体检逐个跑监控回测，同样归入回测 lane）
+BACKTEST_LANE_JOB_TYPES: tuple[str, ...] = ("backtest", "comparison", "lifecycle_refresh_all")
 
 
 def lane_for(job_type: str) -> str:

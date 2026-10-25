@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator, Sequence
 from datetime import date
 from typing import Any
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from quant_etf_api.infra.db.models.stock import (
@@ -15,6 +16,8 @@ from quant_etf_api.infra.db.models.stock import (
 from quant_etf_api.infra.db.repositories.base import BaseRepository
 
 _PG_INSERT_CHUNK_SIZE = 500
+# 字段投影查询每批个股数：按日期区间扫描一次即可覆盖全市场个股，分块会重复扫描区间
+_FIELD_QUERY_CODE_CHUNK = 6000
 
 
 class _StockDailyRepository(BaseRepository):
@@ -84,6 +87,43 @@ class _StockDailyRepository(BaseRepository):
         for start in range(0, len(rows), _PG_INSERT_CHUNK_SIZE):
             self._db.execute(_build(rows[start : start + _PG_INSERT_CHUNK_SIZE]))
         return len(rows)
+
+
+    def iter_field_rows(
+        self,
+        fields: Sequence[str],
+        start: date,
+        end: date,
+        stock_codes: Iterable[str],
+    ) -> Iterator[tuple[Any, ...]]:
+        """按列投影流式读取区间内指定个股的字段（成分聚合因子面板使用）。
+
+        只取 ``(trade_date, stock_code, *fields)``，按批流式返回，避免把整张表的 ORM
+        对象载入内存；个股代码分块查询，控制 IN 列表长度。
+
+        Args:
+            fields: 需要的列名（必须是本表的数值列）。
+            start: 起始交易日（含）。
+            end: 截止交易日（含）。
+            stock_codes: 个股代码。
+
+        Yields:
+            ``(trade_date, stock_code, field1, field2, ...)`` 元组。
+        """
+        codes = sorted(set(stock_codes))
+        columns = [getattr(self._model, name) for name in fields]
+        for offset in range(0, len(codes), _FIELD_QUERY_CODE_CHUNK):
+            chunk = codes[offset : offset + _FIELD_QUERY_CODE_CHUNK]
+            statement = (
+                select(self._model.trade_date, self._model.stock_code, *columns)
+                .where(
+                    self._model.trade_date >= start,
+                    self._model.trade_date <= end,
+                    self._model.stock_code.in_(chunk),
+                )
+                .execution_options(yield_per=50_000)
+            )
+            yield from self._db.execute(statement)
 
 
 class StockDailyBasicRepository(_StockDailyRepository):

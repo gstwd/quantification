@@ -1,5 +1,6 @@
 import { apiClient } from './client'
 import type {
+  BacktestAttribution,
   BacktestCancelResponse,
   BacktestCreateRequest,
   BacktestDeleteResponse,
@@ -105,6 +106,16 @@ export async function fetchBacktestOrphans(limit = 200): Promise<DanglingReferen
 }
 
 /** 获取回测每日组合绩效（用于权益曲线和回撤图） */
+/**
+ * 获取回测收益归因（资产贡献与择时 / 选择 / 残差分解，读取路径现算）。
+ *
+ * @param backtestId 回测 ID
+ */
+export async function fetchBacktestAttribution(backtestId: string): Promise<BacktestAttribution> {
+  const { data } = await apiClient.get<BacktestAttribution>(`/backtests/${backtestId}/attribution`)
+  return data
+}
+
 export async function fetchBacktestDaily(backtestId: string): Promise<BacktestDailyResult[]> {
   const { data } = await apiClient.get<BacktestDailyResult[]>(`/backtests/${backtestId}/daily`)
   return data

@@ -2,7 +2,8 @@
 
 派生因子不直接读行情：依赖因子由注册表解析时绑定到计算器上
 （:meth:`ExpressionComputer.bind_dependencies`），``FactorComputeService.compute_matrix``
-先算全部依赖，再逐日逐指数按表达式求值。因子值同样只现算、不落库。
+先算全部依赖，再逐日逐指数按表达式求值；含时序函数（delay / ts_mean 等）的表达式在
+向前扩展了 ``series_window`` 个交易日的轴上按数组求值后裁剪。因子值同样只现算、不落库。
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from quant_etf_api.factors.base import (
 from quant_etf_api.factors.expression import (
     ParsedExpression,
     evaluate_expression,
+    evaluate_expression_series,
     expression_fingerprint,
     parse_expression,
 )
@@ -57,6 +59,22 @@ class ExpressionComputer:
     def refs(self) -> tuple[str, ...]:
         """表达式引用的因子。"""
         return self._parsed.refs
+
+    @property
+    def series_window(self) -> int:
+        """时序函数需要的额外交易日数（0 表示不含时序函数）。"""
+        return self._parsed.series_window
+
+    def evaluate_series(self, lookup: Any) -> Any:
+        """按 交易日 × 指数 数组求值（含时序函数的表达式使用）。
+
+        Args:
+            lookup: 引用名 → 形如 (交易日数, 指数数) 的 numpy 数组（缺失为 NaN）。
+
+        Returns:
+            同形 numpy 数组，缺失与数学错误为 NaN。
+        """
+        return evaluate_expression_series(self._parsed, lookup)
 
     @property
     def dependencies(self) -> Mapping[str, FactorInstance]:
@@ -102,8 +120,9 @@ class ExpressionComputer:
             category="derived",
             version="1.0.0",
             description=(
-                "在已有因子之上做四则与函数组合（abs/min/max/log/sqrt/sign），"
-                "如 dev250 - dev60；依赖因子先现算，再逐日逐指数求值，不落库。"
+                "在已有因子之上做四则与函数组合（abs/min/max/log/sqrt/sign）及时序函数"
+                "（delay/delta/ts_mean/ts_std/ts_zscore/ts_rank，窗口为整数交易日），"
+                "如 dev250 - dev60、ts_zscore(amount_ratio, 60)；依赖因子先现算再求值，不落库。"
             ),
             required_data=[],
             lookback_days=0,

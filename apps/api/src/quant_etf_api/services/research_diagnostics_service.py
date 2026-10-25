@@ -195,6 +195,7 @@ class ResearchDiagnosticsService:
                 raise ValueError("--strategy/--ref 与 --factor/--params 只能二选一")
             if StrategyConfigRepository(self._db).find_by_id(strategy_id) is None:
                 raise LookupError(f"策略 {strategy_id} 不存在")
+            StrategyConfigService(self._db).require_single(strategy_id, "因子诊断")
             config = StrategyConfigService(self._db).get_parsed_config(strategy_id)
             if config is None:
                 raise ValueError(f"策略 {strategy_id} 的配置无法解析")
@@ -245,6 +246,7 @@ class ResearchDiagnosticsService:
         if strategy_id:
             if StrategyConfigRepository(self._db).find_by_id(strategy_id) is None:
                 raise LookupError(f"策略 {strategy_id} 不存在")
+            StrategyConfigService(self._db).require_single(strategy_id, "因子诊断")
             config = StrategyConfigService(self._db).get_parsed_config(strategy_id)
             if config is None:
                 raise ValueError(f"策略 {strategy_id} 的配置无法解析")

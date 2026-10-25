@@ -54,6 +54,30 @@ def compute_buy_hold_benchmark(
     return returns
 
 
+def compute_mix_benchmark(
+    all_bars: dict[tuple[str, date], Any],
+    mix: list[tuple[str, float]],
+    trading_dates: list[date],
+) -> list[float]:
+    """恒定比例混合基准：每个收益窗口 Σ 权重 × 各指数买入持有收益（现金收益 0）。
+
+    与 :func:`compute_buy_hold_benchmark` 同一决策日对齐口径；等价于每日再平衡到目标权重。
+
+    Args:
+        all_bars: 收益结算用行情。
+        mix: [(指数代码, 权重)]，权重之和不超过 1。
+        trading_dates: 交易日（升序）。
+
+    Returns:
+        与 compute_buy_hold_benchmark 等长的日收益率（%）列表。
+    """
+    series = [
+        (weight, compute_buy_hold_benchmark(all_bars, code, trading_dates)) for code, weight in mix
+    ]
+    length = min((len(values) for _w, values in series), default=0)
+    return [sum(weight * values[i] for weight, values in series) for i in range(length)]
+
+
 def compute_equal_weight_benchmark(
     all_bars: dict[tuple[str, date], Any],
     index_codes: list[str],

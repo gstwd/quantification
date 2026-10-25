@@ -1,10 +1,12 @@
 from __future__ import annotations
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
+from quant_etf_api.domain.market_data.indicators import MARKET_INDICATORS
+from quant_etf_api.infra.db.repositories.market_indicator import MarketIndicatorRepository
 from quant_etf_api.schemas.market_data import (
     BenchmarkIndex,
     DailyBar,
@@ -12,6 +14,7 @@ from quant_etf_api.schemas.market_data import (
     IndexSummary,
     IndexValuation,
     MacroIndicatorSchema,
+    MarketIndicatorPointSchema,
 )
 from quant_etf_api.schemas.pagination import PaginatedResponse
 from quant_etf_api.schemas.stock import StockSummary
@@ -101,6 +104,35 @@ def macro_indicators(
     indicator_code 可选值：cpi, pmi, lpr1y, lpr5y
     """
     return IngestService(db).get_macro_indicators(indicator_code, limit)
+
+
+@router.get(
+    "/market-data/market-indicators/{indicator_code}",
+    response_model=list[MarketIndicatorPointSchema],
+)
+def market_indicator_series(
+    indicator_code: str,
+    limit: int = Query(default=250, ge=1, le=5000),
+    db: Session = Depends(get_db),
+) -> list[MarketIndicatorPointSchema]:
+    """日频市场指标最近 N 条（只读，未同步时返回空列表，不触发拉取）。
+
+    indicator_code 见 ``domain.market_data.indicators.MARKET_INDICATORS``。
+    """
+    meta = MARKET_INDICATORS.get(indicator_code)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"未知的市场指标 {indicator_code}")
+    name, unit, _group = meta
+    return [
+        MarketIndicatorPointSchema(
+            indicator_code=indicator_code,
+            indicator_name=name,
+            unit=unit,
+            trade_date=trade_date,
+            value=value,
+        )
+        for trade_date, value in MarketIndicatorRepository(db).find_latest(indicator_code, limit)
+    ]
 
 
 # --- 日期范围元数据端点 ---

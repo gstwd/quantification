@@ -12,6 +12,7 @@ from quant_etf_api.api.middleware import RequestIdMiddleware, RequestLoggingMidd
 from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
 from quant_etf_api.api.routers import (
     ai_factors,
+    alerts,
     backtests,
     data_management,
     factors,
@@ -124,6 +125,7 @@ app.include_router(robustness.router, prefix=settings.api_prefix)
 app.include_router(research.router, prefix=settings.api_prefix)
 app.include_router(ai_factors.router, prefix=settings.api_prefix)
 app.include_router(keyword_tags.router, prefix=settings.api_prefix)
+app.include_router(alerts.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

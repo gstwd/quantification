@@ -468,6 +468,8 @@ class RankConfig(BaseModel):
         bottom_n: 取后 N 名，与 top_n 二选一。
         momentum_factor: 动量子排名所用因子引用，仅用于结果展示（数值越高排名越前）。
         valuation_factor: 估值子排名所用因子引用，仅用于结果展示（数值越低排名越前）。
+        buffer_n: 排名缓冲带（只对 top_n 生效）：已持有资产排名不低于 top_n + buffer_n
+            时继续保留，剩余名额按排名补足；None 表示不启用（每次都取严格前 N 名）。
     """
 
     sort_by: Literal["score"] = "score"
@@ -476,6 +478,21 @@ class RankConfig(BaseModel):
     bottom_n: int | None = Field(default=None, ge=1)
     momentum_factor: str | None = None
     valuation_factor: str | None = None
+    buffer_n: int | None = Field(default=None, ge=1, le=50)
+
+    @model_validator(mode="after")
+    def _buffer_requires_top_n(self) -> "RankConfig":
+        """缓冲带只对 top_n 截取有意义。
+
+        Returns:
+            校验通过的原对象。
+
+        Raises:
+            ValueError: 设置了 buffer_n 但未设置 top_n 时抛出。
+        """
+        if self.buffer_n is not None and self.top_n is None:
+            raise ValueError("rank.buffer_n 需要同时设置 rank.top_n")
+        return self
 
     @field_validator("sort_by", mode="before")
     @classmethod
@@ -499,32 +516,116 @@ class RankConfig(BaseModel):
         return value
 
 
+PortfolioMethod = Literal[
+    "equal_weight", "score_weight", "winner_take_all", "inverse_vol", "risk_parity"
+]
+
+
 class PortfolioConfig(BaseModel):
     """组合构建配置。
 
     Attributes:
-        method: 权重分配方法，equal_weight / score_weight / winner_take_all。
+        method: 权重分配方法：equal_weight / score_weight / winner_take_all /
+            inverse_vol（按 ``vol_factor`` 的倒数加权）/ risk_parity（按近
+            ``cov_window`` 个交易日收益协方差求等风险贡献）。
         timing_exposure: 择时 regime 对应的总仓位上限。
         default_exposure: 无择时信号时的默认总仓位上限，默认 0.50。
+        vol_factor: inverse_vol 使用的波动率因子引用（如 volatility / return_std 别名），
+            数值须为正；该因子缺失的资产在评分前剔除。
+        cov_window: risk_parity 的协方差窗口（交易日，20-250）；历史不足时退回等权。
     """
 
-    method: Literal["equal_weight", "score_weight", "winner_take_all"]
+    method: PortfolioMethod
     timing_exposure: dict[str, float] | None = None
     default_exposure: float = Field(default=0.50, ge=0.0, le=1.0)
+    vol_factor: str | None = None
+    cov_window: int = Field(default=60, ge=20, le=250)
+
+    @model_validator(mode="after")
+    def _inverse_vol_requires_factor(self) -> "PortfolioConfig":
+        """inverse_vol 必须声明波动率因子。
+
+        Returns:
+            校验通过的原对象。
+
+        Raises:
+            ValueError: method=inverse_vol 但未给 vol_factor 时抛出。
+        """
+        if self.method == "inverse_vol" and not self.vol_factor:
+            raise ValueError("portfolio.method=inverse_vol 需要指定 portfolio.vol_factor")
+        return self
+
+
+class VolTargetConfig(BaseModel):
+    """事前波动率目标：按近 window 日收益协方差估算目标组合的年化波动，超过目标时
+    等比降低总仓位（只降不加杠杆）。
+
+    Attributes:
+        target: 目标年化波动率（小数，如 0.15）。
+        window: 协方差窗口（交易日）。
+        floor: 缩放后总仓位下限占原仓位的比例（0 表示可降到空仓）。
+    """
+
+    target: float = Field(gt=0.0, le=1.0)
+    window: int = Field(default=60, ge=20, le=250)
+    floor: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class DrawdownStopConfig(BaseModel):
+    """组合回撤止损：策略自身净值从峰值回撤达到阈值后，把总仓位压到 exposure，
+    冷却 cooldown_days 个决策日后恢复并以当时净值重置峰值。
+
+    Attributes:
+        threshold: 触发回撤（小数，如 0.15 表示回撤 15%）。
+        exposure: 止损期间的总仓位上限（0-1）。
+        cooldown_days: 冷却决策日数。
+    """
+
+    threshold: float = Field(gt=0.0, lt=1.0)
+    exposure: float = Field(default=0.0, ge=0.0, le=1.0)
+    cooldown_days: int = Field(default=20, ge=1, le=250)
+
+
+class TrailingStopConfig(BaseModel):
+    """单资产移动止损：持仓资产自入场以来收盘价从最高点回撤达到阈值即清出，冷却期内
+    不再入选。
+
+    Attributes:
+        threshold: 触发回撤（小数）。
+        cooldown_days: 冷却决策日数。
+    """
+
+    threshold: float = Field(gt=0.0, lt=1.0)
+    cooldown_days: int = Field(default=20, ge=1, le=250)
 
 
 class RiskConfig(BaseModel):
     """风控配置（可选模块）。
 
+    前三项为静态约束（逐日裁剪目标权重）；``vol_target`` / ``drawdown_stop`` /
+    ``trailing_stop`` 为路径依赖叠加层，在回测主循环合成当日目标后施加（实时决策通过
+    回放重建状态），缺省 None 表示不启用、口径与改造前一致。
+
     Attributes:
         max_asset_weight: 单资产仓位上限。
         max_portfolio_exposure: 组合总仓位上限。
         min_cash_ratio: 最低现金比例。
+        vol_target: 事前波动率目标。
+        drawdown_stop: 组合回撤止损。
+        trailing_stop: 单资产移动止损。
     """
 
     max_asset_weight: float = Field(default=0.30, gt=0.0, le=1.0)
     max_portfolio_exposure: float = Field(default=1.0, ge=0.0, le=1.0)
     min_cash_ratio: float = Field(default=0.0, ge=0.0, lt=1.0)
+    vol_target: VolTargetConfig | None = None
+    drawdown_stop: DrawdownStopConfig | None = None
+    trailing_stop: TrailingStopConfig | None = None
+
+    @property
+    def has_overlay(self) -> bool:
+        """是否启用了任一路径依赖叠加层。"""
+        return any((self.vol_target, self.drawdown_stop, self.trailing_stop))
 
 
 class RebalanceScheduleConfig(BaseModel):
@@ -567,6 +668,33 @@ class RebalanceScheduleConfig(BaseModel):
         return self
 
 
+class RebalanceBandConfig(BaseModel):
+    """偏离阈值调仓。
+
+    Attributes:
+        min_turnover: 日历调仓日所需单边换手低于该值时跳过本次调仓（小数，如 0.05）。
+        max_drift: 非调仓日实际权重相对最近一次目标的最大单资产偏离超过该值时，按最近
+            目标再平衡（不重新选股；小数，如 0.05）。
+    """
+
+    min_turnover: float | None = Field(default=None, gt=0.0, le=1.0)
+    max_drift: float | None = Field(default=None, gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _require_any(self) -> "RebalanceBandConfig":
+        """至少启用一项阈值。
+
+        Returns:
+            校验通过的原对象。
+
+        Raises:
+            ValueError: 两项都为空时抛出。
+        """
+        if self.min_turnover is None and self.max_drift is None:
+            raise ValueError("rebalance.band 至少需要 min_turnover 或 max_drift 之一")
+        return self
+
+
 class RebalanceConfig(BaseModel):
     """双腿调仓配置（可选模块）。
 
@@ -586,6 +714,7 @@ class RebalanceConfig(BaseModel):
 
     selection: RebalanceScheduleConfig = Field(default_factory=RebalanceScheduleConfig)
     risk: RebalanceScheduleConfig = Field(default_factory=RebalanceScheduleConfig)
+    band: RebalanceBandConfig | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -603,12 +732,11 @@ class RebalanceConfig(BaseModel):
             return value
         # 旧平铺口径：frequency/day_of_week/... 直接写在 rebalance 下
         if "frequency" in value:
-            legacy = {
-                key: value[key]
-                for key in ("frequency", "day_of_week", "week_parity", "day_of_month")
-                if key in value
-            }
-            return {"selection": legacy, "risk": dict(legacy)}
+            legacy_keys = ("frequency", "day_of_week", "week_parity", "day_of_month")
+            legacy = {key: value[key] for key in legacy_keys if key in value}
+            # 平铺字段之外的键（如偏离阈值 band）原样保留，不随升级丢失
+            rest = {key: item for key, item in value.items() if key not in legacy_keys}
+            return {**rest, "selection": legacy, "risk": dict(legacy)}
         normalized = dict(value)
         # 双腿必选：只给出其中一条腿时，另一条按相同日程补齐（不改变单腿语义）
         if "selection" not in normalized and "risk" in normalized:
@@ -703,6 +831,38 @@ class StrategyConfig(BaseModel):
         description="regime 条件化配置，key=regime 名称（offensive/neutral/defensive），value=该 regime 下的配置覆盖",
     )
 
+    def _all_ranks(self) -> list[RankConfig]:
+        """默认排名配置与各 regime 覆盖的排名配置。"""
+        return [self.rank] + [r.rank for r in self.regime_rules.values() if r.rank]
+
+    def _all_portfolios(self) -> list[PortfolioConfig]:
+        """默认组合配置与各 regime 覆盖的组合配置。"""
+        return [self.portfolio] + [r.portfolio for r in self.regime_rules.values() if r.portfolio]
+
+    @property
+    def needs_path_state(self) -> bool:
+        """决策是否依赖持仓或净值路径（排名缓冲、偏离调仓、风控叠加层）。
+
+        为真时实时决策不能只看当日截面，必须回放一段历史重建持仓与风控状态。
+        """
+        if any(rank.buffer_n for rank in self._all_ranks()):
+            return True
+        if self.rebalance is not None and self.rebalance.band is not None:
+            return True
+        return self.risk is not None and self.risk.has_overlay
+
+    @property
+    def return_window(self) -> int | None:
+        """需要的逐日收益历史窗口（交易日）：风险平价与波动率目标共用。
+
+        Returns:
+            最大窗口；都未启用时为 None（不装配收益历史）。
+        """
+        windows = [p.cov_window for p in self._all_portfolios() if p.method == "risk_parity"]
+        if self.risk is not None and self.risk.vol_target is not None:
+            windows.append(self.risk.vol_target.window)
+        return max(windows) if windows else None
+
 
 def iter_factor_refs(config: StrategyConfig) -> list[tuple[str, str, str]]:
     """列出策略各模块引用的全部因子（不去重），作为引用收集的唯一实现。
@@ -715,7 +875,8 @@ def iter_factor_refs(config: StrategyConfig) -> list[tuple[str, str, str]]:
 
     Returns:
         ``(模块 key, 中文位置标签, 因子引用)`` 列表；模块 key 取 score / timing /
-        filter / rank，与因子模板 ``usage`` 取值一致。
+        filter / rank / portfolio，前四者与因子模板 ``usage`` 取值一致；portfolio
+        （inverse_vol 的波动率因子）按资产级取值，用途校验按 score 口径。
     """
     refs: list[tuple[str, str, str]] = []
     refs.extend(("score", "评分", ref) for ref in config.score.factors)
@@ -726,6 +887,8 @@ def iter_factor_refs(config: StrategyConfig) -> list[tuple[str, str, str]]:
     for ref in (config.rank.momentum_factor, config.rank.valuation_factor):
         if ref:
             refs.append(("rank", "排名子因子", ref))
+    if config.portfolio.vol_factor:
+        refs.append(("portfolio", "组合波动率因子", config.portfolio.vol_factor))
     for regime_rule in config.regime_rules.values():
         if regime_rule.score:
             refs.extend(("score", "regime 评分", ref) for ref in regime_rule.score.factors)
@@ -737,6 +900,8 @@ def iter_factor_refs(config: StrategyConfig) -> list[tuple[str, str, str]]:
             for ref in (regime_rule.rank.momentum_factor, regime_rule.rank.valuation_factor):
                 if ref:
                     refs.append(("rank", "regime 排名子因子", ref))
+        if regime_rule.portfolio and regime_rule.portfolio.vol_factor:
+            refs.append(("portfolio", "regime 组合波动率因子", regime_rule.portfolio.vol_factor))
     return refs
 
 
@@ -757,3 +922,89 @@ def filter_rule_refs(filters: FilterConfig) -> list[str]:
     for group in filters.groups:
         refs.extend(filter_rule_refs(group))
     return refs
+
+
+# ── 组合策略（多策略持仓级合成） ──────────────────────────────────────────
+
+COMPOSITE_KIND = "composite"
+
+
+class CompositeMemberConfig(BaseModel):
+    """组合策略的成员。
+
+    Attributes:
+        strategy_id: 成员策略 ID（必须是普通策略，不能是组合策略）。
+        weight: 目标权重（0-1）。
+    """
+
+    strategy_id: str = Field(min_length=1)
+    weight: float = Field(gt=0.0, le=1.0)
+
+
+class CompositeStrategyConfig(BaseModel):
+    """组合策略：按目标权重合成多个普通策略的持仓后统一记账。
+
+    每个成员保留自己的引擎状态与子账本（择时、风控、调仓日程互不影响）；组合账本
+    = Σ 成员权重 × 成员持仓，成员权重随各自净值漂移，在 ``rebalance`` 日程上调回
+    目标权重。换手按合成后的持仓计，成员之间方向相反的交易被轧差。
+
+    Attributes:
+        strategy_id: 组合策略 ID。
+        display_name: 展示名。
+        version: 版本号。
+        schema_version: 配置 schema 版本。
+        description: 描述。
+        frequency: 标注频率（元数据）。
+        kind: 固定为 ``composite``。
+        members: 成员列表（策略 ID 不重复）。
+        cash_weight: 现金目标权重（收益为 0）。
+        rebalance: 成员权重再平衡日程，缺省每日（恒定比例）。
+    """
+
+    strategy_id: str
+    display_name: str
+    version: str = "1.0.0"
+    schema_version: str = "2"
+    description: str = ""
+    frequency: str = "daily"
+    kind: Literal["composite"] = COMPOSITE_KIND
+    members: list[CompositeMemberConfig] = Field(min_length=1, max_length=10)
+    cash_weight: float = Field(default=0.0, ge=0.0, lt=1.0)
+    rebalance: RebalanceScheduleConfig = Field(default_factory=RebalanceScheduleConfig)
+
+    @model_validator(mode="after")
+    def _check_members(self) -> "CompositeStrategyConfig":
+        """成员不重复、不含自身，且成员权重 + 现金权重 = 1。
+
+        Returns:
+            校验通过的原对象。
+
+        Raises:
+            ValueError: 规则不满足时抛出。
+        """
+        ids = [member.strategy_id for member in self.members]
+        if len(set(ids)) != len(ids):
+            raise ValueError("组合策略成员不能重复")
+        if self.strategy_id in ids:
+            raise ValueError("组合策略不能包含自身")
+        total = sum(member.weight for member in self.members) + self.cash_weight
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(f"成员权重与现金权重之和必须为 1（当前 {total:.4f}）")
+        return self
+
+    @property
+    def target_weights(self) -> dict[str, float]:
+        """成员 ID → 目标权重。"""
+        return {member.strategy_id: member.weight for member in self.members}
+
+
+def is_composite_config(config_json: Any) -> bool:
+    """判断 config_json 是否为组合策略配置。
+
+    Args:
+        config_json: 策略 config_json。
+
+    Returns:
+        ``kind == "composite"`` 时为 True。
+    """
+    return isinstance(config_json, dict) and config_json.get("kind") == COMPOSITE_KIND

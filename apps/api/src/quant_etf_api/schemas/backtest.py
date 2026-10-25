@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from quant_etf_api.domain.common.enums import DEFAULT_EXECUTION_MODEL, ExecutionModel
 from quant_etf_api.schemas.types import UtcDatetime
@@ -59,11 +59,48 @@ class BacktestCreateRequest(BaseModel):
     params: dict[str, Any] | None = None
     enable_benchmark: bool = True
     benchmark_index_code: str = "000300"
+    benchmark_mix: list[BenchmarkMixItem] | None = None
     execution_model: ExecutionModel = DEFAULT_EXECUTION_MODEL
     data_quality_mode: Literal["warn", "strict"] = "warn"
     purpose: Literal["research", "validation", "monitor"] = "research"
     purpose_reason: str | None = None
     cost_bps: float | None = None
+
+    @model_validator(mode="after")
+    def _check_benchmark_mix(self) -> "BacktestCreateRequest":
+        """混合基准：指数不重复、最多 5 个、权重之和不超过 1（其余为现金）。
+
+        Returns:
+            校验通过的原对象。
+
+        Raises:
+            ValueError: 规则不满足时抛出。
+        """
+        if not self.benchmark_mix:
+            return self
+        codes = [item.index_code for item in self.benchmark_mix]
+        if len(set(codes)) != len(codes):
+            raise ValueError("混合基准的指数不能重复")
+        if len(codes) > 5:
+            raise ValueError("混合基准最多 5 个指数")
+        if sum(item.weight for item in self.benchmark_mix) > 1 + 1e-9:
+            raise ValueError("混合基准权重之和不能超过 1（不足部分为现金）")
+        return self
+
+
+class BenchmarkMixItem(BaseModel):
+    """混合基准中的一个指数。
+
+    Attributes:
+        index_code: 指数代码。
+        weight: 权重（0-1）；全部指数权重之和不足 1 的部分为现金（收益 0）。
+    """
+
+    index_code: str = Field(min_length=1)
+    weight: float = Field(gt=0.0, le=1.0)
+
+
+BacktestCreateRequest.model_rebuild()
 
 
 class BacktestMetrics(BaseModel):
@@ -813,3 +850,41 @@ class ComparisonDailyResponse(BaseModel):
 
     a_daily: list[ComparisonDailyPoint]
     b_daily: list[ComparisonDailyPoint]
+
+
+class AttributionAssetItem(BaseModel):
+    """单个资产的收益贡献。"""
+
+    index_code: str
+    contribution_pct: float
+    held_days: int
+    average_weight: float
+    win_rate: float
+    missing_days: int = 0
+
+
+class AttributionBucketItem(BaseModel):
+    """一段区间的收益分解（百分点，逐日算术和）。"""
+
+    label: str
+    days: int
+    portfolio_pct: float
+    benchmark_pct: float | None = None
+    timing_pct: float | None = None
+    selection_pct: float | None = None
+    explained_pct: float
+    residual_pct: float
+
+
+class BacktestAttribution(BaseModel):
+    """回测收益归因：资产贡献 + 择时 / 选择 / 残差分解（读取路径现算，不重跑）。"""
+
+    backtest_id: str
+    execution_model: str
+    approximate: bool
+    has_benchmark: bool
+    benchmark_label: str | None = None
+    total: AttributionBucketItem
+    yearly: list[AttributionBucketItem]
+    assets: list[AttributionAssetItem]
+    note: str

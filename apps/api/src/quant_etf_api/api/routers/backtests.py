@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from quant_etf_api.api.deps import get_db
 from quant_etf_api.infra.job_queue.queue import backtest_job_key, get_job_queue
 from quant_etf_api.schemas.backtest import (
+    BacktestAttribution,
     BacktestCancelResponse,
     BacktestComparisonCreateRequest,
     BacktestComparisonDetail,
@@ -251,6 +252,18 @@ def get_backtest_daily(
 ) -> list[BacktestDailyResult]:
     """返回回测每日组合绩效，用于权益曲线和回撤图渲染。"""
     return BacktestService(db).get_daily_results(backtest_id)
+
+
+@router.get("/backtests/{backtest_id}/attribution", response_model=BacktestAttribution)
+def get_backtest_attribution(backtest_id: str, db: Session = Depends(get_db)) -> BacktestAttribution:
+    """收益归因：资产贡献与择时 / 选择 / 残差分解（读取路径现算，只读）。"""
+    try:
+        result = BacktestService(db).get_attribution(backtest_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"回测 {backtest_id} 不存在")
+    return result
 
 
 @router.get("/backtests/{backtest_id}/index-results", response_model=list[BacktestIndexResult])

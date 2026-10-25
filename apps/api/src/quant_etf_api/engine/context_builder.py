@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from quant_etf_api.domain.portfolio.risk_model import ReturnPanel
 from quant_etf_api.domain.portfolio.universe import build_universe_items
 from quant_etf_api.domain.strategies.timing_proxy import (
     TimingProxySelection,
@@ -68,6 +69,8 @@ class ContextBuilder:
         market_shape_refs: set[str] | None = None,
         previous_timing_regime: str | None = None,
         timing_state: TimingState | None = None,
+        current_holdings: dict[str, float] | None = None,
+        return_panel: ReturnPanel | None = None,
     ) -> EngineContext:
         """构建引擎上下文（实时和回测统一入口）。
 
@@ -88,12 +91,15 @@ class ContextBuilder:
                 供 ``on_degraded=hold_previous`` 使用）；实时模式忽略。
             timing_state: 上一决策日结束时的择时状态（仅回测模式由主循环传入）；
                 实时模式在择时依赖历史时回放最近交易日重建，忽略该参数。
+            current_holdings: 调仓前实际持仓（回测由主循环传入；实时由状态回放传入）。
+            return_panel: 逐日收益面板（回测由主循环一次性构建后传入）；实时模式在
+                配置需要收益历史时按需只读加载。
 
         Returns:
             填充完成的 EngineContext。
         """
         if all_bars is not None:
-            return self._build_backtest(
+            context = self._build_backtest(
                 config,
                 trade_date,
                 index_codes,
@@ -105,7 +111,38 @@ class ContextBuilder:
                 previous_timing_regime,
                 timing_state,
             )
-        return self._build_live(config, trade_date)
+            context.return_panel = return_panel
+        else:
+            context = self._build_live(config, trade_date)
+            if config.return_window is not None:
+                context.return_panel = return_panel or self._load_live_return_panel(
+                    config, context
+                )
+        context.current_holdings = current_holdings
+        return context
+
+    def _load_live_return_panel(
+        self, config: StrategyConfig, context: EngineContext
+    ) -> ReturnPanel:
+        """实时路径：只读加载风险平价 / 波动率目标所需的收益面板。
+
+        Args:
+            config: 策略配置（``return_window`` 非空）。
+            context: 已构建的实时上下文（决定资产与有效交易日）。
+
+        Returns:
+            覆盖候选资产、窗口足够长的收益面板。
+        """
+        from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
+
+        window = int(config.return_window or 0)
+        codes = [item["index_code"] for item in context.universe]
+        # 交易日约为自然日的 1/1.45，多取一些以覆盖长假
+        start = context.trade_date - timedelta(days=int(window * 1.7) + 15)
+        bars = IndexDailyBarRepository(self._db).find_all_date_range(
+            start, context.trade_date, index_codes=codes
+        )
+        return ReturnPanel.from_bars(bars, codes)
 
     def insufficient_factors(self, context: EngineContext) -> dict[str, str]:
         """识别本次决策中数据不足或计算失败的因子，供服务层生成结构化告警。

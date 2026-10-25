@@ -74,6 +74,36 @@
 
       <!-- 策略配置模块 -->
       <div v-if="activeTab === 'config'" class="config-grid">
+        <!-- 组合策略成员 -->
+        <div v-if="isComposite" class="config-card">
+          <div class="config-header">组合成员 (Composite)</div>
+          <div class="config-body">
+            <div class="config-section">
+              <div v-for="member in compositeConfig?.members ?? []" :key="member.strategy_id" class="config-row">
+                <router-link :to="`/strategies/${member.strategy_id}`" class="config-key mono">
+                  {{ member.strategy_id }}
+                </router-link>
+                <span class="config-val">{{ (member.weight * 100).toFixed(1) }}%</span>
+              </div>
+              <div v-if="(compositeConfig?.cash_weight ?? 0) > 0" class="config-row">
+                <span class="config-key">现金</span>
+                <span class="config-val">{{ ((compositeConfig?.cash_weight ?? 0) * 100).toFixed(1) }}%</span>
+              </div>
+              <div class="config-row">
+                <span class="config-key">权重再平衡</span>
+                <span class="config-val">
+                  {{ compositeConfig?.rebalance ? formatRebalanceSchedule(compositeConfig.rebalance) : '每日（恒定比例）' }}
+                </span>
+              </div>
+            </div>
+            <div class="config-desc">
+              成员各自保留择时、风控与调仓日程；组合持仓按成员权重合成后统一记账，成员间方向相反的交易被轧差。
+              组合策略不支持稳健性扫描、优化会话与研究批量评估，请对成员策略分别执行。
+            </div>
+          </div>
+        </div>
+
+        <template v-if="!isComposite">
         <!-- 资产范围 -->
         <div v-if="indexCodesList.length > 0" class="config-card">
           <div class="config-header">资产范围</div>
@@ -264,6 +294,10 @@
                 <span class="config-key">Bottom N</span>
                 <span class="config-val">{{ rankConfig.bottom_n }}</span>
               </div>
+              <div v-if="rankConfig.buffer_n" class="config-row">
+                <span class="config-key">缓冲带</span>
+                <span class="config-val">老持仓排名 ≤ {{ (rankConfig.top_n ?? 0) + rankConfig.buffer_n }} 时保留</span>
+              </div>
               <div v-if="rankConfig.momentum_factor" class="config-row">
                 <span class="config-key">动量子因子</span>
                 <span class="config-val mono">{{ factorLabel(rankConfig.momentum_factor) }}</span>
@@ -303,7 +337,15 @@
             <div class="config-section">
               <div class="config-row">
                 <span class="config-key">分配方法</span>
-                <span class="config-val">{{ portfolioConfig.method }}</span>
+                <span class="config-val">{{ portfolioMethodLabel(portfolioConfig.method) }}</span>
+              </div>
+              <div v-if="portfolioConfig.method === 'inverse_vol'" class="config-row">
+                <span class="config-key">波动率因子</span>
+                <span class="config-val mono">{{ factorLabel(portfolioConfig.vol_factor ?? '') }}</span>
+              </div>
+              <div v-if="portfolioConfig.method === 'risk_parity'" class="config-row">
+                <span class="config-key">协方差窗口</span>
+                <span class="config-val">{{ portfolioConfig.cov_window ?? 60 }} 个交易日（历史不足时退回等权）</span>
               </div>
               <div v-if="portfolioConfig.timing_exposure" class="config-row">
                 <span class="config-key">择时仓位</span>
@@ -346,6 +388,27 @@
                 <span class="config-key">最低现金</span>
                 <span class="config-val">{{ (riskConfig.min_cash_ratio * 100).toFixed(0) }}%</span>
               </div>
+              <div v-if="riskConfig.vol_target" class="config-row">
+                <span class="config-key">波动率目标</span>
+                <span class="config-val">
+                  年化 {{ (riskConfig.vol_target.target * 100).toFixed(1) }}%（{{ riskConfig.vol_target.window ?? 60 }} 日协方差，只降不加）
+                </span>
+              </div>
+              <div v-if="riskConfig.drawdown_stop" class="config-row">
+                <span class="config-key">回撤止损</span>
+                <span class="config-val">
+                  回撤 {{ (riskConfig.drawdown_stop.threshold * 100).toFixed(1) }}% →
+                  仓位 ≤ {{ ((riskConfig.drawdown_stop.exposure ?? 0) * 100).toFixed(0) }}%，
+                  冷却 {{ riskConfig.drawdown_stop.cooldown_days ?? 20 }} 日
+                </span>
+              </div>
+              <div v-if="riskConfig.trailing_stop" class="config-row">
+                <span class="config-key">移动止损</span>
+                <span class="config-val">
+                  自入场高点回撤 {{ (riskConfig.trailing_stop.threshold * 100).toFixed(1) }}% 清出，
+                  冷却 {{ riskConfig.trailing_stop.cooldown_days ?? 20 }} 日
+                </span>
+              </div>
             </div>
             <div v-else class="config-empty">未配置（无风控）</div>
           </div>
@@ -372,10 +435,22 @@
                 <span class="config-key">口径</span>
                 <span class="config-val">两腿异频：选股腿日只换成分、维持当前总仓位；总仓位仅在风险腿日按择时目标调整</span>
               </div>
+              <div v-if="rebalanceConfig.band" class="config-row">
+                <span class="config-key">偏离阈值</span>
+                <span class="config-val">
+                  <template v-if="rebalanceConfig.band.min_turnover != null">
+                    换手 &lt; {{ (rebalanceConfig.band.min_turnover * 100).toFixed(1) }}% 跳过；
+                  </template>
+                  <template v-if="rebalanceConfig.band.max_drift != null">
+                    偏离 &gt; {{ (rebalanceConfig.band.max_drift * 100).toFixed(1) }}% 时回到最近目标
+                  </template>
+                </span>
+              </div>
             </div>
             <div v-else class="config-empty">未配置（默认每日调仓，两腿同频）</div>
           </div>
         </div>
+        </template>
 
       </div>
 
@@ -621,7 +696,7 @@
           </span>
           <span v-if="allocation.plan?.method" class="summary-item">
             <span class="summary-label">方法</span>
-            <span class="summary-val">{{ allocation.plan.method === 'equal_weight' ? '等权' : allocation.plan.method === 'score_weight' ? '得分加权' : allocation.plan.method }}</span>
+            <span class="summary-val">{{ portfolioMethodLabel(allocation.plan.method) }}</span>
           </span>
         </div>
 
@@ -690,6 +765,53 @@
           <span class="empty-icon">📋</span>
           <p>当前无资产通过策略筛选条件</p>
           <p class="hint-sub">所有标的被过滤规则剔除，或因子数据尚未就绪</p>
+        </div>
+
+        <!-- 路径依赖回放状态 -->
+        <div v-if="allocation.plan?.path_state" class="alloc-card">
+          <div class="alloc-header">路径状态（回放重建）</div>
+          <div class="alloc-body">
+            <div class="alloc-row">
+              <span class="alloc-key">回放起点</span>
+              <span class="alloc-val">{{ allocation.plan.path_state.replay_start }}（结果取决于回放起点）</span>
+            </div>
+            <div class="alloc-row">
+              <span class="alloc-key">今日成交</span>
+              <span class="alloc-val">
+                {{ allocation.plan.path_state.rebalance_due ? '需要调仓（下方为目标持仓）' : '无需调仓（下方为当前持仓）' }}
+                <template v-if="allocation.plan.path_state.reason">· {{ pathReasonLabel(allocation.plan.path_state.reason) }}</template>
+              </span>
+            </div>
+            <div v-if="allocation.plan.path_state.drawdown_stop_days_left" class="alloc-row">
+              <span class="alloc-key">回撤止损</span>
+              <span class="alloc-val">止损中，剩余 {{ allocation.plan.path_state.drawdown_stop_days_left }} 个决策日</span>
+            </div>
+            <div
+              v-if="Object.keys(allocation.plan.path_state.trailing_stop_cooldowns ?? {}).length > 0"
+              class="alloc-row"
+            >
+              <span class="alloc-key">移动止损冷却</span>
+              <span class="alloc-val">
+                <span v-for="(days, code) in allocation.plan.path_state.trailing_stop_cooldowns" :key="code">
+                  {{ code }}（{{ days }} 日）
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 组合策略成员 -->
+        <div v-if="allocation.plan?.members?.length" class="alloc-card">
+          <div class="alloc-header">组合成员</div>
+          <div class="alloc-body">
+            <div v-for="member in allocation.plan.members" :key="member.strategy_id" class="alloc-row">
+              <span class="alloc-key mono">{{ member.strategy_id }}（{{ (member.weight * 100).toFixed(0) }}%）</span>
+              <span class="alloc-val">
+                <span v-for="(w, code) in member.positions" :key="code">{{ code }} {{ (w * 100).toFixed(1) }}% </span>
+                <template v-if="Object.keys(member.positions).length === 0">空仓</template>
+              </span>
+            </div>
+          </div>
         </div>
 
         <!-- 仓位分配 -->
@@ -958,7 +1080,12 @@
               </button>
             </div>
 
-            <StrategyConfigForm v-if="!editAdvancedMode" v-model="editConfigJson" />
+            <CompositeStrategyForm
+              v-if="isComposite && !editAdvancedMode"
+              v-model="editConfigJson"
+              :self-id="strategyId"
+            />
+            <StrategyConfigForm v-else-if="!editAdvancedMode" v-model="editConfigJson" />
 
             <template v-else>
               <textarea v-model="editConfigText" class="form-textarea mono" rows="14"></textarea>
@@ -998,10 +1125,12 @@ import {
 } from '../api/robustness'
 import { clearStrategyResearchData, runAllocation } from '../api/strategies'
 import StrategyConfigForm from '../components/StrategyConfigForm.vue'
+import CompositeStrategyForm from '../components/CompositeStrategyForm.vue'
 import { useStrategyStore } from '../stores/strategies'
 import { toast } from '../stores/toast'
 import type {
   AllocationResponse,
+  CompositeConfigJson,
   DailyBar,
   FactorSpec,
   RobustnessCoverage,
@@ -1074,7 +1203,33 @@ function onDegradedLabel(policy: TimingOnDegraded | undefined): string {
   return '按中性（默认）'
 }
 const filterConfig = computed(() => configJson.value.filters as { logic?: string; rules?: Array<{ factor: string; op: string; value?: number | number[]; compare_to?: string; missing_strategy?: string }>; groups?: TimingRuleGroupJson[] } | undefined)
-const rankConfig = computed(() => configJson.value.rank as { order?: string; top_n?: number; bottom_n?: number; momentum_factor?: string; valuation_factor?: string } | undefined)
+const rankConfig = computed(() => configJson.value.rank as { order?: string; top_n?: number; bottom_n?: number; momentum_factor?: string; valuation_factor?: string; buffer_n?: number } | undefined)
+/** 是否为组合策略（kind=composite） */
+const isComposite = computed(() => configJson.value.kind === 'composite')
+const compositeConfig = computed(() => (isComposite.value ? (configJson.value as unknown as CompositeConfigJson) : null))
+
+/** 仓位分配方法的中文名 */
+function portfolioMethodLabel(method: string | undefined): string {
+  const labels: Record<string, string> = {
+    equal_weight: '等权',
+    score_weight: '得分加权',
+    winner_take_all: '赢家通吃',
+    inverse_vol: '波动率倒数加权',
+    risk_parity: '风险平价',
+    composite: '组合策略合成',
+  }
+  return method ? (labels[method] ?? method) : ''
+}
+
+/** 路径状态说明 */
+function pathReasonLabel(reason: string): string {
+  const labels: Record<string, string> = {
+    band_drift: '持仓偏离超过阈值，回到最近目标',
+    band_skip: '所需换手低于阈值，跳过本次调仓',
+    risk_stop: '止损触发，强制调仓',
+  }
+  return labels[reason] ?? reason
+}
 
 /** 因子别名声明：别名 → 模板与参数 */
 const factorAliasMap = computed(
@@ -1110,7 +1265,13 @@ function factorLabel(ref: string): string {
 }
 const portfolioConfig = computed(() => (
   configJson.value.portfolio ?? { method: 'equal_weight', default_exposure: 0.5 }
-) as { method?: string; timing_exposure?: Record<string, number>; default_exposure?: number })
+) as {
+  method?: string
+  timing_exposure?: Record<string, number>
+  default_exposure?: number
+  vol_factor?: string
+  cov_window?: number
+})
 
 /** timing_exposure 只配置了部分 regime 时缺失的档位（未配置 timing_exposure 时按默认三档表，不算缺档） */
 const missingExposureRegimes = computed((): string[] => {
@@ -1118,9 +1279,20 @@ const missingExposureRegimes = computed((): string[] => {
   if (!exposure || Object.keys(exposure).length === 0) return []
   return ['offensive', 'neutral', 'defensive'].filter(regime => !(regime in exposure))
 })
-const riskConfig = computed(() => configJson.value.risk as { max_asset_weight?: number; max_portfolio_exposure?: number; min_cash_ratio?: number } | undefined)
+const riskConfig = computed(() => configJson.value.risk as {
+  max_asset_weight?: number
+  max_portfolio_exposure?: number
+  min_cash_ratio?: number
+  vol_target?: { target: number; window?: number; floor?: number } | null
+  drawdown_stop?: { threshold: number; exposure?: number; cooldown_days?: number } | null
+  trailing_stop?: { threshold: number; cooldown_days?: number } | null
+} | undefined)
 type RebalanceSchedule = { frequency?: string; day_of_week?: number; week_parity?: string; day_of_month?: number }
-const rebalanceConfig = computed(() => configJson.value.rebalance as (RebalanceSchedule & { selection?: RebalanceSchedule; risk?: RebalanceSchedule }) | undefined)
+const rebalanceConfig = computed(() => configJson.value.rebalance as (RebalanceSchedule & {
+  selection?: RebalanceSchedule
+  risk?: RebalanceSchedule
+  band?: { min_turnover?: number | null; max_drift?: number | null } | null
+}) | undefined)
 
 /** 两条腿的日程是否等价（等价时展示为改造前的单腿口径） */
 const legsAreIdentical = computed((): boolean => {

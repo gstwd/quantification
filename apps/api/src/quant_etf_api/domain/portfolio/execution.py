@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
@@ -71,6 +71,9 @@ class DayExecution:
         missing_bar_count: 受原始行情缺失影响的持仓资产数（数据缺口统计口径）。
         exposure_turnover: 当日成交中总仓位变动带来的单边换手 |ΣW新 − ΣW旧| / 2，
             是换手里"择时缩放总仓位"部分的下限估计；只用于择时观测，不参与记账。
+        pre_trade_positions: 成交前一刻的实际持仓（开盘模式为隔夜漂移后的开盘持仓，
+            收盘模式为漂移到成交日收盘的持仓；无成交时与 positions 相同）。
+            组合策略据此在成员间轧差换手。
     """
 
     portfolio_return: float
@@ -79,6 +82,7 @@ class DayExecution:
     turnover: float
     missing_bar_count: int
     exposure_turnover: float = 0.0
+    pre_trade_positions: dict[str, float] = field(default_factory=dict)
 
 
 def forward_fill_return_bars(
@@ -328,6 +332,7 @@ class BacktestExecutor:
                 missing_bar_count=count_missing_allocation_assets(
                     previous, trade_date, next_date, quality_bars
                 ),
+                pre_trade_positions=dict(previous),
             )
 
         new_positions = dict(target_positions)
@@ -358,6 +363,7 @@ class BacktestExecutor:
                 previous, new_positions, trade_date, next_date, quality_bars
             ),
             exposure_turnover=exposure_turnover,
+            pre_trade_positions=weights_at_open,
         )
 
     def _step_close(
@@ -382,6 +388,7 @@ class BacktestExecutor:
         Returns:
             当日执行结果。
         """
+        pre_trade = dict(self._holdings)
         if self._pending is not None:
             # 成交腿 = 漂移到今日收盘的实际持仓 → 昨日指令
             turnover = compute_turnover(self._holdings, self._pending)
@@ -403,4 +410,5 @@ class BacktestExecutor:
                 executed, trade_date, next_date, quality_bars
             ),
             exposure_turnover=exposure_turnover,
+            pre_trade_positions=pre_trade,
         )

@@ -134,12 +134,39 @@
         </div>
         <div v-if="form.enable_benchmark" class="form-row" style="margin-top: 8px;">
           <div class="form-section">
+            <label class="form-label">
+              <input v-model="useBenchmarkMix" type="checkbox" />
+              混合基准（如 60% 沪深300 + 40% 现金）
+            </label>
+          </div>
+        </div>
+        <div v-if="form.enable_benchmark && !useBenchmarkMix" class="form-row">
+          <div class="form-section">
             <label class="form-label">基准指数</label>
             <select v-model="form.benchmark_index_code" class="form-select">
               <option v-for="idx in indexes" :key="idx.index_code" :value="idx.index_code">
                 {{ idx.index_code }} {{ idx.index_name }}
               </option>
             </select>
+          </div>
+        </div>
+        <div v-if="form.enable_benchmark && useBenchmarkMix" class="form-section">
+          <div v-for="(item, i) in benchmarkMix" :key="i" class="form-row">
+            <select v-model="item.index_code" class="form-select">
+              <option v-for="idx in indexes" :key="idx.index_code" :value="idx.index_code">
+                {{ idx.index_code }} {{ idx.index_name }}
+              </option>
+            </select>
+            <input v-model.number="item.weight" type="number" min="1" max="100" class="form-input" style="max-width: 100px;" />
+            <span>%</span>
+            <button type="button" class="btn-link" @click="benchmarkMix.splice(i, 1)">移除</button>
+          </div>
+          <div class="form-row">
+            <button type="button" class="btn-link" :disabled="benchmarkMix.length >= 5" @click="benchmarkMix.push({ index_code: '000905', weight: 20 })">
+              + 添加指数
+            </button>
+            <span class="form-hint">现金 {{ Math.max(0, 100 - benchmarkMixTotal).toFixed(0) }}%（收益按 0 计）</span>
+            <span v-if="benchmarkMixTotal > 100" class="form-error">权重之和不能超过 100%</span>
           </div>
         </div>
       </div>
@@ -196,6 +223,10 @@ const form = reactive({
 
 const submitting = ref(false)
 const error = ref('')
+/** 是否启用混合基准；权重用百分数编辑 */
+const useBenchmarkMix = ref(false)
+const benchmarkMix = ref<{ index_code: string; weight: number }[]>([{ index_code: '000300', weight: 60 }])
+const benchmarkMixTotal = computed(() => benchmarkMix.value.reduce((sum, item) => sum + (item.weight || 0), 0))
 
 /** 日期快捷预设 */
 const presets = getDatePresets()
@@ -269,6 +300,9 @@ async function submit() {
       index_codes: form.index_codes,
       enable_benchmark: form.enable_benchmark,
       benchmark_index_code: form.benchmark_index_code,
+      benchmark_mix: form.enable_benchmark && useBenchmarkMix.value
+        ? benchmarkMix.value.map(item => ({ index_code: item.index_code, weight: item.weight / 100 }))
+        : null,
       execution_model: form.execution_model,
       data_quality_mode: form.data_quality_mode,
       purpose: form.purpose,

@@ -1,6 +1,7 @@
 """组合构建模块：根据排名和择时信号分配目标仓位权重。
 
-支持 equal_weight（等权）和 score_weight（得分加权）两种方法。
+支持 equal_weight（等权）、score_weight（得分加权）、winner_take_all（赢家通吃）、
+inverse_vol（波动率倒数加权）与 risk_parity（等风险贡献）。
 """
 
 from __future__ import annotations
@@ -8,7 +9,9 @@ from __future__ import annotations
 import logging
 from typing import Protocol
 
+from quant_etf_api.domain.portfolio.risk_model import covariance, risk_parity_weights
 from quant_etf_api.domain.strategies.models import AssetRanking, TimingSignal
+from quant_etf_api.engine.base import EngineContext
 from quant_etf_api.engine.config import PortfolioConfig, RiskConfig
 
 logger = logging.getLogger(__name__)
@@ -78,6 +81,7 @@ class WeightAllocator(Protocol):
         config: PortfolioConfig,
         rankings: list[AssetRanking],
         timing: TimingSignal | None = None,
+        context: EngineContext | None = None,
     ) -> dict[str, float]:
         """分配目标仓位权重。
 
@@ -85,6 +89,8 @@ class WeightAllocator(Protocol):
             config: 组合配置。
             rankings: 资产排名列表（已排序）。
             timing: 择时信号，None 时默认中性。
+            context: 引擎上下文（inverse_vol 读波动率因子、risk_parity 读收益面板）；
+                其余分配器忽略。
 
         Returns:
             key=index_code, value=目标权重（0-1）。
@@ -100,6 +106,7 @@ class EqualWeightAllocator:
         config: PortfolioConfig,
         rankings: list[AssetRanking],
         timing: TimingSignal | None = None,
+        context: EngineContext | None = None,
     ) -> dict[str, float]:
         """等权分配。"""
         if not rankings:
@@ -120,6 +127,7 @@ class ScoreWeightAllocator:
         config: PortfolioConfig,
         rankings: list[AssetRanking],
         timing: TimingSignal | None = None,
+        context: EngineContext | None = None,
     ) -> dict[str, float]:
         """按得分加权分配。"""
         if not rankings:
@@ -155,6 +163,7 @@ class WinnerTakeAllAllocator:
         config: PortfolioConfig,
         rankings: list[AssetRanking],
         timing: TimingSignal | None = None,
+        context: EngineContext | None = None,
     ) -> dict[str, float]:
         """赢家通吃分配。
 
@@ -175,11 +184,85 @@ class WinnerTakeAllAllocator:
         return {winner.index_code: round(total_exposure, 4)}
 
 
+def _scale_raw_weights(raw: dict[str, float], total_exposure: float) -> dict[str, float]:
+    """把非负原始权重归一化后缩放到目标总仓位（4 位小数）。
+
+    Args:
+        raw: 资产 → 原始权重（如波动率倒数）。
+        total_exposure: 目标总仓位。
+
+    Returns:
+        目标权重；原始权重之和非正时为空。
+    """
+    total = sum(raw.values())
+    if total <= 0:
+        return {}
+    return {code: round(weight / total * total_exposure, 4) for code, weight in raw.items()}
+
+
+class InverseVolAllocator:
+    """波动率倒数加权：权重 ∝ 1 / vol_factor。
+
+    波动率因子缺失的资产已由引擎在评分前剔除（``decision_required_refs``）；
+    非正值视为无效，不参与分配。
+    """
+
+    def allocate(
+        self,
+        config: PortfolioConfig,
+        rankings: list[AssetRanking],
+        timing: TimingSignal | None = None,
+        context: EngineContext | None = None,
+    ) -> dict[str, float]:
+        """按波动率倒数分配。"""
+        if not rankings or context is None or not config.vol_factor:
+            return {}
+        raw: dict[str, float] = {}
+        for ranking in rankings:
+            vol = context.asset_factors.get((ranking.index_code, config.vol_factor))
+            if vol is not None and vol > 0:
+                raw[ranking.index_code] = 1.0 / vol
+        return _scale_raw_weights(raw, resolve_target_exposure(config, timing))
+
+
+class RiskParityAllocator:
+    """等风险贡献：按近 ``cov_window`` 个交易日的日收益协方差求解。
+
+    入选资产在窗口内共同有效的交易日不足窗口一半（至少 20 天）时，退回等权并记 debug
+    日志——新上市指数在回测早期常见，此时协方差不可估。
+    """
+
+    def allocate(
+        self,
+        config: PortfolioConfig,
+        rankings: list[AssetRanking],
+        timing: TimingSignal | None = None,
+        context: EngineContext | None = None,
+    ) -> dict[str, float]:
+        """按等风险贡献分配。"""
+        if not rankings:
+            return {}
+        total_exposure = resolve_target_exposure(config, timing)
+        codes = [r.index_code for r in rankings]
+        weights = None
+        if context is not None and context.return_panel is not None:
+            block = context.return_panel.window(context.trade_date, config.cov_window, codes)
+            cov = covariance(block, max(20, config.cov_window // 2))
+            weights = risk_parity_weights(cov) if cov is not None else None
+        if weights is None:
+            logger.debug("风险平价协方差不可估，退回等权: codes=%s", codes)
+            return {code: round(total_exposure / len(codes), 4) for code in codes}
+        return _scale_raw_weights(
+            {code: float(w) for code, w in zip(codes, weights)}, total_exposure
+        )
+
+
 def build_allocator(method: str) -> WeightAllocator:
     """根据方法名构建权重分配器。
 
     Args:
-        method: 分配方法，equal_weight / score_weight / winner_take_all。
+        method: 分配方法，equal_weight / score_weight / winner_take_all / inverse_vol /
+            risk_parity。
 
     Returns:
         权重分配器实例。
@@ -191,6 +274,8 @@ def build_allocator(method: str) -> WeightAllocator:
         "equal_weight": EqualWeightAllocator(),
         "score_weight": ScoreWeightAllocator(),
         "winner_take_all": WinnerTakeAllAllocator(),
+        "inverse_vol": InverseVolAllocator(),
+        "risk_parity": RiskParityAllocator(),
     }
     if method not in allocators:
         raise ValueError(f"未知的权重分配方法: {method}，可用: {list(allocators.keys())}")

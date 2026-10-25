@@ -87,6 +87,37 @@ _FOLD_DISPLAY_METRICS: list[str] = [
 ]
 
 
+def load_daily_net_series(
+    backtest_repo: BacktestRepository, backtest_id: str | None, cost_bps: float
+) -> dict[date, float]:
+    """把一条成功回测的逐日结果折算为 {交易日: 日净收益（%）}。
+
+    验收第 8~10 项与 Deflated Sharpe 校准共用同一口径：毛收益按换手扣成本。
+
+    Args:
+        backtest_repo: 回测仓库。
+        backtest_id: 回测 ID。
+        cost_bps: 往返交易成本（基点，按单边换手折算）。
+
+    Returns:
+        逐日净收益字典；回测缺失或未成功时为空。
+    """
+    if not backtest_id:
+        return {}
+    row = backtest_repo.find_by_id(backtest_id)
+    if row is None or row.status != "success":
+        return {}
+    daily = backtest_repo.find_daily_results(backtest_id)
+    if not daily:
+        return {}
+    net = net_return_series(
+        [item.portfolio_return for item in daily],
+        [getattr(item, "turnover", None) for item in daily],
+        float(cost_bps),
+    )
+    return {item.trade_date: value for item, value in zip(daily, net)}
+
+
 class OptimizationService:
     """策略优化会话服务，提供 start/evaluate/report/finish 等生命周期操作。"""
 
@@ -152,6 +183,7 @@ class OptimizationService:
         baseline = self._config_svc.get_config(strategy_id)
         if baseline is None:
             raise ValueError(f"基线策略 {strategy_id} 不存在")
+        self._config_svc.require_single(strategy_id, "优化会话")
         baseline_parsed = self._config_svc.get_parsed_config(strategy_id)
         if baseline_parsed is None:
             raise ValueError(f"基线策略 {strategy_id} 配置解析失败")
@@ -889,20 +921,7 @@ class OptimizationService:
         Returns:
             逐日净收益字典；回测缺失或未成功时为空。
         """
-        if not backtest_id:
-            return {}
-        row = self._backtest_repo.find_by_id(backtest_id)
-        if row is None or row.status != "success":
-            return {}
-        daily = self._backtest_repo.find_daily_results(backtest_id)
-        if not daily:
-            return {}
-        net = net_return_series(
-            [item.portfolio_return for item in daily],
-            [getattr(item, "turnover", None) for item in daily],
-            float(cost_bps),
-        )
-        return {item.trade_date: value for item, value in zip(daily, net)}
+        return load_daily_net_series(self._backtest_repo, backtest_id, cost_bps)
 
     def _check_deflated_sharpe(
         self,

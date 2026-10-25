@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import asdict
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -45,6 +45,10 @@ from quant_etf_api.schemas.strategy import (
 from quant_etf_api.services.strategy_config_service import StrategyConfigService
 
 logger = logging.getLogger(__name__)
+
+# 路径状态回放：LIVE 策略至少回放的自然日数；非 LIVE 策略回放的自然日数（约 250 个交易日）
+_MIN_REPLAY_DAYS = 60
+_DEFAULT_REPLAY_DAYS = 365
 
 
 def resolve_effective_date(trade_date: date | None = None) -> date:
@@ -192,6 +196,9 @@ class StrategyDecisionService:
         """
         config = self.get_config(strategy_id)
         if config is None:
+            composite = self._config_svc.get_composite_config(strategy_id)
+            if composite is not None:
+                return self._composite_allocation(composite, trade_date)
             return None
 
         # P4 运行期兜底：引用未知/停用因子时快速失败
@@ -203,6 +210,10 @@ class StrategyDecisionService:
         logger.info("[strategy] 实时分配启动: strategy=%s trade_date=%s", strategy_id, trade_date)
         context = self.build_live_context(config, trade_date)
         result = self.run(config, context)
+        path_plan: dict[str, Any] | None = None
+        if config.needs_path_state:
+            # 排名缓冲 / 偏离调仓 / 风控叠加层依赖持仓与净值路径：回放重建后再决策
+            result, path_plan = self._decide_with_replay(strategy_id, config, context)
 
         # 构建结构化警告：未知因子已被配置校验拦截，这里只透传可执行的
         # 计算失败 / 数据不足，避免"看起来正常但结果为空"的静默问题。
@@ -252,20 +263,146 @@ class StrategyDecisionService:
             elapsed_ms,
         )
 
+        plan: dict[str, Any] = {
+            "positions": result.positions,
+            "total_exposure": result.total_exposure,
+            "cash_ratio": result.cash_ratio,
+            "method": config.portfolio.method,
+            "timing_target_exposure": result.timing_target_exposure,
+        }
+        if path_plan is not None:
+            plan.update(path_plan)
         return AllocationResponse(
             timing=asdict(result.timing) if result.timing else {},
             rankings=[asdict(r) for r in result.rankings],
-            plan={
-                "positions": result.positions,
-                "total_exposure": result.total_exposure,
-                "cash_ratio": result.cash_ratio,
-                "method": config.portfolio.method,
-                "timing_target_exposure": result.timing_target_exposure,
-            },
+            plan=plan,
             data_date=context.trade_date,
             pipeline_detail=asdict(result.pipeline_detail) if result.pipeline_detail else None,
             warnings=warnings,
         )
+
+    def _composite_allocation(
+        self, composite: Any, trade_date: date | None
+    ) -> AllocationResponse:
+        """组合策略实时分配：各成员各自决策后按目标权重合成持仓。
+
+        成员按各自配置走完整的实时决策（含路径依赖回放），组合层只做加权合成；
+        成员权重按目标权重计（实时不追踪组合层的权重漂移）。
+
+        Args:
+            composite: 组合策略配置。
+            trade_date: 指定交易日。
+
+        Returns:
+            合成后的分配结果；plan.members 给出各成员的权重与持仓。
+
+        Raises:
+            ValueError: 成员不存在或成员决策失败时抛出。
+        """
+        combined: dict[str, float] = {}
+        members: list[dict[str, Any]] = []
+        warnings: list[BacktestWarning] = []
+        data_dates: list[date] = []
+        for member in composite.members:
+            response = self.run_allocation(member.strategy_id, trade_date)
+            if response is None:
+                raise ValueError(f"成员策略 {member.strategy_id} 不存在")
+            positions = dict(response.plan.get("positions") or {})
+            for code, weight in positions.items():
+                combined[code] = combined.get(code, 0.0) + member.weight * float(weight)
+            members.append(
+                {"strategy_id": member.strategy_id, "weight": member.weight, "positions": positions}
+            )
+            warnings.extend(
+                warning.model_copy(
+                    update={"message": f"[成员 {member.strategy_id}] {warning.message}"}
+                )
+                for warning in response.warnings
+            )
+            if response.data_date is not None:
+                data_dates.append(response.data_date)
+        positions = {code: round(weight, 4) for code, weight in sorted(combined.items()) if weight > 0}
+        exposure = round(sum(positions.values()), 4)
+        return AllocationResponse(
+            timing={},
+            rankings=[],
+            plan={
+                "positions": positions,
+                "total_exposure": exposure,
+                "cash_ratio": round(1.0 - exposure, 4),
+                "method": "composite",
+                "members": members,
+                "cash_weight": composite.cash_weight,
+            },
+            data_date=min(data_dates) if data_dates else None,
+            pipeline_detail=None,
+            warnings=warnings,
+        )
+
+    def _replay_start(self, strategy_id: str, effective_date: date) -> date:
+        """路径状态回放起点：LIVE 策略取上线日（至少回放 60 个自然日），其余回放约一年。
+
+        Args:
+            strategy_id: 策略 ID。
+            effective_date: 本次决策的有效交易日。
+
+        Returns:
+            回放起点。
+        """
+        from quant_etf_api.infra.db.models.core import StrategyLifecycleModel
+
+        floor = effective_date - timedelta(days=_MIN_REPLAY_DAYS)
+        lifecycle = self._db.get(StrategyLifecycleModel, strategy_id)
+        if lifecycle is not None and lifecycle.lifecycle_status == "LIVE" and lifecycle.live_at:
+            return min(lifecycle.live_at, floor)
+        return effective_date - timedelta(days=_DEFAULT_REPLAY_DAYS)
+
+    def _decide_with_replay(
+        self, strategy_id: str, config: StrategyConfig, context: Any
+    ) -> tuple[Any, dict[str, Any]]:
+        """回放路径状态后重新执行今日管线，并按回测主循环的规则合成今日目标。
+
+        只读：回放走 ``persist=False`` 的回测主循环。
+
+        Args:
+            strategy_id: 策略 ID。
+            config: 策略配置（``needs_path_state`` 为真）。
+            context: 今日实时上下文（被注入回放得到的调仓前持仓）。
+
+        Returns:
+            (今日引擎结果, 写入 plan 的路径信息：回放起点、是否需要成交、目标与当前持仓)。
+        """
+        from quant_etf_api.services.backtest_service import BacktestService
+
+        start = self._replay_start(strategy_id, context.trade_date)
+        backtest_svc = BacktestService(self._db)
+        state = backtest_svc.replay_path_state(strategy_id, config, start, context.trade_date)
+        context.current_holdings = state.composition_base
+        result = self.run(config, context)
+        target = backtest_svc.decide_with_path_state(
+            config, result, context.trade_date, state, context.return_panel
+        )
+        holdings = {k: round(v, 4) for k, v in sorted(state.composition_base.items()) if v > 0}
+        positions = (
+            {k: round(v, 4) for k, v in sorted(target.positions.items()) if v > 0}
+            if target.should_rebalance
+            else holdings
+        )
+        exposure = round(sum(positions.values()), 4)
+        overlay = state.overlay_state
+        return result, {
+            "positions": positions,
+            "total_exposure": exposure,
+            "cash_ratio": round(1.0 - exposure, 4),
+            "path_state": {
+                "replay_start": start.isoformat(),
+                "rebalance_due": target.should_rebalance,
+                "reason": target.reason,
+                "current_holdings": holdings,
+                "drawdown_stop_days_left": overlay.stop_days_left if overlay else None,
+                "trailing_stop_cooldowns": dict(overlay.asset_cooldowns) if overlay else {},
+            },
+        }
 
     # ==================================================================
     # 持久化执行（策略运行任务）

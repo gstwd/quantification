@@ -28,6 +28,15 @@ class Settings(BaseSettings):
 
     # 定时调度
     schedule_enabled: bool = Field(default=True, description="是否启用每日自动全局数据同步")
+    lifecycle_auto_refresh_enabled: bool = Field(
+        default=True,
+        description="每日数据同步完成后是否自动刷新 LIVE 策略健康快照（只做诊断与站内告警）",
+    )
+    lifecycle_scheduled_keep: int = Field(
+        default=5,
+        ge=1,
+        description="每条 LIVE 策略保留的定时监控回测条数（手动刷新产生的不清理）",
+    )
     schedule_time: str = Field(
         default="17:30", description="每日全局数据自动同步触发时间（HH:MM），默认收盘后 17:30"
     )
@@ -144,7 +153,10 @@ class Settings(BaseSettings):
         default=0.95,
         ge=0.0,
         le=1.0,
-        description="验收第 8 项：候选全区间净收益的 Deflated Sharpe 下限（N 取研究线累计值）",
+        description=(
+            "验收第 8 项：候选 − 基线逐日超额净收益的 Deflated Sharpe 下限（N 取研究线累计值；"
+            "门槛的实际假阳性率与功效用 research dsr-calibrate 校准）"
+        ),
     )
     acceptance_min_diff_episodes: int = Field(
         default=8,

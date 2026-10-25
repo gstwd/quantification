@@ -419,6 +419,11 @@
         </div>
       </div>
 
+      <!-- 收益归因（读取路径现算） -->
+      <div v-if="store.current" class="metrics-section">
+        <AttributionPanel :backtest-id="store.current.backtest_id" :status="store.current.status" />
+      </div>
+
       <!-- 有效候选池时间线（C6） -->
       <div v-if="candidatePool" class="metrics-section">
         <div class="section-label">
@@ -539,6 +544,7 @@ import { RouterLink } from 'vue-router'
 import type { BenchmarkIndex } from '../types/api'
 import { fetchBenchmarkIndexes } from '../api/market_data'
 import HelpTip from '../components/HelpTip.vue'
+import AttributionPanel from '../components/backtest/AttributionPanel.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
 import { useBacktestStore } from '../stores/backtests'
 import { usePolling } from '../composables/usePolling'

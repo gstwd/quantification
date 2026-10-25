@@ -88,6 +88,11 @@ _KNOB_PRIORITY: tuple[tuple[str, int], ...] = (
     ("timing.thresholds", 1),
     ("timing.proxy_index_codes", 2),
     ("timing.", 3),
+    # 路径依赖风控与偏离调仓的阈值同样容易被调到"刚好"，与择时参数同级优先扫
+    ("risk.drawdown_stop", 3),
+    ("risk.trailing_stop", 3),
+    ("risk.vol_target", 3),
+    ("rebalance.band", 3),
     ("filters.rules", 4),
     ("filters.", 5),
     ("score.factors", 6),
@@ -296,6 +301,7 @@ class RobustnessService:
         baseline = self._config_svc.get_config(strategy_id)
         if baseline is None:
             raise ValueError(f"基线策略 {strategy_id} 不存在")
+        self._config_svc.require_single(strategy_id, "稳健性评估")
         boundaries = load_period_boundaries()
         trade_dates = self._index_bar_repo.find_all_trading_dates(
             boundaries.research_start, boundaries.research_end

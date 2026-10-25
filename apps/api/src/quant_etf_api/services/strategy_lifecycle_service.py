@@ -34,6 +34,7 @@ from quant_etf_api.domain.research.periods import (
     PeriodBoundaries,
 )
 from quant_etf_api.domain.research.stability import compute_stability_metrics
+from quant_etf_api.engine.config import is_composite_config
 from quant_etf_api.factors.catalog import get_factor_template_registry
 from quant_etf_api.factors.evaluation import analyze_backtest_score_ic, analyze_ic
 from quant_etf_api.infra.db.base import utcnow
@@ -60,6 +61,15 @@ from quant_etf_api.services.strategy_config_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 健康快照的触发来源（strategy_health_snapshot.trigger）
+TRIGGER_MANUAL = "manual"
+TRIGGER_SCHEDULED = "scheduled"
+
+
+def _scheduled_reason(strategy_id: str) -> str:
+    """定时监控回测的 purpose_reason（清理时据此识别，手动刷新的回测不受影响）。"""
+    return f"lifecycle scheduled refresh: {strategy_id}"
 
 # 详情页默认返回的最近快照条数
 DEFAULT_SNAPSHOT_LIMIT = 24
@@ -168,7 +178,22 @@ class StrategyLifecycleService:
                 "研究期区间只能用于研究，不能作为实盘监控起点。"
             )
 
+        frozen_snapshot: dict[str, Any] = {
+            "strategy_id": detail.strategy_id,
+            "display_name": detail.display_name,
+            "version": detail.version,
+            "frequency": detail.frequency,
+            "config_json": detail.config_json,
+        }
         config_hash = compute_config_hash(detail.config_json)
+        composite = (
+            self._config_svc.get_composite_config(strategy_id)
+            if is_composite_config(detail.config_json)
+            else None
+        )
+        if composite is not None:
+            # 组合策略冻结时连同成员快照一起冻结，成员之后的修改不影响监控对象
+            frozen_snapshot, config_hash = self._config_svc.build_composite_snapshot(composite)
         research_backtest_id = self._find_reusable_research_backtest(
             strategy_id, config_hash, boundaries
         )
@@ -199,13 +224,7 @@ class StrategyLifecycleService:
                 lifecycle_status="LIVE",
                 live_at=live_at,
                 frozen_config_hash=config_hash,
-                frozen_config_snapshot={
-                    "strategy_id": detail.strategy_id,
-                    "display_name": detail.display_name,
-                    "version": detail.version,
-                    "frequency": detail.frequency,
-                    "config_json": detail.config_json,
-                },
+                frozen_config_snapshot=frozen_snapshot,
                 research_backtest_id=research_backtest_id,
                 baseline_distribution=distribution,
                 note=req.note,
@@ -219,13 +238,7 @@ class StrategyLifecycleService:
             row.live_at = live_at
             row.retired_at = None
             row.frozen_config_hash = config_hash
-            row.frozen_config_snapshot = {
-                "strategy_id": detail.strategy_id,
-                "display_name": detail.display_name,
-                "version": detail.version,
-                "frequency": detail.frequency,
-                "config_json": detail.config_json,
-            }
+            row.frozen_config_snapshot = frozen_snapshot
             row.research_backtest_id = research_backtest_id
             row.baseline_distribution = distribution
             row.note = req.note or row.note
@@ -278,8 +291,116 @@ class StrategyLifecycleService:
             raise ValueError(f"策略 {strategy_id} 状态更新后详情不可用")
         return result
 
+    def refresh_all_live(self) -> dict[str, Any]:
+        """定时任务：逐个刷新 LIVE 策略健康快照，等级恶化或刷新失败时写站内告警。
+
+        只做诊断与提醒：不改配置、不改生命周期状态。每条策略只保留最近
+        ``lifecycle_scheduled_keep`` 条定时监控回测（手动刷新的不动）。
+
+        Returns:
+            ``{"refreshed": [...], "failed": [...], "degraded": [...], "pruned": n}``。
+        """
+        from quant_etf_api.services.alert_service import (  # noqa: PLC0415
+            KIND_HEALTH_DEGRADED,
+            KIND_REFRESH_FAILED,
+            AlertService,
+            is_degraded,
+            severity_of_health,
+        )
+
+        alerts = AlertService(self._db)
+        today = today_cn().isoformat()
+        summary: dict[str, Any] = {"refreshed": [], "failed": [], "degraded": [], "pruned": 0}
+        live_ids = [
+            row.strategy_id
+            for row in self._db.query(StrategyLifecycleModel)
+            .filter(StrategyLifecycleModel.lifecycle_status == "LIVE")
+            .all()
+        ]
+        for strategy_id in live_ids:
+            row = self._find(strategy_id)
+            previous = row.latest_health_level if row is not None else None
+            try:
+                snapshot = self.refresh(
+                    strategy_id, LifecycleRefreshRequest(), trigger=TRIGGER_SCHEDULED
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._db.rollback()
+                logger.warning("定时健康刷新失败: strategy=%s", strategy_id, exc_info=True)
+                summary["failed"].append(strategy_id)
+                alerts.raise_alert(
+                    kind=KIND_REFRESH_FAILED,
+                    severity="warning",
+                    strategy_id=strategy_id,
+                    title=f"{strategy_id} 定时健康刷新失败",
+                    detail={"error": f"{type(exc).__name__}: {exc}"},
+                    dedupe_key=f"{KIND_REFRESH_FAILED}:{strategy_id}:{today}",
+                )
+                continue
+            summary["refreshed"].append(strategy_id)
+            current = snapshot.health_level
+            if is_degraded(previous, current):
+                summary["degraded"].append(strategy_id)
+                alerts.raise_alert(
+                    kind=KIND_HEALTH_DEGRADED,
+                    severity=severity_of_health(current),
+                    strategy_id=strategy_id,
+                    title=f"{strategy_id} 健康等级 {previous} → {current}",
+                    detail={
+                        "previous": previous,
+                        "current": current,
+                        "diagnosis": snapshot.diagnosis,
+                        "recommended_action": snapshot.recommended_action,
+                        "reasons": snapshot.reasons,
+                    },
+                    dedupe_key=f"{KIND_HEALTH_DEGRADED}:{strategy_id}:{today}",
+                )
+            summary["pruned"] += self._prune_scheduled_backtests(strategy_id)
+        return summary
+
+    def _prune_scheduled_backtests(self, strategy_id: str) -> int:
+        """只保留最近 N 条定时监控回测，删除更早的（手动刷新产生的不动）。
+
+        健康快照本身保留（指标存于快照），只清理其对应的回测明细；生命周期行引用的
+        最新监控回测必然在保留范围内。
+
+        Args:
+            strategy_id: 策略 ID。
+
+        Returns:
+            删除条数。
+        """
+        keep = get_settings().lifecycle_scheduled_keep
+        rows = (
+            self._db.query(BacktestRunModel.backtest_id)
+            .filter(
+                BacktestRunModel.strategy_id == strategy_id,
+                BacktestRunModel.purpose == PURPOSE_MONITOR,
+                BacktestRunModel.purpose_reason == _scheduled_reason(strategy_id),
+            )
+            .order_by(BacktestRunModel.created_at.desc())
+            .all()
+        )
+        lifecycle = self._find(strategy_id)
+        protected = {lifecycle.validation_backtest_id} if lifecycle is not None else set()
+        removed = 0
+        for (backtest_id,) in rows[keep:]:
+            if backtest_id in protected:
+                continue
+            try:
+                self._backtest_svc.delete_backtest(backtest_id)
+                removed += 1
+            except ValueError:
+                # 被其他记录引用的回测不强删，留待人工处理
+                self._db.rollback()
+                logger.info("定时监控回测仍被引用，跳过清理: %s", backtest_id)
+        return removed
+
     def refresh(
-        self, strategy_id: str, req: LifecycleRefreshRequest
+        self,
+        strategy_id: str,
+        req: LifecycleRefreshRequest,
+        trigger: str = TRIGGER_MANUAL,
     ) -> HealthSnapshotSchema:
         """人工触发一次体检：跑上线后回测并与研究期分布比对，追加一条快照。
 
@@ -288,6 +409,7 @@ class StrategyLifecycleService:
         Args:
             strategy_id: 策略 ID。
             req: 刷新请求（可选成本覆盖）。
+            trigger: 触发来源：manual（人工 / API）或 scheduled（每日定时任务）。
 
         Returns:
             新生成的健康快照。
@@ -319,7 +441,11 @@ class StrategyLifecycleService:
                 start_date=live_start,
                 end_date=live_end,
                 purpose=PURPOSE_MONITOR,
-                purpose_reason=f"lifecycle refresh: {strategy_id}",
+                purpose_reason=(
+                    _scheduled_reason(strategy_id)
+                    if trigger == TRIGGER_SCHEDULED
+                    else f"lifecycle refresh: {strategy_id}"
+                ),
                 cost_bps=cost_bps,
             ),
             config_snapshot_override=row.frozen_config_snapshot,
@@ -419,7 +545,7 @@ class StrategyLifecycleService:
             diagnosis=assessment.diagnosis,
             recommended_action=assessment.recommended_action,
             reasons=assessment.reasons,
-            trigger="manual",
+            trigger=trigger,
             computed_at=utcnow(),
         )
         self._db.add(snapshot)
@@ -583,7 +709,10 @@ class StrategyLifecycleService:
             if config_snapshot is not None
             else self._config_svc.get_parsed_config(strategy_id)
         )
-        if config_snapshot is not None and config is None:
+        composite_snapshot = config_snapshot is not None and is_composite_config(
+            config_snapshot.get("config_json")
+        )
+        if config_snapshot is not None and config is None and not composite_snapshot:
             # 冻结快照损坏时不能退化为"无因子"分析，否则衰减证据会被静默清空
             raise ValueError(f"策略 {strategy_id} 的冻结配置快照解析失败，无法计算衰减证据")
         factor_ids = list(config.score.factors) if config is not None else []

@@ -35,8 +35,16 @@ def parse_macro_period(period: str) -> date | None:
 
 # 月度指标的发布滞后：参考月数据在「次月第 N 日」起才可见。
 # 统计局制造业 PMI 于参考月最后一天发布，次月 1 日起可用；
-# CPI 于次月 9-15 日发布，保守取次月 15 日。未列出的指标（如 LPR 报价日）按期日本身可见。
-_MONTHLY_RELEASE_DAY: dict[str, int] = {"pmi": 1, "cpi": 15}
+# CPI 于次月 9-15 日发布，保守取次月 15 日；货币供应（M1/M2）与社融存量由人民银行在次月
+# 10-17 日前后发布、日期不固定，保守取次月 20 日。未列出的指标（如 LPR 报价日、日频市场
+# 指标的交易日）按期日本身可见。
+_MONTHLY_RELEASE_DAY: dict[str, int] = {
+    "pmi": 1,
+    "cpi": 15,
+    "m1_yoy": 20,
+    "m2_yoy": 20,
+    "sf_stock": 20,
+}
 
 
 def macro_available_date(indicator_code: str | None, period: str) -> date | None:

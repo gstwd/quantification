@@ -221,7 +221,9 @@ class TestTemplateRegistration:
             if other.template_id == "valuation_percentile":
                 continue
             for parameter in other.parameter_schema.values():
-                assert "choices" not in parameter.to_payload()
+                # 其他模板的 choice 参数同样带 choices；数值参数载荷不出现 choices 键
+                if parameter.type != "choice":
+                    assert "choices" not in parameter.to_payload()
 
     def test_distinct_params_are_distinct_instances(self) -> None:
         """同模板不同 field / window 是不同实例（不会被同参复用合并）。"""

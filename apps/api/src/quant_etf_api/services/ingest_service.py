@@ -46,6 +46,9 @@ from quant_etf_api.schemas.market_data import (
 
 logger = logging.getLogger(__name__)
 
+# 宏观指标单条 INSERT 的行数上限（每行 8 个绑定参数，远低于 65535）
+_MACRO_INSERT_CHUNK = 500
+
 
 def _affected_rows(result: Any, fallback: int) -> int:
     """返回语句实际影响的行数；驱动未提供有效 rowcount 时回退为提交行数。
@@ -816,6 +819,8 @@ class IngestService:
             ("CPI", tushare_client.fetch_cpi_monthly, akshare_client.fetch_cpi_monthly),
             ("PMI", tushare_client.fetch_pmi, akshare_client.fetch_pmi),
             ("LPR", tushare_client.fetch_lpr, akshare_client.fetch_lpr),
+            ("M", tushare_client.fetch_money_supply, akshare_client.fetch_money_supply),
+            ("SF", tushare_client.fetch_social_financing, akshare_client.fetch_social_financing),
         ]
         results: list[Any] = []
         fallbacks: list[dict[str, str]] = []
@@ -861,36 +866,39 @@ class IngestService:
         indicators = self._fetch_macro_indicators_preferred()
         if not indicators:
             return 0
-        stmt = insert(MacroIndicatorModel).values(
-            [
-                {
-                    "indicator_code": i.indicator_code,
-                    "indicator_name": i.indicator_name,
-                    "period": i.period,
-                    "value": i.value,
-                    "unit": i.unit,
-                    "source": getattr(i, "source", None) or "akshare",
-                    "period_date": i.period_date,
-                    "ingested_at": utcnow(),
-                }
-                for i in indicators
-            ]
-        )
-        if overwrite:
-            stmt = stmt.on_conflict_do_update(
-                constraint="uq_macro_indicator",
-                set_={
-                    "indicator_name": stmt.excluded.indicator_name,
-                    "value": stmt.excluded.value,
-                    "unit": stmt.excluded.unit,
-                    "source": stmt.excluded.source,
-                    "period_date": stmt.excluded.period_date,
-                    "ingested_at": stmt.excluded.ingested_at,
-                },
-            )
-        else:
-            stmt = stmt.on_conflict_do_nothing(constraint="uq_macro_indicator")
-        count = _affected_rows(self._db.execute(stmt), len(indicators))
+        rows = [
+            {
+                "indicator_code": i.indicator_code,
+                "indicator_name": i.indicator_name,
+                "period": i.period,
+                "value": i.value,
+                "unit": i.unit,
+                "source": getattr(i, "source", None) or "akshare",
+                "period_date": i.period_date,
+                "ingested_at": utcnow(),
+            }
+            for i in indicators
+        ]
+        count = 0
+        # 分块写入：单条 INSERT 的绑定参数上限 65535（每行 8 个参数）
+        for start in range(0, len(rows), _MACRO_INSERT_CHUNK):
+            chunk = rows[start : start + _MACRO_INSERT_CHUNK]
+            stmt = insert(MacroIndicatorModel).values(chunk)
+            if overwrite:
+                stmt = stmt.on_conflict_do_update(
+                    constraint="uq_macro_indicator",
+                    set_={
+                        "indicator_name": stmt.excluded.indicator_name,
+                        "value": stmt.excluded.value,
+                        "unit": stmt.excluded.unit,
+                        "source": stmt.excluded.source,
+                        "period_date": stmt.excluded.period_date,
+                        "ingested_at": stmt.excluded.ingested_at,
+                    },
+                )
+            else:
+                stmt = stmt.on_conflict_do_nothing(constraint="uq_macro_indicator")
+            count += _affected_rows(self._db.execute(stmt), len(chunk))
         self._db.commit()
         return count
 

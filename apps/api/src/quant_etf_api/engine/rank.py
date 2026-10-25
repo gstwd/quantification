@@ -85,7 +85,9 @@ class DefaultRankEngine:
 
         # 截取
         if config.top_n is not None:
-            rankings = rankings[: config.top_n]
+            rankings = _truncate_with_buffer(
+                rankings, config.top_n, config.buffer_n, context.current_holdings
+            )
         elif config.bottom_n is not None:
             rankings = rankings[-config.bottom_n :]
 
@@ -126,3 +128,33 @@ class DefaultRankEngine:
         )
         for sub_rank, (idx, r) in enumerate(with_valuation, 1):
             rankings[idx].valuation_rank = sub_rank
+
+
+def _truncate_with_buffer(
+    rankings: list[AssetRanking],
+    top_n: int,
+    buffer_n: int | None,
+    holdings: dict[str, float] | None,
+) -> list[AssetRanking]:
+    """截取前 N 名；启用缓冲带时优先保留排名仍在前 N+buffer 内的老持仓。
+
+    老持仓按排名先后保留（最多 N 个），剩余名额按排名补足新资产，结果仍按排名排序。
+    没有持仓信息或未启用缓冲带时与严格截取前 N 名一致。
+
+    Args:
+        rankings: 已排序的全部排名项。
+        top_n: 目标持有数。
+        buffer_n: 缓冲名次，None 表示不启用。
+        holdings: 调仓前实际持仓。
+
+    Returns:
+        截取后的排名项。
+    """
+    if not buffer_n or not holdings:
+        return rankings[:top_n]
+    held = {code for code, weight in holdings.items() if weight > 0}
+    keep = [r for r in rankings[: top_n + buffer_n] if r.index_code in held][:top_n]
+    kept = {r.index_code for r in keep}
+    fill = [r for r in rankings if r.index_code not in kept][: top_n - len(keep)]
+    chosen = kept | {r.index_code for r in fill}
+    return [r for r in rankings if r.index_code in chosen]

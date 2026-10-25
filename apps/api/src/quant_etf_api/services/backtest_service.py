@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from time import perf_counter
@@ -27,18 +28,30 @@ from quant_etf_api.domain.common.numeric import (
 from quant_etf_api.domain.common.numeric import (
     sanitize_metric_value as _sanitize_metric_value,
 )
+from quant_etf_api.domain.common.enums import RESEARCH_DEFAULT_EXECUTION_MODEL
 from quant_etf_api.domain.common.signal_level import determine_signal_level
 from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
 from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
-from quant_etf_api.domain.portfolio.benchmark import compute_buy_hold_benchmark
+from quant_etf_api.domain.portfolio.attribution import (
+    AttributionBucket,
+    AttributionDay,
+    compute_attribution,
+)
+from quant_etf_api.domain.portfolio.benchmark import (
+    compute_buy_hold_benchmark,
+    compute_mix_benchmark,
+)
+from quant_etf_api.domain.portfolio.composite import COMPOSITE_MODEL, MemberDay, blend_members
 from quant_etf_api.domain.portfolio.execution import (
     ACCOUNTING_MODEL_DRIFT,
     ACCOUNTING_MODEL_LEGACY,
     EXECUTION_MODEL_CLOSE,
     BacktestExecutor,
+    DayExecution,
     forward_fill_return_bars,
 )
 from quant_etf_api.domain.portfolio.returns import get_index_return
+from quant_etf_api.domain.portfolio.risk_model import ReturnPanel, covariance
 from quant_etf_api.domain.portfolio.scaling import compose_two_leg_positions
 from quant_etf_api.domain.portfolio.turnover import (
     TURNOVER_MODEL_DELTA_W,
@@ -67,11 +80,19 @@ from quant_etf_api.domain.strategies.rebalance import (
     RebalanceLegs,
     select_active_legs,
 )
+from quant_etf_api.domain.strategies.risk_overlay import (
+    DayTarget,
+    RiskOverlayState,
+    advance_overlay_state,
+    resolve_day_target,
+)
 from quant_etf_api.domain.strategies.timing_state import TimingState
 from quant_etf_api.engine.config import (
     StrategyConfig,
+    is_composite_config,
     iter_factor_refs,
 )
+from quant_etf_api.engine.base import EngineResult
 from quant_etf_api.engine.context_builder import ContextBuilder
 from quant_etf_api.engine.factor_provider import FactorProvider
 from quant_etf_api.engine.orchestrator import StrategyEngine
@@ -95,6 +116,7 @@ from quant_etf_api.infra.db.repositories.benchmark_index import BenchmarkIndexRe
 from quant_etf_api.infra.db.repositories.index_daily_bar import IndexDailyBarRepository
 from quant_etf_api.infra.db.repositories.index_valuation import IndexValuationRepository
 from quant_etf_api.infra.db.repositories.macro_indicator import MacroIndicatorRepository
+from quant_etf_api.infra.db.repositories.market_indicator import MarketIndicatorRepository
 from quant_etf_api.infra.job_queue.context import JobCancelledError, ensure_not_cancelled
 from quant_etf_api.infra.job_queue.queue import BACKTEST_LANE_JOB_TYPES, backtest_job_key
 from quant_etf_api.infra.job_queue.repository import JobRepository
@@ -102,6 +124,9 @@ from quant_etf_api.infra.time import CHINA_TZ, utcnow_aware
 from quant_etf_api.infra.trading_calendar import resolve_trading_calendar
 from quant_etf_api.schemas.backtest import (
     AnnualMetrics,
+    AttributionAssetItem,
+    AttributionBucketItem,
+    BacktestAttribution,
     BacktestCandidatePool,
     BacktestCreateRequest,
     BacktestDailyResult,
@@ -181,6 +206,109 @@ def _window_cache_key(row: BacktestRunModel) -> str:
     """
     universe_filter = json.dumps(row.universe_filter or {}, sort_keys=True, ensure_ascii=False)
     return f"{row.start_date.isoformat()}~{row.end_date.isoformat()}|{universe_filter}"
+
+
+#: 路径依赖叠加层口径指纹（偏离调仓 / 回撤止损 / 移动止损 / 波动率目标）；
+#: 只在启用这些功能的回测上写入 params，存量回测无该键
+RISK_OVERLAY_MODEL = "overlay_v1"
+
+
+@dataclass
+class LoopPathState:
+    """回测主循环结束时的路径状态，供实时决策在回放后接着做"今日"决策。
+
+    Attributes:
+        composition_base: 末个收盘时点的调仓前实际持仓（执行器口径）。
+        overlay_state: 风控叠加层状态；未启用时为 None。
+        last_target: 最近一次成交的目标持仓；尚未成交时为 None。
+        timing_state: 择时状态层状态。
+        last_date: 回放覆盖的最后一个交易日（状态所处的收盘时点）。
+    """
+
+    composition_base: dict[str, float]
+    overlay_state: RiskOverlayState | None
+    last_target: dict[str, float] | None
+    timing_state: TimingState | None
+    last_date: date | None
+
+
+def _covariance_lookup(
+    config: StrategyConfig, panel: ReturnPanel | None, trade_date: date
+) -> Callable[[Sequence[str]], Any] | None:
+    """构造波动率目标使用的协方差查询（截至决策日的近 window 日）。
+
+    Args:
+        config: 策略配置。
+        panel: 收益面板；未构建时为 None。
+        trade_date: 决策日。
+
+    Returns:
+        codes → 协方差矩阵（历史不足为 None）的函数；未启用波动率目标时为 None。
+    """
+    vol_target = config.risk.vol_target if config.risk is not None else None
+    if panel is None or vol_target is None:
+        return None
+    window = vol_target.window
+
+    def _lookup(codes: Sequence[str]) -> Any:
+        return covariance(panel.window(trade_date, window, list(codes)), max(20, window // 2))
+
+    return _lookup
+
+
+def _closes(
+    bars: dict[tuple[str, date], Any], positions: dict[str, float], day: date
+) -> dict[str, float | None]:
+    """取持仓资产在某交易日的原始收盘价（无效价为 None）。
+
+    Args:
+        bars: 原始行情。
+        positions: 持仓（只取其资产代码）。
+        day: 交易日。
+
+    Returns:
+        资产 → 收盘价。
+    """
+    result: dict[str, float | None] = {}
+    for code in positions:
+        close = getattr(bars.get((code, day)), "close_price", None)
+        result[code] = None if _price_invalid(close) else float(close)
+    return result
+
+
+def _bucket_item(bucket: AttributionBucket) -> AttributionBucketItem:
+    """领域汇总 → 接口模型（4 位小数）。"""
+
+    def _r(value: float | None) -> float | None:
+        return None if value is None else round(value, 4)
+
+    return AttributionBucketItem(
+        label=bucket.label,
+        days=bucket.days,
+        portfolio_pct=round(bucket.portfolio_pct, 4),
+        benchmark_pct=_r(bucket.benchmark_pct),
+        timing_pct=_r(bucket.timing_pct),
+        selection_pct=_r(bucket.selection_pct),
+        explained_pct=round(bucket.explained_pct, 4),
+        residual_pct=round(bucket.residual_pct, 4),
+    )
+
+
+def _benchmark_mix_pairs(params: dict[str, Any]) -> list[tuple[str, float]]:
+    """从回测 params 读取混合基准 [(指数代码, 权重)]；未配置时为空列表。"""
+    return [
+        (str(item["index_code"]), float(item["weight"]))
+        for item in params.get("_benchmark_mix") or []
+    ]
+
+
+def _benchmark_mix_label(mix: list[dict[str, Any]]) -> str:
+    """混合基准的展示名，如 "000300 60% + 现金 40%"。"""
+    parts = [f"{item['index_code']} {float(item['weight']) * 100:.0f}%" for item in mix]
+    cash = 1.0 - sum(float(item["weight"]) for item in mix)
+    if cash > 1e-9:
+        parts.append(f"现金 {cash * 100:.0f}%")
+    return " + ".join(parts)
 
 
 def _round_weights(positions: dict[str, float]) -> dict[str, float]:
@@ -312,6 +440,14 @@ class BacktestService:
             else config_svc.get_parsed_config(req.strategy_id)
         )
         if strategy_config is None:
+            # 组合策略没有引擎管线配置（解析为 None），走持仓级合成回测
+            composite_snapshot, composite_hash = self._composite_snapshot_for(
+                config_svc, req.strategy_id, config_snapshot_override
+            )
+            if composite_snapshot is not None:
+                return self._create_composite_backtest(
+                    req, backtest_id, now, composite_snapshot, composite_hash, optimization_id
+                )
             raise ValueError(f"策略 {req.strategy_id} 配置不存在或解析失败，无法执行回测")
 
         # P4：回测创建前复用配置校验，未知/停用因子或非法变换函数直接拒绝
@@ -349,6 +485,9 @@ class BacktestService:
         # 保存基准配置到 params，供执行时读取；基准统一采用买入持有口径。
         params["_enable_benchmark"] = req.enable_benchmark
         params["_benchmark_index_code"] = req.benchmark_index_code
+        if req.benchmark_mix:
+            # 混合基准（恒定比例，现金收益 0）；存量回测无该键，按单指数买入持有解释
+            params["_benchmark_mix"] = [item.model_dump() for item in req.benchmark_mix]
         # 换手口径指纹（C2）：存量回测无该键，读取时按历史口径（legacy_v1）标注，
         # 避免"含清仓/建仓腿"与"未含"的净口径指标被直接比较
         params["_turnover_model"] = TURNOVER_MODEL_DELTA_W
@@ -1076,6 +1215,75 @@ class BacktestService:
             logger.warning("get_daily_results DB query failed", exc_info=True)
             return []
 
+    def get_attribution(self, backtest_id: str) -> BacktestAttribution | None:
+        """收益归因（读取路径现算，只读）。
+
+        Args:
+            backtest_id: 回测标识。
+
+        Returns:
+            归因结果；回测不存在时为 None。
+
+        Raises:
+            ValueError: 回测未成功完成时抛出。
+        """
+        row = self._backtest_repo.find_by_id(backtest_id)
+        if row is None:
+            return None
+        if row.status != "success":
+            raise ValueError(f"回测 {backtest_id} 状态为 {row.status}，只有成功的回测可以归因")
+        params = row.params or {}
+        execution_model = str(params.get("_execution_model", "t_plus_1_open"))
+        daily = self._backtest_repo.find_daily_results(backtest_id)
+        held = {
+            (trade_date, code): ret
+            for trade_date, code, ret in self._backtest_repo.find_held_index_returns(backtest_id)
+        }
+        days = [
+            AttributionDay(
+                trade_date=item.trade_date,
+                portfolio_return=float(item.portfolio_return or 0.0),
+                positions=dict(item.executed_positions or item.positions or {}),
+                benchmark_return=item.benchmark_return,
+            )
+            for item in daily
+        ]
+        approximate = execution_model != EXECUTION_MODEL_CLOSE
+        result = compute_attribution(days, held, approximate=approximate)
+        has_benchmark = any(day.benchmark_return is not None for day in days)
+        mix = params.get("_benchmark_mix")
+        benchmark_label = (
+            _benchmark_mix_label(mix)
+            if mix
+            else (params.get("_benchmark_index_code") if has_benchmark else None)
+        )
+        note = (
+            "T+1 收盘执行：组合收益等于 Σ 权重 × 资产收益，残差只来自权重取整。"
+            if not approximate
+            else "T+1 开盘执行：调仓日组合收益按隔夜 + 日内两段复利，收盘到收盘分解为近似，差异计入残差。"
+        )
+        return BacktestAttribution(
+            backtest_id=backtest_id,
+            execution_model=execution_model,
+            approximate=approximate,
+            has_benchmark=has_benchmark,
+            benchmark_label=benchmark_label,
+            total=_bucket_item(result.total),
+            yearly=[_bucket_item(bucket) for bucket in result.yearly],
+            assets=[
+                AttributionAssetItem(
+                    index_code=item.index_code,
+                    contribution_pct=round(item.contribution_pct, 4),
+                    held_days=item.held_days,
+                    average_weight=round(item.average_weight, 4),
+                    win_rate=round(item.win_rate, 4),
+                    missing_days=item.missing_days,
+                )
+                for item in result.assets
+            ],
+            note=note + "多日汇总为逐日算术和（不复利），与累计收益的差异同样计入残差。",
+        )
+
     def get_index_results(
         self, backtest_id: str, index_code: str | None = None
     ) -> list[BacktestIndexResult]:
@@ -1139,6 +1347,11 @@ class BacktestService:
             # 静默改用当前配置会让回测结果与其记录的配置哈希不一致
             config_svc = StrategyConfigService(self._db)
             config = None
+            snapshot = getattr(row, "config_snapshot", None)
+            if snapshot and is_composite_config(snapshot.get("config_json")):
+                self._record_data_cutoff(row)
+                self._run_composite_backtest(backtest_id, row)
+                return
             if getattr(row, "config_snapshot", None):
                 config = config_svc.parse_snapshot(row.config_snapshot)
                 if config is None:
@@ -1393,21 +1606,28 @@ class BacktestService:
         # 无风险利率（%）：默认 0（历史口径），预留从回测参数读取的通道
         risk_free_rate_pct = float(run_params.get("_annual_risk_free_rate_pct", 0.0) or 0.0)
 
-        if enable_benchmark and benchmark_index_code not in index_codes:
+        benchmark_mix = _benchmark_mix_pairs(run_params)
+        benchmark_codes = [code for code, _w in benchmark_mix] or [benchmark_index_code]
+        missing_benchmark = [code for code in benchmark_codes if code not in index_codes]
+        if enable_benchmark and missing_benchmark:
             # 基准指数可能不在策略 universe 中，单独补充行情
-            all_bars.update(self._load_all_index_bars(trading_dates, [benchmark_index_code]))
+            all_bars.update(self._load_all_index_bars(trading_dates, missing_benchmark))
         # 收益结算专用的前向填充行情：缺口期间的涨跌在缺口后补回，而不是永久丢失；
         # 候选池、因子与缺口统计仍使用原始行情
         return_codes = list(index_codes)
-        if enable_benchmark and benchmark_index_code not in return_codes:
-            return_codes.append(benchmark_index_code)
+        if enable_benchmark:
+            return_codes.extend(code for code in benchmark_codes if code not in return_codes)
         return_bars = forward_fill_return_bars(all_bars, return_codes, trading_dates)
 
         # 决策日：最后一个交易日没有下一交易日，不形成收益窗口
         decision_dates = trading_dates[:-1]
         # 基准日收益率序列（与决策日等长，第 i 个元素为 [收盘 T_i, 收盘 T_{i+1}]）
         benchmark_returns: list[float] = []
-        if enable_benchmark:
+        if enable_benchmark and benchmark_mix:
+            benchmark_returns = compute_mix_benchmark(return_bars, benchmark_mix, trading_dates)[
+                : len(decision_dates)
+            ]
+        elif enable_benchmark:
             benchmark_returns = compute_buy_hold_benchmark(
                 return_bars, benchmark_index_code, trading_dates
             )[: len(decision_dates)]
@@ -1463,6 +1683,23 @@ class BacktestService:
         previous_timing_regime: str | None = None
         timing_state: TimingState | None = None
         all_index_codes = set(index_codes)
+        # 路径依赖：风控叠加层状态、最近一次成交目标与收益面板（未启用时保持 None，
+        # 当日目标与成交判定与改造前逐位一致）
+        risk_cfg = config.risk
+        band_cfg = config.rebalance.band if config.rebalance else None
+        overlay_state = (
+            RiskOverlayState() if risk_cfg is not None and risk_cfg.has_overlay else None
+        )
+        last_target: dict[str, float] | None = None
+        return_panel = (
+            ReturnPanel.from_bars(all_bars, index_codes)
+            if config.return_window is not None
+            else None
+        )
+        executions: list[tuple[date, DayExecution]] = []
+        if overlay_state is not None or band_cfg is not None:
+            run_params["_risk_overlay_model"] = RISK_OVERLAY_MODEL
+            row.params = dict(run_params)
 
         for i, trade_date in enumerate(decision_dates):
             # 协作取消检查点（B2）：取消标记有短 TTL 缓存，不会每个交易日都查库
@@ -1488,6 +1725,8 @@ class BacktestService:
                 market_shape_refs=market_shape_refs,
                 previous_timing_regime=previous_timing_regime,
                 timing_state=timing_state,
+                current_holdings=executor.composition_base,
+                return_panel=return_panel,
             )
 
             # 两条腿独立到期：选股腿改成分，风险腿仅按择时等比缩放总仓位。
@@ -1525,22 +1764,46 @@ class BacktestService:
 
             # 以"调仓前实际持仓"（已随行情漂移）合成当日目标；收盘模式先成交昨日
             # 指令，仅风险腿到期时沿用今日收盘成交后的成分
+            composition_base = executor.composition_base
             target_positions = compose_two_leg_positions(
-                previous=executor.composition_base,
+                previous=composition_base,
                 selection_target=dict(result.positions) if result.positions else {},
                 timing_target_exposure=result.timing_target_exposure,
                 should_select=legs.selection,
                 should_scale_risk=legs.risk,
                 max_asset_weight=result.max_asset_weight,
             )
+            # 偏离调仓与风控叠加层（未启用时原样返回，成交判定只看日历腿）
+            day_target = resolve_day_target(
+                target_positions,
+                legs_due=legs.selection or legs.risk,
+                base=composition_base,
+                last_target=last_target,
+                risk=risk_cfg,
+                band=band_cfg,
+                overlay_state=overlay_state,
+                covariance_of=_covariance_lookup(config, return_panel, trade_date),
+            )
             day = executor.step(
                 trade_date=trade_date,
                 next_date=next_date,
-                target_positions=target_positions,
-                should_rebalance=legs.selection or legs.risk,
+                target_positions=day_target.positions,
+                should_rebalance=day_target.should_rebalance,
                 return_bars=return_bars,
                 quality_bars=all_bars,
             )
+            if day_target.should_rebalance:
+                last_target = dict(day_target.positions)
+            if overlay_state is not None and risk_cfg is not None:
+                overlay_state = advance_overlay_state(
+                    overlay_state,
+                    risk_cfg,
+                    portfolio_return_pct=day.portfolio_return,
+                    held=day.executed_positions,
+                    start_closes=_closes(all_bars, day.executed_positions, trade_date),
+                    end_closes=_closes(all_bars, day.executed_positions, next_date),
+                )
+            executions.append((trade_date, day))
             if day.missing_bar_count > 0:
                 data_gap_days += 1
 
@@ -1751,6 +2014,14 @@ class BacktestService:
             "candidate_pool": candidate_pool,
             "trading_dates": trading_dates,
             "params": dict(row.params or {}),
+            "executions": executions,
+            "path_state": LoopPathState(
+                composition_base=executor.composition_base,
+                overlay_state=overlay_state,
+                last_target=last_target,
+                timing_state=timing_state,
+                last_date=trading_dates[-1] if trading_dates else None,
+            ),
         }
 
     def _flush_results(self, index_buffer: list[dict[str, Any]]) -> None:
@@ -2001,7 +2272,7 @@ class BacktestService:
         required_ids = {
             ref
             for module_key, _label, ref in iter_factor_refs(config)
-            if module_key in ("score", "filter")
+            if module_key in ("score", "filter", "portfolio")
         }
         # 因子引用 → 模板 ID：别名按声明解析，未声明的引用名本身就是模板 ID
         template_ids = {
@@ -2115,6 +2386,407 @@ class BacktestService:
         row.params = params
         if commit:
             self._db.commit()
+
+    # ── 组合策略（多策略持仓级合成） ─────────────────────────────────────
+
+    def _composite_snapshot_for(
+        self,
+        config_svc: StrategyConfigService,
+        strategy_id: str,
+        override: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """判定回测对象是否为组合策略，是则给出（含成员快照的）快照与哈希。
+
+        Args:
+            config_svc: 策略配置服务。
+            strategy_id: 策略 ID。
+            override: 调用方指定的不可变快照（生命周期监控）。
+
+        Returns:
+            (快照, 哈希)；普通策略时为 (None, None)。
+
+        Raises:
+            ValueError: 组合策略校验失败或快照缺少成员时抛出。
+        """
+        if override is not None:
+            if not is_composite_config(override.get("config_json")):
+                return None, None
+            if StrategyConfigService.parse_composite_snapshot(override) is None:
+                raise ValueError(f"组合策略 {strategy_id} 的冻结快照缺少成员配置，无法回测")
+            members = override.get("members") or {}
+            digest = compute_config_hash(
+                {
+                    "composite": override["config_json"],
+                    "members": {sid: item.get("config_hash") for sid, item in members.items()},
+                }
+            )
+            return override, digest
+        composite = config_svc.get_composite_config(strategy_id)
+        if composite is None:
+            return None, None
+        validation = config_svc.validate_composite(
+            composite.model_dump(exclude={"strategy_id", "display_name"}), strategy_id
+        )
+        if not validation.valid:
+            raise ValueError(
+                f"组合策略 {strategy_id} 配置校验失败: {'; '.join(validation.errors)}"
+            )
+        return config_svc.build_composite_snapshot(composite)
+
+    def _create_composite_backtest(
+        self,
+        req: BacktestCreateRequest,
+        backtest_id: str,
+        now: datetime,
+        snapshot: dict[str, Any],
+        config_hash: str | None,
+        optimization_id: str | None,
+    ) -> BacktestSummary:
+        """创建组合策略回测行（成员快照随行固化）。
+
+        Args:
+            req: 创建请求。
+            backtest_id: 回测 ID。
+            now: 创建时间。
+            snapshot: 组合快照。
+            config_hash: 组合哈希。
+            optimization_id: 关联的优化会话（组合策略不参与优化，通常为 None）。
+
+        Returns:
+            回测摘要。
+        """
+        member_codes: list[str] = []
+        restricted = True
+        for item in (snapshot.get("members") or {}).values():
+            codes = (item.get("config_json") or {}).get("index_codes") or []
+            if not codes:
+                restricted = False
+            member_codes.extend(code for code in codes if code not in member_codes)
+        universe_filter = (
+            {"mode": "subset", "index_codes": member_codes} if restricted else {"mode": "all"}
+        )
+        params = dict(req.params) if req.params else {}
+        params.update(
+            {
+                "_execution_model": req.execution_model,
+                "_data_quality_mode": req.data_quality_mode,
+                "_cost_bps": (
+                    req.cost_bps if req.cost_bps is not None else get_settings().default_cost_bps
+                ),
+                "_enable_benchmark": req.enable_benchmark,
+                "_benchmark_index_code": req.benchmark_index_code,
+                "_turnover_model": TURNOVER_MODEL_DELTA_W,
+                "_composite_model": COMPOSITE_MODEL,
+            }
+        )
+        if req.benchmark_mix:
+            params["_benchmark_mix"] = [item.model_dump() for item in req.benchmark_mix]
+        row = BacktestRunModel(
+            backtest_id=backtest_id,
+            strategy_id=req.strategy_id,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            universe_filter=universe_filter,
+            params=params,
+            status="pending",
+            config_snapshot=snapshot,
+            config_hash=config_hash,
+            optimization_id=optimization_id,
+            purpose=req.purpose,
+            purpose_reason=req.purpose_reason,
+            created_at=now,
+        )
+        try:
+            self._db.add(row)
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            logger.exception("组合回测写库失败: backtest_id=%s", backtest_id)
+            raise
+        if req.purpose in ("validation", "monitor"):
+            try:
+                StrategyConfigService(self._db).mark_validation_consumed(
+                    req.strategy_id,
+                    note=f"回测 {backtest_id}（{req.purpose}）：{req.purpose_reason or '未填写用途说明'}",
+                )
+            except Exception:
+                self._db.rollback()
+                logger.warning("验证期消费留痕失败: %s", backtest_id, exc_info=True)
+        return BacktestSummary(
+            backtest_id=backtest_id,
+            strategy_id=req.strategy_id,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            status="pending",
+            created_at=now,
+            purpose=req.purpose,
+        )
+
+    def _run_composite_backtest(self, backtest_id: str, row: BacktestRunModel) -> dict[str, Any]:
+        """组合策略回测：逐成员内存回测，再按持仓级口径逐日合成并落库。
+
+        成员决策互不依赖，先各自跑完与同一循环并排执行等价（见
+        ``domain.portfolio.composite``）。成员回测走 ``persist=False`` 的同一主循环，
+        不计算各自基准；组合基准按组合回测的参数计算。
+
+        Args:
+            backtest_id: 组合回测 ID。
+            row: 组合回测行（含成员快照）。
+
+        Returns:
+            结果字典：``metrics`` 与逐日合成结果 ``days``。
+
+        Raises:
+            ValueError: 快照解析失败或成员没有共同决策日时抛出。
+        """
+        parsed = StrategyConfigService.parse_composite_snapshot(row.config_snapshot or {})
+        if parsed is None:
+            raise ValueError(f"回测 {backtest_id} 的组合快照解析失败")
+        composite, members = parsed
+        run_params = dict(row.params or {})
+        execution_model = run_params.get("_execution_model", "t_plus_1_open")
+        member_days: dict[str, dict[date, MemberDay]] = {}
+        member_metrics: dict[str, Any] = {}
+        warnings: list[dict[str, Any]] = []
+        common: set[date] | None = None
+        trading_axis: set[date] = set()
+        for sid, member_config in members.items():
+            ensure_not_cancelled()
+            member_row = BacktestRunModel(
+                backtest_id=f"{backtest_id}:{sid}",
+                strategy_id=sid,
+                start_date=row.start_date,
+                end_date=row.end_date,
+                universe_filter=(
+                    {"mode": "subset", "index_codes": list(member_config.index_codes)}
+                    if member_config.index_codes
+                    else {"mode": "all"}
+                ),
+                params={
+                    "_execution_model": execution_model,
+                    "_data_quality_mode": run_params.get("_data_quality_mode", "warn"),
+                    "_enable_benchmark": False,
+                    "_turnover_model": TURNOVER_MODEL_DELTA_W,
+                },
+                status="pending",
+            )
+            outcome = self._run_backtest_loop(
+                member_row.backtest_id, member_row, member_config, persist=False
+            )
+            days = {
+                day: MemberDay(
+                    portfolio_return=execution.portfolio_return,
+                    pre_trade=execution.pre_trade_positions,
+                    post_trade=execution.executed_positions,
+                )
+                for day, execution in outcome["executions"]
+            }
+            member_days[sid] = days
+            common = set(days) if common is None else common & set(days)
+            trading_axis.update(outcome["trading_dates"])
+            member_metrics[sid] = {
+                key: outcome["metrics"].get(key)
+                for key in ("annualized_return_pct", "max_drawdown_pct", "sharpe_ratio")
+            }
+            warnings.extend(
+                {**warning, "message": f"[成员 {sid}] {warning.get('message', '')}"}
+                for warning in outcome["warnings"]
+            )
+        dates = sorted(common or ())
+        if not dates:
+            raise ValueError("组合成员没有共同的决策日，无法合成")
+        rebalance_dates: set[date] | None = None
+        if composite.rebalance.frequency != "daily":
+            calendar, source = resolve_trading_calendar(
+                self._db, required_range=(row.start_date, row.end_date)
+            )
+            scheduler = DefaultRebalanceScheduler(calendar)
+            rebalance_dates = {
+                day for day in dates if scheduler.should_rebalance(composite.rebalance, day)
+            }
+            run_params["_calendar_source"] = source
+        blended = blend_members(dates, member_days, composite.target_weights, rebalance_dates)
+
+        enable_benchmark = run_params.get("_enable_benchmark", True)
+        benchmark_code = run_params.get("_benchmark_index_code", "000300")
+        mix = _benchmark_mix_pairs(run_params) or [(benchmark_code, 1.0)]
+        axis = sorted(trading_axis)
+        benchmark_by_date: dict[date, float] = {}
+        if enable_benchmark and len(axis) > 1:
+            mix_codes = [code for code, _w in mix]
+            bench_bars = forward_fill_return_bars(
+                self._load_all_index_bars(axis, mix_codes), mix_codes, axis
+            )
+            series = compute_mix_benchmark(bench_bars, mix, axis)
+            benchmark_by_date = dict(zip(axis[:-1], series))
+        return_codes = sorted({code for day in blended for code in day.positions})
+        return_bars = forward_fill_return_bars(
+            self._load_all_index_bars(axis, return_codes), return_codes, axis
+        )
+        next_of = dict(zip(axis[:-1], axis[1:]))
+
+        accumulator = BacktestDayAccumulator()
+        benchmark_returns: list[float] = []
+        index_buffer: list[dict[str, Any]] = []
+        in_count = in_positive = 0
+        for day in blended:
+            accumulator.apply_day(day.portfolio_return, bool(day.positions))
+            exposure = round(sum(day.positions.values()), 4)
+            bench = benchmark_by_date.get(day.trade_date)
+            if enable_benchmark:
+                benchmark_returns.append(bench if bench is not None else 0.0)
+            positions = _round_weights(day.positions)
+            self._backtest_repo.add_daily_result(
+                BacktestDailyResultModel(
+                    backtest_id=backtest_id,
+                    trade_date=day.trade_date,
+                    portfolio_return=day.portfolio_return,
+                    cumulative_return=round(accumulator.cumulative_return_pct, 4),
+                    drawdown=round(accumulator.drawdown_pct, 4),
+                    timing_regime=None,
+                    total_exposure=exposure,
+                    cash_ratio=round(1.0 - exposure, 4),
+                    positions=positions or None,
+                    executed_positions=positions or None,
+                    benchmark_return=round(bench, 4) if bench is not None else None,
+                    turnover=round(day.turnover, 4) if round(day.turnover, 4) > 0 else None,
+                    missing_bar_count=0,
+                )
+            )
+            next_date = next_of.get(day.trade_date)
+            for code, weight in positions.items():
+                index_return = (
+                    get_index_return(code, day.trade_date, next_date, return_bars)
+                    if next_date
+                    else None
+                )
+                in_count += 1
+                if index_return is not None and index_return > 0:
+                    in_positive += 1
+                level, _ = determine_signal_level(
+                    score=0.0, target_weight=weight, timing_regime=None, scoring_mode="absolute"
+                )
+                index_buffer.append(
+                    {
+                        "backtest_id": backtest_id,
+                        "trade_date": day.trade_date,
+                        "index_code": code,
+                        "signal_score": 0.0,
+                        "scored": False,
+                        "selection_rebalanced": False,
+                        "signal_level": level,
+                        "in_portfolio": True,
+                        "index_return": index_return,
+                        "target_weight": weight,
+                    }
+                )
+        self._flush_results(index_buffer)
+        metrics = self._compute_summary_metrics(
+            accumulator,
+            benchmark_returns,
+            total_in_pos_count=in_count,
+            total_in_pos_positive=in_positive,
+        )
+        metrics["composite"] = {
+            "members": [
+                {"strategy_id": sid, "weight": weight, "metrics": member_metrics.get(sid)}
+                for sid, weight in composite.target_weights.items()
+            ],
+            "cash_weight": composite.cash_weight,
+            "rebalance": composite.rebalance.model_dump(),
+        }
+        run_params["_accounting_model"] = ACCOUNTING_MODEL_DRIFT
+        run_params["_benchmark_alignment"] = "decision_day"
+        run_params["_composite_model"] = COMPOSITE_MODEL
+        row.params = run_params
+        self._backtest_repo.mark_success(backtest_id, metrics, warnings=warnings)
+        return {"metrics": metrics, "days": blended}
+
+    def replay_path_state(
+        self,
+        strategy_id: str,
+        config: StrategyConfig,
+        start: date,
+        end: date,
+        execution_model: str = RESEARCH_DEFAULT_EXECUTION_MODEL,
+    ) -> LoopPathState:
+        """只读回放一段历史，重建实时决策所需的持仓与风控路径状态。
+
+        与研究批量评估一样走 ``persist=False`` 的同一条主循环，不写库、不提交；
+        不计算基准。路径依赖功能（排名缓冲、偏离调仓、风控叠加层）的状态取决于
+        回放起点，调用方须把起点随决策结果一起展示。
+
+        Args:
+            strategy_id: 策略 ID（仅用于日志）。
+            config: 策略配置。
+            start: 回放起点（含）。
+            end: 回放终点（含），即本次决策的有效交易日。
+            execution_model: 回放使用的执行模型。
+
+        Returns:
+            终点收盘时点的路径状态。
+        """
+        universe_filter = (
+            {"mode": "subset", "index_codes": list(config.index_codes)}
+            if config.index_codes
+            else {"mode": "all"}
+        )
+        row = BacktestRunModel(
+            backtest_id=f"replay:{strategy_id}",
+            strategy_id=strategy_id,
+            start_date=start,
+            end_date=end,
+            universe_filter=universe_filter,
+            params={
+                "_execution_model": execution_model,
+                "_data_quality_mode": "warn",
+                "_enable_benchmark": False,
+                "_turnover_model": TURNOVER_MODEL_DELTA_W,
+            },
+            status="pending",
+        )
+        outcome = self._run_backtest_loop(row.backtest_id, row, config, persist=False)
+        return outcome["path_state"]
+
+    def decide_with_path_state(
+        self,
+        config: StrategyConfig,
+        result: EngineResult,
+        trade_date: date,
+        state: LoopPathState,
+        return_panel: ReturnPanel | None = None,
+    ) -> DayTarget:
+        """在回放得到的路径状态上，按与回测主循环相同的规则合成"今日"目标。
+
+        Args:
+            config: 策略配置。
+            result: 今日引擎结果（上下文须带回放得到的 ``current_holdings``）。
+            trade_date: 今日有效交易日。
+            state: :meth:`replay_path_state` 的结果。
+            return_panel: 收益面板（波动率目标使用）。
+
+        Returns:
+            DayTarget：目标持仓与今日是否需要成交。
+        """
+        legs = self._select_legs(config, trade_date)
+        composed = compose_two_leg_positions(
+            previous=state.composition_base,
+            selection_target=dict(result.positions) if result.positions else {},
+            timing_target_exposure=result.timing_target_exposure,
+            should_select=legs.selection,
+            should_scale_risk=legs.risk,
+            max_asset_weight=result.max_asset_weight,
+        )
+        return resolve_day_target(
+            composed,
+            legs_due=legs.selection or legs.risk,
+            base=state.composition_base,
+            last_target=state.last_target,
+            risk=config.risk,
+            band=config.rebalance.band if config.rebalance else None,
+            overlay_state=state.overlay_state,
+            covariance_of=_covariance_lookup(config, return_panel, trade_date),
+        )
 
     def _select_legs(
         self,
@@ -2435,7 +3107,10 @@ class BacktestService:
         Returns:
             key=indicator_code, value={period: value} 的字典。
         """
-        return MacroIndicatorRepository(self._db).find_all_as_map()
+        indicators = MacroIndicatorRepository(self._db).find_all_as_map()
+        # 日频市场指标并入同一个时点映射（交易日当日可见），与实时路径同口径
+        indicators.update(MarketIndicatorRepository(self._db).find_all_as_map())
+        return indicators
 
     # ── Schema 转换辅助 ────────────────────────────────────────────────────
 

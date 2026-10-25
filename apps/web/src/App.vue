@@ -8,6 +8,7 @@
         </svg>
         <span class="logo-text">Quant</span>
       </div>
+      <AlertBell />
       <nav>
         <RouterLink to="/" class="nav-item">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
@@ -84,6 +85,7 @@
 
 <script setup lang="ts">
 import { RouterLink, RouterView } from 'vue-router'
+import AlertBell from './components/layout/AlertBell.vue'
 import ToastHost from './components/ToastHost.vue'
 </script>
 
