@@ -89,12 +89,13 @@
             <tr>
               <th>策略</th>
               <th>日期范围</th>
+              <th>用途 / 执行模型</th>
               <th>状态</th>
               <th>队列</th>
-              <th>累计收益</th>
-              <th>年化收益</th>
+              <th title="回测汇总为毛收益（未扣交易成本）；净口径见详情页成本阶梯">累计收益（毛）</th>
+              <th title="毛收益口径">年化收益（毛）</th>
               <th>最大回撤</th>
-              <th>夏普</th>
+              <th title="毛收益口径">夏普（毛）</th>
               <th>创建时间</th>
               <th>操作</th>
             </tr>
@@ -108,6 +109,15 @@
             >
               <td class="mono">{{ item.strategy_id }}</td>
               <td class="text-muted">{{ item.start_date }} ~ {{ item.end_date }}</td>
+              <td class="text-muted model-cell">
+                {{ purposeLabel(item.purpose) }}
+                <template v-if="item.execution_model"> · {{ executionModelLabel(item.execution_model) }}</template>
+                <span
+                  v-if="item.accounting_model === 'constant_mix_v0'"
+                  class="legacy-tag"
+                  title="历史记账口径（恒定权重），与当前 drift_v1 口径不可直接比较"
+                >旧口径</span>
+              </td>
               <td>
                 <span class="status-badge" :class="'status-' + item.status">{{ statusLabel(item.status) }}</span>
                 <span v-if="item.status === 'running' && item.progress > 0" class="progress-inline">
@@ -172,9 +182,9 @@
               <th>策略 B</th>
               <th>日期范围</th>
               <th>状态</th>
-              <th>A 累计收益</th>
-              <th>B 累计收益</th>
-              <th>收益差</th>
+              <th title="毛收益口径（未扣交易成本）">A 累计收益（毛）</th>
+              <th title="毛收益口径（未扣交易成本）">B 累计收益（毛）</th>
+              <th>收益差（毛）</th>
               <th>创建时间</th>
             </tr>
           </thead>
@@ -231,6 +241,7 @@ import { cancelBacktest } from '../api/backtests'
 import { useBacktestStore } from '../stores/backtests'
 import { toast } from '../stores/toast'
 import type { BacktestSummary } from '../types/api'
+import { backtestStatusLabel, executionModelLabel, purposeLabel } from '../utils/labels'
 
 const store = useBacktestStore()
 const loading = ref(false)
@@ -335,21 +346,11 @@ function extractErrorDetail(error: unknown): string {
 
 /** 状态中文标签。 */
 function statusLabel(status: string): string {
-  const map: Record<string, string> = {
-    pending: '待执行',
-    running: '执行中',
-    success: '成功',
-    failed: '失败',
-    cancelled: '已取消',
-  }
-  return map[status] ?? status
+  return backtestStatusLabel(status)
 }
 
 function compStatusLabel(status: string): string {
-  const map: Record<string, string> = {
-    pending: '待执行', running: '执行中', success: '成功', failed: '失败', partial: '部分成功',
-  }
-  return map[status] ?? status
+  return backtestStatusLabel(status)
 }
 
 function formatPct(v: number): string {
@@ -492,8 +493,10 @@ onMounted(async () => {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  overflow-x: auto;
 }
+.model-cell { white-space: nowrap; font-size: 12px; }
+.legacy-tag { margin-left: 4px; font-size: 11px; color: var(--warning); border: 1px solid rgba(245,158,11,0.4); border-radius: 4px; padding: 0 4px; }
 .loading, .empty { padding: 40px; text-align: center; color: var(--text-muted); }
 
 .data-table { width: 100%; border-collapse: collapse; }
@@ -513,7 +516,7 @@ onMounted(async () => {
 .clickable { cursor: pointer; transition: background 0.1s; }
 .clickable:hover td { background: rgba(59,130,246,0.05); }
 
-.mono { font-family: monospace; font-size: 12px; }
+.mono { font-family: var(--font-mono); font-size: 12px; }
 .text-muted { color: var(--text-muted); }
 .success { color: var(--success); font-weight: 600; }
 .danger { color: var(--danger); font-weight: 600; }

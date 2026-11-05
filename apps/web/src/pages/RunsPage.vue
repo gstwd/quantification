@@ -28,7 +28,8 @@
         <div class="queue-metric">
           <span class="queue-label">近 {{ queueStats.throughput_window_hours }}h 完成</span>
           <span class="queue-value">
-            {{ queueStats.throughput.success ?? 0 }} 成功 / {{ queueStats.throughput.failed ?? 0 }} 失败
+            {{ queueStats.throughput.success ?? 0 }} 成功 / {{ queueStats.throughput.failed ?? 0 }} 失败 /
+            {{ queueStats.throughput.cancelled ?? 0 }} 取消
           </span>
         </div>
         <div class="queue-metric">
@@ -45,20 +46,21 @@
           class="job-chip"
           :title="`${job.job_id}（lane=${job.lane}）`"
         >
-          {{ job.job_type }} · {{ formatSeconds(job.elapsed_seconds) }}
+          {{ jobTypeLabel(job.job_type) }} · {{ formatSeconds(job.elapsed_seconds) }}
           <span v-if="job.cancel_requested" class="job-cancel-flag">取消中</span>
         </span>
       </div>
       <div v-if="queueStats.backlog_by_type.length > 0" class="backlog-list">
         <span v-for="item in queueStats.backlog_by_type" :key="item.job_type" class="backlog-chip">
-          {{ item.job_type }}: 待 {{ item.pending }} / 跑 {{ item.running }}
+          {{ jobTypeLabel(item.job_type) }}：待 {{ item.pending }} / 跑 {{ item.running }}<template v-if="item.paused"> / 停 {{ item.paused }}</template>
         </span>
       </div>
     </div>
 
     <div class="table-wrap">
-      <div v-if="loading" class="loading">加载中...</div>
-      <table v-else class="data-table">
+      <!-- 仅首次加载（列表为空）时显示加载态；轮询刷新保持表格与展开行不闪烁 -->
+      <div v-if="loading && runs.length === 0" class="loading">加载中...</div>
+      <table v-else-if="runs.length > 0" class="data-table">
         <thead>
           <tr>
             <th></th>
@@ -67,8 +69,8 @@
             <th>策略</th>
             <th>交易日</th>
             <th>状态</th>
-            <th>耗时</th>
-            <th>开始时间</th>
+            <th title="自运行记录创建（入队）起算，包含排队等待时间">总耗时（含排队）</th>
+            <th title="运行记录创建（入队）时间">创建时间</th>
             <th>操作</th>
           </tr>
         </thead>
@@ -79,15 +81,15 @@
                 <span class="expand-icon" :class="{ expanded: expandedId === item.run_id }">&#9654;</span>
               </td>
               <td class="mono text-muted">{{ item.run_id.slice(0, 8) }}…</td>
-              <td><span class="type-badge">{{ item.run_type }}</span></td>
+              <td><span class="type-badge" :title="item.run_type">{{ runTypeLabel(item.run_type) }}</span></td>
               <td class="text-muted mono">{{ item.strategy_id ?? '—' }}</td>
               <td class="text-muted mono">{{ item.trade_date ?? '—' }}</td>
-              <td><span class="status-badge" :class="'status-' + item.status">{{ statusLabel(item.status) }}</span></td>
-              <td class="text-muted mono">{{ formatDuration(item.run_id) }}</td>
+              <td><span class="status-badge" :class="'status-' + item.status">{{ runStatusLabel(item.status) }}</span></td>
+              <td class="text-muted mono">{{ formatDuration(item) }}</td>
               <td class="text-muted">{{ formatTime(item.started_at) }}</td>
               <td>
                 <button
-                  v-if="item.status === 'failed' || item.status === 'partial_success'"
+                  v-if="(item.status === 'failed' || item.status === 'partial_success') && RETRYABLE_RUN_TYPES.has(item.run_type)"
                   class="btn btn-sm btn-accent"
                   :disabled="retryingId === item.run_id"
                   @click.stop="handleRetry(item.run_id)"
@@ -107,6 +109,24 @@
                   <!-- 运行指标 -->
                   <div v-if="detailCache[item.run_id].metrics" class="detail-section">
                     <div class="section-label">运行指标</div>
+                    <div v-if="metricItems(detailCache[item.run_id].metrics).length" class="items-table-wrap metric-items-wrap">
+                      <table class="items-table">
+                        <thead>
+                          <tr>
+                            <th>数据集</th>
+                            <th>状态</th>
+                            <th>明细</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="(row, idx) in metricItems(detailCache[item.run_id].metrics)" :key="idx">
+                            <td class="mono">{{ row.key }}</td>
+                            <td><span class="status-badge" :class="'status-' + row.status">{{ runStatusLabel(row.status) }}</span></td>
+                            <td class="text-muted">{{ row.detail || '—' }}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
                     <div class="metrics-grid">
                       <template v-for="(val, key) in flattenMetrics(detailCache[item.run_id].metrics)" :key="key">
                         <div class="metric-item">
@@ -124,7 +144,7 @@
                       <table class="items-table">
                         <thead>
                           <tr>
-                            <th>指数代码</th>
+                            <th>子项</th>
                             <th>状态</th>
                             <th>说明</th>
                           </tr>
@@ -132,7 +152,7 @@
                         <tbody>
                           <tr v-for="sub in itemDetails[item.run_id]" :key="sub.id">
                             <td class="mono">{{ sub.index_code }}</td>
-                            <td><span class="status-badge" :class="'status-' + sub.status">{{ sub.status }}</span></td>
+                            <td><span class="status-badge" :class="'status-' + sub.status">{{ runStatusLabel(sub.status) }}</span></td>
                             <td class="text-muted">{{ sub.message ?? '—' }}</td>
                           </tr>
                         </tbody>
@@ -172,7 +192,8 @@ import type {
   ResearchRunSummary,
 } from '../types/api'
 import { usePolling } from '../composables/usePolling'
-import { notifySkippedRun } from '../composables/useRunSkipToast'
+import { useRunSkipToast } from '../composables/useRunSkipToast'
+import { jobTypeLabel, RETRYABLE_RUN_TYPES, runStatusLabel, runTypeLabel } from '../utils/labels'
 
 const runs = ref<ResearchRunSummary[]>([])
 const total = ref(0)
@@ -182,12 +203,13 @@ const loading = ref(false)
 const refreshing = ref(false)
 const retryingId = ref<string | null>(null)
 const queueStats = ref<QueueStatsResponse | null>(null)
+/** 重试后跟踪新运行记录，被跳过时提示原因 */
+const { notify: notifySkippedRun } = useRunSkipToast()
 
 // 展开详情相关
 const expandedId = ref<string | null>(null)
 const detailCache = ref<Record<string, ResearchRunDetail>>({})
 const itemDetails = ref<Record<string, ResearchRunItem[]>>({})
-const durationCache = ref<Record<string, number | null>>({})
 
 /** 是否有正在执行的任务 */
 const hasActiveRuns = computed(() => runs.value.some((r) => r.status === 'pending' || r.status === 'running'))
@@ -207,7 +229,6 @@ const { polling, start: startPolling } = usePolling({
         try {
           const detail = await fetchRunDetail(expandedId.value)
           detailCache.value[expandedId.value] = detail
-          durationCache.value[detail.run_id] = detail.duration_seconds ?? null
         } catch {
           // 静默失败
         }
@@ -219,47 +240,62 @@ const { polling, start: startPolling } = usePolling({
   isDone: () => !hasActiveRuns.value,
 })
 
-/** 状态标签 */
-function statusLabel(status: string): string {
-  const map: Record<string, string> = {
-    pending: '待执行',
-    running: '执行中',
-    success: '成功',
-    partial_success: '部分成功',
-    skipped: '已跳过',
-    failed: '失败',
-    completed: '完成',
-  }
-  return map[status] ?? status
-}
-
 /** 格式化时间 */
 function formatTime(ts: string | null | undefined): string {
   if (!ts) return '—'
   return new Date(ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
-/** 格式化耗时 */
-function formatDuration(runId: string): string {
-  const d = durationCache.value[runId]
-  if (d === undefined || d === null) return '—'
+/**
+ * 总耗时：列表已含创建时间与结束时间，直接计算（含排队等待）；未结束显示 —。
+ */
+function formatDuration(item: ResearchRunSummary): string {
+  if (!item.started_at || !item.finished_at) return '—'
+  const d = (new Date(item.finished_at).getTime() - new Date(item.started_at).getTime()) / 1000
+  if (!Number.isFinite(d) || d < 0) return '—'
   if (d < 60) return `${d.toFixed(1)}s`
   const m = Math.floor(d / 60)
-  const s = Math.round(d % 60)
-  return `${m}m${s}s`
+  const sec = Math.round(d % 60)
+  return `${m}m${sec}s`
 }
 
-/** 将嵌套 metrics 展开为平铺的 key-value */
+/** metrics.items 中的单个数据集结果行 */
+interface MetricItemRow {
+  key: string
+  status: string
+  detail: string
+}
+
+/**
+ * 数据维护 / 全局同步的 metrics.items（每个数据集一项）转为表格行。
+ */
+function metricItems(metrics: Record<string, unknown> | null | undefined): MetricItemRow[] {
+  const items = metrics?.items
+  if (!Array.isArray(items)) return []
+  return items
+    .filter((it): it is Record<string, unknown> => !!it && typeof it === 'object')
+    .map((it) => {
+      const { dataset_key: key, status, ...rest } = it
+      const detail = Object.entries(rest)
+        .filter(([, v]) => v !== null && v !== undefined && v !== '')
+        .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
+        .join('，')
+      return { key: String(key ?? '—'), status: String(status ?? ''), detail }
+    })
+}
+
+/** 将嵌套 metrics 展开为平铺的 key-value（items 列表单独以表格展示） */
 function flattenMetrics(metrics: Record<string, unknown> | null | undefined): Record<string, string> {
   if (!metrics) return {}
   const result: Record<string, string> = {}
   for (const [k, v] of Object.entries(metrics)) {
+    if (k === 'items' && Array.isArray(v)) continue
     if (v && typeof v === 'object' && !Array.isArray(v)) {
       for (const [sk, sv] of Object.entries(v as Record<string, unknown>)) {
-        result[`${k}.${sk}`] = String(sv)
+        result[`${k}.${sk}`] = typeof sv === 'object' && sv !== null ? JSON.stringify(sv) : String(sv)
       }
     } else {
-      result[k] = String(v)
+      result[k] = Array.isArray(v) ? JSON.stringify(v) : String(v)
     }
   }
   return result
@@ -290,7 +326,6 @@ async function toggleDetail(runId: string) {
     try {
       const detail = await fetchRunDetail(runId)
       detailCache.value[runId] = detail
-      durationCache.value[runId] = detail.duration_seconds ?? null
     } catch {
       // 静默失败
     }
@@ -313,7 +348,6 @@ async function load(offset = 0) {
     runs.value = res.items
     total.value = res.total
     currentOffset.value = offset
-    // 同步更新 duration 缓存（列表接口不含 duration，从 detail 缓存读取）
   } finally {
     loading.value = false
   }
@@ -436,7 +470,7 @@ onMounted(async () => {
 }
 .expand-icon.expanded { transform: rotate(90deg); }
 
-.mono { font-family: monospace; font-size: 12px; }
+.mono { font-family: var(--font-mono); font-size: 12px; }
 .text-muted { color: var(--text-muted); }
 
 .type-badge {
@@ -445,7 +479,7 @@ onMounted(async () => {
   color: var(--text-muted);
   padding: 2px 8px;
   border-radius: 20px;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 .status-badge {
@@ -462,6 +496,8 @@ onMounted(async () => {
 .status-failed { background: rgba(239,68,68,0.15); color: var(--danger); }
 .status-completed { background: rgba(34,197,94,0.15); color: var(--success); }
 .status-skipped { background: rgba(148,163,184,0.1); color: var(--text-muted); }
+.status-cancelled { background: rgba(148,163,184,0.1); color: var(--text-muted); }
+.metric-items-wrap { margin-bottom: 10px; }
 
 /* 详情面板 */
 .detail-row td { padding: 0; border-bottom: 1px solid var(--border); }
@@ -487,7 +523,7 @@ onMounted(async () => {
   border-radius: var(--radius-sm);
   padding: 12px 16px;
   font-size: 12px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   color: var(--danger);
   white-space: pre-wrap;
   word-break: break-all;
@@ -510,7 +546,7 @@ onMounted(async () => {
   border-radius: var(--radius-sm);
   font-size: 12px;
 }
-.metric-key { color: var(--text-muted); font-family: monospace; }
+.metric-key { color: var(--text-muted); font-family: var(--font-mono); }
 .metric-val { color: var(--text); font-weight: 500; }
 
 .items-table-wrap {

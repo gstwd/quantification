@@ -28,8 +28,8 @@
       </div>
 
       <div class="scope-notice">
-        执行模型：{{ executionModelLabel }}；数据质量：{{ dataQualityLabel }}。
-        仓位图同时区分目标仓位与收益窗口实际执行仓位。
+        用途：{{ purposeText }}；执行模型：{{ executionModelLabel }}；数据质量：{{ dataQualityLabel }}。
+        下方核心绩效为毛收益口径（未扣交易成本），净口径见「稳健性与成本口径」。
       </div>
 
       <!-- 结构化警告（预热期/因子缺失/数据缺口/部分结果等） -->
@@ -43,7 +43,7 @@
 
       <!-- 汇总指标卡片 -->
       <div v-if="store.current.metrics" class="metrics-section">
-        <div class="section-label">核心绩效</div>
+        <div class="section-label">核心绩效（毛口径）</div>
         <div class="metrics-grid">
           <div class="metric-card">
             <div class="metric-label">累计收益 <HelpTip :text="metricHelp('cumulative_return_pct')" /></div>
@@ -158,7 +158,10 @@
 
       <!-- 分年度绩效表 -->
       <div v-if="store.current?.annual_metrics?.length" class="metrics-section">
-        <div class="section-label">分年度绩效</div>
+        <div class="section-label">
+          分年度绩效（毛口径）
+          <HelpTip :text="`交易日少于 ${SHORT_YEAR_DAYS} 天的年份（如区间首尾不完整年）只展示区间累计收益与回撤，年化、夏普、索提诺显示为 —。`" />
+        </div>
         <div class="annual-table-wrap">
           <table class="annual-table">
             <thead>
@@ -174,12 +177,14 @@
             </thead>
             <tbody>
               <tr v-for="row in store.current.annual_metrics" :key="row.year">
-                <td>{{ row.year }}</td>
+                <td>{{ row.year }}<span v-if="isShortYear(row.trading_days)" class="short-year" title="交易日不足，年化与夏普类指标没有统计意义">不足一年</span></td>
                 <td>{{ row.trading_days }}</td>
                 <td :class="pctClass(row.total_return_pct)">{{ formatPct(row.total_return_pct) }}</td>
-                <td :class="pctClass(row.annualized_return_pct)">{{ formatPct(row.annualized_return_pct) }}</td>
-                <td>{{ row.sharpe_ratio.toFixed(2) }}</td>
-                <td>{{ row.sortino_ratio.toFixed(2) }}</td>
+                <td :class="isShortYear(row.trading_days) ? '' : pctClass(row.annualized_return_pct)">
+                  {{ isShortYear(row.trading_days) ? '—' : formatPct(row.annualized_return_pct) }}
+                </td>
+                <td>{{ isShortYear(row.trading_days) ? '—' : row.sharpe_ratio.toFixed(2) }}</td>
+                <td>{{ isShortYear(row.trading_days) ? '—' : row.sortino_ratio.toFixed(2) }}</td>
                 <td class="danger">{{ formatPct(row.max_drawdown_pct) }}</td>
               </tr>
             </tbody>
@@ -204,7 +209,7 @@
           </div>
           <div class="metric-card">
             <div class="metric-label">成本拖累</div>
-            <div class="metric-value danger">{{ formatPct(store.current.stability.cost_drag_pct_per_year) }}/年</div>
+            <div class="metric-value">{{ store.current.stability.cost_drag_pct_per_year.toFixed(2) }}%/年</div>
           </div>
           <div class="metric-card">
             <div class="metric-label">净口径年化</div>
@@ -296,14 +301,14 @@
           </table>
         </div>
         <div class="stability-note">
-          指标口径：{{ store.current.stability.execution_model || '—' }} /
+          指标口径：{{ store.current.stability.execution_model ? labelExecutionModel(store.current.stability.execution_model) : '—' }} /
           {{ store.current.stability.data_quality_mode || '—' }} /
           基准 {{ store.current.stability.benchmark_index_code || '未启用' }} /
           日历 {{ calendarSourceLabel }} /
           换手 {{ turnoverModelLabel }} /
           记账 {{ accountingModelLabel }}
           <template v-if="store.current.purpose && store.current.purpose !== 'research'">
-            ｜用途：{{ store.current.purpose }}
+            ｜用途：{{ purposeText }}
           </template>
           <div v-if="isLegacyTurnover" class="legacy-warning">
             ⚠ 该回测使用历史换手口径（未计入清仓/建仓腿），净口径指标偏低，
@@ -512,7 +517,7 @@
 
       <!-- 仓位变化 -->
       <div class="chart-card">
-        <div class="chart-title">实际执行仓位变化</div>
+        <div class="chart-title">实际持仓变化（收益窗口起点）</div>
         <div ref="positionsChartEl" class="chart-container"></div>
       </div>
 
@@ -522,13 +527,15 @@
         <div v-if="hasBenchmark" ref="timingChartEl" class="chart-container"></div>
         <!-- 无基准数据时降级为原始 regime 时间线 -->
         <div v-else class="regime-timeline">
+          <!-- 连续相同状态合并为一段，宽度按天数，避免长回测渲染上千个日期块 -->
           <span
-            v-for="(item, i) in regimeTimeline"
+            v-for="(seg, i) in regimeSegments"
             :key="i"
-            :class="['regime-block', `regime-${item.regime}`]"
-            :title="`${item.date}: ${item.regime} (${(item.exposure * 100).toFixed(0)}%)`"
+            :class="['regime-block', `regime-${seg.regime}`]"
+            :style="{ flexGrow: seg.days }"
+            :title="`${seg.start} ~ ${seg.end}：${regimeLabel(seg.regime)}（${seg.days} 个交易日）`"
           >
-            {{ item.date.slice(5) }}
+            <template v-if="seg.days >= regimeLabelMinDays">{{ regimeLabel(seg.regime) }}</template>
           </span>
         </div>
       </div>
@@ -538,8 +545,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
+import { useChart } from '../composables/useChart'
+import {
+  backtestStatusLabel,
+  executionModelLabel as labelsExecutionModel,
+  purposeLabel,
+} from '../utils/labels'
 
 import type { BenchmarkIndex } from '../types/api'
 import { fetchBenchmarkIndexes } from '../api/market_data'
@@ -580,21 +593,45 @@ const { polling, start: startPolling } = usePolling({
 /** 指数代码 → 指数名称 映射表 */
 const indexNameMap = ref<Record<string, string>>({})
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let equityChart: any = null
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let drawdownChart: any = null
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let rollingChart: any = null
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let positionsChart: any = null
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let timingChart: any = null
+/** 图表实例由 useChart 管理：容器重建时重新初始化，尺寸变化自动 resize，卸载时释放 */
+const equityChart = useChart(equityChartEl)
+const drawdownChart = useChart(drawdownChartEl)
+const rollingChart = useChart(rollingChartEl)
+const positionsChart = useChart(positionsChartEl)
+const timingChart = useChart(timingChartEl)
 
 function statusLabel(status: string): string {
-  const map: Record<string, string> = { pending: '待执行', running: '执行中', success: '成功', failed: '失败' }
-  return map[status] ?? status
+  return backtestStatusLabel(status)
 }
+
+/** 回测用途中文 */
+const purposeText = computed(() => purposeLabel(store.current?.purpose ?? 'research'))
+
+/** 分年度表中视为「不足一年」的交易日阈值：低于该值不展示年化类指标 */
+const SHORT_YEAR_DAYS = 60
+
+/** 该年份交易日是否不足以计算有意义的年化指标 */
+function isShortYear(tradingDays: number): boolean {
+  return tradingDays < SHORT_YEAR_DAYS
+}
+
+/** 择时状态合并段（无基准时的降级时间线） */
+const regimeSegments = computed(() => {
+  const segments: Array<{ regime: string; start: string; end: string; days: number }> = []
+  for (const item of regimeTimeline.value) {
+    const last = segments[segments.length - 1]
+    if (last && last.regime === item.regime) {
+      last.end = item.date
+      last.days += 1
+    } else {
+      segments.push({ regime: item.regime, start: item.date, end: item.date, days: 1 })
+    }
+  }
+  return segments
+})
+
+/** 段内天数达到总天数 3% 才显示文字，避免窄段文字溢出 */
+const regimeLabelMinDays = computed(() => Math.max(1, Math.ceil(regimeTimeline.value.length * 0.03)))
 
 /** 结构化警告列表（内联展示） */
 const warnings = computed(() => store.current?.warnings ?? [])
@@ -709,6 +746,11 @@ const executionModelLabel = computed(() => {
   return value === 't_plus_1_close' ? 'T+1 收盘执行' : 'T+1 开盘执行'
 })
 
+/** 执行模型键 → 中文（用于口径说明行） */
+function labelExecutionModel(value: string): string {
+  return labelsExecutionModel(value)
+}
+
 const dataQualityLabel = computed(() => {
   const value = store.current?.params?.['_data_quality_mode']
   return value === 'strict' ? '缺口逐指数提示' : '缺口汇总提示'
@@ -799,7 +841,6 @@ function getDisplayName(code: string): string {
 
 async function initCharts() {
   if (store.dailyResults.length === 0) return
-  const echarts = await import('echarts')
 
   const dates = store.dailyResults.map((r) => r.trade_date)
   const cumReturns = store.dailyResults.map((r) => r.cumulative_return)
@@ -810,8 +851,6 @@ async function initCharts() {
 
   // 权益曲线（含基准对比叠加）
   if (equityChartEl.value) {
-    equityChart?.dispose()
-    equityChart = echarts.init(equityChartEl.value)
     const series: Record<string, unknown>[] = [{
       name: '策略',
       type: 'line',
@@ -831,7 +870,7 @@ async function initCharts() {
         lineStyle: { color: '#f59e0b', width: 1.5, type: 'dashed' },
       })
     }
-    equityChart.setOption({
+    await equityChart.render({
       backgroundColor: 'transparent',
       tooltip: {
         trigger: 'axis',
@@ -853,9 +892,7 @@ async function initCharts() {
 
   // 回撤曲线
   if (drawdownChartEl.value) {
-    drawdownChart?.dispose()
-    drawdownChart = echarts.init(drawdownChartEl.value)
-    drawdownChart.setOption({
+    await drawdownChart.render({
       backgroundColor: 'transparent',
       tooltip: { trigger: 'axis', formatter: (p: { name: string; value: number }[]) => `${p[0].name}<br/>回撤: ${p[0].value.toFixed(2)}%` },
       grid: { left: 60, right: 20, top: 20, bottom: 40 },
@@ -874,9 +911,7 @@ async function initCharts() {
 
   // 滚动夏普/索提诺（252 个交易日窗口，样本不足处留空）
   if (rollingChartEl.value && hasRollingMetrics.value) {
-    rollingChart?.dispose()
-    rollingChart = echarts.init(rollingChartEl.value)
-    rollingChart.setOption({
+    await rollingChart.render({
       backgroundColor: 'transparent',
       tooltip: {
         trigger: 'axis',
@@ -916,8 +951,6 @@ async function initCharts() {
 
   // 仓位变化堆叠面积图（使用指数名称展示）
   if (positionsChartEl.value) {
-    positionsChart?.dispose()
-    positionsChart = echarts.init(positionsChartEl.value)
 
     // 收集所有持仓的指数代码
     const allCodes = new Set<string>()
@@ -961,7 +994,7 @@ async function initCharts() {
       data: store.dailyResults.map((r) => r.cash_ratio ? (r.cash_ratio * 100) : (100 - (r.total_exposure ?? 0) * 100)),
     })
 
-    positionsChart.setOption({
+    await positionsChart.render({
       backgroundColor: 'transparent',
       tooltip: {
         trigger: 'axis',
@@ -982,12 +1015,11 @@ async function initCharts() {
   }
 
   // 择时状态 + 代理指数趋势（合并图表）
-  initTimingChart(echarts, dates, benchmarkPricesData, showBench)
+  await initTimingChart(dates, benchmarkPricesData, showBench)
 }
 
 /** 构建择时状态 + 代理指数趋势合并图表（每日归一化收盘价 + regime 背景着色） */
-function initTimingChart(
-  echarts: any, // eslint-disable-line @typescript-eslint/no-explicit-any
+async function initTimingChart(
   dates: string[],
   prices: number[],
   showBench: boolean,
@@ -995,8 +1027,6 @@ function initTimingChart(
   if (!timingChartEl.value || regimeTimeline.value.length === 0) return
   if (!showBench) return // 无基准数据时使用降级方案（regime 时间线块）
 
-  timingChart?.dispose()
-  timingChart = echarts.init(timingChartEl.value)
 
   // 构建 regime → 颜色映射
   const REGIME_COLORS: Record<string, string> = {
@@ -1030,7 +1060,7 @@ function initTimingChart(
     ])
   }
 
-  timingChart.setOption({
+  await timingChart.render({
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'axis',
@@ -1043,9 +1073,8 @@ function initTimingChart(
         // 择时状态
         const regimeItem = regimeTimeline.value.find((r) => r.date === date)
         if (regimeItem) {
-          const regimeLabels: Record<string, string> = { offensive: '进攻', neutral: '中性', defensive: '防守' }
-          tip += `择时状态: ${regimeLabels[regimeItem.regime] ?? regimeItem.regime}<br/>`
-          tip += `目标仓位: ${(regimeItem.exposure * 100).toFixed(0)}%`
+          tip += `择时状态: ${regimeLabel(regimeItem.regime)}<br/>`
+          tip += `持仓（窗口初）: ${(regimeItem.exposure * 100).toFixed(1)}%`
         }
         return tip
       },
@@ -1121,13 +1150,6 @@ onMounted(async () => {
   }
 })
 
-onUnmounted(() => {
-  equityChart?.dispose()
-  drawdownChart?.dispose()
-  rollingChart?.dispose()
-  positionsChart?.dispose()
-  timingChart?.dispose()
-})
 </script>
 
 <style scoped>
@@ -1168,7 +1190,7 @@ onUnmounted(() => {
   font-size: 12px;
   cursor: pointer;
 }
-.preset-btn:hover { border-color: var(--primary, #3b82f6); color: var(--primary, #3b82f6); }
+.preset-btn:hover { border-color: var(--accent); color: var(--accent); }
 
 .annual-table-wrap {
   overflow-x: auto;
@@ -1260,11 +1282,11 @@ onUnmounted(() => {
 }
 .metrics-grid {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 12px;
 }
 @media (max-width: 1200px) {
-  .metrics-grid { grid-template-columns: repeat(3, 1fr); }
+  .metrics-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 .metric-card {
   background: var(--surface);
@@ -1304,7 +1326,7 @@ onUnmounted(() => {
 }
 .data-table td { padding: 10px 14px; border-bottom: 1px solid rgba(51,65,85,0.5); font-size: 13px; }
 .data-table tr:last-child td { border-bottom: none; }
-.mono { font-family: monospace; font-size: 12px; }
+.mono { font-family: var(--font-mono); font-size: 12px; }
 
 .status-badge {
   display: inline-block;
@@ -1317,23 +1339,29 @@ onUnmounted(() => {
 .status-running { background: rgba(59,130,246,0.15); color: #60a5fa; }
 .status-success { background: rgba(34,197,94,0.15); color: var(--success); }
 .status-failed { background: rgba(239,68,68,0.15); color: var(--danger); }
+.status-cancelled { background: rgba(148,163,184,0.15); color: var(--text-muted); }
 
 /* 择时状态时间线 */
 .regime-timeline {
   display: flex;
-  flex-wrap: wrap;
-  gap: 2px;
+  gap: 1px;
   padding: 8px 0;
+  height: 40px;
 }
 .regime-block {
-  display: inline-block;
-  padding: 2px 4px;
-  border-radius: 3px;
-  font-size: 9px;
+  flex-basis: 0;
+  min-width: 1px;
+  overflow: hidden;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 2px;
+  font-size: 11px;
   font-weight: 500;
   cursor: default;
-  line-height: 1.4;
 }
+.short-year { margin-left: 6px; font-size: 10px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; }
 .regime-block.regime-offensive { background: rgba(34,197,94,0.25); color: #4ade80; }
 .regime-block.regime-neutral { background: rgba(245,158,11,0.25); color: #f59e0b; }
 .regime-block.regime-defensive { background: rgba(239,68,68,0.25); color: #f87171; }

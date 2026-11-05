@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../api/client'
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
@@ -27,8 +28,14 @@ import type {
 export const useStrategyStore = defineStore('strategies', () => {
   const items = ref<StrategySummary[]>([])
   const current = ref<StrategyDetail | null>(null)
+  /** 列表 / 详情加载中（读操作） */
   const loading = ref(false)
+  /** 列表 / 详情加载失败文案（读操作）；页面据此显示错误态 */
   const error = ref<string | null>(null)
+  /** 创建 / 更新 / 删除 / 星标进行中（写操作），不影响页面主体渲染 */
+  const saving = ref(false)
+  /** 写操作失败文案：在弹窗或提示条中展示，不能让整页内容消失 */
+  const actionError = ref<string | null>(null)
   const validationResult = ref<StrategyValidationResult | null>(null)
 
   /** 加载所有策略摘要 */
@@ -38,7 +45,7 @@ export const useStrategyStore = defineStore('strategies', () => {
     try {
       items.value = await fetchStrategies()
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '加载策略列表失败'
+      error.value = getErrorMessage(e, '加载策略列表失败')
     } finally {
       loading.value = false
     }
@@ -51,7 +58,7 @@ export const useStrategyStore = defineStore('strategies', () => {
     try {
       current.value = await fetchStrategyDetail(strategyId)
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '加载策略详情失败'
+      error.value = getErrorMessage(e, '加载策略详情失败')
     } finally {
       loading.value = false
     }
@@ -59,49 +66,49 @@ export const useStrategyStore = defineStore('strategies', () => {
 
   /** 创建策略配置 */
   async function create(req: StrategyConfigCreate): Promise<boolean> {
-    loading.value = true
-    error.value = null
+    saving.value = true
+    actionError.value = null
     try {
       await createStrategy(req)
       await loadAll()
       return true
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '创建策略失败'
+      actionError.value = getErrorMessage(e, '创建策略失败')
       return false
     } finally {
-      loading.value = false
+      saving.value = false
     }
   }
 
   /** 更新策略配置 */
   async function update(strategyId: string, req: StrategyConfigUpdate): Promise<boolean> {
-    loading.value = true
-    error.value = null
+    saving.value = true
+    actionError.value = null
     try {
       current.value = await updateStrategy(strategyId, req)
       await loadAll()
       return true
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '更新策略失败'
+      actionError.value = getErrorMessage(e, '更新策略失败')
       return false
     } finally {
-      loading.value = false
+      saving.value = false
     }
   }
 
   /** 删除策略配置 */
   async function remove(strategyId: string): Promise<boolean> {
-    loading.value = true
-    error.value = null
+    saving.value = true
+    actionError.value = null
     try {
       await deleteStrategy(strategyId)
       await loadAll()
       return true
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '删除策略失败'
+      actionError.value = getErrorMessage(e, '删除策略失败')
       return false
     } finally {
-      loading.value = false
+      saving.value = false
     }
   }
 
@@ -117,7 +124,7 @@ export const useStrategyStore = defineStore('strategies', () => {
       }
       return true
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '星标策略失败'
+      actionError.value = getErrorMessage(e, '星标策略失败')
       return false
     }
   }
@@ -134,7 +141,7 @@ export const useStrategyStore = defineStore('strategies', () => {
       }
       return true
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '取消星标失败'
+      actionError.value = getErrorMessage(e, '取消星标失败')
       return false
     }
   }
@@ -153,6 +160,8 @@ export const useStrategyStore = defineStore('strategies', () => {
     current,
     loading,
     error,
+    saving,
+    actionError,
     validationResult,
     loadAll,
     loadOne,

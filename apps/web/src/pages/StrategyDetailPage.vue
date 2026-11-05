@@ -6,9 +6,9 @@
     支持编辑和删除策略。
   -->
   <div class="page">
-    <div v-if="store.error" class="error-tip">{{ store.error }}</div>
-    <div v-else-if="store.loading" class="loading">加载中...</div>
-    <template v-else-if="store.current">
+    <div v-if="store.error && !currentMatches" class="error-tip">{{ store.error }}</div>
+    <div v-else-if="store.loading && !currentMatches" class="loading">加载中...</div>
+    <template v-else-if="store.current && currentMatches">
       <div class="page-header">
         <div class="header-left">
           <h1 class="page-title">
@@ -27,11 +27,12 @@
             <span
               class="chip chip-freq"
               title="策略标注频率（元数据，不控制调仓；实际调仓频率见下方调仓模块的 frequency）"
-              >{{ store.current.frequency }}</span
+              >{{ frequencyLabel(store.current.frequency) }}</span
             >
             <span :class="['chip', store.current.status === 'active' ? 'chip-active' : 'chip-disabled']">
-              {{ store.current.status === 'active' ? '启用' : '禁用' }}
+              {{ strategyStatusLabel(store.current.status) }}
             </span>
+            <span v-if="isLive" class="chip chip-live" title="上线中的策略配置已冻结，不能直接修改 config_json">上线中</span>
           </div>
         </div>
         <div class="header-actions">
@@ -42,8 +43,13 @@
             :max="todayStr"
             title="选择交易日查看历史决策"
           />
-          <button class="btn-accent" @click="handleRunAllocation" :disabled="allocating">
-            {{ allocating ? '计算中...' : '执行决策' }}
+          <button
+            class="btn-accent"
+            title="按所选交易日运行一次决策管线，输出研究用的目标配置（不产生交易）"
+            @click="handleRunAllocation"
+            :disabled="allocating"
+          >
+            {{ allocating ? '计算中...' : '计算当日配置' }}
           </button>
           <button class="btn-secondary" @click="showEdit = true">编辑</button>
           <button class="btn-danger" @click="handleClearResearchData" :disabled="clearingResearchData">
@@ -54,6 +60,7 @@
       </div>
 
       <p class="description">{{ store.current.description || '暂无描述' }}</p>
+      <div v-if="store.actionError && !showEdit" class="error-tip">{{ store.actionError }}</div>
 
       <!-- 页签：策略配置 / 稳健性验证（D-3） -->
       <div class="debug-tabs page-tabs">
@@ -104,6 +111,18 @@
         </div>
 
         <template v-if="!isComposite">
+        <!-- 分状态配置覆盖（regime_rules）：表单不编辑，但保存时原样保留 -->
+        <div v-if="regimeRuleEntries.length > 0" class="config-card">
+          <div class="config-header">分状态覆盖 (Regime Rules)</div>
+          <div class="config-body">
+            <div v-for="entry in regimeRuleEntries" :key="entry.regime" class="config-row">
+              <span class="config-key">{{ entry.label }}状态</span>
+              <span class="config-val mono regime-rule-json">{{ entry.text }}</span>
+            </div>
+            <div class="config-desc">对应择时状态下用这里的模块配置替换默认配置，未列出的模块沿用默认。</div>
+          </div>
+        </div>
+
         <!-- 资产范围 -->
         <div v-if="indexCodesList.length > 0" class="config-card">
           <div class="config-header">资产范围</div>
@@ -391,7 +410,7 @@
               <div v-if="riskConfig.vol_target" class="config-row">
                 <span class="config-key">波动率目标</span>
                 <span class="config-val">
-                  年化 {{ (riskConfig.vol_target.target * 100).toFixed(1) }}%（{{ riskConfig.vol_target.window ?? 60 }} 日协方差，只降不加）
+                  年化 {{ (riskConfig.vol_target.target * 100).toFixed(1) }}%（{{ riskConfig.vol_target.window ?? 60 }} 日协方差，只降不加<template v-if="riskConfig.vol_target.floor">，缩放后仓位不低于 {{ (riskConfig.vol_target.floor * 100).toFixed(1) }}%</template>）
                 </span>
               </div>
               <div v-if="riskConfig.drawdown_stop" class="config-row">
@@ -482,6 +501,7 @@
               <th>类型</th>
               <th>状态</th>
               <th>试验数</th>
+              <th title="不同执行模型的批次结果不可直接比较">执行模型</th>
               <th>窗口</th>
               <th>创建时间</th>
               <th>操作</th>
@@ -504,6 +524,7 @@
                 </span>
               </td>
               <td>{{ run.trial_count }}</td>
+              <td>{{ executionModelLabel(run.execution_model) }}</td>
               <td class="mono">{{ run.start_date }} ~ {{ run.end_date }}</td>
               <td>{{ formatCnTime(run.created_at) }}</td>
               <td class="row-actions">
@@ -547,12 +568,15 @@
               <span v-if="coverageOf(selectedRun)?.is_partial" class="chip chip-disabled">
                 部分汇总（结论仅供参考）
               </span>
+              <span v-if="coverageOf(selectedRun)?.comparable === false" class="chip chip-warn">
+                各变体没有共同窗口：Δ 不可比较
+              </span>
             </div>
           </div>
 
           <!-- 参数邻域（scan） -->
           <div v-if="selectedRun.summary?.neighborhood" class="robust-block">
-            <div class="robust-block-title">参数邻域稳定度</div>
+            <div class="robust-block-title">参数邻域稳定度（毛口径）</div>
             <div class="robust-kv">
               <span>扰动变体 {{ selectedRun.summary.neighborhood.n_variants }} 个</span>
               <span>Δ夏普范围 {{ fmt(selectedRun.summary.neighborhood.delta_min) }} ~
@@ -578,7 +602,7 @@
 
           <!-- 因子消融（ablate） -->
           <div v-if="selectedRun.summary?.marginal?.length" class="robust-block">
-            <div class="robust-block-title">因子／过滤条件边际贡献（Δ夏普，升序）</div>
+            <div class="robust-block-title">因子／过滤条件边际贡献（Δ夏普，升序，毛口径）</div>
             <table class="robust-table inner">
               <thead>
                 <tr><th>移除项</th><th>Δ夏普</th><th>Δ年化(%)</th></tr>
@@ -596,7 +620,7 @@
 
           <!-- 资产池扰动（pool） -->
           <div v-if="selectedRun.summary?.pool" class="robust-block">
-            <div class="robust-block-title">资产池扰动分布</div>
+            <div class="robust-block-title">资产池扰动分布（毛口径）</div>
             <div class="robust-kv">
               <span>子池变体 {{ selectedRun.summary.pool.n_variants }} 个</span>
               <span>中位 Δ夏普 {{ fmt(selectedRun.summary.pool.delta_median) }}</span>
@@ -621,7 +645,7 @@
             </div>
             <div class="robust-kv">
               <span v-if="selectedRun.statistics.deflated_sharpe">
-                Deflated Sharpe：<b class="mono">{{ selectedRun.statistics.deflated_sharpe.deflated_sharpe }}</b>
+                基线 Deflated Sharpe（{{ selectedRun.statistics.cost_bps }}bp 净口径）：<b class="mono">{{ selectedRun.statistics.deflated_sharpe.deflated_sharpe }}</b>
                 （年化夏普 {{ selectedRun.statistics.deflated_sharpe.sharpe_annualized }}，
                 期望最大夏普 {{ selectedRun.statistics.deflated_sharpe.expected_max_sharpe_annualized }}）
               </span>
@@ -639,7 +663,7 @@
 
           <!-- 变体逐个结果 -->
           <div v-if="selectedRun.summary?.variants?.length" class="robust-block">
-            <div class="robust-block-title">变体逐项结果（相对基线）</div>
+            <div class="robust-block-title">变体逐项结果（相对基线，毛口径）</div>
             <table class="robust-table inner">
               <thead>
                 <tr>
@@ -681,7 +705,7 @@
           <span v-if="allocation.timing?.regime" class="summary-item">
             <span class="summary-label">择时</span>
             <span :class="['regime-tag-sm', `regime-${allocation.timing.regime}`]">
-              {{ allocation.timing.regime === 'offensive' ? '进攻' : allocation.timing.regime === 'defensive' ? '防守' : '观望' }}
+              {{ regimeLabel(allocation.timing.regime) }}
             </span>
           </span>
           <span class="summary-item">
@@ -691,8 +715,8 @@
           </span>
           <span class="summary-item">
             <span class="summary-label">仓位</span>
-            <span v-if="allocation.plan?.total_exposure > 0" class="summary-val-accent">{{ (allocation.plan.total_exposure * 100).toFixed(0) }}%</span>
-            <span v-else class="summary-val-muted">空仓</span>
+            <span v-if="allocation.plan?.total_exposure > 0" class="summary-val-accent">{{ (allocation.plan.total_exposure * 100).toFixed(1) }}%</span>
+            <span v-else class="summary-val-muted">目标仓位 0</span>
           </span>
           <span v-if="allocation.plan?.method" class="summary-item">
             <span class="summary-label">方法</span>
@@ -707,11 +731,11 @@
             <div class="alloc-row">
               <span class="alloc-key">Regime</span>
               <span :class="['regime-tag', `regime-${allocation.timing.regime}`]">
-                {{ allocation.timing.regime === 'offensive' ? '进攻' : allocation.timing.regime === 'defensive' ? '防守' : '中性' }}
+                {{ regimeLabel(allocation.timing.regime) }}
               </span>
             </div>
             <div class="alloc-row">
-              <span class="alloc-key">置信度</span>
+              <span class="alloc-key">确信度</span>
               <span class="alloc-val">{{ (allocation.timing.confidence ?? 0).toFixed(0) }}%</span>
             </div>
             <div v-if="allocation.timing.label" class="alloc-row">
@@ -776,9 +800,9 @@
               <span class="alloc-val">{{ allocation.plan.path_state.replay_start }}（结果取决于回放起点）</span>
             </div>
             <div class="alloc-row">
-              <span class="alloc-key">今日成交</span>
+              <span class="alloc-key">调仓日</span>
               <span class="alloc-val">
-                {{ allocation.plan.path_state.rebalance_due ? '需要调仓（下方为目标持仓）' : '无需调仓（下方为当前持仓）' }}
+                {{ allocation.plan.path_state.rebalance_due ? '今日为调仓日（下方为模型目标持仓）' : '今日不调仓（下方为回放得到的模型持仓）' }}
                 <template v-if="allocation.plan.path_state.reason">· {{ pathReasonLabel(allocation.plan.path_state.reason) }}</template>
               </span>
             </div>
@@ -830,8 +854,8 @@
         <!-- 仓位为空：展示空仓说明 -->
         <div v-else class="alloc-empty-hint">
           <span class="empty-icon">💤</span>
-          <p>当前建议空仓</p>
-          <p class="hint-sub">策略未产生有效持仓信号，保持现金观望</p>
+          <p>模型目标仓位为 0</p>
+          <p class="hint-sub">该交易日策略管线没有产出非零持仓（研究输出，不构成交易建议）</p>
         </div>
       </div>
 
@@ -1080,6 +1104,10 @@
               </button>
             </div>
 
+            <div v-if="isLive" class="live-freeze-tip">
+              该策略上线中，配置已冻结：本次保存只更新名称、描述与频率，不提交 config_json。
+              需要修改配置请先在生命周期页退役，或派生新策略。
+            </div>
             <CompositeStrategyForm
               v-if="isComposite && !editAdvancedMode"
               v-model="editConfigJson"
@@ -1092,20 +1120,22 @@
               <div v-if="editJsonError" class="form-error">{{ editJsonError }}</div>
             </template>
           </div>
+          <div v-if="store.actionError" class="form-error">{{ store.actionError }}</div>
           <div class="modal-actions">
             <button class="btn-secondary" @click="showEdit = false">取消</button>
-            <button class="btn-primary" @click="handleUpdate" :disabled="store.loading">
-              {{ store.loading ? '保存中...' : '保存' }}
+            <button class="btn-primary" @click="handleUpdate" :disabled="store.saving">
+              {{ store.saving ? '保存中...' : '保存' }}
             </button>
           </div>
         </div>
       </div>
     </template>
-    <div v-else class="loading">策略不存在</div>
+    <div v-else-if="!store.loading" class="loading">策略不存在</div>
   </div>
 </template>
 
 <script setup lang="ts">
+import { getErrorMessage } from '../api/client'
 /**
  * 策略详情页面。
  *
@@ -1144,10 +1174,35 @@ import type {
   TimingOnDegraded,
 } from '../types/api'
 import { formatCnTime, shiftDateCn, todayCn } from '../utils/date'
+import { CHART_THEME, loadEcharts } from '../utils/echarts'
+import {
+  executionModelLabel,
+  frequencyLabel,
+  REGIME_LABELS,
+  regimeLabel,
+  strategyStatusLabel,
+} from '../utils/labels'
+import { fetchLifecycles } from '../api/lifecycle'
 
 const props = defineProps<{ strategyId: string }>()
 const store = useStrategyStore()
 const router = useRouter()
+
+/** store.current 是否就是当前路由的策略（避免切换策略时短暂显示上一个策略） */
+const currentMatches = computed(() => store.current?.strategy_id === props.strategyId)
+
+/** 是否处于上线中（LIVE）：上线中的策略禁止直接更新 config_json */
+const isLive = ref(false)
+
+/** 读取生命周期状态；失败时按未上线处理（后端仍会拒绝对 LIVE 策略改配置） */
+async function loadLiveStatus(): Promise<void> {
+  try {
+    const items = await fetchLifecycles()
+    isLive.value = items.some(item => item.strategy_id === props.strategyId && item.lifecycle_status === 'LIVE')
+  } catch {
+    isLive.value = false
+  }
+}
 
 /** 因子模板列表（用于把引用名解析成可读模板名） */
 const availableFactors = ref<FactorSpec[]>([])
@@ -1168,6 +1223,8 @@ const decisionDate = computed(() => allocation.value?.data_date || selectedDate.
 const chartsLoading = ref(false)
 const chartsData = ref<Record<string, DailyBar[]>>({})
 const chartInstances = new Map<string, unknown>()
+/** 各标的 K 线容器的尺寸监听（窗口缩放时 resize） */
+let chartResizeObserver: ResizeObserver | null = null
 const chartRefs: Record<string, HTMLElement> = {}
 
 /** 设置图表容器引用 */
@@ -1415,7 +1472,7 @@ async function loadRobustness(): Promise<void> {
       selectedRun.value = null
     }
   } catch (e) {
-    robustnessError.value = e instanceof Error ? e.message : '稳健性批次加载失败'
+    robustnessError.value = getErrorMessage(e, '稳健性批次加载失败')
   } finally {
     robustnessLoading.value = false
   }
@@ -1427,7 +1484,7 @@ async function selectRun(robustnessId: string): Promise<void> {
     selectedRun.value = await fetchRobustnessDetail(robustnessId)
   } catch (e) {
     selectedRun.value = null
-    robustnessError.value = e instanceof Error ? e.message : '批次详情加载失败'
+    robustnessError.value = getErrorMessage(e, '批次详情加载失败')
   }
 }
 
@@ -1438,7 +1495,7 @@ async function handleCancelRun(robustnessId: string): Promise<void> {
     toast.info('已请求取消该批次，运行中的任务会在安全检查点退出')
     await loadRobustness()
   } catch (e) {
-    toast.error(e instanceof Error ? e.message : '取消失败')
+    toast.error(getErrorMessage(e, '取消失败'))
   }
 }
 
@@ -1450,7 +1507,7 @@ async function handleAbandonRun(robustnessId: string): Promise<void> {
     if (selectedRun.value?.robustness_id === robustnessId) selectedRun.value = null
     await loadRobustness()
   } catch (e) {
-    toast.error(e instanceof Error ? e.message : '作废失败')
+    toast.error(getErrorMessage(e, '作废失败'))
   }
 }
 
@@ -1476,10 +1533,11 @@ async function handleUpdate(): Promise<void> {
     finalConfig = editConfigJson.value
   }
 
-  const success = await store.update(props.strategyId, {
-    ...editForm.value,
-    config_json: finalConfig,
-  })
+  // 上线中的策略禁止直接更新 config_json：只提交元数据字段
+  const success = await store.update(
+    props.strategyId,
+    isLive.value ? { ...editForm.value } : { ...editForm.value, config_json: finalConfig },
+  )
   if (success) {
     showEdit.value = false
   }
@@ -1521,26 +1579,32 @@ function isTimingFactorDetail(value: TimingDetailValue): value is TimingFactorDe
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-const REGIME_TEXT: Record<string, string> = { offensive: '进攻', neutral: '中性', defensive: '防守' }
+const REGIME_TEXT: Record<string, string> = REGIME_LABELS
 
-/** 规则模式下的进攻 / 防守规则组展示文本 */
+/** 规则模式下的进攻 / 防守规则组展示文本（含嵌套子组；只有子组的 regime 也要展示） */
 const timingRuleGroups = computed((): Array<{ regime: string; label: string; text: string }> => {
   const rules = timingConfig.value?.rules
   if (!rules) return []
   const groups: Array<{ regime: string; label: string; text: string }> = []
   for (const [regime, label] of [['defensive', '防守'], ['offensive', '进攻']] as const) {
     const group = rules[regime]
-    if (!group || !group.rules || group.rules.length === 0) continue
-    const joiner = group.logic === 'OR' ? ' 或 ' : ' 且 '
-    const text = group.rules
-      .map(rule => {
-        const target = rule.compare_to ? factorLabel(rule.compare_to) : JSON.stringify(rule.value)
-        return `${factorLabel(rule.factor)} ${rule.op} ${target}`
-      })
-      .join(joiner)
+    if (!group) continue
+    const text = ruleGroupText(group)
+    if (!text) continue
     groups.push({ regime, label, text })
   }
   return groups
+})
+
+/** regime_rules（分状态配置覆盖）的展示行 */
+const regimeRuleEntries = computed((): Array<{ regime: string; label: string; text: string }> => {
+  const raw = configJson.value.regime_rules
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
+  return Object.entries(raw as Record<string, unknown>).map(([regime, override]) => ({
+    regime,
+    label: regimeLabel(regime),
+    text: JSON.stringify(override),
+  }))
 })
 
 /** 择时综合方式的展示文本（区分是否启用多档仓位） */
@@ -1738,7 +1802,7 @@ async function handleRunAllocation(): Promise<void> {
     // 决策完成后加载标的K线数据
     await loadKlineData()
   } catch (e) {
-    runError.value = e instanceof Error ? e.message : '决策管线执行失败'
+    runError.value = getErrorMessage(e, '决策管线执行失败')
     allocation.value = null
   } finally {
     allocating.value = false
@@ -1775,7 +1839,18 @@ async function loadKlineData(): Promise<void> {
 
 /** 初始化所有标的K线图表 */
 async function initCharts(): Promise<void> {
-  const echarts = await import('echarts')
+  const echarts = await loadEcharts()
+  chartResizeObserver?.disconnect()
+  chartResizeObserver =
+    typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver((entries) => {
+          for (const entry of entries) {
+            for (const [code, el] of Object.entries(chartRefs)) {
+              if (el === entry.target) (chartInstances.get(code) as { resize(): void } | undefined)?.resize()
+            }
+          }
+        })
+      : null
 
   for (const code of Object.keys(chartsData.value)) {
     const el = chartRefs[code]
@@ -1783,8 +1858,9 @@ async function initCharts(): Promise<void> {
     const bars = chartsData.value[code]
     if (!bars || bars.length === 0) continue
 
-    const chart = echarts.init(el, null, { renderer: 'canvas' })
+    const chart = echarts.init(el, CHART_THEME, { renderer: 'canvas' })
     chartInstances.set(code, chart)
+    chartResizeObserver?.observe(el)
 
     const dates = bars.map(b => b.trade_date)
     const candleData = bars.map(b => [b.open_price, b.close_price, b.low_price, b.high_price])
@@ -1865,6 +1941,8 @@ async function initCharts(): Promise<void> {
 
 /** 销毁所有图表实例 */
 function disposeCharts(): void {
+  chartResizeObserver?.disconnect()
+  chartResizeObserver = null
   chartInstances.forEach((c) => {
     try { (c as { dispose(): void }).dispose() } catch { /* ignore */ }
   })
@@ -1901,14 +1979,14 @@ async function handleClearResearchData(): Promise<void> {
     toast.info(`研究数据已清理（共 ${total} 条记录）`)
     robustnessRuns.value = []
   } catch (e) {
-    toast.error(e instanceof Error ? e.message : '清理研究数据失败')
+    toast.error(getErrorMessage(e, '清理研究数据失败'))
   } finally {
     clearingResearchData.value = false
   }
 }
 
 onMounted(async () => {
-  await store.loadOne(props.strategyId)
+  await Promise.all([store.loadOne(props.strategyId), loadLiveStatus()])
   try {
     availableFactors.value = await fetchFactorSpecs()
   } catch {
@@ -1922,6 +2000,13 @@ onUnmounted(() => disposeCharts())
 .page { display: flex; flex-direction: column; gap: 20px; }
 .loading { padding: 60px; text-align: center; color: var(--text-muted); }
 .error-tip { padding: 12px 16px; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); border-radius: var(--radius); color: #f87171; font-size: 13px; }
+.chip-live { background: rgba(245,158,11,0.15); color: var(--warning); }
+.chip-warn { background: rgba(245,158,11,0.15); color: var(--warning); }
+.live-freeze-tip {
+  padding: 10px 12px; margin-bottom: 8px; border-radius: var(--radius-sm);
+  background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.3); color: var(--warning); font-size: 12px;
+}
+.regime-rule-json { white-space: pre-wrap; word-break: break-all; font-size: 12px; }
 
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .header-left { display: flex; flex-direction: column; gap: 8px; }
@@ -2005,10 +2090,10 @@ onUnmounted(() => disposeCharts())
 .robust-block { display: flex; flex-direction: column; gap: 4px; }
 .robust-block-title { font-size: 12px; color: var(--text-muted); font-weight: 500; }
 .robust-kv { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; align-items: center; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.mono { font-family: var(--font-mono); }
 
 /* 配置网格 */
-.config-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.config-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
 .config-card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -2083,7 +2168,7 @@ onUnmounted(() => disposeCharts())
   word-break: break-all;
 }
 
-.mono { font-family: monospace; }
+.mono { font-family: var(--font-mono); }
 
 /* 按钮 */
 .btn-primary {
@@ -2133,7 +2218,7 @@ onUnmounted(() => disposeCharts())
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 24px;
-  width: 720px;
+  width: min(720px, calc(100vw - 32px));
   max-height: 90vh;
   overflow-y: auto;
   display: flex;

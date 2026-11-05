@@ -136,7 +136,11 @@
           <div class="kv-grid">
             <div><span class="k">状态</span><span class="v">{{ statusText(detail.lifecycle_status) }}</span></div>
             <div><span class="k">上线日期</span><span class="v">{{ detail.live_at }}</span></div>
-            <div><span class="k">监控天数</span><span class="v">{{ detail.live_days }}</span></div>
+            <div v-if="detail.retired_at"><span class="k">退役日期</span><span class="v">{{ detail.retired_at }}</span></div>
+            <div>
+              <span class="k">监控天数（自然日）</span>
+              <span class="v">{{ monitorDays }}</span>
+            </div>
             <div><span class="k">冻结配置哈希</span><span class="v mono">{{ shortHash(detail.frozen_config_hash) }}</span></div>
             <div>
               <span class="k">研究期基线回测</span>
@@ -148,9 +152,10 @@
                 {{ detail.research_backtest_id }}
               </RouterLink>
               <span v-else class="v mono">{{ backtestRefLabel(detail.research_backtest_id) }}</span>
+              <span v-if="baselineModel" class="model-tag">{{ executionModelLabel(baselineModel) }}</span>
             </div>
             <div>
-              <span class="k">验证期回测</span>
+              <span class="k">上线监控回测</span>
               <RouterLink
                 v-if="detail.validation_backtest_id"
                 class="v mono backtest-link"
@@ -159,6 +164,11 @@
                 {{ detail.validation_backtest_id }}
               </RouterLink>
               <span v-else class="v mono">{{ backtestRefLabel(detail.validation_backtest_id) }}</span>
+              <span v-if="monitorModel" class="model-tag">{{ executionModelLabel(monitorModel) }}</span>
+            </div>
+            <div v-if="modelMismatch" class="wide model-mismatch">
+              研究期基线与上线监控回测的执行模型不同（{{ executionModelLabel(baselineModel) }} vs
+              {{ executionModelLabel(monitorModel) }}），下方分位与期望差不可直接比较；请重新标记上线以生成同口径基线。
             </div>
             <div v-if="detail.note" class="wide">
               <span class="k">上线备注</span><span class="v">{{ detail.note }}</span>
@@ -183,7 +193,10 @@
             </div>
             <div class="diagnosis">
               <div><span class="k">诊断</span><span class="v">{{ diagnosisText(latest.diagnosis) }}</span></div>
-              <div><span class="k">建议动作</span><span class="v">{{ actionText(latest.recommended_action) }}</span></div>
+              <div>
+                <span class="k" title="系统只给出诊断提示，不会自动调参、改状态或产生交易">诊断提示（不自动执行）</span>
+                <span class="v">{{ actionText(latest.recommended_action) }}</span>
+              </div>
             </div>
             <ul class="reasons">
               <li v-for="(reason, i) in latest.reasons" :key="i">{{ reason }}</li>
@@ -191,24 +204,24 @@
           </div>
 
           <div class="card">
-            <div class="card-head"><span class="card-title">净成本口径表现</span></div>
+            <div class="card-head"><span class="card-title">上线以来表现</span></div>
             <div class="kv-grid">
               <div><span class="k">成本假设</span><span class="v">{{ metrics.cost_bps ?? '—' }} bp</span></div>
-              <div><span class="k">年化收益</span><span class="v">{{ pct(metrics.net?.annualized_return_pct) }}</span></div>
-              <div><span class="k">年化夏普</span><span class="v">{{ num(metrics.net?.sharpe_ratio) }}</span></div>
-              <div><span class="k">年化超额</span><span class="v">{{ pct(metrics.net?.excess_return_pct) }}</span></div>
+              <div><span class="k">年化收益（净）</span><span class="v">{{ pct(metrics.net?.annualized_return_pct) }}</span></div>
+              <div><span class="k">年化夏普（净）</span><span class="v">{{ num(metrics.net?.sharpe_ratio) }}</span></div>
+              <div><span class="k">年化超额（净）</span><span class="v">{{ pct(metrics.net?.excess_return_pct) }}</span></div>
               <div><span class="k">成本拖累</span><span class="v">{{ pct(metrics.net?.cost_drag_pct_per_year) }}/年</span></div>
               <div><span class="k">年化换手</span><span class="v">{{ num(metrics.gross?.annualized_turnover) }}x</span></div>
-              <div><span class="k">当前回撤</span><span class="v">{{ pct(metrics.evaluation?.drawdown?.current_pct) }}</span></div>
+              <div><span class="k">当前回撤（毛口径）</span><span class="v">{{ pct(metrics.evaluation?.drawdown?.current_pct) }}</span></div>
               <div>
-                <span class="k">回撤分位</span>
+                <span class="k">回撤分位（毛口径）</span>
                 <span class="v">{{ pct(metrics.evaluation?.drawdown?.percentile_pct) }}</span>
               </div>
             </div>
           </div>
 
           <div class="card">
-            <div class="card-head"><span class="card-title">相对研究期分布的分位与期望差</span></div>
+            <div class="card-head"><span class="card-title">相对研究期分布的分位与期望差（毛口径）</span></div>
             <table class="table">
               <thead>
                 <tr>
@@ -317,7 +330,7 @@
           <div class="card-head"><span class="card-title">体检历史</span></div>
           <table class="table">
             <thead>
-              <tr><th>日期</th><th>健康等级</th><th>诊断</th><th>建议动作</th><th>计算时间</th></tr>
+              <tr><th>日期</th><th>健康等级</th><th>诊断</th><th>诊断提示</th><th>计算时间</th></tr>
             </thead>
             <tbody>
               <tr v-for="snap in detail.snapshots" :key="snap.id">
@@ -371,6 +384,7 @@
 </template>
 
 <script setup lang="ts">
+import { getErrorMessage } from '../api/client'
 /**
  * 策略生命周期页面。
  *
@@ -389,7 +403,9 @@ import {
 import { useStrategyStore } from '../stores/strategies'
 import type { AlertItem, LifecycleDetail, LifecycleSummary } from '../types/api'
 import { fetchAlerts } from '../api/alerts'
-import { formatCnTime, todayCn } from '../utils/date'
+import { fetchBacktest } from '../api/backtests'
+import { formatCnTime, parseDateCn, todayCn } from '../utils/date'
+import { executionModelLabel } from '../utils/labels'
 
 // 上线策略摘要列表
 const items = ref<LifecycleSummary[]>([])
@@ -568,7 +584,7 @@ async function loadList(): Promise<void> {
       await select(items.value[0].strategy_id)
     }
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '加载生命周期列表失败'
+    error.value = getErrorMessage(e, '加载生命周期列表失败')
   } finally {
     loading.value = false
   }
@@ -587,10 +603,54 @@ async function select(strategyId: string): Promise<void> {
   error.value = null
   try {
     detail.value = await fetchLifecycleDetail(strategyId)
+    void loadBacktestModels(detail.value)
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '加载生命周期详情失败'
+    error.value = getErrorMessage(e, '加载生命周期详情失败')
   }
 }
+
+/** 研究期基线回测与上线监控回测的执行模型（来自回测 params，缺失按 T+1 开盘解释） */
+const baselineModel = ref<string | null>(null)
+const monitorModel = ref<string | null>(null)
+
+/** 两条回测的执行模型不同：分位比较口径不一致 */
+const modelMismatch = computed(
+  () => !!baselineModel.value && !!monitorModel.value && baselineModel.value !== monitorModel.value,
+)
+
+/** 读取单个回测的执行模型；读取失败返回 null（不阻塞页面） */
+async function backtestModel(backtestId: string | null | undefined): Promise<string | null> {
+  if (!backtestId) return null
+  try {
+    const bt = await fetchBacktest(backtestId)
+    const model = bt.params?._execution_model
+    return typeof model === 'string' ? model : 't_plus_1_open'
+  } catch {
+    return null
+  }
+}
+
+/** 加载详情关联回测的执行模型 */
+async function loadBacktestModels(d: LifecycleDetail): Promise<void> {
+  baselineModel.value = null
+  monitorModel.value = null
+  const [base, monitor] = await Promise.all([
+    backtestModel(d.research_backtest_id),
+    backtestModel(d.validation_backtest_id),
+  ])
+  if (selectedId.value !== d.strategy_id) return
+  baselineModel.value = base
+  monitorModel.value = monitor
+}
+
+/** 监控天数：已退役的策略截止到退役日，不再继续累加 */
+const monitorDays = computed((): number | string => {
+  const d = detail.value
+  if (!d) return '—'
+  if (!d.retired_at) return d.live_days
+  const days = Math.round((parseDateCn(d.retired_at).getTime() - parseDateCn(d.live_at).getTime()) / 86_400_000)
+  return days >= 0 ? days : d.live_days
+})
 
 /**
  * 人工标记上线。
@@ -608,7 +668,7 @@ async function handleOnline(): Promise<void> {
     await loadList()
     await select(result.strategy_id)
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '标记上线失败'
+    error.value = getErrorMessage(e, '标记上线失败')
   } finally {
     busy.value = false
   }
@@ -626,7 +686,7 @@ async function handleRefresh(): Promise<void> {
     await select(selectedId.value)
     await loadList()
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '刷新体检失败'
+    error.value = getErrorMessage(e, '刷新体检失败')
   } finally {
     busy.value = false
   }
@@ -646,7 +706,7 @@ async function handleStatus(status: 'LIVE' | 'SUSPENDED' | 'RETIRED'): Promise<v
     await select(selectedId.value)
     await loadList()
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '状态变更失败'
+    error.value = getErrorMessage(e, '状态变更失败')
   } finally {
     busy.value = false
   }
@@ -747,7 +807,7 @@ onMounted(async () => {
 .alert-card-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
 .alert-row { display: flex; gap: 10px; font-size: 12px; padding: 3px 0 3px 8px; border-left: 3px solid transparent; }
 .alert-row.sev-critical { border-left-color: var(--danger, #ef4444); }
-.alert-row.sev-warning { border-left-color: #f59e0b; }
+.alert-row.sev-warning { border-left-color: var(--warning); }
 .alert-time { color: var(--text-muted); min-width: 130px; }
 .header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .page-title { font-size: 22px; font-weight: 700; }
@@ -755,7 +815,7 @@ onMounted(async () => {
 .loading, .empty { padding: 40px; text-align: center; color: var(--text-muted); }
 .error-tip { padding: 10px 14px; border-radius: var(--radius-sm); background: rgba(239, 68, 68, 0.12); color: var(--danger); }
 
-.layout { display: grid; grid-template-columns: 300px 1fr; gap: 16px; align-items: start; }
+.layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; align-items: start; }
 .list { display: flex; flex-direction: column; gap: 10px; }
 .list-card {
   padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius);
@@ -775,8 +835,10 @@ onMounted(async () => {
 }
 .retired-list { display: flex; flex-direction: column; gap: 10px; }
 
-.detail { display: flex; flex-direction: column; gap: 16px; }
-.card { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.detail { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.card { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); min-width: 0; overflow-x: auto; }
+.model-tag { margin-left: 6px; font-size: 11px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+.model-mismatch { color: var(--warning); font-size: 12px; }
 .empty-card { color: var(--text-muted); }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .card-title { font-weight: 600; }
@@ -806,7 +868,7 @@ onMounted(async () => {
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .table th, .table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
 .table th { color: var(--text-muted); font-weight: 500; }
-.mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
+.mono { font-family: var(--font-mono); font-size: 12px; }
 
 .chip { padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); }
 .chip-active { color: var(--success); border-color: var(--success); }

@@ -352,9 +352,41 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
 }
 
 
+def abandon_run(payload: dict, reason: str) -> None:
+    """把被回收的异常任务对应的运行记录（research_run）标记为失败。
+
+    策略运行、AI 分析、全局同步与数据维护任务都带 run_id；任务被僵尸扫描回收后
+    若不同步运行记录，运行记录页会永远显示执行中并持续轮询。已处于终态的记录不改写。
+
+    Args:
+        payload: 任务载荷（含 run_id）。
+        reason: 回收原因。
+    """
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.services.run_service import RunService
+
+    run_id = str(payload.get("run_id") or "")
+    if not run_id:
+        return
+    db = SessionLocal()
+    try:
+        svc = RunService(db)
+        detail = svc.get_run_detail(run_id)
+        if detail is not None and detail.status in ("pending", "running"):
+            svc.mark_failed(run_id, f"任务被回收：{reason}")
+    except Exception:
+        logger.warning("异常运行任务清理失败: run_id=%s", run_id, exc_info=True)
+    finally:
+        db.close()
+
+
 # 异常任务回收回调（B7）：僵尸扫描把任务判失败时，同步把业务侧记录收口，
-# 否则 backtest_run / backtest_comparison 会永远停在 running。
+# 否则 backtest_run / backtest_comparison / research_run 会永远停在 running。
 JOB_ABANDON_HANDLERS: dict[str, Callable[[dict, str], None]] = {
     "backtest": abandon_backtest,
     "comparison": abandon_comparison,
+    "strategy_run": abandon_run,
+    "ai_analysis": abandon_run,
+    "data_sync_all": abandon_run,
+    "data_manage_operation": abandon_run,
 }

@@ -14,7 +14,7 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
           总览
         </RouterLink>
-        <RouterLink to="/strategies" class="nav-item">
+        <RouterLink to="/strategies" class="nav-item" :class="{ 'nav-active': isUnder('/strategies') }">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
           策略中心
         </RouterLink>
@@ -34,7 +34,7 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
           标签映射
         </RouterLink>
-        <RouterLink to="/factors" class="nav-item">
+        <RouterLink to="/factors" class="nav-item" :class="{ 'nav-active': isUnder('/factors') }">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="14" y2="12"/><line x1="4" y1="18" x2="18" y2="18"/><circle cx="20" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>
           因子中心
         </RouterLink>
@@ -54,11 +54,11 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="4"/></svg>
           数据管理
         </RouterLink>
-        <RouterLink to="/indexes" class="nav-item">
+        <RouterLink to="/indexes" class="nav-item" :class="{ 'nav-active': isUnder('/indexes') }">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
           指数数据
         </RouterLink>
-        <RouterLink to="/industries" class="nav-item">
+        <RouterLink to="/industries" class="nav-item" :class="{ 'nav-active': isUnder('/industries') }">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="18" rx="2"/><line x1="2" y1="9" x2="22" y2="9"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="10" y1="6" x2="10.01" y2="6"/></svg>
           申万行业
         </RouterLink>
@@ -70,29 +70,43 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
           宏观指标
         </RouterLink>
-        <RouterLink to="/backtests" class="nav-item">
+        <RouterLink to="/backtests" class="nav-item" :class="{ 'nav-active': isUnder('/backtests') }">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/></svg>
           回测中心
         </RouterLink>
       </nav>
     </aside>
     <main class="content">
-      <RouterView />
+      <!-- 以路径为 key：详情页路由参数变化（如 /strategies/a → /strategies/b）时重建页面并重新加载数据 -->
+      <RouterView :key="route.path" />
     </main>
     <ToastHost />
   </div>
 </template>
 
 <script setup lang="ts">
-import { RouterLink, RouterView } from 'vue-router'
+import { RouterLink, RouterView, useRoute } from 'vue-router'
 import AlertBell from './components/layout/AlertBell.vue'
 import ToastHost from './components/ToastHost.vue'
+
+const route = useRoute()
+
+/**
+ * 当前路由是否位于某个导航入口之下（详情页也高亮列表入口）。
+ *
+ * @param prefix - 导航入口路径
+ * @returns 是否高亮
+ */
+function isUnder(prefix: string): boolean {
+  return route.path === prefix || route.path.startsWith(`${prefix}/`)
+}
 </script>
 
 <style scoped>
 .app-shell {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  /* minmax(0, 1fr)：允许内容列收缩，宽表格/图表在自身容器内滚动，而不是把整页撑出横向滚动条 */
+  grid-template-columns: 220px minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -105,6 +119,8 @@ import ToastHost from './components/ToastHost.vue'
   position: sticky;
   top: 0;
   height: 100vh;
+  /* 矮窗口下导航项超出一屏时可纵向滚动 */
+  overflow-y: auto;
 }
 
 .logo {
@@ -147,7 +163,8 @@ nav {
   color: var(--text);
 }
 
-.nav-item.router-link-active {
+.nav-item.router-link-active,
+.nav-item.nav-active {
   background: rgba(59, 130, 246, 0.12);
   color: var(--accent);
   border-left-color: var(--accent);
@@ -159,6 +176,7 @@ nav {
 }
 
 .content {
+  min-width: 0;
   padding: 28px 32px;
   background: var(--bg);
   min-height: 100vh;

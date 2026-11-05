@@ -23,19 +23,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["runs"])
 
 
+#: 仍可新建 / 重试的运行类型；历史运行记录中的旧类型（daily_ingest / index_refresh /
+#: macro_refresh / cold_start / index_rebuild / index_incremental_fill）已收敛到数据管理
+#: 操作，不再支持重试。前端 utils/labels.ts 的 RETRYABLE_RUN_TYPES 须与此保持一致。
+RETRYABLE_RUN_TYPES: frozenset[str] = frozenset(
+    {"strategy_run", "ai_analysis", "data_sync_all", "data_manage_operation"}
+)
+
+#: _enqueue_for_run 的结果：新建任务 / 已有同键活动任务（未新建）/ 不支持的类型
+ENQUEUE_CREATED = "created"
+ENQUEUE_DUPLICATE = "duplicate"
+ENQUEUE_UNSUPPORTED = "unsupported"
+
+
 def _enqueue_for_run(
     run_type: str,
     run_id: str,
     strategy_id: str | None,
     params: dict[str, Any] | None,
     trade_date: date,
-) -> bool:
-    """按运行类型将任务入队，返回是否支持该类型。
-
-    仅支持仍可新建的运行类型；历史运行记录中的旧类型
-    （daily_ingest / index_refresh / macro_refresh / cold_start /
-    index_rebuild / index_incremental_fill）已收敛到数据管理操作，
-    不再支持重试。
+) -> str:
+    """按运行类型将任务入队。
 
     Args:
         run_type: 运行类型（与 research_run.run_type 对齐）。
@@ -45,23 +53,31 @@ def _enqueue_for_run(
         trade_date: 运行对应交易日，用于 AI 任务去重键。
 
     Returns:
-        True 表示已入队；False 表示不支持的运行类型。
+        ENQUEUE_CREATED：已新建队列任务；ENQUEUE_DUPLICATE：同去重键已有活动任务，
+        本次未入队（调用方须把运行记录收口，不能留在 pending）；
+        ENQUEUE_UNSUPPORTED：不支持的运行类型或缺少必要参数。
     """
+    if run_type not in RETRYABLE_RUN_TYPES:
+        return ENQUEUE_UNSUPPORTED
     queue = get_job_queue()
     if run_type == "strategy_run":
         if not strategy_id:
-            return False
-        queue.enqueue(
+            return ENQUEUE_UNSUPPORTED
+        _, created = queue.enqueue_with_status(
             "strategy_run",
             {"strategy_id": strategy_id, "run_id": run_id, "params": params},
         )
     elif run_type == "ai_analysis":
-        queue.enqueue("ai_analysis", {"run_id": run_id}, job_key=f"ai_analysis:{trade_date}")
+        _, created = queue.enqueue_with_status(
+            "ai_analysis", {"run_id": run_id}, job_key=f"ai_analysis:{trade_date}"
+        )
     elif run_type == "data_sync_all":
-        queue.enqueue("data_sync_all", {"run_id": run_id}, job_key="data_sync_all")
-    elif run_type == "data_manage_operation":
+        _, created = queue.enqueue_with_status(
+            "data_sync_all", {"run_id": run_id}, job_key="data_sync_all"
+        )
+    else:
         operation_params = params or {}
-        queue.enqueue(
+        _, created = queue.enqueue_with_status(
             "data_manage_operation",
             {"run_id": run_id, **operation_params},
             job_key=(
@@ -70,9 +86,7 @@ def _enqueue_for_run(
                 f"{operation_params.get('partition_key', 'all')}"
             ),
         )
-    else:
-        return False
-    return True
+    return ENQUEUE_CREATED if created else ENQUEUE_DUPLICATE
 
 
 def recover_stuck_runs_on_startup() -> None:
@@ -129,8 +143,14 @@ def get_run_items(run_id: str, db: Session = Depends(get_db)) -> list[ResearchRu
 @router.post("/runs/strategies/{strategy_id}/run")
 def run_strategy(strategy_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     """触发指定策略的信号计算任务，入队后台任务执行并写入 index_signal 表。"""
-    summary = RunService(db).create_run("strategy_run", strategy_id, date.today())
-    _enqueue_for_run("strategy_run", summary.run_id, strategy_id, None, summary.trade_date or date.today())
+    svc = RunService(db)
+    summary = svc.create_run("strategy_run", strategy_id, date.today())
+    outcome = _enqueue_for_run(
+        "strategy_run", summary.run_id, strategy_id, None, summary.trade_date or date.today()
+    )
+    if outcome != ENQUEUE_CREATED:
+        svc.mark_skipped(summary.run_id, {"reason": "策略运行任务未入队"})
+        return {"status": "skipped", "strategy_id": strategy_id, "run_id": summary.run_id}
     return {"status": "accepted", "strategy_id": strategy_id, "run_id": summary.run_id}
 
 
@@ -145,6 +165,11 @@ def retry_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
         raise HTTPException(
             status_code=400, detail=f"只能重试已完成的运行记录，当前状态: {detail.status}"
         )
+    # 先校验类型再建运行记录：不支持的类型不能留下一条永远 pending 的新记录
+    if detail.run_type not in RETRYABLE_RUN_TYPES or (
+        detail.run_type == "strategy_run" and not detail.strategy_id
+    ):
+        raise HTTPException(status_code=400, detail=f"不支持重试的运行类型: {detail.run_type}")
 
     # 创建新的 run 并入队对应后台任务
     new_summary = svc.create_run(
@@ -155,9 +180,15 @@ def retry_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     )
 
     trade_date = new_summary.trade_date or today_cn()
-    if not _enqueue_for_run(
+    outcome = _enqueue_for_run(
         detail.run_type, new_summary.run_id, detail.strategy_id, detail.params, trade_date
-    ):
+    )
+    if outcome == ENQUEUE_DUPLICATE:
+        # 同去重键已有活动任务：本次没有真正入队，运行记录收口为跳过并说明原因
+        svc.mark_skipped(new_summary.run_id, {"reason": "同类任务已在执行，本次重试未入队"})
+        return {"status": "skipped", "run_type": detail.run_type, "run_id": new_summary.run_id}
+    if outcome == ENQUEUE_UNSUPPORTED:
+        svc.mark_skipped(new_summary.run_id, {"reason": f"不支持重试的运行类型: {detail.run_type}"})
         raise HTTPException(status_code=400, detail=f"不支持重试的运行类型: {detail.run_type}")
 
     return {"status": "accepted", "run_type": detail.run_type, "run_id": new_summary.run_id}

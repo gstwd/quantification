@@ -13,9 +13,16 @@
   --signal-high: #22c55e;
   --signal-mid: #f59e0b;
   --signal-low: #94a3b8;
+  /* 涨跌语义色：全站统一绿涨红跌（与 --success / --danger 同色） */
+  --rise: #22c55e;
+  --fall: #ef4444;
+  /* 等宽字体：显式列出 Windows 字体，避免中文 Windows 下 Chrome 回退到新宋体（衬线） */
+  --font-mono: ui-monospace, 'Cascadia Mono', Consolas, 'SF Mono', Menlo, monospace;
   --radius: 10px;
   --radius-sm: 6px;
   --shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+  /* 原生控件（日期选择、滚动条、下拉）按暗色渲染 */
+  color-scheme: dark;
 }
 
 *,
@@ -46,7 +53,9 @@ button {
   font-size: inherit;
 }
 
-input {
+input,
+select,
+textarea {
   font-family: inherit;
   font-size: inherit;
 }

@@ -15,8 +15,10 @@ export interface ToastItem {
 
 /** show() 的可选参数 */
 export interface ToastOptions {
-  /** 去重键：同一 key 会话内只弹一次 */
+  /** 去重键：默认同一 key 会话内只弹一次；配合 dedupeWindowMs 改为时间窗内去重 */
   key?: string
+  /** 去重时间窗（毫秒）：设置后同一 key 只在该时间窗内去重，过后再次出现仍会弹出 */
+  dedupeWindowMs?: number
   title?: string
   /** 自定义显示时长（毫秒），默认按级别：error=8000 / warning=6000 / info=4000 */
   duration?: number
@@ -24,8 +26,8 @@ export interface ToastOptions {
 
 let nextId = 1
 
-/** 已弹过的 key（会话级），避免轮询/后台任务场景刷屏 */
-const seenKeys = new Set<string>()
+/** 已弹过的 key → 最近一次弹出时间（毫秒），避免轮询/后台任务场景刷屏 */
+const seenKeys = new Map<string, number>()
 
 export const useToastStore = defineStore('toast', {
   state: () => ({
@@ -33,12 +35,18 @@ export const useToastStore = defineStore('toast', {
   }),
   actions: {
     /**
-     * 弹出一条提示；带 key 时同一 key 会话内只弹一次（避免轮询刷屏）。
+     * 弹出一条提示；带 key 时去重：默认会话内只弹一次，设置 dedupeWindowMs 时
+     * 仅在时间窗内去重（用于操作失败提示：连点不刷屏，但之后再失败仍能看到）。
      */
     show(level: ToastLevel, message: string, options: ToastOptions = {}) {
       if (options.key) {
-        if (seenKeys.has(options.key)) return
-        seenKeys.add(options.key)
+        const now = Date.now()
+        const last = seenKeys.get(options.key)
+        if (last !== undefined) {
+          const window = options.dedupeWindowMs
+          if (window === undefined || now - last < window) return
+        }
+        seenKeys.set(options.key, now)
       }
       const defaultDuration = level === 'error' ? 8000 : level === 'warning' ? 6000 : 4000
       this.items.push({

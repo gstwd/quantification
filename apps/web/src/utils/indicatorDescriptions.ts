@@ -86,7 +86,7 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
     },
     data_gap_days: {
       label: '数据缺口天数',
-      description: '至少一个持仓资产当日受数据缺失影响的交易日数（B10）。<br>缺失日该资产收益按 0 处理，相关指数会同时出现在"执行提示"的 DATA_GAP 警告中。<br>缺口天数越多，回测结果与真实行情的偏差越大。',
+      description: '至少一个持仓资产当日受数据缺失影响的交易日数（B10）。<br>缺口当日该资产收益记 0，缺口后首个有效收盘相对缺口前最后有效收盘结算，缺口期间的涨跌在之后补回（drift_v1 口径）；相关指数会同时出现在"执行提示"的 DATA_GAP 警告中。<br>缺口天数越多，回测结果与真实行情的偏差越大。',
     },
     benchmark_return_pct: {
       label: '基准收益',
@@ -166,12 +166,12 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
     },
     pe_percentile: {
       label: 'PE分位',
-      description: '当前 PE(TTM) 在历史时间窗口中的排名位置（0-100%）。<br>0% 表示 PE 处于历史最低水平（最便宜），100% 表示历史最高（最贵）。<br>低分位 = 估值便宜，投资价值较高。<br>高分位 = 估值昂贵，需注意回调风险。<br>注意：仅沪深300/上证50/中证500 支持 PE 历史分位。',
+      description: '当前 PE(TTM) 在历史时间窗口中的排名位置（0-100%）。<br>0% 表示 PE 处于历史最低水平（最便宜），100% 表示历史最高（最贵）。<br>低分位 = 历史上相对便宜，高分位 = 历史上相对昂贵（仅描述估值位置，不构成投资建议）。<br>覆盖范围：乐咕乐股提供估值的宽基指数，以及中证指数官网可取 PE 的中证系指数；无估值数据的指数显示为 —。',
       formula: 'PE 在历史数据中的百分位排名',
     },
     pb_percentile: {
       label: 'PB分位',
-      description: '当前 PB（市净率）在历史时间窗口中的排名位置（0-100%）。<br>与 PE分位 类似，但基于市净率计算。<br>PB 分位对金融/周期行业的估值判断更有效。<br>低分位 = 估值便宜，高分位 = 偏贵。<br>注意：仅沪深300/上证50/中证500 支持 PB 历史分位。',
+      description: '当前 PB（市净率）在历史时间窗口中的排名位置（0-100%）。<br>与 PE分位 类似，但基于市净率计算。<br>PB 分位对金融/周期行业的估值判断更有效。<br>低分位 = 估值便宜，高分位 = 偏贵。<br>覆盖范围：PB 及其分位仅乐咕乐股提供估值的宽基指数可用，中证官网来源的指数只有 PE，PB 显示为 —。',
       formula: 'PB 在历史数据中的百分位排名',
     },
     valuation_percentile: {
@@ -187,8 +187,23 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
   transforms: {
     invert_percentile: {
       label: '反转百分位',
-      description: '将百分位值反转：变换后得分 = 100 - 原始值。<br>用于估值因子（PE分位/PB分位），因为低分位（便宜）= 高投资价值。<br>例：PE分位 20% → 得分 80（便宜，高分）。PE分位 80% → 得分 20（昂贵，低分）。',
+      description: '将百分位值反转：变换后得分 = 100 - 原始值。<br>用于估值因子（PE分位/PB分位）：低分位（相对便宜）对应高得分。<br>例：PE分位 20% → 得分 80（便宜，高分）。PE分位 80% → 得分 20（昂贵，低分）。',
       formula: '100 - 原始值',
+    },
+    erp_score: {
+      label: 'ERP 得分',
+      description: '将股权风险溢价 ERP（%）分段映射为 0-100 得分：ERP 越高，股票相对债券越有吸引力，得分越高。<br>分段：> 5 → 95，> 3 → 80，> 2 → 65，> 1 → 50，> 0 → 35，≤ 0 → 15。<br>适用于 erp 因子。',
+      formula: '分段映射',
+    },
+    drawdown_score: {
+      label: '回撤得分',
+      description: '将回撤幅度（负数，如 -12.5 表示回撤 12.5%）映射为 0-100 得分，回撤越小得分越高。<br>分段线性：0 → 100，-5 → 80，-10 → 60，-15 → 40，-20 → 20，≤ -25 → 5。<br>适用于 drawdown 因子。',
+      formula: '分段线性映射',
+    },
+    rsrs_score: {
+      label: 'RSRS 得分',
+      description: '将 RSRS 标准分（z 值）线性映射为 0-100 择时得分并裁剪：z ≤ -2 → 0，z ≥ 2 → 100，中间为 50 + z × 25。<br>择时配置引用 rsrs 时应配套该变换，否则 ±3 量级的 z 值混入 0-100 打分空间几乎不起作用。',
+      formula: 'clip(50 + 25z, 0, 100)',
     },
     momentum_score: {
       label: '动量得分',
@@ -238,7 +253,7 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
     },
     change_pct: {
       label: '涨跌幅',
-      description: '当日收盘价相对前日收盘价的涨跌百分比。<br>正值表示上涨，负值表示下跌。<br>A 股指数涨跌幅限制为 ±10%（科创/创业板 ±20%）。',
+      description: '当日收盘价相对前日收盘价的涨跌百分比。<br>正值表示上涨，负值表示下跌。<br>指数本身没有涨跌停限制，行业/主题指数单日大幅波动属正常。',
       formula: '(当日收盘 / 前日收盘 - 1) × 100',
     },
     volume: {
@@ -304,15 +319,15 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
   signals: {
     signal_score: {
       label: '信号得分',
-      description: '策略引擎为每个资产计算的综合得分（0-100）。<br>得分越高表示该资产在当前策略框架下的投资价值越高。<br>得分 ≥ 70 → HIGH（推荐配置），50-70 → MID（可选配置），< 50 → LOW（暂不配置）。',
+      description: '策略引擎为每个资产计算的综合得分（0-100）。<br>得分越高表示该资产在当前策略打分口径下排名越靠前（研究输出，不构成投资建议）。<br>得分 ≥ 70 → HIGH，50-70 → MID，< 50 → LOW。',
     },
     signal_level: {
       label: '信号等级',
-      description: '根据信号得分划分的等级：HIGH（≥70，推荐配置）、MID（≥50，可选配置）、LOW（<50，暂不配置）。<br>防守 regime 下所有资产信号强制为 LOW。<br>信号等级用于快速筛选有投资价值的资产。',
+      description: '根据信号得分划分的等级：HIGH（≥70）、MID（≥50）、LOW（<50）。<br>防守 regime 下所有资产信号强制为 LOW。<br>等级仅用于研究中快速筛选得分靠前的资产。',
     },
     regime_offensive: {
       label: '进攻 regime',
-      description: '择时综合得分 ≥ 进攻阈值时的市场状态。<br>市场估值合理+趋势向好+量能配合 → 积极配置。<br>进攻状态下组合仓位上限最高（默认 80%）。',
+      description: '择时综合得分 ≥ 进攻阈值时的市场状态。<br>典型情形：估值合理、趋势向好、量能配合。<br>进攻状态下组合仓位上限最高（默认 80%）。',
     },
     regime_neutral: {
       label: '中性 regime',
@@ -320,7 +335,7 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
     },
     regime_defensive: {
       label: '防守 regime',
-      description: '择时综合得分 ≤ 防守阈值时的市场状态。<br>市场估值偏高/趋势走弱/量能不足 → 减仓防守。<br>防守状态下组合仓位最低（默认 20%），所有信号强制 LOW。',
+      description: '择时综合得分 ≤ 防守阈值时的市场状态。<br>典型情形：估值偏高、趋势走弱或量能不足。<br>防守状态下组合仓位最低（默认 20%），所有信号强制 LOW。',
     },
     target_weight: {
       label: '目标权重',
@@ -362,6 +377,11 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
       description: '每个有效观测实际参与排序的指数数量（图中最多/最少见悬浮提示）。<br>Rank IC 是在"当日有因子值的指数"之间做排序相关，样本越少取值粒度越粗：<br>只有 3 个指数时相关系数只能取 ±1 / ±0.5。<br>横截面低于门槛的交易日不产出有效 IC，会被排除并单独提示。',
       formula: 'count(当日有因子值的指数)',
     },
+    ic_count: {
+      label: '数据点',
+      description: '产出有效 Rank IC 的交易日数量。<br>横截面指数不足门槛、或区间末尾没有次日收盘价（无法计算前瞻收益）的交易日不计入。<br>少于 30 个数据点时统计意义不足；前瞻窗口重叠时以「有效」样本数为准。',
+      formula: 'count(有效 IC 交易日)',
+    },
     rank_ic: {
       label: 'Rank IC',
       description: 'Rank Information Coefficient，因子值与下期收益率的 Spearman 秩相关系数。<br>取值范围 [-1, 1]，正值表示正向预测（因子值越高，未来收益越高）。<br>不依赖线性假设，比 Pearson IC 更稳健。<br>计算流程：取当日所有指数因子值 → 按交易日历取 N 个交易日后的收盘价 → Spearman 秩相关。<br>缺失前瞻日行情的指数会被剔除，不会顺延到更晚的行情。',
@@ -389,7 +409,7 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
     },
     pmi: {
       label: 'PMI',
-      description: '制造业采购经理指数（Purchasing Managers\' Index）。<br>以 50% 为荣枯线：> 50 表示制造业扩张，< 50 表示收缩。<br>PMI 是经济周期的先行指标，领先于 GDP 变化。<br>主要关注：生产、新订单、从业人员、供应商配送时间、原材料库存 5 个分项。',
+      description: '制造业采购经理指数（Purchasing Managers\' Index）。<br>以 50 为荣枯线（指数点位，不是百分比）：> 50 表示制造业扩张，< 50 表示收缩。<br>PMI 是经济周期的先行指标，领先于 GDP 变化。<br>主要关注：生产、新订单、从业人员、供应商配送时间、原材料库存 5 个分项。',
     },
     pmi_boom_bust: {
       label: '荣枯线',
@@ -402,6 +422,10 @@ export const INDICATOR_DESCRIPTIONS: Record<string, Record<string, IndicatorEntr
     lpr5y: {
       label: '5年期 LPR',
       description: '五年期贷款市场报价利率。<br>主要影响中长期贷款，尤其是房贷利率的定价基准。<br>5Y LPR 下调 → 房贷成本降低 → 利好房地产及相关产业链。<br>与 1Y LPR 的利差反映银行对长期风险的定价。',
+    },
+    sf_stock: {
+      label: '社融存量',
+      description: '社会融资规模存量（人民银行月度发布，策略中按次月 20 日起可见）。<br>反映实体经济从金融体系获得的资金总量，常用其同比增速衡量信用扩张。<br>因子：macro_series（code=sf_stock、mode=pct_change、months=12 即社融存量同比）。',
     },
     m1_yoy: {
       label: 'M1 / M2 同比',

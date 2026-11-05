@@ -143,6 +143,7 @@ import type { ECharts } from 'echarts'
 import type { SignalLabTimingResponse } from '../../types/api'
 import IssueList from './IssueList.vue'
 import { CHART_COLORS, fmtNum, fmtPct, signClass } from './format'
+import { CHART_THEME, loadEcharts } from '../../utils/echarts'
 
 const props = defineProps<{ result: SignalLabTimingResponse }>()
 
@@ -176,9 +177,9 @@ function diff(a: number | null, b: number | null): number | null {
 /** 渲染联动图 */
 async function render(): Promise<void> {
   if (!chartEl.value) return
-  const echarts = await import('echarts')
+  const echarts = await loadEcharts()
   chart?.dispose()
-  chart = echarts.init(chartEl.value, undefined, { renderer: 'canvas' })
+  chart = echarts.init(chartEl.value, CHART_THEME, { renderer: 'canvas' })
   const r = props.result
   const panels = panelCount.value
   const top0 = 36
@@ -431,7 +432,7 @@ onUnmounted(() => {
   font-weight: 500;
 }
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
 }
 .pos {

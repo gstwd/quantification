@@ -206,7 +206,8 @@ export async function fetchIndustryDailyBars(
       params: {
         start_date: params.startDate || undefined,
         end_date: params.endDate || undefined,
-        limit: params.limit ?? 250,
+        // 给定日期区间时不传 limit：区间内全部返回，避免长区间被截成最近 250 根
+        limit: params.startDate && params.endDate ? undefined : (params.limit ?? 250),
       },
     },
   )

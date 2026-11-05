@@ -45,7 +45,7 @@ apiClient.interceptors.request.use((config) => {
  * 优先读取 FastAPI 的 detail 字段（string 或 422 校验数组），
  * 其次区分网络错误与超时，最后回退到 HTTP 状态描述。
  */
-function extractErrorMessage(error: AxiosError<{ detail?: unknown }>): string {
+export function extractErrorMessage(error: AxiosError<{ detail?: unknown }>): string {
   if (!error.response) {
     if (error.code === 'ECONNABORTED') return '请求超时，请稍后重试'
     return '网络错误或服务不可达，请检查服务是否启动'
@@ -79,8 +79,24 @@ apiClient.interceptors.response.use(
     if (isMutation && !silent) {
       toast.error(extractErrorMessage(err), {
         key: `${method}:${err.config?.url ?? 'unknown'}`,
+        // 只在短时间窗内去重：连点不刷屏，但之后同一操作再次失败仍会提示
+        dedupeWindowMs: 10000,
       })
     }
     return Promise.reject(error)
   },
 )
+
+/**
+ * 把任意异常转换为用户可读文案：Axios 错误优先取后端 detail，
+ * 其他 Error 取 message，否则返回兜底文案。
+ *
+ * @param error - 捕获到的异常
+ * @param fallback - 无法识别时的兜底文案
+ * @returns 用户可读的错误文案
+ */
+export function getErrorMessage(error: unknown, fallback: string): string {
+  if (axios.isAxiosError(error)) return extractErrorMessage(error as AxiosError<{ detail?: unknown }>)
+  if (error instanceof Error && error.message) return error.message
+  return fallback
+}

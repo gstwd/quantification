@@ -239,17 +239,26 @@ class BacktestComparisonService:
             return
 
         statuses = [bt_a.status, bt_b.status]
-        if any(s not in ("success", "failed") for s in statuses):
+        if any(s not in ("success", "failed", "cancelled") for s in statuses):
             # 仍有子回测未完成，等待另一个子回测完成时再次触发
             return
 
+        # 已取消的子回测也是终态：按失败收口，否则对比会永远停在 running
         errors: dict[str, str] = {}
         if bt_a.status == "failed":
             errors["a"] = bt_a.error_message or "策略A回测失败"
+        elif bt_a.status == "cancelled":
+            errors["a"] = "子回测已取消"
         if bt_b.status == "failed":
             errors["b"] = bt_b.error_message or "策略B回测失败"
+        elif bt_b.status == "cancelled":
+            errors["b"] = "子回测已取消"
 
-        if len(errors) == 2:
+        if "cancelled" in statuses:
+            # 有子回测被取消：对比结果不完整，整体判失败（不产出半边指标）
+            parts = [f"策略{side.upper()}: {msg}" for side, msg in sorted(errors.items())]
+            self._backtest_repo.mark_comparison_failed(comparison_id, "; ".join(parts))
+        elif len(errors) == 2:
             self._backtest_repo.mark_comparison_failed(
                 comparison_id,
                 f"策略A: {errors['a']}; 策略B: {errors['b']}",

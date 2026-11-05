@@ -32,7 +32,8 @@
     <!-- ═══ 研究线 ═══ -->
     <div v-if="activeTab === 'lineages'" class="layout">
       <div class="list">
-        <div v-if="lineages.length === 0" class="empty">暂无研究线</div>
+        <div v-if="lineagesLoading && lineages.length === 0" class="empty">加载中...</div>
+        <div v-else-if="lineages.length === 0" class="empty">暂无研究线</div>
         <div
           v-for="line in lineages"
           :key="line.lineage_id"
@@ -48,7 +49,9 @@
           </div>
           <div class="list-meta">
             <span v-if="line.error" class="chip chip-warn" :title="line.error">N 统计失败</span>
-            <span v-else>N = {{ line.n_trials }}（{{ line.budget.used }}/{{ line.budget.budget }}）</span>
+            <span v-else title="N 为 Deflated Sharpe 的试验次数；预算按研究线已用试验计">
+              N = {{ line.n_trials }} · 预算 {{ line.budget.used }}/{{ line.budget.budget }}
+            </span>
             <span>{{ line.members.length }} 个成员{{ line.variant_count ? ` + ${line.variant_count} 变体` : '' }}</span>
           </div>
           <div class="chips">
@@ -113,11 +116,11 @@
                   </thead>
                   <tbody>
                     <tr v-for="trial in hypothesisDetail.trials" :key="trial.trial_id">
-                      <td>{{ TRIAL_KIND_TEXT[trial.kind] ?? trial.kind }}</td>
+                      <td>{{ trialKindLabel(trial.kind) }}</td>
                       <td class="mono small">{{ trial.ref_id || '—' }}</td>
                       <td>{{ trial.trial_count }}</td>
-                      <td>{{ trial.counted_in_n ? '是' : '否（关联）' }}{{ trial.is_estimated ? ' · 估算' : '' }}</td>
-                      <td class="small">{{ trial.execution_model || '—' }}</td>
+                      <td>{{ trial.counted_in_n ? '是' : trial.kind === 'diagnostic' ? '否（诊断记录）' : '否（关联）' }}{{ trial.is_estimated ? ' · 估算' : '' }}</td>
+                      <td class="small">{{ trial.execution_model ? executionModelLabel(trial.execution_model) : '—' }}</td>
                       <td class="small">{{ trial.note || '—' }}</td>
                     </tr>
                   </tbody>
@@ -306,6 +309,8 @@ import {
   fetchResearchHypothesis,
   fetchResearchLineages,
 } from '../api/research'
+import { getErrorMessage } from '../api/client'
+import { executionModelLabel, trialKindLabel } from '../utils/labels'
 import { usePolling } from '../composables/usePolling'
 import type {
   ResearchCampaign,
@@ -342,12 +347,6 @@ const BREAKDOWN_TEXT: Record<string, string> = {
   research_batch: '研究批量评估变体',
   manual: '人工 / 补录',
   estimated: '其中估算',
-}
-const TRIAL_KIND_TEXT: Record<string, string> = {
-  research_batch: '研究批量评估',
-  manual: '人工 / 补录',
-  optimization: '优化会话',
-  robustness: '稳健性批次',
 }
 const VERDICT_TEXT: Record<string, string> = {
   recommend_accept: '推荐接受',
@@ -387,7 +386,7 @@ const campaignDetail = ref<ResearchCampaignDetail | null>(null)
 
 /** 把接口错误转为页面提示 */
 function showError(err: unknown, fallback: string): void {
-  error.value = err instanceof Error ? `${fallback}：${err.message}` : fallback
+  error.value = `${fallback}：${getErrorMessage(err, '未知错误')}`
 }
 
 function statusText(status: string): string {
@@ -479,12 +478,18 @@ const campaignLimits = computed((): Array<{ label: string; text: string }> => {
   ]
 })
 
+/** 研究线列表加载中（区分「加载中」与「暂无研究线」） */
+const lineagesLoading = ref(false)
+
 async function loadLineages(): Promise<void> {
+  lineagesLoading.value = true
   try {
     lineages.value = await fetchResearchLineages()
     if (!selectedLineage.value && lineages.value.length) await selectLineage(lineages.value[0].lineage_id)
   } catch (err) {
     showError(err, '加载研究线失败')
+  } finally {
+    lineagesLoading.value = false
   }
 }
 
@@ -652,7 +657,7 @@ onMounted(async () => {
 
 .muted { color: var(--text-muted); }
 .small { font-size: 12px; }
-.mono { font-family: var(--font-mono, monospace); }
+.mono { font-family: var(--font-mono); }
 .warn { color: var(--warning); }
 .error-text { color: var(--danger); font-size: 12px; margin-bottom: 8px; }
 code { font-size: 12px; padding: 1px 4px; border-radius: 4px; background: var(--bg); }

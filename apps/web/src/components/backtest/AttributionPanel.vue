@@ -1,7 +1,7 @@
 <template>
   <div class="attribution">
     <div class="header">
-      <h3 class="title">收益归因</h3>
+      <h3 class="title">收益归因<span class="unit-note">（单位：百分点 pp，毛口径）</span></h3>
       <span v-if="data?.benchmark_label" class="tag">基准：{{ data.benchmark_label }}</span>
       <span v-if="data?.approximate" class="tag warn">近似（开盘执行）</span>
     </div>
@@ -66,8 +66,9 @@ const loading = ref(false)
 const error = ref('')
 
 /** 百分点展示（缺失为 —） */
+/** 百分点（pp）格式化 */
 function pct(value: number | null | undefined): string {
-  return value == null ? '—' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}`
+  return value == null ? '—' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}pp`
 }
 
 async function load(): Promise<void> {
@@ -102,6 +103,7 @@ onMounted(load)
 .table th, .table td { padding: 4px 8px; border-bottom: 1px solid var(--border); text-align: right; }
 .table th:first-child, .table td:first-child { text-align: left; }
 .table tr.total td { font-weight: 600; }
-.mono { font-family: var(--font-mono, monospace); }
+.mono { font-family: var(--font-mono); }
 .muted { color: var(--text-muted); font-size: 12px; }
+.unit-note { margin-left: 6px; font-size: 12px; font-weight: 400; color: var(--text-muted); }
 </style>

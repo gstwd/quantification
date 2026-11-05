@@ -3,7 +3,7 @@
     <div class="page-header">
       <h1 class="page-title">关键词标签管理</h1>
       <span class="page-desc">管理新闻分类的关键词→资产标签映射规则</span>
-      <HelpTip text="AI 舆情分析链路中的<b>标签分类器</b>使用此映射表，将新闻标题中的关键词自动匹配到资产标签（如“沪深300” → “000300”）。<br><br><b>优先级</b>：数值越大越先匹配（同一条新闻优先匹配高优先级关键词）。<br><b>数据库映射优先</b>：DB 中有数据时自动替代代码中的静态默认映射；清空 DB 则回退到内置默认值。<br><br>映射的标签可以是<b>指数代码</b>（如 000300）或<b>行业/概念</b>（如 新能源、人工智能），直接影响舆情因子与指数的绑定结果。" position="bottom" maxWidth="420px" />
+      <HelpTip text="AI 舆情分析的标签分类<b>优先由 LLM 完成</b>；未配置 API Key 或某批 LLM 分类失败时，才用此映射表按新闻标题关键词兜底匹配资产标签（如“沪深300” → “000300”）。<br><br><b>优先级</b>：数值越大越先匹配（同一条新闻优先匹配高优先级关键词）。<br><b>数据库映射优先</b>：DB 中有数据时自动替代代码中的静态默认映射；清空 DB 则回退到内置默认值。<br><br>映射的标签可以是<b>指数代码</b>（如 000300）或<b>行业/概念</b>（如 新能源、人工智能），影响兜底分类时舆情聚合到哪个标签。AI 舆情只用于展示与研究辅助，不是策略因子。" position="bottom" maxWidth="420px" />
     </div>
 
     <!-- 新增行 -->
@@ -40,12 +40,16 @@
     <div class="card">
       <div class="card-header">
         <span class="card-title">映射列表</span>
+        <span v-if="totalCount !== null" class="list-count">
+          {{ totalCount > rows.length ? `显示前 ${rows.length} 条 / 共 ${totalCount} 条` : `共 ${totalCount} 条` }}
+        </span>
         <label class="checkbox-label">
           <input v-model="showActiveOnly" type="checkbox" @change="loadList" />
           仅显示启用的
         </label>
       </div>
       <div class="card-body">
+        <div v-if="opError" class="op-error">{{ opError }}</div>
         <div v-if="loading" class="loading">加载中...</div>
         <div v-else-if="rows.length === 0" class="empty">暂无数据</div>
         <table v-else class="data-table">
@@ -116,6 +120,7 @@
 </template>
 
 <script setup lang="ts">
+import { getErrorMessage } from '../api/client'
 /** 关键词标签管理页面。
  *
  * 提供 keyword_tag_config 表的 CRUD 管理界面，
@@ -124,6 +129,7 @@
 import { onMounted, ref } from 'vue'
 import {
   batchImportKeywordTags,
+  countKeywordTags,
   createKeywordTag,
   deleteKeywordTag,
   fetchKeywordTags,
@@ -136,13 +142,23 @@ import HelpTip from '../components/HelpTip.vue'
 const rows = ref<KeywordTagConfig[]>([])
 const loading = ref(false)
 const showActiveOnly = ref(false)
+/** 映射总数（列表最多加载 200 条，超出时提示未全部显示） */
+const totalCount = ref<number | null>(null)
+/** 操作失败提示（toast 已自动弹出后端 detail，这里在页面内保留一份） */
+const opError = ref('')
 
 async function loadList() {
   loading.value = true
   try {
-    rows.value = await fetchKeywordTags(0, 200, showActiveOnly.value)
+    const [list, total] = await Promise.all([
+      fetchKeywordTags(0, 200, showActiveOnly.value),
+      countKeywordTags(showActiveOnly.value).catch(() => null),
+    ])
+    rows.value = list
+    totalCount.value = total
   } catch {
     rows.value = []
+    totalCount.value = null
   } finally {
     loading.value = false
   }
@@ -155,6 +171,7 @@ const newPriority = ref(0)
 
 async function handleCreate() {
   if (!newKeyword.value || !newTag.value) return
+  opError.value = ''
   try {
     await createKeywordTag({
       keyword: newKeyword.value.trim(),
@@ -166,7 +183,7 @@ async function handleCreate() {
     newPriority.value = 0
     await loadList()
   } catch (e) {
-    alert(`添加失败：${e instanceof Error ? e.message : '未知错误'}`)
+    opError.value = `添加失败：${getErrorMessage(e, '未知错误')}`
   }
 }
 
@@ -184,23 +201,25 @@ function cancelEdit() {
 }
 
 async function handleSave(id: number) {
+  opError.value = ''
   try {
     await updateKeywordTag(id, editForm.value)
     editingId.value = null
     await loadList()
   } catch (e) {
-    alert(`保存失败：${e instanceof Error ? e.message : '未知错误'}`)
+    opError.value = `保存失败：${getErrorMessage(e, '未知错误')}`
   }
 }
 
 // ---- 删除 ----
 async function handleDelete(id: number) {
   if (!confirm('确定要删除（停用）此映射？')) return
+  opError.value = ''
   try {
     await deleteKeywordTag(id)
     await loadList()
   } catch (e) {
-    alert(`删除失败：${e instanceof Error ? e.message : '未知错误'}`)
+    opError.value = `删除失败：${getErrorMessage(e, '未知错误')}`
   }
 }
 
@@ -254,7 +273,7 @@ async function handleBatchImport() {
     batchText.value = ''
     await loadList()
   } catch (e) {
-    batchMsg.value = `导入失败：${e instanceof Error ? e.message : '未知错误'}`
+    batchMsg.value = `导入失败：${getErrorMessage(e, '未知错误')}`
     batchOk.value = false
   }
 }
@@ -282,7 +301,7 @@ onMounted(() => {
 .form-input-sm { max-width: 80px; }
 .form-input-inline { width: 120px; padding: 4px 6px; font-size: 12px; }
 .form-input-xs { width: 60px; padding: 4px 6px; font-size: 12px; }
-.form-textarea { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px; outline: none; flex: 1; resize: vertical; font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
+.form-textarea { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px; outline: none; flex: 1; resize: vertical; font-family: var(--font-mono); }
 .form-textarea:focus { border-color: var(--accent); }
 
 .btn-primary { background: var(--accent); color: #fff; border: none; border-radius: var(--radius-sm); padding: 8px 16px; font-size: 13px; font-weight: 500; cursor: pointer; }
@@ -308,9 +327,11 @@ onMounted(() => {
 .data-table tbody tr:hover { background: var(--surface-2); }
 .row-inactive { opacity: .5; }
 
-.code-mono { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; font-size: 12px; }
+.code-mono { font-family: var(--font-mono); font-size: 12px; }
 .text-rise { color: var(--success); font-weight: 600; }
 .text-muted { color: var(--text-muted); }
 .loading { padding: 40px; text-align: center; color: var(--text-muted); }
 .empty { padding: 40px; text-align: center; color: var(--text-muted); }
+.list-count { font-size: 12px; color: var(--text-muted); margin-left: 8px; }
+.op-error { margin-bottom: 10px; padding: 8px 12px; border-radius: var(--radius-sm); background: rgba(239,68,68,0.1); color: var(--danger); font-size: 13px; }
 </style>

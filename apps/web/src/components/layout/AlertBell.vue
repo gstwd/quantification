@@ -1,6 +1,6 @@
 <template>
   <div class="alert-bell">
-    <button class="bell-btn" type="button" :title="`站内告警（未读 ${unread}）`" @click="toggle">
+    <button ref="btnEl" class="bell-btn" type="button" :title="`站内告警（未读 ${unread}）`" @click="toggle">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
         stroke-linecap="round" stroke-linejoin="round">
         <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
@@ -9,7 +9,9 @@
       <span>告警</span>
       <span v-if="unread > 0" class="badge">{{ unread > 99 ? '99+' : unread }}</span>
     </button>
-    <div v-if="open" class="panel">
+    <!-- 面板挂到 body 并固定定位：侧栏可纵向滚动（overflow 裁切），面板需浮在内容区之上 -->
+    <Teleport to="body">
+    <div v-if="open" class="alert-panel" :style="panelStyle">
       <div class="panel-header">
         <span>站内告警</span>
         <button v-if="unread > 0" type="button" class="link" @click="readAll">全部已读</button>
@@ -26,6 +28,7 @@
       </div>
       <div class="hint">告警只做提醒：不会自动调参、上下线或产生交易信号。</div>
     </div>
+    </Teleport>
   </div>
 </template>
 
@@ -42,6 +45,9 @@ import { formatCnTime } from '../../utils/date'
 
 const router = useRouter()
 const open = ref(false)
+const btnEl = ref<HTMLButtonElement | null>(null)
+/** 面板固定定位坐标（按铃铛按钮位置计算） */
+const panelStyle = ref<Record<string, string>>({})
 const unread = ref(0)
 const items = ref<AlertItem[]>([])
 
@@ -71,6 +77,10 @@ function kindLabel(kind: string): string {
 
 async function toggle(): Promise<void> {
   open.value = !open.value
+  if (open.value && btnEl.value) {
+    const rect = btnEl.value.getBoundingClientRect()
+    panelStyle.value = { left: `${rect.left}px`, top: `${rect.bottom + 6}px` }
+  }
   if (open.value) apply(await fetchAlerts(false, 30))
 }
 
@@ -104,8 +114,8 @@ onMounted(() => polling.start())
   margin-left: auto; background: var(--danger, #ef4444); color: #fff;
   border-radius: 10px; padding: 0 6px; font-size: 11px; line-height: 18px;
 }
-.panel {
-  position: absolute; left: 0; top: calc(100% + 6px); z-index: 50; width: 320px; max-height: 420px; overflow-y: auto;
+.alert-panel {
+  position: fixed; z-index: 1000; width: 320px; max-height: min(420px, calc(100vh - 80px)); overflow-y: auto;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
@@ -116,7 +126,7 @@ onMounted(() => polling.start())
 .item:hover { background: var(--surface-2); }
 .item.unread .title { font-weight: 600; }
 .sev-critical { border-left-color: var(--danger, #ef4444); }
-.sev-warning { border-left-color: #f59e0b; }
+.sev-warning { border-left-color: var(--warning); }
 .title { font-size: 13px; color: var(--text); }
 .meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 </style>

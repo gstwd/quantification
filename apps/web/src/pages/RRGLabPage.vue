@@ -26,11 +26,10 @@
         </div>
         <div class="notice-item">
           <span class="notice-label">因子中心</span>
-          本页四个指标已在因子中心登记（正式策略/回测默认参数由日频预计算维护）：
-          <a href="/factors/rrg_rs_ratio">rrg_rs_ratio</a> ·
-          <a href="/factors/rrg_rs_momentum">rrg_rs_momentum</a> ·
-          <a href="/factors/rrg_quadrant">rrg_quadrant</a> ·
-          <a href="/factors/diffusion_count_ratio">diffusion_count_ratio</a>
+          本页 RS-Ratio / RS-Momentum / 象限 / 行业扩散均为即时计算的研究展示，不落库。
+          策略可用的相关因子模板（同样按原始数据现算）：
+          <RouterLink to="/factors/index_diffusion_ratio">index_diffusion_ratio</RouterLink> ·
+          <RouterLink to="/factors/rrg_industry_match_score">rrg_industry_match_score</RouterLink>
         </div>
       </div>
     </div>
@@ -567,9 +566,9 @@
  * 不创建策略、不写因子表、不触发回测。查询参数与数据上限均有服务端校验与提示。
  */
 
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { RouterLink } from 'vue-router'
 import type { AxiosError } from 'axios'
-import type { ECharts } from 'echarts'
 
 import {
   fetchDiffusion,
@@ -586,6 +585,9 @@ import {
   type IndustryRRGResponse,
 } from '../api/industry'
 import { fetchBenchmarkIndexes } from '../api/market_data'
+import { fetchSystemStatus } from '../api/runs'
+import { useChart } from '../composables/useChart'
+import { shiftDateCn, todayCn } from '../utils/date'
 import type { BenchmarkIndex } from '../types/api'
 
 const industries = ref<IndustryIndexSummary[]>([])
@@ -619,8 +621,8 @@ const rrgDate = ref('')
 const showTrail = ref(true)
 const trailDays = ref(60)
 const rrgChartEl = ref<HTMLElement | null>(null)
-let rrgChart: ECharts | null = null
-let rrgResizeObserver: ResizeObserver | null = null
+/** 图表实例由 useChart 管理：容器重建时重新初始化，尺寸变化自动 resize，卸载时释放 */
+const rrgChart = useChart(rrgChartEl)
 
 const diffusionResp = ref<IndustryDiffusionResponse | null>(null)
 const diffusionLoading = ref(false)
@@ -629,9 +631,8 @@ const diffusionDate = ref('')
 const chartCodes = ref<string[]>([])
 const diffChartEl = ref<HTMLElement | null>(null)
 const coverageChartEl = ref<HTMLElement | null>(null)
-let diffChart: ECharts | null = null
-let coverageChart: ECharts | null = null
-let diffResizeObserver: ResizeObserver | null = null
+const diffChart = useChart(diffChartEl)
+const coverageChart = useChart(coverageChartEl)
 
 const rangePresets = [
   { label: '近1年', days: 365 },
@@ -657,13 +658,6 @@ const codeToName = computed(() => {
 
 function codeName(code: string): string {
   return codeToName.value[code] ?? code
-}
-
-function toDateStr(d: Date): string {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
 }
 
 function rangeText(start: string | null | undefined, end: string | null | undefined): string {
@@ -704,21 +698,32 @@ function errorText(e: unknown): string {
   return `请求失败（HTTP ${err.response.status}）${idText}`
 }
 
+/** 业务日期统一按北京时间计算 */
 function initDates(): void {
-  const end = new Date()
-  const start = new Date()
-  start.setDate(start.getDate() - 1095)
-  endDate.value = toDateStr(end)
-  startDate.value = toDateStr(start)
+  const end = todayCn()
+  endDate.value = end
+  startDate.value = shiftDateCn(end, -1095)
 }
 
 function applyPreset(preset: { label: string; days: number }): void {
   activePreset.value = preset.label
-  const end = new Date()
-  const start = new Date()
-  start.setDate(start.getDate() - preset.days)
-  endDate.value = toDateStr(end)
-  startDate.value = toDateStr(start)
+  const end = todayCn()
+  endDate.value = end
+  startDate.value = shiftDateCn(end, -preset.days)
+}
+
+/**
+ * 指数扩散默认日期：取指数日线的最新入库交易日（后端只接受已入库交易日，
+ * 用浏览器当天在周末或盘中会直接 422）；取不到时退回北京时间当天。
+ */
+async function initIndexDiffusionDate(): Promise<void> {
+  try {
+    const status = await fetchSystemStatus()
+    const bar = status.data_sources.find((src) => src.table_name === 'index_daily_bar')
+    indexDiffusionDate.value = bar?.latest_trade_date ?? status.latest_trade_date ?? todayCn()
+  } catch {
+    indexDiffusionDate.value = todayCn()
+  }
 }
 
 function selectAllIndustries(): void {
@@ -901,12 +906,11 @@ function pointsAtDate(date: string): Array<{
 /** 渲染 RRG 散点 + 历史轨迹 */
 async function renderRrgChart(): Promise<void> {
   if (!rrgChartEl.value || !rrgDate.value) return
-  const echarts = await import('echarts')
-  rrgChart?.dispose()
-  rrgChart = echarts.init(rrgChartEl.value, undefined, { renderer: 'canvas' })
   const latest = pointsAtDate(rrgDate.value)
   if (!latest.length) {
-    rrgChart.setOption({ title: { text: '该日期无有效 RRG 数据', left: 'center', top: 'middle' } })
+    await rrgChart.render({
+      title: { text: '该日期无有效 RRG 数据', left: 'center', top: 'middle', textStyle: { color: '#94a3b8', fontSize: 14 } },
+    })
     return
   }
 
@@ -974,17 +978,31 @@ async function renderRrgChart(): Promise<void> {
   const padR = Math.max(3, (maxRatio - minRatio) * 0.06)
   const padM = Math.max(3, (maxMom - minMom) * 0.06)
 
-  rrgChart.setOption({
+  await rrgChart.render({
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'item',
-      formatter: (params: { data: { name: string; value: number[] } }) =>
-        `${params.data.name}<br/>RS-Ratio: ${params.data.value[0].toFixed(2)}<br/>RS-Momentum: ${params.data.value[1].toFixed(2)}`,
+      // 散点数据为 {name, value}，轨迹点为 [x, y] 数组，需分别取值
+      formatter: (params: unknown) => {
+        const p = params as { seriesName?: string; data?: unknown }
+        const data = p.data
+        let name = p.seriesName ?? ''
+        let xy: unknown = data
+        if (data && !Array.isArray(data) && typeof data === 'object') {
+          const obj = data as { name?: string; value?: unknown }
+          name = obj.name ?? name
+          xy = obj.value
+        }
+        if (!Array.isArray(xy) || xy.length < 2) return name
+        const [x, y] = xy as number[]
+        return `${name}<br/>RS-Ratio: ${Number(x).toFixed(2)}<br/>RS-Momentum: ${Number(y).toFixed(2)}`
+      },
     },
     legend: { show: false },
     grid: { left: 70, right: 40, top: 40, bottom: 50 },
     xAxis: {
       name: 'RS-Ratio',
+      nameTextStyle: { color: '#94a3b8' },
       type: 'value',
       min: Math.min(minRatio, 100) - padR,
       max: Math.max(maxRatio, 100) + padR,
@@ -994,6 +1012,7 @@ async function renderRrgChart(): Promise<void> {
     },
     yAxis: {
       name: 'RS-Momentum',
+      nameTextStyle: { color: '#94a3b8' },
       type: 'value',
       min: Math.min(minMom, 100) - padM,
       max: Math.max(maxMom, 100) + padM,
@@ -1001,11 +1020,13 @@ async function renderRrgChart(): Promise<void> {
       axisLabel: { color: '#94a3b8', fontSize: 11 },
       splitLine: { lineStyle: { color: '#334155', type: 'dashed' } },
     },
+    // 象限标签贴在绘图区四角：坐标轴范围总是跨过 100（两侧至少留 3 的余量），
+    // 四角必然分别落在对应象限内，不随 100/100 中心线位置漂移到错误象限
     graphic: [
-      { type: 'text', left: '63%', top: '7%', style: { text: '1 领先', fill: '#10b981', fontSize: 12 } },
-      { type: 'text', left: '7%', top: '7%', style: { text: '2 改善', fill: '#3b82f6', fontSize: 12 } },
-      { type: 'text', left: '7%', bottom: '8%', style: { text: '3 滞后', fill: '#f97316', fontSize: 12 } },
-      { type: 'text', left: '63%', bottom: '8%', style: { text: '4 疲软', fill: '#ef4444', fontSize: 12 } },
+      { type: 'text', right: 50, top: 46, style: { text: '1 领先', fill: '#10b981', fontSize: 12 } },
+      { type: 'text', left: 80, top: 46, style: { text: '2 改善', fill: '#3b82f6', fontSize: 12 } },
+      { type: 'text', left: 80, bottom: 58, style: { text: '3 滞后', fill: '#f97316', fontSize: 12 } },
+      { type: 'text', right: 50, bottom: 58, style: { text: '4 疲软', fill: '#ef4444', fontSize: 12 } },
     ],
     series: [
       ...trailSeries,
@@ -1018,6 +1039,7 @@ async function renderRrgChart(): Promise<void> {
           position: 'top',
           formatter: (params: { data: { name: string } }) => params.data.name,
           fontSize: 10,
+          color: '#cbd5e1',
         },
         markLine: {
           silent: true,
@@ -1081,9 +1103,6 @@ function toggleChartCode(code: string): void {
 /** 渲染扩散时序折线 */
 async function renderDiffusionChart(): Promise<void> {
   if (!diffChartEl.value || !diffusionResp.value || !diffusionDates.value.length) return
-  const echarts = await import('echarts')
-  diffChart?.dispose()
-  diffChart = echarts.init(diffChartEl.value, undefined, { renderer: 'canvas' })
   const palette = [
     '#3b82f6',
     '#10b981',
@@ -1106,7 +1125,7 @@ async function renderDiffusionChart(): Promise<void> {
       return p?.value ?? null
     }),
   }))
-  diffChart.setOption({
+  await diffChart.render({
     backgroundColor: 'transparent',
     tooltip: { trigger: 'axis' },
     legend: {
@@ -1136,9 +1155,6 @@ async function renderDiffusionChart(): Promise<void> {
 /** 渲染全行业覆盖度（逐日均值，有效样本/成员数） */
 async function renderCoverageChart(): Promise<void> {
   if (!coverageChartEl.value || !diffusionResp.value || !withCoverage.value) return
-  const echarts = await import('echarts')
-  coverageChart?.dispose()
-  coverageChart = echarts.init(coverageChartEl.value, undefined, { renderer: 'canvas' })
   const seriesData: Array<number | null> = diffusionDates.value.map((d) => {
     const dayMap = pointMap.value[d] ?? {}
     const points = Object.values(dayMap).filter(
@@ -1153,7 +1169,7 @@ async function renderCoverageChart(): Promise<void> {
     if (!points.length) return null
     return points.reduce((sum, p) => sum + (p.coverage ?? 0), 0) / points.length
   })
-  coverageChart.setOption({
+  await coverageChart.render({
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'axis',
@@ -1213,42 +1229,10 @@ watch(
   { flush: 'post' },
 )
 
-function setupResizeObservers(): void {
-  const target = rrgChartEl.value
-  if (target) {
-    rrgResizeObserver = new ResizeObserver(() => rrgChart?.resize())
-    rrgResizeObserver.observe(target)
-  }
-  const target2 = diffChartEl.value
-  if (target2) {
-    diffResizeObserver = new ResizeObserver(() => {
-      diffChart?.resize()
-      coverageChart?.resize()
-    })
-    diffResizeObserver.observe(target2)
-    if (coverageChartEl.value) diffResizeObserver.observe(coverageChartEl.value)
-  }
-}
-
 onMounted(async () => {
   initDates()
-  indexDiffusionDate.value = endDate.value
-  await Promise.all([loadIndustries(), loadIndexes()])
-  setupResizeObservers()
+  await Promise.all([loadIndustries(), loadIndexes(), initIndexDiffusionDate()])
   await queryRRG()
-})
-
-onUnmounted(() => {
-  rrgResizeObserver?.disconnect()
-  diffResizeObserver?.disconnect()
-  rrgResizeObserver = null
-  diffResizeObserver = null
-  rrgChart?.dispose()
-  diffChart?.dispose()
-  coverageChart?.dispose()
-  rrgChart = null
-  diffChart = null
-  coverageChart = null
 })
 </script>
 
@@ -1380,17 +1364,17 @@ onUnmounted(() => {
   width: 210px;
 }
 .field-hint {
-  color: #64748b;
+  color: var(--text-muted);
   font-size: 12px;
   margin-right: 6px;
 }
 .warmup-hint {
-  color: #64748b;
+  color: var(--text-muted);
   font-size: 12px;
   margin-left: 4px;
 }
 .sep {
-  color: #64748b;
+  color: var(--text-muted);
 }
 .inline-check {
   display: inline-flex;
@@ -1473,7 +1457,7 @@ onUnmounted(() => {
   color: #93c5fd;
 }
 .issue-code {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   background: rgba(255, 255, 255, 0.06);
   padding: 2px 6px;
@@ -1509,7 +1493,7 @@ onUnmounted(() => {
   height: 300px;
 }
 .chart-note {
-  color: #64748b;
+  color: var(--text-muted);
   font-size: 12px;
   padding: 6px 0;
 }
@@ -1569,7 +1553,7 @@ onUnmounted(() => {
   background: var(--surface-2, rgba(255, 255, 255, 0.03));
 }
 .mono {
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .text-warn {
   color: #fbbf24;

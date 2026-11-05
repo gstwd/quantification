@@ -77,7 +77,7 @@ const fieldText = computed(() =>
 }
 .def-formula {
   color: #93c5fd;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   white-space: pre-wrap;
   word-break: break-word;
 }

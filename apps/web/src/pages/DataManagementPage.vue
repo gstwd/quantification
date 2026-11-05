@@ -397,6 +397,7 @@
 </template>
 
 <script setup lang="ts">
+import { getErrorMessage } from '../api/client'
 /**
  * 统一数据管理页面。
  *
@@ -864,7 +865,7 @@ async function loadOverview(): Promise<void> {
   try {
     overview.value = await fetchDataManagementOverview()
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : '数据管理总览加载失败'
+    error.value = getErrorMessage(cause, '数据管理总览加载失败')
   } finally {
     loading.value = false
   }
@@ -884,7 +885,7 @@ async function loadDetail(): Promise<void> {
     })
   } catch (cause) {
     detail.value = null
-    error.value = cause instanceof Error ? cause.message : '数据集详情加载失败'
+    error.value = getErrorMessage(cause, '数据集详情加载失败')
   } finally {
     detailLoading.value = false
   }
@@ -1047,7 +1048,7 @@ async function submitOperation(
     }
     await start()
   } catch (cause) {
-    showBanner(cause instanceof Error ? cause.message : '数据维护任务提交失败', false)
+    showBanner(getErrorMessage(cause, '数据维护任务提交失败'), false)
   } finally {
     submitting.value = false
     activeOperation.value = null
@@ -1064,6 +1065,8 @@ const { start, polling } = usePolling<ResearchRunDetail>({
   fetcher: async () => fetchRunDetail(activeRunId.value ?? ''),
   isDone: (run) => TERMINAL_STATUSES.includes(run.status),
   intervalMs: 2000,
+  // 连续请求失败时轮询会停止，需明确告知，避免用户以为任务仍在跟踪
+  onMaxErrors: () => showBanner('任务进度查询连续失败，已停止自动跟踪；请到「运行记录」页查看任务状态', false),
   onData: (run) => {
     if (!TERMINAL_STATUSES.includes(run.status)) return
     const summary = summarizeRun(run)
@@ -1141,7 +1144,7 @@ onUnmounted(() => {
   color: var(--accent);
   padding: 2px 8px;
   border-radius: 20px;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .header-meta {
   font-size: 12px;
@@ -1229,7 +1232,7 @@ onUnmounted(() => {
 }
 .summary-item strong {
   font-size: 18px;
-  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-family: var(--font-mono);
   line-height: 1.1;
 }
 .summary-item span {
@@ -1370,7 +1373,7 @@ onUnmounted(() => {
   color: var(--text-muted);
   padding: 2px 8px;
   border-radius: 20px;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .actions {
   display: flex;
@@ -1491,17 +1494,17 @@ onUnmounted(() => {
   border-bottom: none;
 }
 .code-mono {
-  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-family: var(--font-mono);
   font-weight: 600;
   color: var(--accent);
 }
 .mono {
-  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-muted);
 }
 .num-cell {
-  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-family: var(--font-mono);
   text-align: right;
   white-space: nowrap;
 }
@@ -1700,7 +1703,7 @@ onUnmounted(() => {
 .form-label {
   font-size: 12px;
   color: var(--text-muted);
-  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-family: var(--font-mono);
   word-break: break-all;
 }
 .form-error {

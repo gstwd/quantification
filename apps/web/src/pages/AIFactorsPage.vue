@@ -2,11 +2,11 @@
   <div class="page">
     <div class="page-header">
       <h1 class="page-title">AI 舆情分析</h1>
-      <HelpTip text="基于大语言模型（LLM）的 A 股市场舆情分析模块。<br><br><b>数据来源</b>：11 个中文热榜平台（头条/百度/华尔街见闻等）+ 18 个中英文 RSS 财经源。<br><b>分析流程</b>：新闻采集 → LLM 情绪评分 → 标签分类（指数/行业/概念）→ 情绪聚合 → 市场研判。<br><b>定时调度</b>：每天 23:30 自动执行，覆盖当天新闻。" position="bottom" maxWidth="440px" /></div>
+      <HelpTip text="基于大语言模型（LLM）的 A 股市场舆情分析模块。<br><br><b>数据来源</b>：中文热榜平台（头条/百度/华尔街见闻等）；RSS 财经源为可选补充，需配置 RSSHUB_BASE_URL 与 RSS_FEEDS 后才启用。<br><b>分析流程</b>：新闻采集 → LLM 情绪评分 → 标签分类（指数/行业/概念）→ 情绪聚合 → 可选的市场研判（LLM 不可用时研判缺失，不会伪造）。<br><b>定位</b>：独立的展示与研究辅助，不是策略因子，也不构成投资建议。<br><b>定时调度</b>：每天 23:30 自动执行，覆盖当天新闻。" position="bottom" maxWidth="440px" /></div>
 
     <!-- ════════ 操作面板 ════════ -->
     <div class="card">
-      <div class="card-header"><span class="card-title">操作面板</span><HelpTip text="<b>采集新闻</b>：从热榜（头条/百度/华尔街见闻等）和 18 个 RSS 源抓取当日财经新闻。<br><b>AI 分析</b>：异步任务，依次执行 LLM 情绪分析 → 标签分类 → 情绪聚合 → 市场研判，结果存入数据库。<br>系统每天 23:30 自动执行 AI 分析（无需手动触发）。" position="bottom" maxWidth="360px" /></div>
+      <div class="card-header"><span class="card-title">操作面板</span><HelpTip text="<b>采集新闻</b>：从热榜平台（头条/百度/华尔街见闻等）抓取当日财经新闻（只采集热榜，不含 RSS）。<br><b>AI 分析</b>：异步任务，依次执行 LLM 情绪分析 → 标签分类 → 情绪聚合 → 市场研判，结果存入数据库。<br>系统每天 23:30 自动执行 AI 分析（无需手动触发）。" position="bottom" maxWidth="360px" /></div>
       <div class="card-body">
         <div class="action-row">
           <button class="btn-primary" :disabled="collecting" @click="handleCollect">
@@ -30,6 +30,7 @@
         <div class="action-row">
           <input v-model="queryDate" class="form-input" type="date" />
           <button class="btn-day" @click="goPrevTradingDay">上一交易日</button>
+          <button class="btn-day" title="跳到库中最近一个有舆情数据的日期" @click="goLatestDataDay">最近有数据日</button>
           <input v-model="queryTag" class="form-input tag-input" type="text" placeholder="资产标签（可选）" />
           <button class="btn-secondary" :disabled="queryLoading" @click="handleQuery">
             {{ queryLoading ? '查询中...' : '查询' }}
@@ -176,9 +177,7 @@
       <div class="card-header"><span class="card-title">跨指数情绪对比</span><HelpTip text="选择 2–8 个指数，并列对比同一天的 AI 情绪指标。<br><br>通过分组柱状图直观比较：哪些指数情绪最积极/最消极，正面新闻占比高低。<br>情绪趋同可能预示系统性行情，情绪分化则反映结构性机会。<br><br>点击标签按钮选择指数，最少 2 个、最多 8 个。" position="bottom" maxWidth="380px" /></div>
       <div class="card-body">
         <div class="action-row">
-          <select v-model="compareDate" class="form-input select-input">
-            <option v-for="d in recentDates" :key="d" :value="d">{{ d }}</option>
-          </select>
+          <input v-model="compareDate" class="form-input" type="date" :max="todayStr()" />
           <div class="multi-select-wrap">
             <button
               v-for="idx in INDEX_OPTIONS"
@@ -250,6 +249,7 @@
 </template>
 
 <script setup lang="ts">
+import { getErrorMessage } from '../api/client'
 /** AI 舆情分析主页面。
  *
  * 提供六大功能区域：
@@ -266,9 +266,12 @@ import {
   fetchIndexSummary,
   fetchLatestDataDate,
   fetchMarketSynthesis,
+  fetchPreviousTradingDay,
   triggerAnalyze,
   triggerCollect,
 } from '../api/aiFactors'
+import type { EChartsCoreOption } from 'echarts'
+import { useChart } from '../composables/useChart'
 import type { DailySentimentResponse, MarketSynthesisResponse } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { shiftDateCn, todayCn } from '../utils/date'
@@ -283,15 +286,24 @@ function shiftDate(dateStr: string, days: number): string {
   return shiftDateCn(dateStr, days)
 }
 
-/** 最近 5 个交易日（用于对比日期选择器） */
-const recentDates = ref<string[]>([])
-function refreshRecentDates() {
-  const today = todayCn()
-  const dates: string[] = []
-  for (let i = 0; i < 5; i++) {
-    dates.push(shiftDateCn(today, -i))
+/**
+ * 初始化各查询的默认日期：优先取库中最近有舆情数据的日期，其次取上一交易日
+ * （按交易日历），都取不到时才用北京时间当天——当天盘中通常还没有分析结果。
+ */
+async function initDefaultDates(): Promise<void> {
+  let target: string | null = null
+  try {
+    target = await fetchLatestDataDate()
+  } catch { /* 忽略，退回交易日历 */ }
+  if (!target) {
+    try {
+      target = await fetchPreviousTradingDay()
+    } catch { /* 忽略，退回当天 */ }
   }
-  recentDates.value = dates
+  const date = target ?? todayStr()
+  queryDate.value = date
+  compareDate.value = date
+  synthesisDate.value = date
 }
 
 // ──── 指数选项 ────
@@ -314,11 +326,19 @@ const actionMsg = ref('')
 const actionOk = ref(true)
 const actionRunId = ref<string | null>(null)
 
+/** 操作提示的自动清除定时器：新提示出现时重置，避免旧定时器提前清掉新提示 */
+let actionMsgTimer: ReturnType<typeof setTimeout> | null = null
+
 function showActionMsg(ok: boolean, msg: string, runId?: string | null) {
   actionOk.value = ok
   actionMsg.value = msg
   actionRunId.value = runId ?? null
-  setTimeout(() => { actionMsg.value = ''; actionRunId.value = null }, 8000)
+  if (actionMsgTimer !== null) clearTimeout(actionMsgTimer)
+  actionMsgTimer = setTimeout(() => {
+    actionMsg.value = ''
+    actionRunId.value = null
+    actionMsgTimer = null
+  }, 8000)
 }
 
 async function handleCollect() {
@@ -331,7 +351,7 @@ async function handleCollect() {
       showActionMsg(false, `采集失败：${res.error ?? '未知错误'}`)
     }
   } catch (e) {
-    showActionMsg(false, `请求失败：${e instanceof Error ? e.message : '网络错误'}`)
+    showActionMsg(false, `请求失败：${getErrorMessage(e, '网络错误')}`)
   } finally {
     collecting.value = false
   }
@@ -361,7 +381,7 @@ async function handleAnalyze() {
       showActionMsg(false, `分析失败：${res.error ?? '未知错误'}`)
     }
   } catch (e) {
-    showActionMsg(false, `请求失败：${e instanceof Error ? e.message : '网络错误'}`)
+    showActionMsg(false, `请求失败：${getErrorMessage(e, '网络错误')}`)
   } finally {
     analyzing.value = false
   }
@@ -441,19 +461,24 @@ async function handleQuery() {
   }
 }
 
-/** 快捷日期：上一交易日 */
+/** 快捷日期：上一交易日（按 A 股交易日历，相对当前查询日期） */
 async function goPrevTradingDay() {
   try {
-    const latest = await fetchLatestDataDate()
-    if (latest) {
-      queryDate.value = latest
-    } else {
-      // 回退：取昨天
-      queryDate.value = shiftDate(todayStr(), -1)
-    }
+    const prev = await fetchPreviousTradingDay()
+    // 接口给的是相对今天的上一交易日；已在该日或更早时继续向前一个自然日
+    queryDate.value = prev && prev < queryDate.value ? prev : shiftDate(queryDate.value, -1)
   } catch {
-    queryDate.value = shiftDate(todayStr(), -1)
+    queryDate.value = shiftDate(queryDate.value, -1)
   }
+  handleQuery()
+}
+
+/** 快捷日期：库中最近一个有舆情数据的日期 */
+async function goLatestDataDay() {
+  try {
+    const latest = await fetchLatestDataDate()
+    if (latest) queryDate.value = latest
+  } catch { /* 保持当前日期 */ }
   handleQuery()
 }
 
@@ -466,7 +491,7 @@ function sentimentClass(val: number): string {
 // ──── 主题分布柱状图 ────
 
 const topicChartEl = ref<HTMLElement | null>(null)
-let topicChart: unknown = null
+const topicChart = useChart(topicChartEl)
 
 const topicChartData = computed(() => {
   const counter: Record<string, number> = {}
@@ -504,10 +529,7 @@ function buildTopicOption(data: [string, number][]) {
 
 async function renderTopicChart() {
   if (!topicChartEl.value || topicChartData.value.length === 0) return
-  const echarts = await import('echarts')
-  ;(topicChart as { dispose?: () => void })?.dispose?.()
-  topicChart = echarts.init(topicChartEl.value, null, { renderer: 'canvas' })
-  ;(topicChart as { setOption?: (o: unknown) => void })?.setOption?.(buildTopicOption(topicChartData.value))
+  await topicChart.render(buildTopicOption(topicChartData.value) as EChartsCoreOption)
 }
 
 watch([topicChartData, topicChartEl], () => { nextTick(() => renderTopicChart()) }, { flush: 'post' })
@@ -519,7 +541,7 @@ const selectedIndexes = ref<string[]>(['000300', '000905'])
 const compareLoading = ref(false)
 const compareData = ref<DailySentimentResponse[]>([])
 const compareChartEl = ref<HTMLElement | null>(null)
-let compareChart: unknown = null
+const compareChart = useChart(compareChartEl)
 
 function toggleIndex(code: string) {
   const idx = selectedIndexes.value.indexOf(code)
@@ -552,20 +574,34 @@ function buildCompareOption(data: DailySentimentResponse[]) {
     backgroundColor: 'transparent',
     tooltip: { trigger: 'axis' as const, backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#f1f5f9', fontSize: 12 } },
     legend: { data: ['平均情绪', '加权情绪', '正面占比'], textStyle: { color: '#94a3b8', fontSize: 12 }, top: 4 },
-    grid: { left: 60, right: 30, top: 40, bottom: 50 },
+    grid: { left: 60, right: 60, top: 40, bottom: 50 },
     xAxis: {
       type: 'category' as const,
       data: codes,
       axisLine: { lineStyle: { color: '#334155' } },
       axisLabel: { color: '#94a3b8', fontSize: 11, rotate: codes.length > 4 ? 30 : 0 },
     },
-    yAxis: {
-      type: 'value' as const,
-      name: '情绪值 / 占比',
-      nameTextStyle: { color: '#94a3b8', fontSize: 11 },
-      splitLine: { lineStyle: { color: '#334155', type: 'dashed' as const } },
-      axisLabel: { color: '#94a3b8', fontSize: 11 },
-    },
+    // 情绪值（-1~1）与正面占比（0~100%）量纲不同，分左右两个坐标轴，避免情绪柱被压扁
+    yAxis: [
+      {
+        type: 'value' as const,
+        name: '情绪值',
+        min: -1,
+        max: 1,
+        nameTextStyle: { color: '#94a3b8', fontSize: 11 },
+        splitLine: { lineStyle: { color: '#334155', type: 'dashed' as const } },
+        axisLabel: { color: '#94a3b8', fontSize: 11 },
+      },
+      {
+        type: 'value' as const,
+        name: '正面占比',
+        min: 0,
+        max: 100,
+        nameTextStyle: { color: '#94a3b8', fontSize: 11 },
+        splitLine: { show: false },
+        axisLabel: { color: '#94a3b8', fontSize: 11, formatter: '{value}%' },
+      },
+    ],
     series: [
       {
         name: '平均情绪', type: 'bar',
@@ -582,7 +618,7 @@ function buildCompareOption(data: DailySentimentResponse[]) {
         }),
       },
       {
-        name: '正面占比', type: 'bar',
+        name: '正面占比', type: 'bar', yAxisIndex: 1,
         data: codes.map((c) => {
           const r = data.find((d) => d.asset_tag === c)
           return { value: (r?.positive_ratio ?? 0) * 100, itemStyle: { color: 'rgba(59,130,246,0.5)' } }
@@ -594,10 +630,7 @@ function buildCompareOption(data: DailySentimentResponse[]) {
 
 async function renderCompareChart() {
   if (!compareChartEl.value || compareData.value.length === 0) return
-  const echarts = await import('echarts')
-  ;(compareChart as { dispose?: () => void })?.dispose?.()
-  compareChart = echarts.init(compareChartEl.value, null, { renderer: 'canvas' })
-  ;(compareChart as { setOption?: (o: unknown) => void })?.setOption?.(buildCompareOption(compareData.value))
+  await compareChart.render(buildCompareOption(compareData.value) as EChartsCoreOption)
 }
 
 watch([compareData, compareChartEl], () => { nextTick(() => renderCompareChart()) }, { flush: 'post' })
@@ -629,7 +662,7 @@ const trendDays = ref(7)
 const trendLoading = ref(false)
 const trendData = ref<DailySentimentResponse[]>([])
 const trendChartEl = ref<HTMLElement | null>(null)
-let trendChart: unknown = null
+const trendChart = useChart(trendChartEl)
 
 async function handleTrendQuery() {
   trendLoading.value = true
@@ -667,10 +700,7 @@ function buildTrendOption(data: DailySentimentResponse[]) {
 
 async function renderTrendChart() {
   if (!trendChartEl.value || trendData.value.length === 0) return
-  const echarts = await import('echarts')
-  ;(trendChart as { dispose?: () => void })?.dispose?.()
-  trendChart = echarts.init(trendChartEl.value, null, { renderer: 'canvas' })
-  ;(trendChart as { setOption?: (o: unknown) => void })?.setOption?.(buildTrendOption(trendData.value))
+  await trendChart.render(buildTrendOption(trendData.value) as EChartsCoreOption)
 }
 
 watch([trendData, trendChartEl], () => { nextTick(() => renderTrendChart()) }, { flush: 'post' })
@@ -678,7 +708,7 @@ watch([trendData, trendChartEl], () => { nextTick(() => renderTrendChart()) }, {
 // ──── 生命周期 ────
 
 onMounted(async () => {
-  refreshRecentDates()
+  await initDefaultDates()
   handleQuery()
   try {
     const indexes = await fetchActiveIndexes()
@@ -689,9 +719,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  (trendChart as { dispose?: () => void })?.dispose?.()
-  ;(topicChart as { dispose?: () => void })?.dispose?.()
-  ;(compareChart as { dispose?: () => void })?.dispose?.()
+  if (actionMsgTimer !== null) clearTimeout(actionMsgTimer)
 })
 </script>
 
@@ -720,7 +748,7 @@ onUnmounted(() => {
 .alert-positive { background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.3); color: var(--success); }
 .alert-negative { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: var(--danger); }
 .alert-icon { font-size: 16px; }
-.alert-tag { font-family: 'SF Mono', monospace; font-weight: 700; min-width: 80px; }
+.alert-tag { font-family: var(--font-mono); font-weight: 700; min-width: 80px; }
 
 /* ── 跨指数选择 ── */
 .multi-select-wrap { display: flex; gap: 4px; flex-wrap: wrap; }
@@ -760,7 +788,7 @@ onUnmounted(() => {
 .table-wrap { margin-top: 0; overflow-x: auto; }
 .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .data-table th { text-align: left; padding: 8px 10px; color: var(--text-muted); font-weight: 500; border-bottom: 1px solid var(--border); white-space: nowrap; }
-.data-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.data-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
 .data-table tbody tr:hover { background: var(--surface-2); }
 
 /* ── 标签 ── */
@@ -776,7 +804,7 @@ onUnmounted(() => {
 .empty-hint { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
 
 /* ── 通用 ── */
-.code-mono { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; font-size: 12px; }
+.code-mono { font-family: var(--font-mono); font-size: 12px; }
 .index-name { color: var(--text-muted); font-size: 12px; margin-left: 6px; }
 .text-rise { color: var(--success); font-weight: 600; }
 .text-fall { color: var(--danger); font-weight: 600; }

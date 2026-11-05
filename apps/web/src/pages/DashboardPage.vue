@@ -57,8 +57,8 @@
             <path d="M12 20V10M18 20V4M6 20v-4"></path>
           </svg>
         </div>
-        <div class="stat-label">活跃策略</div>
-        <div class="stat-value">{{ strategyStore.items.length || '—' }}</div>
+        <div class="stat-label">启用策略</div>
+        <div class="stat-value">{{ strategyStore.loading && !strategyStore.items.length ? '—' : activeStrategyCount }}</div>
       </div>
       <div class="stat-card">
         <div class="stat-accent accent-amber"></div>
@@ -77,8 +77,8 @@
             <circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline>
           </svg>
         </div>
-        <div class="stat-label">数据频率</div>
-        <div class="stat-value">{{ systemStatus?.frequency || 'daily' }}</div>
+        <div class="stat-label">最近入库（北京时间）</div>
+        <div class="stat-value">{{ latestIngestedText }}</div>
       </div>
     </div>
 
@@ -143,11 +143,13 @@
             <span :class="['regime-badge', `regime-${item.timing.regime}`]">
               {{ formatRegime(item.timing.regime) }}
             </span>
-            <span class="regime-confidence">{{ item.timing.confidence?.toFixed(0) }}%</span>
+            <span v-if="item.timing.confidence != null" class="regime-confidence" title="择时信号确信度（0-100），不是仓位">
+              确信度 {{ item.timing.confidence.toFixed(0) }}%
+            </span>
           </div>
 
           <!-- 仓位概览 -->
-          <div v-if="Object.keys(item.plan?.positions || {}).length > 0" class="starred-row">
+          <div v-if="nonZeroCount(item.plan?.positions) > 0" class="starred-row">
             <span class="starred-label">持仓</span>
             <div class="position-tags">
               <span
@@ -156,12 +158,12 @@
                 class="position-tag"
                 :title="code"
               >
-                {{ getIndexName(item.rankings, code) || code }} <strong>{{ (weight * 100).toFixed(0) }}%</strong>
+                {{ getIndexName(item.rankings, code) || code }} <strong>{{ formatWeight(weight) }}</strong>
               </span>
               <span
-                v-if="Object.keys(item.plan.positions).length > 5"
+                v-if="nonZeroCount(item.plan.positions) > 5"
                 class="position-more"
-              >+{{ Object.keys(item.plan.positions).length - 5 }}</span>
+              >+{{ nonZeroCount(item.plan.positions) - 5 }}</span>
             </div>
           </div>
 
@@ -174,7 +176,7 @@
                 :style="{ width: (item.plan.total_exposure * 100).toFixed(0) + '%' }"
               ></div>
             </div>
-            <span class="exposure-pct">{{ (item.plan.total_exposure * 100).toFixed(0) }}%</span>
+            <span class="exposure-pct">{{ formatWeight(item.plan.total_exposure) }}</span>
           </div>
         </div>
       </div>
@@ -387,6 +389,8 @@
 </template>
 
 <script setup lang="ts">
+import { getErrorMessage } from '../api/client'
+import { regimeLabel, runStatusLabel, runTypeLabel } from '../utils/labels'
 /**
  * 研究总览页面（合并自原 DashboardPage + DataStatusPage）。
  *
@@ -410,6 +414,19 @@ const statusLoading = ref(false)
 const error = ref<string | null>(null)
 
 const strategyStore = useStrategyStore()
+
+/** 启用状态的策略数量（不含草稿 / 禁用） */
+const activeStrategyCount = computed(() => strategyStore.items.filter(i => i.status === 'active').length)
+
+/** 各数据表最近一次入库时间中的最大值（北京时间） */
+const latestIngestedText = computed(() => {
+  const times = (systemStatus.value?.data_sources ?? [])
+    .map(src => src.latest_ingested_at)
+    .filter((t): t is string => !!t)
+  if (times.length === 0) return '—'
+  const latest = times.reduce((a, b) => (new Date(a).getTime() >= new Date(b).getTime() ? a : b))
+  return formatTime(latest)
+})
 
 const starredSummary = ref<StarredSummaryResponse | null>(null)
 const starredLoading = ref(false)
@@ -507,44 +524,14 @@ function formatTime(ts: string | null | undefined): string {
   })
 }
 
-/** 运行类型中文映射（含已下线类型的标签，供历史运行记录展示） */
+/** 运行类型中文映射（含已下线类型，供历史运行记录展示） */
 function formatRunType(runType: string): string {
-  const map: Record<string, string> = {
-    data_sync_all: '全局数据同步',
-    data_manage_operation: '数据维护',
-    strategy_run: '策略运行',
-    factor_computation: '因子计算',
-    industry_universe_refresh: '更新行业信息',
-    industry_bars_refresh: '行业日线刷新',
-    industry_quality_check: '行业质量检查',
-    industry_data_fill: '行业日线补全',
-    industry_data_rebuild: '行业全量重拉',
-    stock_quality_check: '个股质量检查',
-    stock_data_fill: '个股日线补全',
-    stock_data_rebuild: '个股全量重拉',
-    // 以下类型已下线（统一走数据管理操作），仅用于展示历史运行记录
-    daily_ingest: '日频入库（已下线）',
-    cold_start: '历史回补（已下线）',
-    index_refresh: '指数数据刷新（已下线）',
-    macro_refresh: '宏观数据刷新（已下线）',
-    index_rebuild: '指数全量重拉（已下线）',
-    index_incremental_fill: '指数增量补数（已下线）',
-    industry_ingest: '行业数据刷新（已下线）',
-  }
-  return map[runType] ?? runType
+  return runTypeLabel(runType)
 }
 
 /** 运行状态中文映射 */
 function formatStatus(status: string): string {
-  const map: Record<string, string> = {
-    pending: '待执行',
-    running: '执行中',
-    success: '成功',
-    partial_success: '部分成功',
-    skipped: '跳过',
-    failed: '失败',
-  }
-  return map[status] ?? status
+  return runStatusLabel(status)
 }
 
 /** 格式化执行日期（YYYY-MM-DD → MM-DD） */
@@ -600,7 +587,7 @@ function formatRebalanceLabel(
  */
 function formatPlanMode(item: StarredStrategyItem): string {
   if (item.plan_mode === 'risk_only') {
-    return `仅风险腿到期：维持现有成分，总仓位调至 ${(item.timing_target_exposure * 100).toFixed(0)}%`
+    return `仅风险腿到期：维持现有成分，总仓位调至 ${formatWeight(item.timing_target_exposure)}`
   }
   if (item.plan_mode === 'selection_only') {
     return '仅选股腿到期：替换为下列成分，维持当前总仓位（按单资产上限裁剪）'
@@ -610,15 +597,34 @@ function formatPlanMode(item: StarredStrategyItem): string {
 
 /** 格式化择时 regime */
 function formatRegime(regime: string): string {
-  const map: Record<string, string> = { offensive: '进攻', defensive: '防守', neutral: '中性' }
-  return map[regime] ?? regime
+  return regimeLabel(regime)
 }
 
-/** 取持仓前5项 */
+/** 权重 > 0 的持仓（目标权重为 0 的成分不展示） */
+function nonZeroPositions(positions: Record<string, number> | null | undefined): Array<[string, number]> {
+  return Object.entries(positions ?? {}).filter(([, w]) => w > 1e-9)
+}
+
+/** 权重 > 0 的持仓数量 */
+function nonZeroCount(positions: Record<string, number> | null | undefined): number {
+  return nonZeroPositions(positions).length
+}
+
+/** 取权重最高的前 5 项持仓 */
 function topPositions(positions: Record<string, number>): Array<[string, number]> {
-  return Object.entries(positions)
+  return nonZeroPositions(positions)
     .sort(([, a], [, b]) => b - a)
     .slice(0, 5)
+}
+
+/**
+ * 仓位比例格式化：整数百分比原样显示，否则保留 1 位小数，
+ * 避免 2.5% 四舍五入成 3% 后与总仓位对不上。
+ */
+function formatWeight(weight: number): string {
+  const pct = weight * 100
+  const rounded = Math.round(pct * 10) / 10
+  return Number.isInteger(rounded) ? `${rounded}%` : `${rounded.toFixed(1)}%`
 }
 
 /** 加载星标策略摘要 */
@@ -653,7 +659,7 @@ async function loadStatus() {
   try {
     systemStatus.value = await fetchSystemStatus()
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '加载失败，请稍后重试'
+    error.value = getErrorMessage(e, '加载失败，请稍后重试')
   } finally {
     statusLoading.value = false
   }
@@ -767,7 +773,7 @@ onMounted(() =>
 .page-subtitle {
   font-size: 12px;
   color: var(--text-muted);
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 /* 数据库连接状态指示器 */
@@ -958,7 +964,7 @@ onMounted(() =>
   font-size: 30px;
   font-weight: 700;
   color: var(--text);
-  font-family: monospace;
+  font-family: var(--font-mono);
   letter-spacing: -0.02em;
   line-height: 1.1;
 }
@@ -1018,7 +1024,7 @@ onMounted(() =>
   color: var(--accent);
   padding: 3px 10px;
   border-radius: 20px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   white-space: nowrap;
 }
 
@@ -1133,7 +1139,7 @@ onMounted(() =>
   font-size: 11px;
   color: var(--text-muted);
   margin-left: auto;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 /* 择时 regime 标签 */
@@ -1146,7 +1152,7 @@ onMounted(() =>
 .regime-offensive { background: rgba(34, 197, 94, 0.12); color: var(--success); }
 .regime-defensive { background: rgba(239, 68, 68, 0.12); color: var(--danger); }
 .regime-neutral   { background: rgba(59, 130, 246, 0.12); color: #60a5fa; }
-.regime-confidence { font-size: 12px; color: var(--text-muted); font-family: monospace; }
+.regime-confidence { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); }
 
 /* 持仓标签 */
 .position-tags {
@@ -1212,7 +1218,7 @@ onMounted(() =>
   font-size: 12px;
   font-weight: 600;
   color: var(--text);
-  font-family: monospace;
+  font-family: var(--font-mono);
   min-width: 36px;
 }
 
@@ -1287,6 +1293,12 @@ onMounted(() =>
 .status-partial_success { background: rgba(245, 158, 11, 0.12); color: var(--warning); }
 .status-partial_success .status-dot { background: var(--warning); }
 
+.status-skipped  { background: rgba(148, 163, 184, 0.1); color: var(--text-muted); }
+.status-skipped .status-dot  { background: var(--text-muted); }
+
+.status-cancelled { background: rgba(148, 163, 184, 0.1); color: var(--text-muted); }
+.status-cancelled .status-dot { background: var(--text-muted); }
+
 .status-failed   { background: rgba(239, 68, 68, 0.12); color: var(--danger); }
 .status-failed .status-dot   { background: var(--danger); }
 
@@ -1296,7 +1308,7 @@ onMounted(() =>
   color: var(--text-muted);
   padding: 3px 10px;
   border-radius: 20px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   white-space: nowrap;
 }
 
@@ -1367,7 +1379,7 @@ onMounted(() =>
   font-weight: 700;
   font-size: 13px;
   margin-left: auto;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 .sentiment-positive {
@@ -1434,7 +1446,7 @@ onMounted(() =>
   color: var(--text-muted);
   font-size: 10px;
   flex-shrink: 0;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 /* 市场研判卡片 */
@@ -1493,7 +1505,7 @@ onMounted(() =>
 /* ── 通用工具类 ── */
 .text-muted { color: var(--text-muted); }
 .text-accent { color: var(--accent); }
-.mono { font-family: monospace; font-size: 12px; }
+.mono { font-family: var(--font-mono); font-size: 12px; }
 .link-accent { color: var(--accent); text-decoration: none; transition: color 0.15s; }
 .link-accent:hover { color: var(--accent-hover); }
 

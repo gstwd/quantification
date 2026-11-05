@@ -3,7 +3,7 @@
     <div class="page-header">
       <div class="header-left">
         <h1 class="page-title">个股数据</h1>
-        <span class="count-badge">{{ total.toLocaleString() }} 个</span>
+        <span class="count-badge">{{ loading && total === 0 ? '—' : total.toLocaleString() }} 个</span>
       </div>
       <div class="header-actions">
         <button class="btn-secondary" :disabled="loading" @click="loadStocks">
@@ -13,8 +13,8 @@
     </div>
 
     <div class="notice">
-      缺失数为“上市日（或默认 2013-01-01）到最近交易日”的交易日历全口径统计，
-      停牌/长期无成交的日期也会计入，补全后可能仍大于 0。
+      缺失数只统计“库内该股票首条 → 末条日线”之间按交易日历缺少的日期（停牌日也会计入）；
+      末条日线落后于最新交易日属于滞后，由数据管理页的新鲜度检查单独标记，不计入缺失数。
     </div>
 
     <div class="card filter-card">
@@ -216,7 +216,7 @@ onMounted(() => {
   color: var(--accent);
   padding: 2px 8px;
   border-radius: 20px;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .notice {
   padding: 10px 14px;
@@ -276,7 +276,7 @@ onMounted(() => {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  overflow-x: auto;
 }
 .data-table {
   width: 100%;
@@ -303,7 +303,7 @@ onMounted(() => {
   border-bottom: none;
 }
 .code-mono {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-weight: 600;
   color: var(--accent);
 }
@@ -316,11 +316,11 @@ onMounted(() => {
   padding: 0 4px;
 }
 .mono {
-  font-family: monospace;
+  font-family: var(--font-mono);
   color: var(--text-muted);
 }
 .num-cell {
-  font-family: monospace;
+  font-family: var(--font-mono);
   text-align: right;
 }
 .text-warn {
@@ -377,6 +377,6 @@ onMounted(() => {
 .page-info {
   font-size: 13px;
   color: var(--text-muted);
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 </style>

@@ -38,6 +38,7 @@
       >
         <option value="fail">缺失:不满足</option>
         <option value="pass">缺失:满足</option>
+        <option value="exclude">缺失:排除资产</option>
       </select>
       <template v-if="rule.op === 'between'">
         <input
@@ -173,14 +174,14 @@ function removeRule(i: number): void {
 .fr-op { flex: 1.2; min-width: 0; }
 .fr-missing { flex: 1; min-width: 0; }
 .fr-value { width: 90px; text-align: center; }
-.fr-sep { font-size: 12px; color: var(--text-secondary); }
+.fr-sep { font-size: 12px; color: var(--text-muted); }
 .fp-remove {
   width: 28px;
   height: 28px;
   border: 1px solid var(--border);
   background: transparent;
   border-radius: var(--radius-sm);
-  color: var(--text-secondary);
+  color: var(--text-muted);
   cursor: pointer;
 }
 .add-btn {
@@ -193,5 +194,5 @@ function removeRule(i: number): void {
   color: var(--accent);
   cursor: pointer;
 }
-.threshold-hint { font-size: 11px; color: var(--text-secondary); }
+.threshold-hint { font-size: 11px; color: var(--text-muted); }
 </style>

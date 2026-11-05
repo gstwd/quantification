@@ -125,6 +125,7 @@ import type { ECharts } from 'echarts'
 import type { SignalLabCrossSectionResponse } from '../../types/api'
 import IssueList from './IssueList.vue'
 import { CHART_COLORS, fmtNum, fmtPct, signClass } from './format'
+import { CHART_THEME, loadEcharts } from '../../utils/echarts'
 
 const props = defineProps<{ result: SignalLabCrossSectionResponse }>()
 
@@ -154,12 +155,12 @@ const axisStyle = {
 
 /** 渲染全部图表 */
 async function render(): Promise<void> {
-  const echarts = await import('echarts')
+  const echarts = await loadEcharts()
   charts.forEach((c) => c.dispose())
   charts = []
   const r = props.result
   if (icChartEl.value) {
-    const chart = echarts.init(icChartEl.value, undefined, { renderer: 'canvas' })
+    const chart = echarts.init(icChartEl.value, CHART_THEME, { renderer: 'canvas' })
     chart.setOption({
       backgroundColor: 'transparent',
       animation: false,
@@ -204,7 +205,7 @@ async function render(): Promise<void> {
     charts.push(chart)
   }
   if (yearChartEl.value) {
-    const chart = echarts.init(yearChartEl.value, undefined, { renderer: 'canvas' })
+    const chart = echarts.init(yearChartEl.value, CHART_THEME, { renderer: 'canvas' })
     chart.setOption({
       backgroundColor: 'transparent',
       animation: false,
@@ -226,7 +227,7 @@ async function render(): Promise<void> {
     charts.push(chart)
   }
   if (tercileChartEl.value) {
-    const chart = echarts.init(tercileChartEl.value, undefined, { renderer: 'canvas' })
+    const chart = echarts.init(tercileChartEl.value, CHART_THEME, { renderer: 'canvas' })
     chart.setOption({
       backgroundColor: 'transparent',
       animation: false,

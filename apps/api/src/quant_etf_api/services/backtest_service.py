@@ -28,7 +28,10 @@ from quant_etf_api.domain.common.numeric import (
 from quant_etf_api.domain.common.numeric import (
     sanitize_metric_value as _sanitize_metric_value,
 )
-from quant_etf_api.domain.common.enums import RESEARCH_DEFAULT_EXECUTION_MODEL
+from quant_etf_api.domain.common.enums import (
+    DEFAULT_EXECUTION_MODEL,
+    RESEARCH_DEFAULT_EXECUTION_MODEL,
+)
 from quant_etf_api.domain.common.signal_level import determine_signal_level
 from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
 from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
@@ -564,6 +567,8 @@ class BacktestService:
             start_date=req.start_date,
             end_date=req.end_date,
             status="pending",
+            execution_model=req.execution_model,
+            accounting_model=ACCOUNTING_MODEL_DRIFT,
             created_at=now,
             purpose=req.purpose,
         )
@@ -841,6 +846,20 @@ class BacktestService:
                 "message": "未找到队列任务（同步执行的回测无法取消）",
             }
         job_status = queue.cancel_job(snapshot.job_id, f"用户取消回测 {backtest_id}")
+        if job_status == "cancelled" and row.status == "pending":
+            # 未开始的任务直接取消：回测记录同步落为 cancelled，并让所属对比收口，
+            # 否则回测停在 pending、对比停在 running，前端会一直轮询
+            self._backtest_repo.mark_cancelled(backtest_id, "回测未开始即被取消")
+            comparison_id = (snapshot.payload or {}).get("comparison_id")
+            if comparison_id:
+                from quant_etf_api.services.backtest_comparison_service import (
+                    BacktestComparisonService,
+                )
+
+                try:
+                    BacktestComparisonService(self._db).finalize_comparison_if_ready(comparison_id)
+                except Exception:
+                    logger.warning("对比回测收口失败: %s", comparison_id, exc_info=True)
         return {
             "backtest_id": backtest_id,
             "status": row.status,
@@ -2518,6 +2537,8 @@ class BacktestService:
             start_date=req.start_date,
             end_date=req.end_date,
             status="pending",
+            execution_model=req.execution_model,
+            accounting_model=ACCOUNTING_MODEL_DRIFT,
             created_at=now,
             purpose=req.purpose,
         )
@@ -3137,12 +3158,18 @@ class BacktestService:
                 except Exception:
                     pass
         info = queue_info or {}
+        params = row.params or {}
         return BacktestSummary(
             backtest_id=row.backtest_id,
             strategy_id=row.strategy_id,
             start_date=row.start_date,
             end_date=row.end_date,
             status=row.status,
+            execution_model=params.get("_execution_model") or DEFAULT_EXECUTION_MODEL,
+            # 记账口径在执行时才写入 params：尚未产出结果的回测按当前口径解释，
+            # 只有已成功且缺该键的存量回测才是历史口径
+            accounting_model=params.get("_accounting_model")
+            or (ACCOUNTING_MODEL_LEGACY if row.status == "success" else ACCOUNTING_MODEL_DRIFT),
             metrics=metrics,
             created_at=row.created_at,
             started_at=row.started_at,

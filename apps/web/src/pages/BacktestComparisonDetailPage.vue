@@ -32,9 +32,14 @@
         </span>
       </div>
 
+      <div class="scope-note">
+        执行模型：{{ executionModelText }}（A/B 同一模型）；以下指标均为毛收益口径（未扣交易成本），
+        换手差异较大的两策略需在各自回测详情页对比净口径。
+      </div>
+
       <!-- 综合评价面板 -->
       <div v-if="store.currentComparison.comparison_metrics" class="verdict-card">
-        <div class="verdict-title">综合评价</div>
+        <div class="verdict-title">综合评价（毛口径）</div>
         <div class="verdict-text">{{ verdictText }}</div>
         <div class="verdict-count">
           优胜指标：<span class="a-win">{{ aWinCount }}</span> / {{ totalCompared }} vs
@@ -44,7 +49,7 @@
 
       <!-- 核心绩效对比表 -->
       <div v-if="store.currentComparison.comparison_metrics" class="section">
-        <div class="section-label">核心绩效对比</div>
+        <div class="section-label">核心绩效对比（毛口径）</div>
         <div class="comparison-table">
           <table>
             <thead>
@@ -155,12 +160,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
+import type { ECharts } from 'echarts'
 
 import { useBacktestStore } from '../stores/backtests'
 import { useStrategyStore } from '../stores/strategies'
 import { usePolling } from '../composables/usePolling'
+import { useChart } from '../composables/useChart'
+import { loadEcharts } from '../utils/echarts'
+import { backtestStatusLabel, executionModelLabel } from '../utils/labels'
 
 const props = defineProps<{ comparisonId: string }>()
 const store = useBacktestStore()
@@ -175,9 +184,10 @@ const { polling, start: startPolling } = usePolling({
   isDone: (detail) => detail.status !== 'pending' && detail.status !== 'running',
 })
 
-let equityChartInst: any = null
-let ddChartInst: any = null
-let excessChartInst: any = null
+/** 图表实例由 useChart 管理（暗色主题、尺寸自适应、卸载释放） */
+const equityChart = useChart(equityChartEl)
+const ddChart = useChart(ddChartEl)
+const excessChart = useChart(excessChartEl)
 
 // ── 策略名称 ──
 
@@ -194,11 +204,14 @@ const strategyBName = computed(() => {
 // ── 状态标签 ──
 
 function compStatusLabel(status: string): string {
-  const map: Record<string, string> = {
-    pending: '待执行', running: '执行中', success: '成功', failed: '失败', partial: '部分成功',
-  }
-  return map[status] ?? status
+  return backtestStatusLabel(status)
 }
+
+/** 对比使用的执行模型（params._execution_model，缺失按 T+1 开盘解释） */
+const executionModelText = computed(() => {
+  const value = store.currentComparison?.params?._execution_model
+  return executionModelLabel(typeof value === 'string' ? value : 't_plus_1_open')
+})
 
 // ── 综合评价 ──
 
@@ -373,7 +386,8 @@ const riskRows = computed<MetricRow[]>(() => {
   return [
     buildRow('索提诺比率', m.a_sortino_ratio, m.b_sortino_ratio, ratioFmt, ratioFmt),
     buildRow('胜率 (%)', m.a_win_rate_pct, m.b_win_rate_pct, pctFmt),
-    buildRow('信号准确率 (%)', m.a_signal_accuracy_pct, m.b_signal_accuracy_pct, pctFmt),
+    // 持仓次日正收益率含市场 beta，单独比较没有意义：只展示、不计入优胜
+    buildNeutralRow('持仓次日正收益率 (%)', m.a_signal_accuracy_pct, m.b_signal_accuracy_pct, pctFmt, pctFmt),
     // 以下为中性指标，不做优劣比较
     buildNeutralRow('交易天数', m.a_total_trading_days, m.b_total_trading_days, daysFmt, daysFmt),
     buildNeutralRow('持仓天数', m.a_active_days, m.b_active_days, daysFmt, daysFmt),
@@ -490,12 +504,14 @@ const excessData = computed(() => {
 // ── ECharts 初始化 ──
 
 async function initCharts() {
-  const echarts = await import('echarts')
+  const echarts = await loadEcharts()
+  let equityChartInst: ECharts | null = null
+  let ddChartInst: ECharts | null = null
+  let excessChartInst: ECharts | null = null
 
   // 权益曲线叠加
   if (equityChartEl.value) {
-    equityChartInst = echarts.init(equityChartEl.value)
-    equityChartInst.setOption({
+    equityChartInst = await equityChart.render({
       tooltip: { trigger: 'axis' },
       legend: { data: ['策略 A', '策略 B'], bottom: 0 },
       grid: { left: 50, right: 20, top: 20, bottom: 40 },
@@ -526,8 +542,7 @@ async function initCharts() {
 
   // 回撤曲线叠加
   if (ddChartEl.value) {
-    ddChartInst = echarts.init(ddChartEl.value)
-    ddChartInst.setOption({
+    ddChartInst = await ddChart.render({
       tooltip: { trigger: 'axis' },
       legend: { data: ['策略 A 回撤', '策略 B 回撤'], bottom: 0 },
       grid: { left: 50, right: 20, top: 20, bottom: 40 },
@@ -560,8 +575,7 @@ async function initCharts() {
 
   // 超额收益图
   if (excessChartEl.value) {
-    excessChartInst = echarts.init(excessChartEl.value)
-    excessChartInst.setOption({
+    excessChartInst = await excessChart.render({
       tooltip: { trigger: 'axis' },
       grid: { left: 50, right: 20, top: 20, bottom: 40 },
       xAxis: { type: 'category', data: excessData.value.dates, axisLabel: { rotate: 45, fontSize: 10 } },
@@ -599,27 +613,17 @@ async function initCharts() {
   }
 
   // 联动缩放：权益曲线、回撤曲线、超额收益图共享 X 轴交互
-  const connected = [equityChartInst, ddChartInst, excessChartInst].filter(Boolean)
-  if (connected.length > 1) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    echarts.connect(connected as any)
-  }
-}
-
-function disposeCharts() {
-  // dispose 会自动解除图表联动
-  equityChartInst?.dispose()
-  ddChartInst?.dispose()
-  excessChartInst?.dispose()
+  const connected = [equityChartInst, ddChartInst, excessChartInst].filter((c): c is ECharts => c !== null)
+  if (connected.length > 1) echarts.connect(connected)
 }
 
 // ── 数据重载图表 ──
 
+// 每日数据变化时重绘（render 复用同一实例，不会重复创建）
 watch(
   () => store.comparisonDaily,
   () => {
-    disposeCharts()
-    initCharts()
+    void initCharts()
   },
   { flush: 'post' },
 )
@@ -638,16 +642,11 @@ onMounted(async () => {
     // 轮询结束后加载每日结果（success/partial 均可能有数据）
     if (store.currentComparison?.status === 'success' || store.currentComparison?.status === 'partial') {
       await store.loadComparisonDaily(props.comparisonId)
-      initCharts()
     }
   } else if (status === 'success' || status === 'partial') {
+    // 图表由上方 watch 在每日数据到达后统一绘制，避免重复初始化
     await store.loadComparisonDaily(props.comparisonId)
-    initCharts()
   }
-})
-
-onUnmounted(() => {
-  disposeCharts()
 })
 </script>
 
@@ -658,6 +657,7 @@ onUnmounted(() => {
 .back-link:hover { color: var(--accent); }
 .header-row { display: flex; align-items: flex-start; justify-content: space-between; }
 .page-title { font-size: 22px; font-weight: 700; }
+.scope-note { font-size: 12px; color: var(--text-muted); padding: 8px 12px; border: 1px dashed var(--border); border-radius: var(--radius-sm); }
 .subtitle { color: var(--text-muted); font-size: 13px; margin-top: 4px; }
 .strategy-tag {
   display: inline-block;

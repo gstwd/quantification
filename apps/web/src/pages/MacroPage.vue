@@ -7,6 +7,10 @@
 
     <!-- 刷新提示 -->
     <div v-if="loading" class="loading">加载中...</div>
+    <div v-else-if="loadError" class="load-error">
+      {{ loadError }}
+      <button class="btn-secondary" @click="reload">重试</button>
+    </div>
     <template v-else>
       <!-- CPI -->
       <div class="chart-card">
@@ -24,7 +28,7 @@
       <div class="chart-card">
         <div class="card-header">
           <span class="card-title">PMI 制造业采购经理指数 <HelpTip :text="macroHelp('pmi')" /></span>
-          <span v-if="pmi.length" class="card-badge">{{ pmi[pmi.length - 1].period }}: {{ pmi[pmi.length - 1].value.toFixed(1) }}%</span>
+          <span v-if="pmi.length" class="card-badge">{{ pmi[pmi.length - 1].period }}: {{ pmi[pmi.length - 1].value.toFixed(1) }}</span>
         </div>
         <div v-if="pmi.length === 0" class="chart-placeholder">
           暂无 PMI 数据，请到<router-link to="/data-management">数据管理页</router-link>执行同步
@@ -81,13 +85,16 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
+import type { EChartsCoreOption } from 'echarts'
 
 import { fetchMacroIndicator, fetchMarketIndicator } from '../api/market_data'
 import type { MacroIndicator, MarketIndicatorPoint } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
+import { getErrorMessage } from '../api/client'
+import { useChart } from '../composables/useChart'
 
 /** 获取宏观指标描述的快捷方法 */
 function macroHelp(key: string): string {
@@ -104,21 +111,19 @@ const cgb10y = ref<MarketIndicatorPoint[]>([])
 const margin = ref<MarketIndicatorPoint[]>([])
 const moneyChartEl = ref<HTMLElement | null>(null)
 const marketChartEl = ref<HTMLElement | null>(null)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let moneyChart: any = null
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let marketChart: any = null
 const loading = ref(true)
+/** 加载失败文案（与「暂无数据」区分） */
+const loadError = ref('')
 
 const cpiChartEl = ref<HTMLElement | null>(null)
 const pmiChartEl = ref<HTMLElement | null>(null)
 const lprChartEl = ref<HTMLElement | null>(null)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let cpiChart: any = null
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let pmiChart: any = null
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let lprChart: any = null
+/** 图表实例由 useChart 管理：尺寸变化自动 resize，卸载时释放 */
+const cpiChart = useChart(cpiChartEl)
+const pmiChart = useChart(pmiChartEl)
+const lprChart = useChart(lprChartEl)
+const moneyChart = useChart(moneyChartEl)
+const marketChart = useChart(marketChartEl)
 
 async function loadData() {
   try {
@@ -140,32 +145,35 @@ async function loadData() {
     m2.value = mm2
     cgb10y.value = bond
     margin.value = rz
-  } catch {
-    // 拉取失败时保持空状态
+    loadError.value = ''
+  } catch (e) {
+    loadError.value = `宏观指标加载失败：${getErrorMessage(e, '网络错误')}`
   } finally {
     loading.value = false
   }
+}
+
+/** 重新加载 */
+function reload(): void {
+  loading.value = true
+  void loadData()
 }
 
 function makeLineOption(dates: string[], values: (number | null)[], color: string) {
   return {
     backgroundColor: 'transparent',
     tooltip: { trigger: 'axis', backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#f1f5f9', fontSize: 12 } },
-    grid: { left: 60, right: 20, top: 20, bottom: 40 },
+    grid: { left: 60, right: 20, top: 20, bottom: 64 },
     xAxis: { type: 'category', data: dates, axisLine: { lineStyle: { color: '#334155' } }, axisLabel: { color: '#94a3b8', fontSize: 11 } },
     yAxis: { scale: true, splitLine: { lineStyle: { color: '#334155', type: 'dashed' } }, axisLabel: { color: '#94a3b8', fontSize: 11 } },
     dataZoom: [{ type: 'inside', start: 0, end: 100 }, { type: 'slider', bottom: 6, height: 24, borderColor: '#334155', fillerColor: 'rgba(59,130,246,0.1)', handleStyle: { color: '#3b82f6' }, textStyle: { color: '#94a3b8', fontSize: 10 } }],
-    series: [{ type: 'line', data: values, smooth: false, lineStyle: { color, width: 2 }, symbol: 'none' }],
+    series: [{ type: 'line', data: values, smooth: false, lineStyle: { color, width: 2 }, itemStyle: { color }, symbol: 'none' }] as Array<Record<string, unknown>>,
   }
 }
 
 async function initCharts() {
-  const echarts = await import('echarts')
-
   if (cpiChartEl.value && cpi.value.length) {
-    cpiChart?.dispose()
-    cpiChart = echarts.init(cpiChartEl.value, null, { renderer: 'canvas' })
-    cpiChart.setOption(makeLineOption(
+    await cpiChart.render(makeLineOption(
       cpi.value.map(v => v.period),
       cpi.value.map(v => v.value),
       '#3b82f6',
@@ -173,8 +181,6 @@ async function initCharts() {
   }
 
   if (pmiChartEl.value && pmi.value.length) {
-    pmiChart?.dispose()
-    pmiChart = echarts.init(pmiChartEl.value, null, { renderer: 'canvas' })
     const opt = makeLineOption(
       pmi.value.map(v => v.period),
       pmi.value.map(v => v.value),
@@ -182,27 +188,25 @@ async function initCharts() {
     )
     opt.series.push({
       type: 'line', name: '荣枯线', data: [], markLine: { silent: true, symbol: 'none', lineStyle: { color: '#ef4444', type: 'dashed', width: 1 }, label: { color: '#ef4444', fontSize: 11 }, data: [{ yAxis: 50, label: { formatter: '荣枯线 50' } }] },
-    } as any)
-    pmiChart.setOption(opt)
+    })
+    await pmiChart.render(opt as EChartsCoreOption)
   }
 
   if (lprChartEl.value && (lpr1y.value.length || lpr5y.value.length)) {
-    lprChart?.dispose()
-    lprChart = echarts.init(lprChartEl.value, null, { renderer: 'canvas' })
     const allPeriods = [...new Set([...lpr1y.value.map(v => v.period), ...lpr5y.value.map(v => v.period)])].sort()
     const lpr1yMap = new Map(lpr1y.value.map(v => [v.period, v.value]))
     const lpr5yMap = new Map(lpr5y.value.map(v => [v.period, v.value]))
-    lprChart.setOption({
+    await lprChart.render({
       backgroundColor: 'transparent',
       tooltip: { trigger: 'axis', backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#f1f5f9', fontSize: 12 } },
       legend: { data: ['1年期 LPR', '5年期 LPR'], textStyle: { color: '#94a3b8' }, top: 4 },
-      grid: { left: 60, right: 20, top: 40, bottom: 40 },
+      grid: { left: 60, right: 20, top: 40, bottom: 64 },
       xAxis: { type: 'category', data: allPeriods, axisLine: { lineStyle: { color: '#334155' } }, axisLabel: { color: '#94a3b8', fontSize: 11 } },
       yAxis: { scale: true, splitLine: { lineStyle: { color: '#334155', type: 'dashed' } }, axisLabel: { color: '#94a3b8', fontSize: 11 } },
       dataZoom: [{ type: 'inside', start: 0, end: 100 }, { type: 'slider', bottom: 6, height: 24, borderColor: '#334155', fillerColor: 'rgba(59,130,246,0.1)', handleStyle: { color: '#3b82f6' }, textStyle: { color: '#94a3b8', fontSize: 10 } }],
       series: [
-        { name: '1年期 LPR', type: 'line', data: allPeriods.map(p => lpr1yMap.get(p) ?? null), smooth: false, lineStyle: { color: '#3b82f6', width: 2 }, symbol: 'none' },
-        { name: '5年期 LPR', type: 'line', data: allPeriods.map(p => lpr5yMap.get(p) ?? null), smooth: false, lineStyle: { color: '#f59e0b', width: 2 }, symbol: 'none' },
+        { name: '1年期 LPR', type: 'line', data: allPeriods.map(p => lpr1yMap.get(p) ?? null), smooth: false, lineStyle: { color: '#3b82f6', width: 2 }, itemStyle: { color: '#3b82f6' }, symbol: 'none' },
+        { name: '5年期 LPR', type: 'line', data: allPeriods.map(p => lpr5yMap.get(p) ?? null), smooth: false, lineStyle: { color: '#f59e0b', width: 2 }, itemStyle: { color: '#f59e0b' }, symbol: 'none' },
       ],
     })
   }
@@ -219,37 +223,32 @@ function makeDualOption(
     backgroundColor: 'transparent',
     tooltip: { trigger: 'axis', backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#f1f5f9', fontSize: 12 } },
     legend: { data: series.map(s => s.name), textStyle: { color: '#94a3b8' }, top: 4 },
-    grid: { left: 60, right: hasRight ? 70 : 20, top: 40, bottom: 40 },
+    grid: { left: 60, right: hasRight ? 70 : 20, top: 40, bottom: 64 },
     xAxis: { type: 'category', data: dates, axisLine: { lineStyle: { color: '#334155' } }, axisLabel: { color: '#94a3b8', fontSize: 11 } },
     yAxis: hasRight ? [axis, { ...axis, splitLine: { show: false } }] : axis,
     dataZoom: [{ type: 'inside', start: 0, end: 100 }, { type: 'slider', bottom: 6, height: 24, borderColor: '#334155', fillerColor: 'rgba(59,130,246,0.1)', handleStyle: { color: '#3b82f6' }, textStyle: { color: '#94a3b8', fontSize: 10 } }],
     series: series.map(s => ({
       name: s.name, type: 'line', data: s.values, smooth: false, symbol: 'none',
-      lineStyle: { color: s.color, width: 2 }, yAxisIndex: s.rightAxis ? 1 : 0,
+      lineStyle: { color: s.color, width: 2 }, itemStyle: { color: s.color }, yAxisIndex: s.rightAxis ? 1 : 0,
     })),
   }
 }
 
 async function initExtraCharts() {
-  const echarts = await import('echarts')
   if (moneyChartEl.value && (m1.value.length || m2.value.length)) {
-    moneyChart?.dispose()
-    moneyChart = echarts.init(moneyChartEl.value, null, { renderer: 'canvas' })
     const periods = [...new Set([...m1.value.map(v => v.period), ...m2.value.map(v => v.period)])].sort()
     const m1Map = new Map(m1.value.map(v => [v.period, v.value]))
     const m2Map = new Map(m2.value.map(v => [v.period, v.value]))
-    moneyChart.setOption(makeDualOption(periods, [
+    await moneyChart.render(makeDualOption(periods, [
       { name: 'M1 同比', values: periods.map(p => m1Map.get(p) ?? null), color: '#3b82f6' },
       { name: 'M2 同比', values: periods.map(p => m2Map.get(p) ?? null), color: '#f59e0b' },
     ]))
   }
   if (marketChartEl.value && (cgb10y.value.length || margin.value.length)) {
-    marketChart?.dispose()
-    marketChart = echarts.init(marketChartEl.value, null, { renderer: 'canvas' })
     const days = [...new Set([...cgb10y.value.map(v => v.trade_date), ...margin.value.map(v => v.trade_date)])].sort()
     const bondMap = new Map(cgb10y.value.map(v => [v.trade_date, v.value]))
     const marginMap = new Map(margin.value.map(v => [v.trade_date, v.value]))
-    marketChart.setOption(makeDualOption(days, [
+    await marketChart.render(makeDualOption(days, [
       { name: '10Y 国债收益率（%）', values: days.map(d => bondMap.get(d) ?? null), color: '#22c55e' },
       { name: '融资余额（亿元）', values: days.map(d => marginMap.get(d) ?? null), color: '#a855f7', rightAxis: true },
     ]))
@@ -266,19 +265,17 @@ watch([cpi, pmi, lpr1y, lpr5y, cpiChartEl, pmiChartEl, lprChartEl], () => {
 
 onMounted(loadData)
 
-onUnmounted(() => {
-  cpiChart?.dispose()
-  pmiChart?.dispose()
-  lprChart?.dispose()
-  moneyChart?.dispose()
-  marketChart?.dispose()
-})
 </script>
 
 <style scoped>
 .page { display: flex; flex-direction: column; gap: 24px; }
 .page-header { display: flex; align-items: center; justify-content: space-between; }
 .page-title { font-size: 22px; font-weight: 700; }
+.load-error {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px; border-radius: var(--radius-sm);
+  background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: var(--danger); font-size: 13px;
+}
 .btn-secondary {
   background: var(--surface);
   color: var(--text);

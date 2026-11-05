@@ -40,6 +40,8 @@ export interface StrategyConfigCreate {
   description?: string
   frequency?: string
   config_json: Record<string, unknown>
+  /** 归入的研究线：给已有策略 ID 时归入该策略所在研究线，缺省自成一条研究线 */
+  lineage_id?: string | null
 }
 
 export interface StrategyConfigUpdate {
@@ -109,8 +111,6 @@ export interface SystemStatusResponse {
   latest_trade_date: string | null
   data_sources: DataSourceSnapshot[]
   recent_runs: ResearchRunSummary[]
-  frequency: string
-  database: string
   db_connected: boolean
 }
 
@@ -480,6 +480,10 @@ export interface BacktestSummary {
   progress: number
   /** 回测用途：research / validation / monitor */
   purpose: string
+  /** 执行模型（t_plus_1_open / t_plus_1_close）；不同模型的结果不可直接比较 */
+  execution_model?: string
+  /** 记账口径（drift_v1 / 历史 constant_mix_v0）；不同口径的结果不可直接比较 */
+  accounting_model?: string
   /** 对应后台任务状态；null 表示该回测未经过队列（如 CLI 同步执行） */
   job_status?: string | null
   /** 仍在排队时的等待时长（秒） */
@@ -1477,6 +1481,8 @@ export interface RobustnessSummary {
   error_message: string | null
   /** 疑似停滞（running 且长时间无更新，可用 robustness abandon 收口，F-4） */
   is_stale?: boolean
+  /** 本批次回测的执行模型（口径指纹，不同模型的批次指标不可直接比较） */
+  execution_model?: string
 }
 
 /** 稳健性汇总中的单个变体明细（Δ 相对基线） */

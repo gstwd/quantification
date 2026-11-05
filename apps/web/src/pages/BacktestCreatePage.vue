@@ -22,10 +22,13 @@
       <div class="form-section">
         <label class="form-label">执行模型</label>
         <select v-model="form.execution_model" class="form-select">
-          <option value="t_plus_1_open">T+1 开盘执行（默认）</option>
-          <option value="t_plus_1_close">T+1 收盘执行</option>
+          <option value="t_plus_1_close">T+1 收盘执行（研究默认）</option>
+          <option value="t_plus_1_open">T+1 开盘执行（系统默认，历史回测口径）</option>
         </select>
-        <div class="form-hint">开盘执行需要开盘价；收盘执行只使用收盘价，目标仓位在下一交易日收盘生效。</div>
+        <div class="form-hint">
+          研究与优化统一按 T+1 收盘口径（与 CLI 一致）；开盘执行需要开盘价。
+          不同执行模型的结果不可直接比较。
+        </div>
       </div>
 
       <div class="form-section">
@@ -75,6 +78,7 @@
             <input v-model="form.end_date" type="date" class="form-input" />
           </div>
         </div>
+        <div v-if="periodError" class="form-error">{{ periodError }}</div>
         <div class="form-hint">
           任意跨度均可（研究期内 1 个月 ~ 研究期全段 10 年都能一次跑完，无需分段）；
           长区间建议同时查看分年度绩效与三段一致性。
@@ -151,7 +155,7 @@
           </div>
         </div>
         <div v-if="form.enable_benchmark && useBenchmarkMix" class="form-section">
-          <div v-for="(item, i) in benchmarkMix" :key="i" class="form-row">
+          <div v-for="(item, i) in benchmarkMix" :key="i" class="mix-row">
             <select v-model="item.index_code" class="form-select">
               <option v-for="idx in indexes" :key="idx.index_code" :value="idx.index_code">
                 {{ idx.index_code }} {{ idx.index_name }}
@@ -161,7 +165,7 @@
             <span>%</span>
             <button type="button" class="btn-link" @click="benchmarkMix.splice(i, 1)">移除</button>
           </div>
-          <div class="form-row">
+          <div class="mix-row">
             <button type="button" class="btn-link" :disabled="benchmarkMix.length >= 5" @click="benchmarkMix.push({ index_code: '000905', weight: 20 })">
               + 添加指数
             </button>
@@ -184,6 +188,7 @@
 </template>
 
 <script setup lang="ts">
+import { getErrorMessage } from '../api/client'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 
@@ -193,7 +198,14 @@ import { useStrategyStore } from '../stores/strategies'
 import type { BenchmarkIndex } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
-import { RESEARCH_END, RESEARCH_START, getDatePresets } from '../utils/datePresets'
+import {
+  RESEARCH_END,
+  RESEARCH_START,
+  VALIDATION_START,
+  getDatePresetsForPurpose,
+  periodRuleError,
+} from '../utils/datePresets'
+import { todayCn } from '../utils/date'
 import type { DatePreset } from '../utils/datePresets'
 
 /** 获取配置描述的快捷方法 */
@@ -215,7 +227,8 @@ const form = reactive({
   index_codes: [] as string[],
   enable_benchmark: true,
   benchmark_index_code: '000300',
-  execution_model: 't_plus_1_open' as 't_plus_1_open' | 't_plus_1_close',
+  // 研究用途默认 T+1 收盘（RESEARCH_DEFAULT_EXECUTION_MODEL）；只改界面默认，不改 API 缺省
+  execution_model: 't_plus_1_close' as 't_plus_1_open' | 't_plus_1_close',
   data_quality_mode: 'warn' as 'warn' | 'strict',
   purpose: 'research' as 'research' | 'validation' | 'monitor',
   cost_bps: null as number | null,
@@ -228,8 +241,11 @@ const useBenchmarkMix = ref(false)
 const benchmarkMix = ref<{ index_code: string; weight: number }[]>([{ index_code: '000300', weight: 60 }])
 const benchmarkMixTotal = computed(() => benchmarkMix.value.reduce((sum, item) => sum + (item.weight || 0), 0))
 
-/** 日期快捷预设 */
-const presets = getDatePresets()
+/** 日期快捷预设（按用途过滤，只给后端会接受的区间） */
+const presets = computed(() => getDatePresetsForPurpose(form.purpose))
+
+/** 区间与用途不匹配的说明（与后端期间规则一致） */
+const periodError = computed(() => periodRuleError(form.purpose, form.start_date, form.end_date))
 
 /** 应用日期预设 */
 function applyPreset(p: DatePreset) {
@@ -247,8 +263,8 @@ const isValid = computed(() =>
   form.start_date !== '' &&
   form.end_date !== '' &&
   form.start_date <= form.end_date &&
-  // 研究类回测不得越过研究期末端（后端会直接拒绝）
-  (form.purpose !== 'research' || form.end_date <= RESEARCH_END) &&
+  // 研究期 / 验证期边界与后端一致，违规时不允许提交
+  periodError.value === '' &&
   (form.universe_mode === 'all' || form.index_codes.length > 0),
 )
 
@@ -256,9 +272,16 @@ const isValid = computed(() =>
 watch(
   () => form.purpose,
   (purpose) => {
-    if (purpose !== 'research') return
-    if (form.end_date > RESEARCH_END) form.end_date = RESEARCH_END
-    if (form.start_date > RESEARCH_END) form.start_date = RESEARCH_START
+    if (purpose === 'research') {
+      if (form.end_date > RESEARCH_END) form.end_date = RESEARCH_END
+      if (form.start_date > RESEARCH_END || (form.start_date && form.start_date < RESEARCH_START)) {
+        form.start_date = RESEARCH_START
+      }
+      return
+    }
+    // 验证 / 监控：区间必须从验证期起点开始
+    if (!form.start_date || form.start_date < VALIDATION_START) form.start_date = VALIDATION_START
+    if (!form.end_date || form.end_date < form.start_date) form.end_date = todayCn()
   },
 )
 
@@ -310,7 +333,7 @@ async function submit() {
     })
     router.push(`/backtests/${summary.backtest_id}`)
   } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : '提交失败，请重试'
+    error.value = getErrorMessage(e, '提交失败，请重试')
   } finally {
     submitting.value = false
   }
@@ -345,7 +368,9 @@ onMounted(async () => {
   max-width: 640px;
 }
 
-.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.mix-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+.form-error { font-size: 12px; color: var(--danger); margin-top: 6px; }
 
 .form-section { display: flex; flex-direction: column; gap: 8px; }
 .form-label { font-size: 13px; font-weight: 600; color: var(--text); }

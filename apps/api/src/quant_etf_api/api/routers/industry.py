@@ -180,10 +180,16 @@ def industry_daily_bars(
     industry_code: str,
     start_date: date | None = Query(default=None, description="起始日期"),
     end_date: date | None = Query(default=None, description="结束日期"),
-    limit: int = Query(default=250, ge=1, le=2000, description="返回最近 N 行"),
+    limit: int = Query(
+        default=250, ge=1, le=2000, description="未给日期区间时返回最近 N 行；给定区间时不截断"
+    ),
     db: Session = Depends(get_db),
 ) -> list[DailyBar]:
-    """查询单个申万一级行业指数日线（K 线数据源）。"""
+    """查询单个申万一级行业指数日线（K 线数据源）。
+
+    同时给定 start_date 与 end_date 时返回区间内全部日线（不再按 limit 截取最近 N 行，
+    否则「近 3 年」等长区间会被静默截成约一年）；否则按 limit 返回最近 N 行。
+    """
     code = normalize_sw_code(industry_code)
     if start_date is not None and end_date is not None and start_date > end_date:
         raise HTTPException(status_code=422, detail="start_date 不能晚于 end_date")
@@ -192,7 +198,7 @@ def industry_daily_bars(
         rows = repo.find_range(start_date, end_date, [code])
     else:
         rows = repo.find_by_code(code)
-    rows = rows[-limit:] if limit and len(rows) > limit else rows
+        rows = rows[-limit:] if limit and len(rows) > limit else rows
     return [
         DailyBar(
             trade_date=row.trade_date,

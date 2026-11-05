@@ -95,11 +95,11 @@
             {{ timingLoading ? '计算中...' : '计算' }}
           </button>
         </div>
-        <div v-if="timingDef && !timingStrategy" class="form-row wrap">
+        <div v-if="timingDef && !usingStrategyTiming" class="form-row wrap">
           <label>参数</label>
           <ParamEditor v-model="timingParams" :definition="timingDef" />
         </div>
-        <div v-else-if="timingStrategy" class="form-row wrap">
+        <div v-else-if="usingStrategyTiming" class="form-row wrap">
           <label>参数</label>
           <span class="hint">取自策略 timing 块（因子、权重、变换、阈值与代理指数），不可覆盖</span>
         </div>
@@ -280,6 +280,14 @@ function findDef(list: SignalLabDefinition[] | undefined, key: string): SignalLa
 const timingDef = computed(() => findDef(catalog.value?.timing_signals, timingSignal.value))
 // 择时综合分走引擎实现，可选择任一策略的 timing 块
 const isEngineTiming = computed(() => timingSignal.value === ENGINE_TIMING_KEY)
+
+/** 是否按策略 timing 块计算（仅「择时综合分」信号下有效） */
+const usingStrategyTiming = computed(() => isEngineTiming.value && !!timingStrategy.value)
+
+// 切到其他信号时清空所选策略：否则参数编辑器被隐藏，界面却仍提示「取自策略」
+watch(timingSignal, () => {
+  if (!isEngineTiming.value) timingStrategy.value = ''
+})
 // 策略口径的公式由后端按 timing 块生成：结果与当前选择一致时展示结果中的定义
 const shownTimingDef = computed<SignalLabDefinition | null>(() => {
   const result = timingResult.value

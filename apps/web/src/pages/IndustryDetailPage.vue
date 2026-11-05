@@ -140,9 +140,8 @@
  * K 线图；单行业维护统一由数据管理页承接，并链向 RRG 调试页。
  */
 
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
-import type { ECharts } from 'echarts'
 
 import {
   fetchIndustryDailyBars,
@@ -152,6 +151,8 @@ import {
 } from '../api/industry'
 import { fetchDataSetDetail } from '../api/dataManagement'
 import type { DataPartitionHealth } from '../types/api'
+import { useChart } from '../composables/useChart'
+import { shiftDateCn, todayCn } from '../utils/date'
 
 const props = defineProps<{ industryCode: string }>()
 
@@ -170,13 +171,14 @@ const barEndDate = ref('')
 const activePreset = ref('近60日')
 const rangeError = ref('')
 
-let chartInstance: ECharts | null = null
-let chartResizeObserver: ResizeObserver | null = null
+/** 图表实例由 useChart 管理：容器重建时重新初始化，尺寸变化自动 resize，卸载时释放 */
+const klineChart = useChart(chartEl)
 
+/** 快捷区间（自然日，与指数详情页同一口径） */
 const rangePresets = [
-  { label: '近60日', days: 90 },
-  { label: '近1年', days: 400 },
-  { label: '近3年', days: 1100 },
+  { label: '近60日', days: 60 },
+  { label: '近1年', days: 365 },
+  { label: '近3年', days: 1095 },
   { label: '近2000根', days: 0 },
 ]
 
@@ -277,11 +279,10 @@ function applyPreset(preset: { label: string; days: number }): void {
   barStartDate.value = ''
   barEndDate.value = ''
   if (preset.days > 0) {
-    const end = new Date()
-    const start = new Date()
-    start.setDate(start.getDate() - preset.days)
-    barStartDate.value = toDateStr(start)
-    barEndDate.value = toDateStr(end)
+    // 业务日期统一按北京时间计算
+    const end = todayCn()
+    barStartDate.value = shiftDateCn(end, -preset.days)
+    barEndDate.value = end
   }
   void loadBars()
 }
@@ -296,39 +297,25 @@ function applyCustomRange(): void {
   void loadBars()
 }
 
-function toDateStr(d: Date): string {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
-}
-
 async function renderKlineChart(): Promise<void> {
   if (!chartEl.value || bars.value.length === 0) return
-  const echarts = await import('echarts')
-  if (!chartInstance) {
-    chartInstance = echarts.init(chartEl.value, null, { renderer: 'canvas' })
-    chartResizeObserver?.disconnect()
-    chartResizeObserver = new ResizeObserver(() => chartInstance?.resize())
-    chartResizeObserver.observe(chartEl.value)
-  }
   const dates = bars.value.map((b) => b.trade_date)
-  const candleData = bars.value.map((b) => [
-    b.open_price ?? 0,
-    b.close_price ?? 0,
-    b.low_price ?? 0,
-    b.high_price ?? 0,
-  ])
+  // OHLC 任一缺失时该日留空（'-'），不能按 0 绘制，否则 K 线跌到 0 并把纵轴拉到 0
+  const candleData = bars.value.map((b) =>
+    b.open_price == null || b.close_price == null || b.low_price == null || b.high_price == null
+      ? ['-', '-', '-', '-']
+      : [b.open_price, b.close_price, b.low_price, b.high_price],
+  )
   const volumes = bars.value.map((b) => ({
-    value: b.volume ?? 0,
+    value: b.volume ?? '-',
     itemStyle: {
       color:
-        (b.close_price ?? 0) >= (b.open_price ?? 0)
-          ? 'rgba(34,197,94,0.45)'
-          : 'rgba(239,68,68,0.45)',
+        b.close_price != null && b.open_price != null && b.close_price < b.open_price
+          ? 'rgba(239,68,68,0.45)'
+          : 'rgba(34,197,94,0.45)',
     },
   }))
-  chartInstance.setOption({
+  await klineChart.render({
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'axis',
@@ -417,13 +404,6 @@ watch([bars, chartEl], () => {
   }
 }, { flush: 'post' })
 
-onUnmounted(() => {
-  chartResizeObserver?.disconnect()
-  chartResizeObserver = null
-  chartInstance?.dispose()
-  chartInstance = null
-})
-
 onMounted(async () => {
   loading.value = true
   await Promise.all([loadSummary(), loadQuality()])
@@ -468,7 +448,7 @@ onMounted(async () => {
   color: var(--accent);
   padding: 3px 10px;
   border-radius: 20px;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .research-link {
   margin-left: auto;
@@ -493,7 +473,7 @@ onMounted(async () => {
 .stat-value {
   font-size: 20px;
   font-weight: 700;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .stat-sub {
   font-size: 12px;
@@ -650,7 +630,7 @@ onMounted(async () => {
   cursor: pointer;
 }
 .mono {
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .text-warn {
   color: #fbbf24;

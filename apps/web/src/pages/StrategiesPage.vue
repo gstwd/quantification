@@ -12,8 +12,9 @@
     </div>
 
     <div v-if="store.error" class="error-tip">{{ store.error }}</div>
-    <div v-else-if="store.loading" class="loading">加载中...</div>
-    <div v-else-if="store.items.length === 0" class="empty">暂无策略配置，请点击"新建策略"创建</div>
+    <div v-if="store.actionError && !showCreate && !showCopy" class="error-tip">{{ store.actionError }}</div>
+    <div v-if="store.loading && store.items.length === 0" class="loading">加载中...</div>
+    <div v-else-if="store.items.length === 0 && !store.error" class="empty">暂无策略配置，请点击"新建策略"创建</div>
     <div v-else class="grid">
       <div v-for="item in store.items" :key="item.strategy_id" class="strategy-card">
         <button
@@ -32,13 +33,23 @@
             <span
               class="chip chip-freq"
               title="策略标注频率（元数据，不控制调仓；实际调仓频率见策略配置的调仓模块）"
-              >{{ item.frequency }}</span
+              >{{ frequencyLabel(item.frequency) }}</span
             >
             <span :class="['chip', item.status === 'active' ? 'chip-active' : 'chip-disabled']">
-              {{ item.status === 'active' ? '启用' : '禁用' }}
+              {{ strategyStatusLabel(item.status) }}
             </span>
-            <span v-if="lifecycleMap[item.strategy_id]" :class="['chip', 'chip-lifecycle']">
-              上线 · {{ healthText(lifecycleMap[item.strategy_id].health_level) }}
+            <span
+              v-if="lifecycleMap[item.strategy_id]?.lifecycle_status === 'LIVE'"
+              :class="['chip', 'chip-lifecycle']"
+            >
+              上线中 · {{ healthText(lifecycleMap[item.strategy_id].health_level) }}
+            </span>
+            <span
+              v-else-if="lifecycleMap[item.strategy_id]?.lifecycle_status === 'RETIRED'"
+              class="chip chip-disabled"
+              :title="`退役于 ${lifecycleMap[item.strategy_id].retired_at ?? '—'}`"
+            >
+              已退役
             </span>
           </div>
         </div>
@@ -110,10 +121,11 @@
         <div v-if="store.validationResult && !store.validationResult.valid" class="validation-errors">
           <div v-for="(err, i) in store.validationResult.errors" :key="i" class="validation-error">{{ err }}</div>
         </div>
+        <div v-if="store.actionError" class="form-error">{{ store.actionError }}</div>
         <div class="modal-actions">
           <button class="btn-secondary" @click="showCreate = false">取消</button>
-          <button class="btn-primary" @click="handleCreate" :disabled="store.loading">
-            {{ store.loading ? '创建中...' : '创建' }}
+          <button class="btn-primary" @click="handleCreate" :disabled="store.saving">
+            {{ store.saving ? '创建中...' : '创建' }}
           </button>
         </div>
       </div>
@@ -145,6 +157,7 @@
 </template>
 
 <script setup lang="ts">
+import { getErrorMessage } from '../api/client'
 /**
  * 策略中心页面。
  *
@@ -160,6 +173,7 @@ import CompositeStrategyForm from '../components/CompositeStrategyForm.vue'
 import { useStrategyStore } from '../stores/strategies'
 import { fetchLifecycles } from '../api/lifecycle'
 import type { LifecycleSummary } from '../types/api'
+import { frequencyLabel, strategyStatusLabel } from '../utils/labels'
 
 const store = useStrategyStore()
 const showCreate = ref(false)
@@ -169,7 +183,7 @@ const copyError = ref('')
 const jsonError = ref('')
 const advancedMode = ref(false)
 
-/** 已上线策略的生命周期摘要，按策略 ID 索引（未上线的策略不出现） */
+/** 生命周期摘要（上线中与已退役），按策略 ID 索引；从未上线的策略不出现 */
 const lifecycleMap = ref<Record<string, LifecycleSummary>>({})
 
 /**
@@ -302,7 +316,7 @@ async function handleCopyClick(item: { strategy_id: string; display_name: string
     }
     showCopy.value = true
   } catch (e) {
-    copyError.value = e instanceof Error ? e.message : '获取策略详情失败'
+    copyError.value = getErrorMessage(e, '获取策略详情失败')
   } finally {
     copyLoading.value = false
   }
@@ -329,11 +343,13 @@ async function handleCopyConfirm(): Promise<void> {
       description: store.current.description || '',
       frequency: store.current.frequency,
       config_json: store.current.config_json,
+      // 复制的策略归入源策略所在研究线：试验次数 N 与预算按研究线累计，不能通过另建策略重置
+      lineage_id: store.current.strategy_id,
     })
     if (success) {
       showCopy.value = false
     } else {
-      copyError.value = store.error || '复制失败'
+      copyError.value = store.actionError || '复制失败'
     }
   } catch {
     copyError.value = '复制策略失败'
@@ -356,7 +372,7 @@ onMounted(() => {
 .empty { padding: 60px; text-align: center; color: var(--text-muted); }
 .error-tip { padding: 12px 16px; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); border-radius: var(--radius); color: #f87171; font-size: 13px; }
 
-.grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 16px; }
 
 .strategy-card {
   background: var(--surface);
@@ -452,7 +468,7 @@ onMounted(() => {
 }
 .detail-btn:hover { color: var(--accent-hover); }
 
-.mono { font-family: monospace; }
+.mono { font-family: var(--font-mono); }
 
 /* 按钮 */
 .btn-primary {
@@ -494,7 +510,7 @@ onMounted(() => {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 24px;
-  width: 720px;
+  width: min(720px, calc(100vw - 32px));
   max-height: 90vh;
   overflow-y: auto;
   display: flex;

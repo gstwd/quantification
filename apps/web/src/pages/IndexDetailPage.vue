@@ -19,16 +19,17 @@
           <div v-if="latestValuation" class="stat-item">
             <span class="stat-label">PE(TTM) <HelpTip :text="mktHelp('pe')" /></span>
             <span class="stat-value">{{ latestValuation.pe?.toFixed(1) ?? '—' }}</span>
-            <span class="stat-sub">分位 {{ latestValuation.pe_percentile?.toFixed(0) ?? '—' }}%</span>
+            <span class="stat-sub">分位 {{ pctText(latestValuation.pe_percentile, 0) }}</span>
           </div>
           <div v-if="latestValuation" class="stat-item">
             <span class="stat-label">PB <HelpTip :text="mktHelp('pb')" /></span>
             <span class="stat-value">{{ latestValuation.pb?.toFixed(2) ?? '—' }}</span>
-            <span class="stat-sub">分位 {{ latestValuation.pb_percentile?.toFixed(0) ?? '—' }}%</span>
+            <span class="stat-sub">分位 {{ pctText(latestValuation.pb_percentile, 0) }}</span>
           </div>
-          <div v-if="latestValuation" class="stat-item">
+          <!-- 当前各数据源均未提供股息率，有值时才展示 -->
+          <div v-if="latestValuation && latestValuation.dividend_yield != null" class="stat-item">
             <span class="stat-label">股息率 <HelpTip :text="mktHelp('dividend_yield')" /></span>
-            <span class="stat-value">{{ latestValuation.dividend_yield?.toFixed(2) ?? '—' }}%</span>
+            <span class="stat-value">{{ pctText(latestValuation.dividend_yield, 2) }}</span>
           </div>
         </div>
         <div v-if="freshnessMsg" class="freshness" :class="{ stale: isStale }">
@@ -157,7 +158,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import {
@@ -171,7 +172,8 @@ import { fetchDataSetDetail } from '../api/dataManagement'
 import type { DailyBar, DataPartitionHealth, DateRange, IndexSummary, IndexValuation } from '../types/api'
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
-import { formatCnTime } from '../utils/date'
+import { formatCnTime, shiftDateCn, todayCn } from '../utils/date'
+import { useChart } from '../composables/useChart'
 
 /** 获取指标描述的快捷方法 */
 function mktHelp(key: string): string {
@@ -194,12 +196,9 @@ const indexName = ref(props.indexCode)
 
 const chartEl = ref<HTMLElement | null>(null)
 const valuationChartEl = ref<HTMLElement | null>(null)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let chartInstance: any = null
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let valuationChartInstance: any = null
-let chartResizeObserver: ResizeObserver | null = null
-let valuationResizeObserver: ResizeObserver | null = null
+/** 图表实例由 useChart 管理：容器重建时重新初始化，尺寸变化自动 resize，卸载时释放 */
+const klineChart = useChart(chartEl)
+const valuationChart = useChart(valuationChartEl)
 
 /** 页头最新快照（独立于图表区间，一次性拉取后保持不变） */
 const snapshot = ref<IndexSummary | null>(null)
@@ -237,9 +236,9 @@ const latestBar = computed(() =>
     : null,
 )
 
-/** 最新估值（来自独立快照，不随图表区间变化） */
+/** 最新估值（来自独立快照，不随图表区间变化）；没有估值日期即视为无估值数据 */
 const latestValuation = computed(() =>
-  snapshot.value
+  snapshot.value && snapshot.value.valuation_date
     ? {
         pe: snapshot.value.pe,
         pe_percentile: snapshot.value.pe_percentile,
@@ -308,12 +307,9 @@ const currentValuationRange = computed(() => {
   return calcRange(preset?.days ?? 60)
 })
 
-/** 格式化日期为 YYYY-MM-DD（使用本地时区，避免 toISOString 的 UTC 偏移） */
-function formatDate(d: Date): string {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
+/** 百分数文本：空值显示 —，不拼接 % */
+function pctText(value: number | null | undefined, digits: number): string {
+  return value === null || value === undefined ? '—' : `${value.toFixed(digits)}%`
 }
 
 /** 格式化涨跌幅文本 */
@@ -330,10 +326,9 @@ function calcRange(days: number): { startDate?: string; endDate?: string; limit?
     }
     return { limit: 2000 }
   }
-  const end = new Date()
-  const start = new Date()
-  start.setDate(start.getDate() - days)
-  return { startDate: formatDate(start), endDate: formatDate(end) }
+  // 业务日期统一按北京时间计算，与行业详情页的「近 N 日」口径一致（自然日）
+  const end = todayCn()
+  return { startDate: shiftDateCn(end, -days), endDate: end }
 }
 
 /** 将当前选择同步到 URL query，便于分享与刷新恢复 */
@@ -484,13 +479,6 @@ async function loadDataQuality() {
 /** 渲染 K 线图（首次初始化并挂载尺寸监听，后续增量更新数据） */
 async function renderKlineChart() {
   if (!chartEl.value || bars.value.length === 0) return
-  const echarts = await import('echarts')
-  if (!chartInstance) {
-    chartInstance = echarts.init(chartEl.value, null, { renderer: 'canvas' })
-    chartResizeObserver?.disconnect()
-    chartResizeObserver = new ResizeObserver(() => chartInstance.resize())
-    chartResizeObserver.observe(chartEl.value)
-  }
   const dates = bars.value.map(b => b.trade_date)
   const candleData = bars.value.map(b => [b.open_price, b.close_price, b.low_price, b.high_price])
   const volumes = bars.value.map(b => ({
@@ -500,7 +488,7 @@ async function renderKlineChart() {
       color: (b.close_price ?? 0) >= (b.open_price ?? 0) ? 'rgba(34,197,94,0.45)' : 'rgba(239,68,68,0.45)',
     },
   }))
-  chartInstance.setOption({
+  await klineChart.render({
     backgroundColor: 'transparent',
     tooltip: { trigger: 'axis', axisPointer: { type: 'cross' }, backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#f1f5f9', fontSize: 12 } },
     legend: { data: ['K线', '成交量'], textStyle: { color: '#94a3b8' }, top: 4 },
@@ -535,28 +523,25 @@ async function renderKlineChart() {
 /** 渲染 PE/PB 分位图（首次初始化并挂载尺寸监听，后续增量更新数据） */
 async function renderValuationChart() {
   if (!valuationChartEl.value || valuation.value.length === 0) return
-  const echarts = await import('echarts')
-  if (!valuationChartInstance) {
-    valuationChartInstance = echarts.init(valuationChartEl.value, null, { renderer: 'canvas' })
-    valuationResizeObserver?.disconnect()
-    valuationResizeObserver = new ResizeObserver(() => valuationChartInstance.resize())
-    valuationResizeObserver.observe(valuationChartEl.value)
-  }
   const dates = valuation.value.map(v => v.trade_date)
-  valuationChartInstance.setOption({
+  await valuationChart.render({
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'axis',
       backgroundColor: '#1e293b',
       borderColor: '#334155',
       textStyle: { color: '#f1f5f9', fontSize: 12 },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      formatter: (params: any) => {
-        const list = Array.isArray(params) ? params : [params]
+      formatter: (params: unknown) => {
+        const list = (Array.isArray(params) ? params : [params]) as Array<{
+          axisValue?: string
+          marker?: string
+          seriesName?: string
+          value?: number | null
+        }>
         let html = `<div style="margin-bottom:4px">${list[0]?.axisValue ?? ''}</div>`
         for (const p of list) {
           const val = p.value !== null && p.value !== undefined ? Number(p.value).toFixed(1) + '%' : '—'
-          html += `<div>${p.color} ${p.seriesName}: ${val}</div>`
+          html += `<div>${p.marker ?? ''} ${p.seriesName ?? ''}: ${val}</div>`
         }
         return html
       },
@@ -577,6 +562,7 @@ async function renderValuationChart() {
         data: valuation.value.map(v => v.pe_percentile),
         smooth: true,
         lineStyle: { color: '#3b82f6', width: 2 },
+        itemStyle: { color: '#3b82f6' },
         symbol: 'none',
         areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(59,130,246,0.15)' }, { offset: 1, color: 'rgba(59,130,246,0)' }] } },
       },
@@ -586,6 +572,7 @@ async function renderValuationChart() {
         data: valuation.value.map(v => v.pb_percentile),
         smooth: true,
         lineStyle: { color: '#f59e0b', width: 2 },
+        itemStyle: { color: '#f59e0b' },
         symbol: 'none',
         areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(245,158,11,0.15)' }, { offset: 1, color: 'rgba(245,158,11,0)' }] } },
       },
@@ -609,12 +596,6 @@ onMounted(async () => {
   loading.value = false
 })
 
-onUnmounted(() => {
-  chartResizeObserver?.disconnect()
-  valuationResizeObserver?.disconnect()
-  chartInstance?.dispose()
-  valuationChartInstance?.dispose()
-})
 </script>
 
 <style scoped>
@@ -635,7 +616,7 @@ onUnmounted(() => {
 .page-title { font-size: 20px; font-weight: 700; }
 
 .code-badge {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   font-weight: 700;
   background: rgba(59, 130, 246, 0.15);
@@ -649,8 +630,8 @@ onUnmounted(() => {
 .stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
 .stat-value { font-size: 22px; font-weight: 700; }
 .stat-sub { font-size: 12px; color: var(--text-muted); }
-.text-rise { color: #22c55e; }
-.text-fall { color: #ef4444; }
+.text-rise { color: var(--rise); }
+.text-fall { color: var(--fall); }
 
 .no-valuation { font-size: 13px; color: var(--text-muted); padding: 8px 0; }
 
@@ -813,7 +794,7 @@ onUnmounted(() => {
   color: var(--text-muted);
   line-height: 1.6;
 }
-.mono { font-family: monospace; font-size: 13px; }
+.mono { font-family: var(--font-mono); font-size: 13px; }
 .text-ok { color: #4ade80; }
 .text-warn { color: #fbbf24; }
 .text-err { color: #f87171; }

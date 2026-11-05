@@ -1,6 +1,7 @@
 <template>
   <div class="page">
     <div v-if="specLoading" class="empty">加载中...</div>
+    <div v-else-if="specError" class="error-banner">{{ specError }}</div>
     <template v-else-if="spec">
       <!-- 页头 -->
       <div class="page-header">
@@ -9,10 +10,10 @@
           <div class="badges">
             <span class="factor-id">{{ spec.factor_id }}</span>
             <span class="chip" :class="`chip-${spec.category ?? 'default'}`">
-              {{ CATEGORY_LABELS[spec.category ?? ''] ?? spec.category ?? '未分类' }}
+              {{ spec.category ? factorCategoryLabel(spec.category) : '未分类' }}
             </span>
             <span class="chip chip-ver">v{{ spec.version }}</span>
-            <span class="chip chip-domain">指数资产</span>
+            <span class="chip chip-domain">{{ spec.value_shape === 'market' ? '市场级' : '指数级' }}</span>
             <span class="status-tag" :class="spec.is_active ? 'active' : 'disabled'">
               {{ spec.is_active ? '启用' : '禁用' }}
             </span>
@@ -48,6 +49,16 @@
                     {{ choice }}
                   </option>
                 </select>
+                <!-- 文本参数（派生因子 expr 的表达式），失焦时提交 -->
+                <input
+                  v-else-if="parameterSpec(key)?.type === 'text'"
+                  :value="params[key]"
+                  type="text"
+                  maxlength="200"
+                  class="param-input param-text"
+                  :placeholder="parameterSpec(key)?.description || key"
+                  @change="setTextParam(key, ($event.target as HTMLInputElement).value)"
+                />
                 <input
                   v-else
                   v-model.number="params[key]"
@@ -84,6 +95,7 @@
           </div>
         </div>
         <p v-if="crossDateError" class="error-text">{{ crossDateError }}</p>
+        <p v-if="crossError" class="error-text">{{ crossError }}</p>
         <details class="info-block">
           <summary>查看说明</summary>
           <p><strong>横截面快照</strong>是某一天所有指数的因子值截面，按因子值降序排列。因子值越高，表示该因子维度上信号越强。</p>
@@ -143,8 +155,10 @@
             <span class="sep">~</span>
             <input type="date" class="date-input" v-model="seriesEnd" />
             <button class="query-btn" @click="() => loadSeries()">查询</button>
+            <span v-if="seriesEnd >= VALIDATION_START" class="validation-tag" title="2026-01-01 起为验证期：只能用于验收与监控，不能用于研究调参">含验证期数据</span>
           </div>
         </div>
+        <p v-if="seriesError" class="error-text">{{ seriesError }}</p>
         <details class="info-block">
           <summary>查看说明</summary>
           <p><strong>时间序列</strong>展示单个指数在指定日期范围内因子值的变化趋势。输入指数代码和日期范围后点击查询。</p>
@@ -164,12 +178,14 @@
             <span class="sep">~</span>
             <input type="date" class="date-input" v-model="icEnd" />
             <button class="query-btn" @click="loadIC">查询</button>
+            <span v-if="icEnd >= VALIDATION_START" class="validation-tag" title="2026-01-01 起为验证期：只能用于验收与监控，不能用于研究调参">含验证期数据</span>
           </div>
         </div>
+        <p v-if="icError" class="error-text">{{ icError }}</p>
         <details class="info-block">
           <summary>查看说明</summary>
           <p><strong>Rank IC（Information Coefficient）</strong>是因子值与下期收益率的 Spearman 秩相关系数，衡量因子的预测能力。取值范围 [-1, 1]。</p>
-          <p><strong>计算流程：</strong>取当日所有指数的因子值 → 按交易日历取 N 个交易日后的收盘价 → 对两个序列做 Spearman 相关。</p>
+          <p><strong>计算流程：</strong>取当日所有指数的因子值 → 按交易日历取 1 个交易日后的收盘价计算次日收益 → 对两个序列做 Spearman 相关（本页前瞻期固定为 1 个交易日）。</p>
           <p><strong>横截面规模决定可信度：</strong>IC 是在"当日有因子值的指数"之间做排序相关，指数越少结果越粗（只有 3 个指数时相关系数只能取 ±1 / ±0.5）。因此横截面少于 {{ icSummary?.cross_section_n_required ?? 20 }} 个指数的交易日不产出有效 IC，会被排除并在下方提示。</p>
           <div class="info-table">
             <div class="info-row"><span class="info-label">IC 均值</span><span class="info-desc">所有有效交易日 IC 的平均值。<strong>> 0</strong> 表示因子有正向预测力，但必须结合 t 统计量与横截面指数数量判读，不能只看绝对值大小。</span></div>
@@ -222,10 +238,15 @@
               </span>
             </div>
             <div class="stat-card">
-              <span class="stat-label">数据点 <HelpTip :text="faHelp('rank_ic')" /></span>
+              <span class="stat-label">数据点 <HelpTip :text="faHelp('ic_count')" /></span>
               <span class="stat-value">
                 {{ icSummary.count }}
                 <span class="stat-hint" v-if="icSummary.overlap">有效 {{ icSummary.effective_n }}</span>
+                <span
+                  v-if="icSummary.dropped_no_forward_days > 0"
+                  class="stat-hint"
+                  title="区间末尾没有次日收盘价、无法计算前瞻收益的交易日"
+                >无前瞻收益 {{ icSummary.dropped_no_forward_days }} 天</span>
               </span>
             </div>
           </div>
@@ -250,6 +271,7 @@
         <details class="info-block">
           <summary>查看说明</summary>
           <p><strong>因子相关性矩阵</strong>衡量同一天各因子之间的 Spearman 秩相关系数，用于判断因子冗余度。对角线恒为 1.0（自身完全相关）。</p>
+          <p><strong>注意：</strong>所有因子（包括本因子）都按各自模板的<strong>默认参数</strong>计算，页面顶部修改的模板参数不影响此矩阵。</p>
           <p><strong>每一对因子使用各自共同覆盖的指数</strong>（不是"所有因子都有的指数"），因此不同格子的样本数可能不同；悬浮可看到该对实际使用的指数数量。成对样本不足或相关未定义（因子值恒定）的格子显示为空，表示无法判断，而不是"不相关"。</p>
           <p><strong>热力图颜色：</strong>绿色 = 正相关（两个因子同向变化），红色 = 负相关（反向变化），深色/黑色 = 接近 0（相互独立）。</p>
           <div class="info-table">
@@ -261,6 +283,7 @@
         </details>
         <div v-if="corrLoading" class="empty">加载中...</div>
         <template v-else>
+          <p v-if="corrError" class="error-text">{{ corrError }}</p>
           <div v-if="!corrData || corrData.matrix.length === 0 || !corrHasDeterminedPair" class="empty">
             {{ corrEmptyHint }}
           </div>
@@ -268,12 +291,12 @@
             <div v-if="corrData.undetermined_pair_count > 0" class="ic-notice">
               {{ corrData.undetermined_pair_count }} 对因子因成对样本不足或数值恒定未能计算相关系数（对应格显示为空）。
             </div>
-            <div ref="corrChartEl" class="chart-container corr-chart"></div>
+            <div ref="corrChartEl" class="chart-container corr-chart" :style="{ height: corrChartHeight }"></div>
           </template>
         </template>
       </div>
     </template>
-    <div v-else class="empty">因子不存在</div>
+    <div v-else class="empty">因子模板不存在：{{ factorId }}</div>
   </div>
 </template>
 
@@ -285,7 +308,7 @@
  * 参数可覆盖，所有查询都按当前参数从原始数据现算，不读取任何缓存。
  */
 
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { fetchFactorCrossSection, fetchFactorCorrelation, fetchFactorIC, fetchFactorSpecs, fetchFactorTimeSeries } from '../api/factors'
@@ -302,6 +325,10 @@ import type {
 import HelpTip from '../components/HelpTip.vue'
 import { getIndicator } from '../utils/indicatorDescriptions'
 import { shiftDateCn, todayCn } from '../utils/date'
+import { getErrorMessage } from '../api/client'
+import { useChart } from '../composables/useChart'
+import { factorCategoryLabel } from '../utils/labels'
+import { VALIDATION_START } from '../utils/datePresets'
 
 /** 获取因子分析指标描述的快捷方法 */
 function faHelp(key: string): string {
@@ -312,6 +339,13 @@ const props = defineProps<{ factorId: string }>()
 
 const spec = ref<FactorSpec | null>(null)
 const specLoading = ref(false)
+/** 模板元数据加载失败（与「因子不存在」区分） */
+const specError = ref('')
+/** 各 Tab 的查询失败文案（后端 422 参数校验信息原样展示） */
+const crossError = ref('')
+const seriesError = ref('')
+const icError = ref('')
+const corrError = ref('')
 
 /** 当前模板参数：以模板默认值为初值，可由页面输入覆盖（choice 参数为字符串） */
 const params = ref<Record<string, FactorParameterValue>>({})
@@ -322,6 +356,12 @@ const parameterKeys = computed(() => Object.keys(spec.value?.parameter_schema ??
 /** 查询单个参数的声明 */
 function parameterSpec(key: string): FactorParameterSpec | undefined {
   return spec.value?.parameter_schema?.[key]
+}
+
+/** 文本参数（expr 表达式）提交：去除首尾空白后按新参数重查 */
+function setTextParam(key: string, value: string): void {
+  params.value = { ...params.value, [key]: value.trim() }
+  reloadWithParams()
 }
 
 /** 规范化参数的展示文本 */
@@ -357,8 +397,7 @@ const seriesIndex = ref('')
 const seriesRows = ref<FactorRow[]>([])
 const seriesLoading = ref(false)
 const chartEl = ref<HTMLElement | null>(null)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let chartInstance: any = null
+const seriesChart = useChart(chartEl)
 
 /** IC 分析状态 */
 const icStart = ref((() => {
@@ -369,29 +408,20 @@ const icSummary = ref<ICSummary | null>(null)
 const icSeries = ref<ICPoint[]>([])
 const icLoading = ref(false)
 const icChartEl = ref<HTMLElement | null>(null)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let icChartInstance: any = null
+const icChart = useChart(icChartEl)
 
 /** 相关性状态 */
 const corrDate = ref(todayCn())
 const corrData = ref<CorrelationResponse | null>(null)
 const corrLoading = ref(false)
 const corrChartEl = ref<HTMLElement | null>(null)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let corrChartInstance: any = null
+const corrChart = useChart(corrChartEl)
 
-const CATEGORY_LABELS: Record<string, string> = {
-  volume: '量能',
-  momentum: '动量',
-  volatility: '波动率',
-  flow: '份额流',
-  valuation: '估值',
-  technical: '技术',
-  macro: '宏观',
-  price: '价格',
-  relative_strength: '相对强度',
-  breadth: '市场宽度',
-}
+/** 热力图高度随因子数量增长（每行约 18px），避免几十个因子挤在固定高度里 */
+const corrChartHeight = computed(() => {
+  const n = corrData.value?.factor_ids.length ?? 0
+  return `${Math.max(400, n * 18 + 140)}px`
+})
 
 /** 默认时间序列日期范围：最近 90 天 */
 const seriesStart = ref((() => {
@@ -417,6 +447,7 @@ function barWidth(val: number | null): number {
 /** 加载横截面数据（默认最新日期），按因子值降序排列 */
 async function loadCross() {
   crossDateError.value = ''
+  crossError.value = ''
   crossLoading.value = true
   try {
     const resp = await fetchFactorCrossSection(props.factorId, undefined, params.value)
@@ -425,8 +456,9 @@ async function loadCross() {
     crossRows.value = resp.rows
       .slice()
       .sort((a, b) => (b.factor_value_numeric ?? -Infinity) - (a.factor_value_numeric ?? -Infinity))
-  } catch {
+  } catch (e) {
     crossRows.value = []
+    crossError.value = `横截面加载失败：${getErrorMessage(e, '网络错误')}`
   } finally {
     crossLoading.value = false
   }
@@ -440,6 +472,7 @@ async function loadCrossByDate() {
     return
   }
   crossDateError.value = ''
+  crossError.value = ''
   crossLoading.value = true
   try {
     const resp = await fetchFactorCrossSection(props.factorId, crossDateInput.value, params.value)
@@ -447,8 +480,11 @@ async function loadCrossByDate() {
     crossRows.value = resp.rows
       .slice()
       .sort((a, b) => (b.factor_value_numeric ?? -Infinity) - (a.factor_value_numeric ?? -Infinity))
-  } catch {
+  } catch (e) {
     crossRows.value = []
+    // 查询失败时清掉旧的数据日期，避免与空表格不一致
+    crossDate.value = ''
+    crossError.value = `横截面加载失败：${getErrorMessage(e, '网络错误')}`
   } finally {
     crossLoading.value = false
   }
@@ -465,6 +501,7 @@ function goToSeries(indexCode: string) {
 async function loadSeries() {
   if (!seriesIndex.value.trim()) return
   seriesLoading.value = true
+  seriesError.value = ''
   try {
     seriesRows.value = await fetchFactorTimeSeries(
       props.factorId,
@@ -473,8 +510,9 @@ async function loadSeries() {
       seriesEnd.value,
       params.value,
     )
-  } catch {
+  } catch (e) {
     seriesRows.value = []
+    seriesError.value = `时间序列加载失败：${getErrorMessage(e, '网络错误')}`
   } finally {
     seriesLoading.value = false
   }
@@ -483,12 +521,9 @@ async function loadSeries() {
 /** 渲染 ECharts 时间序列折线图 */
 async function renderChart() {
   if (!chartEl.value || seriesRows.value.length === 0) return
-  const echarts = await import('echarts')
-  chartInstance?.dispose()
-  chartInstance = echarts.init(chartEl.value, null, { renderer: 'canvas' })
   const dates = seriesRows.value.map(r => r.trade_date)
   const values = seriesRows.value.map(r => r.factor_value_numeric)
-  chartInstance.setOption({
+  await seriesChart.render({
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'axis',
@@ -598,6 +633,7 @@ const corrEmptyHint = computed(() => {
 async function loadIC() {
   if (!icStart.value || !icEnd.value) return
   icLoading.value = true
+  icError.value = ''
   try {
     const resp = await fetchFactorIC(
       props.factorId,
@@ -609,9 +645,10 @@ async function loadIC() {
     )
     icSummary.value = resp.summary
     icSeries.value = resp.series
-  } catch {
+  } catch (e) {
     icSummary.value = null
     icSeries.value = []
+    icError.value = `IC 计算失败：${getErrorMessage(e, '网络错误')}`
   } finally {
     icLoading.value = false
   }
@@ -620,13 +657,10 @@ async function loadIC() {
 /** 渲染 IC 时间序列图表 */
 async function renderICChart() {
   if (!icChartEl.value || icSeries.value.length === 0) return
-  const echarts = await import('echarts')
-  icChartInstance?.dispose()
-  icChartInstance = echarts.init(icChartEl.value, null, { renderer: 'canvas' })
   const points = icSeries.value
   const dates = points.map(r => r.trade_date)
   const values = points.map(r => r.ic)
-  icChartInstance.setOption({
+  await icChart.render({
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'axis',
@@ -672,10 +706,12 @@ watch([icSeries, icChartEl], () => {
 async function loadCorrelation() {
   if (!corrDate.value) return
   corrLoading.value = true
+  corrError.value = ''
   try {
     corrData.value = await fetchFactorCorrelation(corrDate.value)
-  } catch {
+  } catch (e) {
     corrData.value = null
+    corrError.value = `相关性计算失败：${getErrorMessage(e, '网络错误')}`
   } finally {
     corrLoading.value = false
   }
@@ -684,9 +720,8 @@ async function loadCorrelation() {
 /** 渲染相关性热力图 */
 async function renderCorrChart() {
   if (!corrChartEl.value || !corrData.value || corrData.value.matrix.length === 0) return
-  const echarts = await import('echarts')
-  corrChartInstance?.dispose()
-  corrChartInstance = echarts.init(corrChartEl.value, null, { renderer: 'canvas' })
+  // 等容器高度（随因子数量计算）生效后再初始化，保证 canvas 尺寸正确
+  await nextTick()
   const { factor_ids: fids, matrix, pair_counts: pairCounts } = corrData.value
   // null 表示样本不足或相关未定义：以空值渲染，不伪装成 0
   const data: [number, number, number | string][] = []
@@ -696,7 +731,7 @@ async function renderCorrChart() {
       data.push([j, i, value == null ? '-' : value])
     }
   }
-  corrChartInstance.setOption({
+  await corrChart.render({
     backgroundColor: 'transparent',
     tooltip: {
       backgroundColor: '#1e293b',
@@ -714,7 +749,7 @@ async function renderCorrChart() {
         return `${head}<br/>相关系数: <b>${Number(d[2]).toFixed(4)}</b><br/>成对指数: ${pairN ?? '—'}`
       },
     },
-    grid: { left: 100, right: 40, top: 20, bottom: 80 },
+    grid: { left: 170, right: 60, top: 20, bottom: 150 },
     xAxis: {
       type: 'category',
       data: fids,
@@ -757,6 +792,7 @@ watch([corrData, corrChartEl], () => {
 
 onMounted(async () => {
   specLoading.value = true
+  specError.value = ''
   try {
     const all = await fetchFactorSpecs()
     spec.value = all.find(s => s.factor_id === props.factorId) ?? null
@@ -765,24 +801,22 @@ onMounted(async () => {
       defaults[key] = parameter.default
     }
     params.value = defaults
-  } catch {
+  } catch (e) {
     spec.value = null
+    specError.value = `因子模板加载失败：${getErrorMessage(e, '网络错误')}`
   } finally {
     specLoading.value = false
   }
-  await loadCross()
-})
-
-onUnmounted(() => {
-  chartInstance?.dispose()
-  icChartInstance?.dispose()
-  corrChartInstance?.dispose()
+  if (spec.value) await loadCross()
 })
 </script>
 
 <style scoped>
 .page { display: flex; flex-direction: column; gap: 20px; }
 .empty { padding: 60px; text-align: center; color: var(--text-muted); }
+.error-banner { padding: 14px 16px; border-radius: var(--radius-sm); background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: var(--danger); font-size: 13px; }
+.validation-tag { font-size: 11px; color: var(--warning); border: 1px solid rgba(245,158,11,0.4); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+.param-text { min-width: 220px; }
 
 .page-header {
   background: var(--surface);
@@ -799,7 +833,7 @@ onUnmounted(() => {
 
 .badges { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .factor-id {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--accent);
   background: rgba(59, 130, 246, 0.1);
@@ -830,7 +864,7 @@ onUnmounted(() => {
 
 .meta-row { display: flex; align-items: center; gap: 8px; }
 .meta-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
-.meta-val   { font-size: 13px; font-family: monospace; }
+.meta-val   { font-size: 13px; font-family: var(--font-mono); }
 
 /* Tabs */
 .tabs { display: flex; gap: 4px; }
@@ -907,18 +941,6 @@ onUnmounted(() => {
 }
 .query-btn:hover { background: rgba(59, 130, 246, 0.25); }
 
-.recompute-btn {
-  background: rgba(245, 158, 11, 0.15);
-  border: 1px solid rgba(245, 158, 11, 0.3);
-  color: #fbbf24;
-  border-radius: var(--radius-sm);
-  padding: 4px 14px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.recompute-btn:hover:not(:disabled) { background: rgba(245, 158, 11, 0.25); }
-.recompute-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .sep { color: var(--text-muted); font-size: 12px; }
 
@@ -940,9 +962,9 @@ onUnmounted(() => {
 
 .rank { color: var(--text-muted); font-size: 12px; width: 48px; }
 .name-cell { font-size: 13px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.value.mono { font-family: monospace; font-size: 13px; }
+.value.mono { font-family: var(--font-mono); font-size: 13px; }
 .bar-col { width: 180px; }
-.index-link { color: var(--accent); font-family: monospace; font-weight: 600; }
+.index-link { color: var(--accent); font-family: var(--font-mono); font-weight: 600; }
 .index-link:hover { text-decoration: underline; }
 
 .bar-cell { padding: 9px 16px 9px 0; }
@@ -984,7 +1006,7 @@ onUnmounted(() => {
   min-width: 100px;
 }
 .stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
-.stat-value { font-size: 16px; font-weight: 600; font-family: monospace; }
+.stat-value { font-size: 16px; font-weight: 600; font-family: var(--font-mono); }
 .stat-value.positive { color: #4ade80; }
 .stat-value.negative { color: #f87171; }
 .stat-hint { font-size: 11px; font-weight: 400; color: var(--text-muted); margin-left: 4px; }
@@ -1038,7 +1060,7 @@ onUnmounted(() => {
 .info-label {
   flex-shrink: 0;
   width: 90px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
   color: var(--accent);
@@ -1050,7 +1072,7 @@ onUnmounted(() => {
 
 .param-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .param-field { display: flex; align-items: center; gap: 6px; }
-.param-name { font-family: monospace; font-size: 12px; color: var(--text-muted); }
+.param-name { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
 .param-input {
   width: 90px;
   background: var(--bg);
@@ -1062,5 +1084,5 @@ onUnmounted(() => {
   outline: none;
 }
 .param-input:focus { border-color: var(--accent); }
-.param-hint { font-family: monospace; font-size: 11px; color: var(--text-muted); }
+.param-hint { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
 </style>

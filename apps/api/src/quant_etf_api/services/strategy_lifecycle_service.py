@@ -19,6 +19,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from quant_etf_api.config.settings import get_settings
+from quant_etf_api.domain.common.enums import DEFAULT_EXECUTION_MODEL
+from quant_etf_api.domain.portfolio.execution import ACCOUNTING_MODEL_DRIFT, ACCOUNTING_MODEL_LEGACY
 from quant_etf_api.domain.research.lifecycle import (
     SCORE_IC_DECAY_MIN_HALF_N,
     assess_health,
@@ -61,6 +63,40 @@ from quant_etf_api.services.strategy_config_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _monitor_days(live_at: date, retired_at: date | None) -> int:
+    """上线监控天数（自然日）：已退役的策略截止到退役日，不再随当天增长。
+
+    Args:
+        live_at: 上线日期。
+        retired_at: 退役日期，未退役为 None。
+
+    Returns:
+        自上线起的自然日数，不小于 0。
+    """
+    end = retired_at or today_cn()
+    return max(0, (end - live_at).days)
+
+
+def _is_monitor_caliber(params: dict[str, Any] | None) -> bool:
+    """回测是否与上线监控回测同口径（执行模型与记账口径）。
+
+    上线监控回测与上线时新建的基线都不显式指定执行模型，使用系统缺省
+    ``DEFAULT_EXECUTION_MODEL``，记账为当前 ``drift_v1``；缺失字段按存量
+    回测的解释（开盘执行、历史记账）处理。
+
+    Args:
+        params: 回测 params。
+
+    Returns:
+        同口径时为 True。
+    """
+    data = params or {}
+    execution_model = data.get("_execution_model") or DEFAULT_EXECUTION_MODEL
+    accounting_model = data.get("_accounting_model") or ACCOUNTING_MODEL_LEGACY
+    return execution_model == DEFAULT_EXECUTION_MODEL and accounting_model == ACCOUNTING_MODEL_DRIFT
+
 
 # 健康快照的触发来源（strategy_health_snapshot.trigger）
 TRIGGER_MANUAL = "manual"
@@ -587,7 +623,7 @@ class StrategyLifecycleService:
             可复用的回测 ID，无匹配时返回 None。
         """
         try:
-            row = (
+            rows = (
                 self._db.query(BacktestRunModel)
                 .filter(
                     BacktestRunModel.strategy_id == strategy_id,
@@ -598,12 +634,17 @@ class StrategyLifecycleService:
                     BacktestRunModel.end_date >= boundaries.research_end,
                 )
                 .order_by(BacktestRunModel.created_at.desc())
-                .first()
+                .all()
             )
         except Exception:
             logger.warning("查找可复用研究期回测失败", exc_info=True)
             return None
-        return row.backtest_id if row is not None else None
+        # 执行模型 / 记账口径存于 params（JSON），在 Python 侧过滤：基线必须与上线监控
+        # 回测同口径（两者都按系统缺省执行模型创建），否则分位比较会跨口径
+        for row in rows:
+            if _is_monitor_caliber(row.params):
+                return row.backtest_id
+        return None
 
     def _build_distribution(self, backtest_id: str) -> dict[str, Any]:
         """从研究期回测的逐日结果构建分布快照。
@@ -795,7 +836,7 @@ class StrategyLifecycleService:
             lifecycle_status=row.lifecycle_status,
             live_at=row.live_at,
             retired_at=row.retired_at,
-            live_days=(today_cn() - row.live_at).days,
+            live_days=_monitor_days(row.live_at, row.retired_at),
             health_level=row.latest_health_level,
             diagnosis=row.latest_diagnosis,
             recommended_action=row.latest_recommended_action,

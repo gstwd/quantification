@@ -36,22 +36,28 @@
       <select v-model="frequency" class="fp-select">
         <option value="daily">每日（恒定比例）</option>
         <option value="weekly">每周</option>
+        <option value="biweekly">双周</option>
         <option value="monthly">每月</option>
       </select>
-      <select v-if="frequency === 'weekly'" v-model.number="dayOfWeek" class="fp-select">
+      <select v-if="frequency === 'weekly' || frequency === 'biweekly'" v-model.number="dayOfWeek" class="fp-select">
         <option :value="0">周一</option>
         <option :value="1">周二</option>
         <option :value="2">周三</option>
         <option :value="3">周四</option>
         <option :value="4">周五</option>
       </select>
+      <select v-if="frequency === 'biweekly'" v-model="weekParity" class="fp-select" title="以 2016-01-04 所在周为第 1 周连续计数">
+        <option value="odd">奇数周</option>
+        <option value="even">偶数周</option>
+      </select>
       <input
         v-if="frequency === 'monthly'"
         v-model.number="dayOfMonth"
         type="number"
         min="1"
-        max="28"
+        max="31"
         class="fp-input weight-input"
+        title="超出当月天数时按当月最后一日处理"
       />
     </div>
 
@@ -89,6 +95,10 @@ const cashWeight = ref(0)
 const frequency = ref('daily')
 const dayOfWeek = ref(4)
 const dayOfMonth = ref(1)
+const weekParity = ref('even')
+/** 原配置是否显式声明了调仓日（未声明且未改动时保存继续省略，保持配置哈希不变） */
+const dayOfWeekDeclared = ref(false)
+const dayOfMonthDeclared = ref(false)
 let selfUpdating = false
 
 /** 成员候选：排除自身与变体草稿（组合策略在提交时由后端拒绝嵌套） */
@@ -120,15 +130,23 @@ function init(): void {
   if (members.value.length === 0) members.value = [{ strategy_id: '', weight: 50 }, { strategy_id: '', weight: 50 }]
   cashWeight.value = Math.round((config.cash_weight ?? 0) * 10000) / 100
   frequency.value = config.rebalance?.frequency ?? 'daily'
+  dayOfWeekDeclared.value = typeof config.rebalance?.day_of_week === 'number'
+  dayOfMonthDeclared.value = typeof config.rebalance?.day_of_month === 'number'
   dayOfWeek.value = config.rebalance?.day_of_week ?? 4
   dayOfMonth.value = config.rebalance?.day_of_month ?? 1
+  weekParity.value = config.rebalance?.week_parity ?? 'even'
 }
 
 /** 生成 config_json */
 function build(): Record<string, unknown> {
   const rebalance: Record<string, unknown> = { frequency: frequency.value }
-  if (frequency.value === 'weekly') rebalance.day_of_week = dayOfWeek.value
-  if (frequency.value === 'monthly') rebalance.day_of_month = dayOfMonth.value
+  const weekly = frequency.value === 'weekly' || frequency.value === 'biweekly'
+  // 后端缺省调仓日：周度/双周 4（周五）、月度 1；原配置未声明且未改动时保持省略
+  if (weekly && (dayOfWeekDeclared.value || dayOfWeek.value !== 4)) rebalance.day_of_week = dayOfWeek.value
+  if (frequency.value === 'biweekly') rebalance.week_parity = weekParity.value
+  if (frequency.value === 'monthly' && (dayOfMonthDeclared.value || dayOfMonth.value !== 1)) {
+    rebalance.day_of_month = dayOfMonth.value
+  }
   const config: CompositeConfigJson = {
     kind: 'composite',
     schema_version: '2',
@@ -148,7 +166,7 @@ function removeMember(index: number): void {
 }
 
 watch(
-  [members, cashWeight, frequency, dayOfWeek, dayOfMonth],
+  [members, cashWeight, frequency, dayOfWeek, dayOfMonth, weekParity],
   () => {
     selfUpdating = true
     emit('update:modelValue', build())
@@ -180,10 +198,10 @@ defineExpose({ errors })
 .member-row, .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .member-select { flex: 1; min-width: 220px; }
 .weight-input { width: 90px; }
-.unit { color: var(--text-secondary, #888); }
+.unit { color: var(--text-muted); }
 .total.ok { color: var(--success, #2e7d32); }
 .total.bad { color: var(--danger, #c62828); }
 .form-errors { margin: 0; padding-left: 18px; color: var(--danger, #c62828); font-size: 13px; }
-.btn-link { background: none; border: none; color: var(--primary, #1976d2); cursor: pointer; padding: 0; }
+.btn-link { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; }
 .btn-link:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

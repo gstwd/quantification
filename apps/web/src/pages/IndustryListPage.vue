@@ -3,7 +3,7 @@
     <div class="page-header">
       <div class="header-left">
         <h1 class="page-title">申万行业</h1>
-        <span class="count-badge">{{ items.length }} 个一级行业</span>
+        <span class="count-badge">{{ loading && items.length === 0 ? '—' : items.length }} 个一级行业</span>
       </div>
       <div class="header-actions">
         <RouterLink to="/data-management?dataset=industry_universe" class="btn-secondary">维护行业信息</RouterLink>
@@ -199,7 +199,7 @@ onMounted(() => {
   color: var(--accent);
   padding: 2px 8px;
   border-radius: 20px;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .notice {
   padding: 10px 14px;
@@ -258,7 +258,7 @@ onMounted(() => {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  overflow-x: auto;
 }
 .data-table {
   width: 100%;
@@ -291,7 +291,7 @@ onMounted(() => {
   background: rgba(59, 130, 246, 0.06);
 }
 .code-mono {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-weight: 600;
   color: var(--accent);
 }
@@ -304,11 +304,11 @@ onMounted(() => {
   padding: 0 4px;
 }
 .mono {
-  font-family: monospace;
+  font-family: var(--font-mono);
   color: var(--text-muted);
 }
 .num-cell {
-  font-family: monospace;
+  font-family: var(--font-mono);
   text-align: right;
 }
 .text-warn {

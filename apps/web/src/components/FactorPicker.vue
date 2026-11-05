@@ -15,7 +15,7 @@
       <optgroup
         v-for="group in groupedFactors"
         :key="group.category"
-        :label="group.category || '其他'"
+        :label="group.category === '其他' ? '其他' : factorCategoryLabel(group.category)"
       >
         <option v-for="f in group.items" :key="f.factor_id" :value="f.factor_id">
           {{ f.factor_id }} — {{ f.name }}
@@ -121,6 +121,7 @@
 </template>
 
 <script setup lang="ts">
+import { factorCategoryLabel } from '../utils/labels'
 /**
  * 因子选择行组件。
  *

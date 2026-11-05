@@ -811,6 +811,9 @@
 
         <div class="sub-field">
           <label class="sub-label">择时仓位控制（各 regime 下的总仓位上限）</label>
+          <span v-if="timingExposureMode === 'absent'" class="threshold-hint">
+            原配置未声明 regime 仓位，当前为引擎默认值（进攻 80% / 中性 50% / 防守 20%）；不修改则保存时保持省略。
+          </span>
           <span v-if="timingEnabled && timingTiersEnabled" class="threshold-hint">
             已启用择时多档仓位：命中档位时取档位仓位，以下 regime 仓位只在未命中档位（或择时降级）时生效。
           </span>
@@ -824,8 +827,10 @@
                 max="100"
                 step="5"
                 class="fp-input exposure-input"
+                @input="markExposureEdited('offensive')"
               />
               <span class="exposure-unit">%</span>
+              <span v-if="timingExposureMode === 'explicit' && exposureInherited.offensive" class="inherit-tag" title="原配置未声明该 regime，引擎使用默认仓位；修改后才会写入配置">继承默认</span>
             </div>
             <div class="exposure-field">
               <span class="exposure-label">中性</span>
@@ -836,8 +841,10 @@
                 max="100"
                 step="5"
                 class="fp-input exposure-input"
+                @input="markExposureEdited('neutral')"
               />
               <span class="exposure-unit">%</span>
+              <span v-if="timingExposureMode === 'explicit' && exposureInherited.neutral" class="inherit-tag" title="原配置未声明该 regime，引擎使用默认仓位；修改后才会写入配置">继承默认</span>
             </div>
             <div class="exposure-field">
               <span class="exposure-label">防守</span>
@@ -848,8 +855,10 @@
                 max="100"
                 step="5"
                 class="fp-input exposure-input"
+                @input="markExposureEdited('defensive')"
               />
               <span class="exposure-unit">%</span>
+              <span v-if="timingExposureMode === 'explicit' && exposureInherited.defensive" class="inherit-tag" title="原配置未声明该 regime，引擎使用默认仓位；修改后才会写入配置">继承默认</span>
             </div>
           </div>
         </div>
@@ -1285,6 +1294,8 @@ function initScope(): void {
 // ── 评分模块 ──────────────────────────────────────────────────────
 const scoreFactors = ref<FactorRowValue[]>([])
 const scoreMissingStrategy = ref('ignore')
+/** 原配置是否显式声明了 missing_factor_strategy（显式写缺省值 ignore 时保存也保留，避免配置哈希无谓变化） */
+const scoreMissingDeclared = ref(false)
 const scoreScoringMode = ref('absolute')
 
 /** 从 config_json 读取因子别名声明 */
@@ -1347,6 +1358,7 @@ function initScore(): void {
     weight,
     transform: transforms[ref] || undefined,
   }))
+  scoreMissingDeclared.value = typeof score.missing_factor_strategy === 'string'
   scoreMissingStrategy.value = (score.missing_factor_strategy as string) || 'ignore'
   scoreScoringMode.value = (score.scoring_mode as string) || 'absolute'
 }
@@ -1529,10 +1541,10 @@ function parseTimingTiers(raw: unknown): TimingTierValue[] {
       ...parseTimingRuleGroup(tier, 'AND'),
       label: typeof tier.label === 'string' ? tier.label : '',
       mode,
-      exposure: Math.round((typeof tier.exposure === 'number' ? tier.exposure : 0.5) * 100),
-      delta: Math.round((typeof tier.exposure_delta === 'number' ? tier.exposure_delta : 0.25) * 100),
-      min_exposure: Math.round((typeof tier.min_exposure === 'number' ? tier.min_exposure : 0) * 100),
-      max_exposure: Math.round((typeof tier.max_exposure === 'number' ? tier.max_exposure : 1) * 100),
+      exposure: toPct(tier.exposure, 50),
+      delta: toPct(tier.exposure_delta, 25),
+      min_exposure: toPct(tier.min_exposure, 0),
+      max_exposure: toPct(tier.max_exposure, 100),
       min_score: typeof tier.min_score === 'number' ? tier.min_score : null,
       regime: parseTierRegime(tier.regime),
     }
@@ -1696,12 +1708,10 @@ function initTiming(): void {
   }))
   timingCaps.value = ((timing.exposure_caps ?? []) as Array<Record<string, unknown>>).map(cap => ({
     label: typeof cap.label === 'string' ? cap.label : '',
-    max_exposure: Math.round((typeof cap.max_exposure === 'number' ? cap.max_exposure : 0.5) * 100),
+    max_exposure: toPct(cap.max_exposure, 50),
     group: parseTimingRuleGroup(cap, 'AND'),
   }))
-  timingTierBase.value = Math.round(
-    (typeof timing.tier_base_exposure === 'number' ? timing.tier_base_exposure : 0.5) * 100,
-  )
+  timingTierBase.value = toPct(timing.tier_base_exposure, 50)
   // 规则模式引用的因子不在 factors 中：补成因子行，保证别名声明不丢失；
   // 条件仓位上限在两种模式下都只声明别名（加权模式下以权重 0 的行承载）
   const declaredOnly = [...(timingCombine.value === 'rules' ? timingRuleRefs() : []), ...timingCapRefs()]
@@ -1718,7 +1728,7 @@ function initTiming(): void {
   timingHoldOnNeutral.value = state.hold_on_neutral === true
   timingConfirmDays.value = typeof state.confirm_days === 'number' ? state.confirm_days : 1
   timingMinHoldDays.value = typeof state.min_hold_days === 'number' ? state.min_hold_days : 0
-  timingMaxStep.value = typeof state.max_exposure_step === 'number' ? Math.round(state.max_exposure_step * 100) : 0
+  timingMaxStep.value = toPct(state.max_exposure_step, 0)
   const thresholds = (timing.thresholds ?? {}) as Record<string, number>
   timingOffensive.value = thresholds.offensive ?? 65
   timingDefensive.value = thresholds.defensive ?? 35
@@ -1850,10 +1860,13 @@ const rankBottomN = ref<string>('')
 const rankMomentumFactor = ref('')
 const rankValuationFactor = ref('')
 const rankBufferN = ref<string>('')
+/** 原 rank 段存在但未声明 order（引擎缺省 desc）：未改动时保存继续省略 */
+const rankOrderOmitted = ref(false)
 
 function initRank(): void {
   const rank = props.modelValue.rank as Record<string, unknown> | undefined
   if (!rank) return
+  rankOrderOmitted.value = rank.order == null
   rankOrder.value = (rank.order as string) || 'desc'
   rankTopN.value = rank.top_n != null ? String(rank.top_n) : ''
   rankBottomN.value = rank.bottom_n != null ? String(rank.bottom_n) : ''
@@ -1868,6 +1881,40 @@ const portfolioDefaultExposure = ref(50)
 const exposureOffensive = ref(80)
 const exposureNeutral = ref(50)
 const exposureDefensive = ref(20)
+
+type ExposureRegime = 'offensive' | 'neutral' | 'defensive'
+/** 引擎未配置 timing_exposure 时使用的 regime 仓位表（engine/portfolio.py 的 _DEFAULT_TIMING_EXPOSURE） */
+const ENGINE_DEFAULT_TIMING_EXPOSURE: Record<ExposureRegime, number> = { offensive: 80, neutral: 50, defensive: 20 }
+/**
+ * timing_exposure 的来源：
+ * - absent：原配置未声明，引擎使用默认仓位表；值未改动时保存仍省略该字段；
+ * - explicit：原配置已声明（可能只声明部分 regime）。
+ */
+const timingExposureMode = ref<'absent' | 'explicit'>('absent')
+/** explicit 模式下未声明的 regime：引擎回退到 default_exposure，表单显示为「继承默认」，未改动时保存省略 */
+const exposureInherited = ref<Record<ExposureRegime, boolean>>({ offensive: false, neutral: false, defensive: false })
+/** 原配置是否显式声明了 default_exposure（显式写 0.5 时保存也保留，避免配置哈希无谓变化） */
+const defaultExposureDeclared = ref(false)
+
+/** 各 regime 仓位输入框的读写入口 */
+const exposureRefs: Record<ExposureRegime, typeof exposureOffensive> = {
+  offensive: exposureOffensive,
+  neutral: exposureNeutral,
+  defensive: exposureDefensive,
+}
+
+/** 用户手动修改某个 regime 仓位后，不再视为继承默认 */
+function markExposureEdited(regime: ExposureRegime): void {
+  exposureInherited.value = { ...exposureInherited.value, [regime]: false }
+}
+
+// 继承默认的 regime 跟随默认仓位变化
+watch(portfolioDefaultExposure, (value) => {
+  if (timingExposureMode.value !== 'explicit') return
+  for (const regime of Object.keys(exposureRefs) as ExposureRegime[]) {
+    if (exposureInherited.value[regime]) exposureRefs[regime].value = value
+  }
+})
 const portfolioVolFactor = ref('')
 const portfolioCovWindow = ref(60)
 
@@ -1875,11 +1922,24 @@ function initPortfolio(): void {
   const portfolio = props.modelValue.portfolio as Record<string, unknown> | undefined
   if (!portfolio) return
   portfolioMethod.value = (portfolio.method as string) || 'equal_weight'
-  portfolioDefaultExposure.value = Math.round(((portfolio.default_exposure as number) ?? 0.5) * 100)
-  const te = (portfolio.timing_exposure ?? {}) as Record<string, number>
-  exposureOffensive.value = Math.round((te.offensive ?? 0.8) * 100)
-  exposureNeutral.value = Math.round((te.neutral ?? 0.5) * 100)
-  exposureDefensive.value = Math.round((te.defensive ?? 0.2) * 100)
+  defaultExposureDeclared.value = typeof portfolio.default_exposure === 'number'
+  portfolioDefaultExposure.value = toPct(portfolio.default_exposure, 50)
+  const te = isPlainObject(portfolio.timing_exposure) ? (portfolio.timing_exposure as Record<string, unknown>) : {}
+  const declared = Object.keys(te).length > 0
+  timingExposureMode.value = declared ? 'explicit' : 'absent'
+  const inherited: Record<ExposureRegime, boolean> = { offensive: false, neutral: false, defensive: false }
+  for (const regime of Object.keys(exposureRefs) as ExposureRegime[]) {
+    if (!declared) {
+      exposureRefs[regime].value = ENGINE_DEFAULT_TIMING_EXPOSURE[regime]
+    } else if (typeof te[regime] === 'number') {
+      exposureRefs[regime].value = toPct(te[regime], ENGINE_DEFAULT_TIMING_EXPOSURE[regime])
+    } else {
+      // 部分声明：引擎对缺失的 regime 使用 default_exposure
+      exposureRefs[regime].value = portfolioDefaultExposure.value
+      inherited[regime] = true
+    }
+  }
+  exposureInherited.value = inherited
   portfolioVolFactor.value = (portfolio.vol_factor as string) || ''
   portfolioCovWindow.value = (portfolio.cov_window as number) ?? 60
 }
@@ -1915,9 +1975,9 @@ function initRisk(): void {
   const risk = props.modelValue.risk as Record<string, unknown> | undefined
   if (!risk) { riskEnabled.value = false; return }
   riskEnabled.value = true
-  riskMaxAssetWeight.value = Math.round(((risk.max_asset_weight as number) ?? 0.3) * 100)
-  riskMaxPortfolioExposure.value = Math.round(((risk.max_portfolio_exposure as number) ?? 1.0) * 100)
-  riskMinCashRatio.value = Math.round(((risk.min_cash_ratio as number) ?? 0) * 100)
+  riskMaxAssetWeight.value = toPct(risk.max_asset_weight, 30)
+  riskMaxPortfolioExposure.value = toPct(risk.max_portfolio_exposure, 100)
+  riskMinCashRatio.value = toPct(risk.min_cash_ratio, 0)
   const vt = risk.vol_target as Record<string, unknown> | null | undefined
   volTargetEnabled.value = !!vt
   volTarget.value = toPct(vt?.target, 15)
@@ -2162,7 +2222,9 @@ function buildConfig(): Record<string, unknown> {
   }
   const scoreConfig: Record<string, unknown> = { factors }
   if (Object.keys(transforms).length > 0) scoreConfig.transforms = transforms
-  if (scoreMissingStrategy.value !== 'ignore') scoreConfig.missing_factor_strategy = scoreMissingStrategy.value
+  if (scoreMissingStrategy.value !== 'ignore' || scoreMissingDeclared.value) {
+    scoreConfig.missing_factor_strategy = scoreMissingStrategy.value
+  }
   if (scoreScoringMode.value !== 'absolute') scoreConfig.scoring_mode = scoreScoringMode.value
   config.score = scoreConfig
 
@@ -2215,7 +2277,7 @@ function buildConfig(): Record<string, unknown> {
     if (timingHoldOnNeutral.value) state.hold_on_neutral = true
     if (timingConfirmDays.value > 1) state.confirm_days = timingConfirmDays.value
     if (timingMinHoldDays.value > 0) state.min_hold_days = timingMinHoldDays.value
-    if (timingMaxStep.value > 0) state.max_exposure_step = timingMaxStep.value / 100
+    if (timingMaxStep.value > 0) state.max_exposure_step = fromPct(timingMaxStep.value)
     if (Object.keys(state).length > 0) timingConfig.state = state
     const proxyCodes = timingProxyIndexCodes.value
       .split(',')
@@ -2229,11 +2291,11 @@ function buildConfig(): Record<string, unknown> {
         if (tier.mode === 'hold') {
           item.hold = true
         } else if (tier.mode === 'delta') {
-          item.exposure_delta = Math.round(tier.delta) / 100
-          if (tier.min_exposure !== 0) item.min_exposure = Math.round(tier.min_exposure) / 100
-          if (tier.max_exposure !== 100) item.max_exposure = Math.round(tier.max_exposure) / 100
+          item.exposure_delta = fromPct(tier.delta)
+          if (tier.min_exposure !== 0) item.min_exposure = fromPct(tier.min_exposure)
+          if (tier.max_exposure !== 100) item.max_exposure = fromPct(tier.max_exposure)
         } else {
-          item.exposure = Math.round(tier.exposure) / 100
+          item.exposure = fromPct(tier.exposure)
         }
         if (tier.label.trim()) item.label = tier.label.trim()
         if (timingCombine.value === 'weighted') {
@@ -2246,12 +2308,12 @@ function buildConfig(): Record<string, unknown> {
         }
         return item
       })
-      if (hasDynamicTier.value) timingConfig.tier_base_exposure = Math.round(timingTierBase.value) / 100
+      if (hasDynamicTier.value) timingConfig.tier_base_exposure = fromPct(timingTierBase.value)
     }
     if (timingCaps.value.length > 0) {
       timingConfig.exposure_caps = timingCaps.value.map(cap => {
         const item: Record<string, unknown> = {
-          max_exposure: Math.round(cap.max_exposure) / 100,
+          max_exposure: fromPct(cap.max_exposure),
           logic: cap.group.logic,
           rules: serializeTimingRules(cap.group.rules),
         }
@@ -2289,9 +2351,8 @@ function buildConfig(): Record<string, unknown> {
   }
 
   // 排名
-  const rank: Record<string, unknown> = {
-    order: rankOrder.value,
-  }
+  const rank: Record<string, unknown> = {}
+  if (!(rankOrderOmitted.value && rankOrder.value === 'desc')) rank.order = rankOrder.value
   if (rankTopN.value !== '') rank.top_n = parseInt(rankTopN.value, 10)
   if (rankBottomN.value !== '') rank.bottom_n = parseInt(rankBottomN.value, 10)
   // 子排名因子仅用于结果展示，不参与排序
@@ -2302,12 +2363,24 @@ function buildConfig(): Record<string, unknown> {
 
   // 组合
   const portfolio: Record<string, unknown> = { method: portfolioMethod.value }
-  portfolio.timing_exposure = {
-    offensive: exposureOffensive.value / 100,
-    neutral: exposureNeutral.value / 100,
-    defensive: exposureDefensive.value / 100,
+  const regimes = Object.keys(exposureRefs) as ExposureRegime[]
+  if (timingExposureMode.value === 'absent') {
+    // 原配置未声明且仍等于引擎默认表：保持省略（语义相同，配置哈希不变）
+    const changed = regimes.some(r => exposureRefs[r].value !== ENGINE_DEFAULT_TIMING_EXPOSURE[r])
+    if (changed) {
+      portfolio.timing_exposure = Object.fromEntries(regimes.map(r => [r, fromPct(exposureRefs[r].value)]))
+    }
+  } else {
+    // 继承 default_exposure 的 regime 不写出，保持引擎回退口径
+    const te: Record<string, number> = {}
+    for (const r of regimes) {
+      if (!exposureInherited.value[r]) te[r] = fromPct(exposureRefs[r].value)
+    }
+    if (Object.keys(te).length > 0) portfolio.timing_exposure = te
   }
-  if (portfolioDefaultExposure.value !== 50) portfolio.default_exposure = portfolioDefaultExposure.value / 100
+  if (portfolioDefaultExposure.value !== 50 || defaultExposureDeclared.value) {
+    portfolio.default_exposure = fromPct(portfolioDefaultExposure.value)
+  }
   if (portfolioMethod.value === 'inverse_vol' && portfolioVolFactor.value) {
     portfolio.vol_factor = portfolioVolFactor.value
   }
@@ -2319,9 +2392,9 @@ function buildConfig(): Record<string, unknown> {
   // 风控
   if (riskEnabled.value) {
     config.risk = {
-      max_asset_weight: riskMaxAssetWeight.value / 100,
-      max_portfolio_exposure: riskMaxPortfolioExposure.value / 100,
-      min_cash_ratio: riskMinCashRatio.value / 100,
+      max_asset_weight: fromPct(riskMaxAssetWeight.value),
+      max_portfolio_exposure: fromPct(riskMaxPortfolioExposure.value),
+      min_cash_ratio: fromPct(riskMinCashRatio.value),
     }
     const risk = config.risk as Record<string, unknown>
     if (volTargetEnabled.value) {
@@ -2553,6 +2626,7 @@ watch(() => props.modelValue, () => {
   gap: 4px;
 }
 .validation-item { font-size: 12px; color: #f87171; }
+.inherit-tag { font-size: 11px; color: var(--text-muted); border: 1px dashed var(--border); border-radius: 4px; padding: 0 4px; }
 
 /* 模块卡片 */
 .module-card {
@@ -2797,7 +2871,7 @@ watch(() => props.modelValue, () => {
   max-height: 200px;
   overflow-y: auto;
 }
-.index-code { font-family: monospace; font-size: 12px; color: var(--accent); min-width: 52px; }
+.index-code { font-family: var(--font-mono); font-size: 12px; color: var(--accent); min-width: 52px; }
 .index-name { font-size: 12px; color: var(--text-muted); }
 
 .index-summary {
@@ -2806,7 +2880,7 @@ watch(() => props.modelValue, () => {
   padding: 4px 0;
 }
 .index-summary.empty { font-style: italic; }
-.index-codes { font-family: monospace; color: var(--accent); }
+.index-codes { font-family: var(--font-mono); color: var(--accent); }
 
 /* 组合模块未启用警告 */
 .portfolio-warn {

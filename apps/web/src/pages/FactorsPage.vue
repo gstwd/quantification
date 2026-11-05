@@ -5,6 +5,7 @@
     </div>
 
     <div v-if="loading" class="empty">加载中...</div>
+    <div v-else-if="loadError" class="load-error">{{ loadError }}</div>
     <div v-else-if="specs.length === 0" class="empty">暂无因子数据</div>
     <div v-else class="grid">
       <div
@@ -17,10 +18,13 @@
           <span class="factor-id">{{ spec.factor_id }}</span>
           <div class="card-actions">
           <span class="chip" :class="`chip-${spec.category ?? 'default'}`">
-              {{ CATEGORY_LABELS[spec.category ?? ''] ?? spec.category ?? '未分类' }}
+              {{ spec.category ? factorCategoryLabel(spec.category) : '未分类' }}
             </span>
-            <span class="chip chip-domain">
-              指数资产
+            <span
+              class="chip chip-domain"
+              :title="spec.value_shape === 'market' ? '每个交易日只有一个值（全市场共用），多用于择时' : '每个指数各有一个值，可用于评分 / 过滤 / 排名'"
+            >
+              {{ spec.value_shape === 'market' ? '市场级' : '指数级' }}
             </span>
             <span v-if="isTunable(spec)" class="chip chip-tunable">可调参</span>
             <button class="edit-btn" @click="startEdit(spec)">编辑</button>
@@ -56,7 +60,7 @@
           <label class="form-label">类别</label>
           <select v-model="editForm.category" class="form-input">
             <option value="">未分类</option>
-            <option v-for="(label, key) in CATEGORY_LABELS" :key="key" :value="key">{{ label }}</option>
+            <option v-for="(label, key) in FACTOR_CATEGORY_LABELS" :key="key" :value="key">{{ label }}</option>
           </select>
         </div>
         <div class="form-group">
@@ -78,6 +82,8 @@
 </template>
 
 <script setup lang="ts">
+import { getErrorMessage } from '../api/client'
+import { FACTOR_CATEGORY_LABELS, factorCategoryLabel } from '../utils/labels'
 /**
  * 因子中心页面。
  *
@@ -106,18 +112,8 @@ const editForm = reactive({
   is_active: true,
 })
 
-const CATEGORY_LABELS: Record<string, string> = {
-  volume: '量能',
-  momentum: '动量',
-  volatility: '波动率',
-  flow: '份额流',
-  valuation: '估值',
-  technical: '技术',
-  macro: '宏观',
-  price: '价格',
-  relative_strength: '相对强度',
-  breadth: '市场宽度',
-}
+/** 列表加载失败文案（与「暂无因子数据」区分） */
+const loadError = ref('')
 
 /** 模板是否可覆盖参数 */
 function isTunable(spec: FactorSpec): boolean {
@@ -130,6 +126,9 @@ function parameterSummary(spec: FactorSpec): string {
     .map(([key, param]) => {
       if (param.type === 'choice') {
         return `${key} ${(param.choices ?? []).join(' / ')}，默认 ${param.default}`
+      }
+      if (param.type === 'text') {
+        return `${key} 表达式文本，默认 ${param.default}`
       }
       const range =
         param.minimum != null && param.maximum != null
@@ -175,8 +174,8 @@ async function saveEdit() {
       specs.value[idx] = updated
     }
     cancelEdit()
-  } catch {
-    editError.value = '保存失败，请稍后重试'
+  } catch (e) {
+    editError.value = getErrorMessage(e, '保存失败，请稍后重试')
   } finally {
     saving.value = false
   }
@@ -184,10 +183,12 @@ async function saveEdit() {
 
 onMounted(async () => {
   loading.value = true
+  loadError.value = ''
   try {
     specs.value = await fetchFactorSpecs()
-  } catch {
+  } catch (e) {
     specs.value = []
+    loadError.value = `因子列表加载失败：${getErrorMessage(e, '网络错误')}`
   } finally {
     loading.value = false
   }
@@ -202,7 +203,8 @@ onMounted(async () => {
 
 .empty { padding: 60px; text-align: center; color: var(--text-muted); }
 
-.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+.load-error { padding: 14px 16px; border-radius: var(--radius-sm); background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: var(--danger); font-size: 13px; }
 
 .factor-card {
   background: var(--surface);
@@ -217,9 +219,9 @@ onMounted(async () => {
 .factor-card:hover { border-color: var(--accent); }
 .factor-card.inactive { opacity: 0.55; }
 
-.card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .factor-id {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--accent);
   background: rgba(59, 130, 246, 0.1);
@@ -227,14 +229,14 @@ onMounted(async () => {
   border-radius: 20px;
 }
 
-.card-actions { display: flex; align-items: center; gap: 8px; }
+.card-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .chip { font-size: 11px; padding: 2px 8px; border-radius: 20px; font-weight: 500; white-space: nowrap; }
 .chip-tunable  { background: rgba(16, 185, 129, 0.15); color: #34d399; }
 .factor-params {
   font-size: 11px;
   color: var(--text-muted);
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .chip-volume    { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
 .chip-momentum  { background: rgba(34, 197, 94, 0.12);  color: #4ade80; }
@@ -260,7 +262,7 @@ onMounted(async () => {
 
 .card-footer { display: flex; align-items: center; gap: 12px; margin-top: auto; }
 .version  { font-size: 11px; color: var(--text-muted); }
-.required { font-size: 11px; color: var(--text-muted); font-family: monospace; }
+.required { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
 
 .status-tag {
   font-size: 10px;

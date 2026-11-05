@@ -459,6 +459,10 @@ class BacktestSummary(BaseModel):
         queue_position: 回测 lane 内的排队位置（0 表示下一个执行）。
         job_priority: 队列优先级。
         batch_id: 批次标识（如稳健性批次 ID）。
+        execution_model: 执行模型（取自 params._execution_model，缺失按系统缺省
+            t_plus_1_open 解释）；不同执行模型的结果不可直接比较。
+        accounting_model: 记账口径（取自 params._accounting_model，缺失按历史
+            constant_mix_v0 解释）；不同记账口径的结果不可直接比较。
     """
 
     backtest_id: str
@@ -466,6 +470,8 @@ class BacktestSummary(BaseModel):
     start_date: date
     end_date: date
     status: str
+    execution_model: str = DEFAULT_EXECUTION_MODEL
+    accounting_model: str = "constant_mix_v0"
     metrics: BacktestMetrics | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None = None
