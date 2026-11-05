@@ -1,4 +1,4 @@
-"""行业数据管理（P03）只读端点边界测试。"""
+"""行业数据管理只读端点边界测试。"""
 
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 """调仓模块（兼容转发层）。
 
-实现已下沉到 domain/strategies/rebalance.py（纯领域逻辑），
-本模块保留原导入路径，避免破坏引擎与外部调用方的 import。
+实现在 domain/strategies/rebalance.py（纯领域逻辑），
+本模块只做转发，供引擎与外部调用方按该路径导入。
 """
 
 from __future__ import annotations

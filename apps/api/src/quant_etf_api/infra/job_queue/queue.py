@@ -24,7 +24,7 @@ from quant_etf_api.infra.time import utcnow_aware
 
 logger = logging.getLogger(__name__)
 
-# lane 名称：回测 lane 与通用 lane 各自持有独立 worker 配额（B1/B6）。
+# lane 名称：回测 lane 与通用 lane 各自持有独立 worker 配额。
 # 回测是 CPU + 数据库混合型任务，实测单进程内并发 4 条比串行慢约 20 倍；
 # 把它隔离出来既能约束回测的数据库并发预算，也不会让长批次占满通用 worker
 # 而拖住数据摄取与因子计算。
@@ -52,7 +52,7 @@ def backtest_job_key(backtest_id: str) -> str:
     """回测任务的统一去重键。
 
     除幂等去重外，回测详情的排队位置/等待耗时也依赖该键反查
-    background_job 记录（B3），因此所有入队点必须使用同一命名。
+    background_job 记录，因此所有入队点必须使用同一命名。
 
     Args:
         backtest_id: 回测标识。
@@ -69,7 +69,7 @@ class JobQueue:
     所有后台任务通过 enqueue 写入 background_job 表，由按 lane 划分的
     worker 线程以 FOR UPDATE SKIP LOCKED 认领执行。
     支持按 job_key 幂等去重、按 max_attempts 重试、按 priority 抢跑，
-    以及批次级取消/暂停（B2）与心跳超时回收（B7）。
+    以及批次级取消/暂停与心跳超时回收。
     """
 
     def __init__(
@@ -269,7 +269,7 @@ class JobQueue:
             return 0
         job_types = BACKTEST_LANE_JOB_TYPES if lane_for(job.job_type) == LANE_BACKTEST else None
         # 传 job_id 兜底：批量入队时 created_at 可能相同，只有带上同一兜底次序键，
-        # 队列位置才与 worker 的实际认领次序一致（B3）
+        # 队列位置才与 worker 的实际认领次序一致
         return self._repo.count_pending_ahead(
             job.priority, job.created_at, job_types, job.job_id
         )
@@ -336,7 +336,7 @@ class JobQueue:
     # ── 可观测性 ─────────────────────────────────────────────────────────
 
     def stats(self, window_hours: float = 1.0) -> dict[str, Any]:
-        """汇总队列积压、吞吐与运行中任务（B3）。
+        """汇总队列积压、吞吐与运行中任务。
 
         Args:
             window_hours: 吞吐统计窗口（小时）。
@@ -439,7 +439,7 @@ class JobQueue:
 
         心跳超时说明执行进程已死；即使心跳仍在更新，只要超过 max_runtime
         也判定为异常长任务并回收，避免单条任务永久占用 worker 并让整批
-        稳健性回测无法收口（B7）。
+        稳健性回测无法收口。
 
         Returns:
             本轮回收的任务数量。
@@ -511,7 +511,7 @@ class JobQueue:
             self._wake_event.clear()
 
     def _zombie_scan_loop(self) -> None:
-        """僵尸任务扫描线程：周期性回收异常任务（B7）。"""
+        """僵尸任务扫描线程：周期性回收异常任务。"""
         while not self._stop_event.wait(self._zombie_scan_interval):
             try:
                 count = self.scan_zombies()

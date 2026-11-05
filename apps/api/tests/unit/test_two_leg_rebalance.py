@@ -1,10 +1,10 @@
 """双腿调仓（选股腿 / 风险腿）与仓位缩放单元测试。
 
 覆盖：
-- ``compose_two_leg_positions`` 的合成口径：两腿同日 = 改造前的"新成分 + 择时仓位"；
+- ``compose_two_leg_positions`` 的合成口径：两腿同日 = "新成分 + 择时仓位"；
   仅选股腿 = 只换成分、维持当前总仓位；仅风险腿 = 等比缩放现有成分；皆否 = 维持持仓；
 - ``scale_to_exposure`` 的守恒性与和差校正（不越过目标仓位）；
-- 回测主循环层面的双腿调度：同频两腿逐日等价于改造前的单腿行为；风险腿日照常缩放
+- 回测主循环层面的双腿调度：同频两腿逐日等价于单腿口径；风险腿日照常缩放
   并计入换手，选股腿日只替换成分。
 """
 
@@ -133,7 +133,7 @@ class TestComposeTwoLegPositions:
     """双腿合成的四条分支。"""
 
     def test_same_day_uses_engine_target(self) -> None:
-        '''两腿同日：采用引擎的择时目标仓位（等价改造前的重建）。'''
+        '''两腿同日：采用引擎的择时目标仓位（按新成分重建）。'''
         positions = compose_two_leg_positions(
             previous={"old": 0.6},
             selection_target={"a": 0.4, "b": 0.4},
@@ -321,7 +321,7 @@ def _config(rebalance: RebalanceConfig | None) -> StrategyConfig:
 
 
 class TestComposeTwoLegFixes:
-    """双腿单独到期时的择时目标仓位与风控上限（审查问题 2、3 的回归）。"""
+    """双腿单独到期时的择时目标仓位与风控上限。"""
 
     def test_risk_only_ignores_empty_selection(self) -> None:
         """仅风险腿到期且当日无入选资产：按择时目标缩放现有持仓，不清仓。"""
@@ -408,7 +408,7 @@ class TestLoopLegs:
         )
 
     def test_identical_legs_match_legacy_daily_rebuild(self) -> None:
-        '''两腿同频（每日）时，每日按"新成分 + 择时仓位"重建，等价改造前行为。'''
+        '''两腿同频（每日）时，每日按"新成分 + 择时仓位"重建，等价于单腿口径。'''
         # 引擎输出 = 择时 regime 对应的目标仓位（equal_weight 下每腿 = exposure / n）
         exposures = [0.8, 0.5, 0.2]
         engine_positions = [{"000300": exposure} for exposure in exposures]
@@ -462,7 +462,7 @@ class TestLoopLegs:
         assert rows[2].positions == {"a": 0.2, "b": 0.2}
 
     def test_identical_legs_follow_engine_components_every_day(self) -> None:
-        """两腿同频（每日）时成分每日随引擎更新（等价改造前行为）。"""
+        """两腿同频（每日）时成分每日随引擎更新（等价于单腿口径）。"""
         config = _config(RebalanceConfig())  # 默认两腿每日
         # 引擎输出本身已按择时目标仓位归一（总暴露 = 目标仓位）；第 3 日沿用第 2 日
         engine_positions = [{"a": 0.8}, {"b": 0.5}, {"b": 0.5}]

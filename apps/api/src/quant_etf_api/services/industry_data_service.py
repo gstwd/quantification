@@ -107,7 +107,7 @@ class IndustryDataService:
     ) -> dict[str, Any]:
         """增量更新行业指数日线（从库内最新日期回带缓冲窗口补到最新）。
 
-        申万上游接口不支持按日期增量下载（P09），当前仍为全量下载后本地
+        申万上游接口不支持按日期增量下载，当前仍为全量下载后本地
         裁剪；以拉取窗口前最近收盘作为 prev_close_override，保证窗口首行
         的 prev_close/change_pct 派生正确。逐行业失败进入 errors 返回给
         调用方（不再仅记日志）。

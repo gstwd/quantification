@@ -74,7 +74,7 @@ export const useBacktestStore = defineStore('backtests', {
       if (idx !== -1) this.items[idx] = detail
       return detail
     },
-    /** 删除回测记录（C5）；存在 JSONB 引用时需 force=true */
+    /** 删除回测记录；存在 JSONB 引用时需 force=true */
     async remove(backtestId: string, force = false) {
       return deleteBacktest(backtestId, force)
     },

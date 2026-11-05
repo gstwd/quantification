@@ -131,7 +131,7 @@ class TestCloseModelHandComputed:
         assert report.period_expected_pct == pytest.approx(0.0, abs=1e-3)
 
     def test_free_daily_rebalance_is_flagged(self) -> None:
-        """旧口径：非调仓日被免费调回目标权重——持仓不连续却未记换手。"""
+        """错误口径：非调仓日被免费调回目标权重——持仓不连续却未记换手。"""
         rows = self._rows({"a": 0.5, "b": 0.5}, 5.0)
         report = reconcile_daily(
             rows, [D0, D1, D2, D3], self._bars, execution_model="t_plus_1_close"
@@ -167,7 +167,7 @@ class TestOpenModelHandComputed:
     }
 
     def _rows(self, switch_ret: float) -> list[SimpleNamespace]:
-        """D0：现金 → a，只有日内段 105/102；D1：a → b，隔夜 104/105 复利日内 103/101。"""
+        """现金 → a，只有日内段 105/102；D1：a → b，隔夜 104/105 复利日内 103/101。"""
         return _with_accumulator(
             [
                 _row(D0, 2.9412, {"a": 1.0}, turnover=0.5),
@@ -183,7 +183,7 @@ class TestOpenModelHandComputed:
         assert report.ok, [i.to_dict() for i in report.issues]
 
     def test_legs_added_instead_of_compounded_is_flagged(self) -> None:
-        """旧口径两段直接相加：−0.9524% + 1.9802% = 1.0278%，差 0.019 个百分点。"""
+        """错误口径（两段直接相加）：−0.9524% + 1.9802% = 1.0278%，差 0.019 个百分点。"""
         report = reconcile_daily(
             self._rows(1.0278), [D0, D1, D2], self._bars, execution_model="t_plus_1_open"
         )
@@ -216,7 +216,7 @@ class TestForwardFill:
         assert report.ok, [i.to_dict() for i in report.issues]
 
     def test_lost_gap_move_is_flagged(self) -> None:
-        """缺口后的涨跌被永久丢失（旧口径）会报收益差异。"""
+        """缺口后的涨跌被永久丢失（错误口径）会报收益差异。"""
         rows = _with_accumulator(
             [_row(D0, 0.0, {"a": 1.0}, turnover=0.5), _row(D1, 0.0, {"a": 1.0})]
         )

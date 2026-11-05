@@ -68,7 +68,7 @@ from quant_etf_api.services.strategy_config_service import (
 
 logger = logging.getLogger(__name__)
 
-# 批次停滞判定阈值（小时）：running 且超过该时长没有更新，提示人工收口（F-4）
+# 批次停滞判定阈值（小时）：running 且超过该时长没有更新，提示人工收口
 STALE_AFTER_HOURS = 6
 
 # 不参与单旋钮扰动的配置键：版本号改动不产生行为差异
@@ -80,7 +80,7 @@ DEFAULT_MAX_KNOBS = 30
 # 子池扰动保留比例
 POOL_KEEP_RATIO = 0.8
 
-# 旋钮扰动优先级（D-2）：截断时按"业务上最可疑的拟合参数优先"排序，
+# 旋钮扰动优先级：截断时按"业务上最可疑的拟合参数优先"排序，
 # 而不是按路径字母序——字母序会把 timing.thresholds.* 排到最后截掉，
 # 而择时阈值恰恰是最容易被调到"刚好"的参数。
 _KNOB_PRIORITY: tuple[tuple[str, int], ...] = (
@@ -103,7 +103,7 @@ _KNOB_PRIORITY: tuple[tuple[str, int], ...] = (
     ("rebalance.", 11),
 )
 
-# 扫描预设（D-2）：quick 用于"轻量体检"（默认写进优化验收清单），
+# 扫描预设：quick 用于"轻量体检"（默认写进优化验收清单），
 # standard 与既有默认值一致
 SCAN_PRESETS: dict[str, dict[str, int]] = {
     "quick": {"windows": 2, "max_knobs": 8},
@@ -131,7 +131,7 @@ def resolve_scan_options(
     windows: int | None,
     max_knobs: int | None,
 ) -> tuple[int, int, dict[str, Any]]:
-    """解析扫描预设与显式参数，返回最终窗口数、旋钮上限与口径记录（D-2）。
+    """解析扫描预设与显式参数，返回最终窗口数、旋钮上限与口径记录。
 
     显式参数优先于预设；都未提供时等价于 ``standard``。
 
@@ -394,9 +394,9 @@ class RobustnessService:
             len(window_list),
         )
 
-        # 阶段一：只创建回测行并落库（F-5）。
-        # 同步模式下旧实现把整批回测放在同一个事务里，批次行要到全部跑完
-        # 才 commit，前端/CLI 在长达一小时的执行期里既看不到批次也无法取消。
+        # 阶段一：只创建回测行并落库。
+        # 批次行先单独提交：若整批回测放在同一个事务里，批次行要到全部跑完才可见，
+        # 前端 / CLI 在长时间的执行期里既看不到批次也无法取消。
         pending: list[str] = []
         for variant in variants:
             for window in window_list:
@@ -469,7 +469,7 @@ class RobustnessService:
                 expected += 1
                 detail = self._backtest_repo.find_by_id(backtest_id)
                 if detail is None:
-                    # 回测已被删除（C5）：既不是 pending 也不能算 completed，
+                    # 回测已被删除：既不是 pending 也不能算 completed，
                     # 否则批次会永远停在 running（"等待一个不存在的结果"）
                     missing += 1
                     missing_windows.append(f"{variant['label']}/{window_label}:回测已删除")
@@ -480,7 +480,7 @@ class RobustnessService:
                 else:
                     completed += 1
         # 缺失窗口（回测行已不存在）与失败窗口分开报：前者是"证据被删除"，
-        # 后者是"跑过了但没跑成"，混在一起会让人以为是执行问题（F-4）
+        # 后者是"跑过了但没跑成"，混在一起会让人以为是执行问题
         if (failed or missing_windows) and not allow_partial:
             row.status = "failed"
             row.error_message = f"部分回测失败或缺失：{', '.join((failed + missing_windows)[:5])}"
@@ -544,7 +544,7 @@ class RobustnessService:
         self._db.commit()
         return {"robustness_id": robustness_id, "status": row.status, "summary": summary}
 
-    # ── 批次取消 / 暂停（B2） ─────────────────────────────────────────────
+    # ── 批次取消 / 暂停 ─────────────────────────────────────────────
 
     def cancel(self, robustness_id: str) -> dict[str, Any]:
         """取消整批稳健性回测：未开始的直接取消，运行中的协作退出。
@@ -627,7 +627,7 @@ class RobustnessService:
         return {"robustness_id": robustness_id, "resumed_jobs": resumed}
 
     def abandon(self, robustness_id: str, reason: str | None = None) -> dict[str, Any]:
-        """作废批次：把长期挂着 running 的批次显式收口（F-4）。
+        """作废批次：把长期挂着 running 的批次显式收口。
 
         适用场景：回测记录被删除、服务重启后遗留、批次已无继续执行的意义。
         作废只改批次状态与原因，**不删除任何证据**（变体策略与回测行保留，
@@ -716,7 +716,7 @@ class RobustnessService:
 
         # CSCV 需要对称切分：分块数必须为不小于 2 的偶数，否则跳过 PBO。
         # 分块太少（< MIN_PBO_BLOCKS）时 compute_pbo 会返回 pbo=None + reason，
-        # 而不是把"恒为 0"伪装成"没有过拟合"（F-14）
+        # 而不是把"恒为 0"伪装成"没有过拟合"
         n_blocks = len(window_labels)
         pbo_reason: str | None = None
         if n_blocks < 2:
@@ -1028,7 +1028,7 @@ class RobustnessService:
                     frequency=baseline.frequency,
                     config_json=variant_config,
                     status="draft",
-                    # D-4：变体带来源批次元数据，支持整批精确清理
+                    # 变体带来源批次元数据，支持整批精确清理
                     # （strategy prune-variants --batch <id>）
                     is_variant=True,
                     source_batch_id=robustness_id,
@@ -1054,7 +1054,7 @@ class RobustnessService:
     ) -> str | None:
         """只为单个变体窗口创建回测行（不执行）。
 
-        创建与执行分开是为了让批次在执行期就可见（F-5）：
+        创建与执行分开是为了让批次在执行期就可见：
         先把全部回测行落库，再进入执行阶段。
 
         Args:
@@ -1105,7 +1105,7 @@ class RobustnessService:
         )
 
     def _run_backtests_parallel(self, backtest_ids: list[str], workers: int) -> None:
-        """本地多进程并行执行多条回测（F-13）：只用 CLI 子进程 + 数据库。
+        """本地多进程并行执行多条回测：只用 CLI 子进程 + 数据库。
 
         回测是 CPU + 数据库混合任务，单进程内多线程受 GIL 限制
         （B-1 已实测线程并发反而更慢），因此用进程级并发。
@@ -1145,7 +1145,7 @@ class RobustnessService:
     def _summarize(self, row: RobustnessRunModel, variants: list[dict[str, Any]]) -> dict[str, Any]:
         """按验证类型汇总变体结果（邻域稳定度 / 边际贡献 / 池扰动分布）。
 
-        **只在共同窗口集上比较**（F-1）：只有"所有变体都成功"的窗口才进入
+        **只在共同窗口集上比较**：只有"所有变体都成功"的窗口才进入
         均值，否则基线（可能少算几个窗口）与变体的均值不在同一时间样本上，
         直接相减会得到反向结论（实测池扰动结论被整体反转）。
 
@@ -1383,12 +1383,12 @@ class RobustnessService:
 
 
 def _is_stale(row: RobustnessRunModel) -> bool:
-    """判断批次是否疑似停滞（F-4）。
+    """判断批次是否疑似停滞。
 
     ``running`` 且超过 :data:`STALE_AFTER_HOURS` 没有更新，说明没有人/进程
-    在推进它（历史上出现过两种成因：回测被删除、进程重启遗留）。
+    在推进它（常见成因：回测被删除、进程重启遗留）。
     时间戳可能同时存在 aware（timestamptz）与 naive（历史 timestamp）两种
-    形态，这里统一按 UTC 处理，避免时区混用导致的判断错误（B5）。
+    形态，这里统一按 UTC 处理，避免时区混用导致的判断错误。
 
     Args:
         row: 批次 ORM 行。
@@ -1420,7 +1420,7 @@ def build_knob_variants(
 
     截断顺序按**业务重要性**（``_KNOB_PRIORITY``：因子模板参数 → 择时阈值 →
     过滤阈值 → 评分权重 → 风险/仓位 → 调仓），而非路径字母序；``knobs`` 显式给出
-    "关键旋钮清单"时只扫这些路径（D-2）。
+    "关键旋钮清单"时只扫这些路径。
 
     Args:
         config: 基线配置 JSON。

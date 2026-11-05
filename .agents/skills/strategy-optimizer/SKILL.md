@@ -9,7 +9,7 @@ description: >
 
 # 策略优化器
 
-> **当前契约优先**：先读取根目录 `AGENTS.md`，并以 CLI `--help` 为准。本技能中的历史并行参数、性能数字和固定因子 ID 不构成接口承诺；不得启动自动交易、使用验证期反向调参，或绕过策略生命周期的人工确认。
+> 先读根目录 `AGENTS.md`，命令参数以 CLI `--help` 为准；本技能中的并行度与耗时数字只作参考。不得启动自动交易、用验证期反向调参，或绕过策略生命周期的人工确认。
 
 使用 `quant_etf_api.cli` 的 strategy/backtest/optimization 命令，对策略执行"基线 → 候选 → 滚动样本外验证 → 报告 → 收尾"的自动优化闭环。系统不内置参数搜索：每一轮由你提出一个有明确假设的改动，用回测与滚动验证检验，再决定 accept/reject 或进入下一轮。
 
@@ -31,13 +31,11 @@ description: >
    | `optimization evaluate` | `--workers N` | 2+2K 条回测 |
    | `backtest batch` | `--workers N` | 任意条已落库回测 |
 
-   `--workers` 语义：`1`=串行；`N`=并发 N 条；`0`=按 CPU 与内存自动推导。
-   未显式给定时会读环境变量 `QUANT_ETF_CLI_WORKERS`。
-   实测参考（本机 20 核 / 远端数据库）：`robustness scan --preset quick`（18 条回测）
-   串行 ≈ 32 分钟、`--workers 6` ≈ 15 分钟；`research batch` 11 变体 × 5 窗口
-   （55 段回测）≈ 15 分钟。**并发不是越大越好**：每个子进程都要各自加载行情与因子
-   缓存（数百 MB），并发过高会先撞内存与远端数据库连接预算；6~8 是常见甜点区，
-   想知道本机最优值就固定同一批任务跑 `--workers 4 / 8 / 12` 比较墙钟时间。
+   `--workers` 语义：`1`=串行；`N`=并发 N 条；`0`=先读环境变量 `QUANT_ETF_CLI_WORKERS`，没有再按
+   CPU 与内存自动推导（上限 8）。`robustness scan|ablate|pool` 与 `optimization evaluate` 不写时缺省 `1`
+   （串行）；`backtest batch` 不写时等同 `0`。
+   **并发不是越大越好**：每个子进程各自加载行情与因子缓存（数百 MB），并发过高会先撞内存与远端数据库
+   连接预算；6~8 是常见甜点区，想知道本机最优值就固定同一批任务比较不同 `--workers` 的墙钟时间。
 3. **长任务与输出**。并行池会把子进程输出直接打到当前终端（无管道通信），
    所以**不要**把命令接进 `| Select-Object -Last N` 之类的管道——那会把输出缓冲到
    进程结束才显示，中途完全看不到进度。要盯进度就重定向到文件（`*> run.log`）再 tail；
@@ -52,7 +50,7 @@ description: >
    python -m quant_etf_api.cli research ledger --strategy <id>      # 进行中假设、近期结论、N 拆分
    python -m quant_etf_api.cli research hypothesis list --index <指数代码> --status rejected
    ```
-   已被否决的方向不要换个说法重试；要在旧结论上细化时用 `--parent <旧假设>` 登记子假设。
+   已被否决的方向不要换个说法重试；要在已有结论上细化时用 `--parent <父假设ID>` 登记子假设。
    确定本轮方向后**先登记再检验**，判定标准检验前写定、检验后不改：
    ```bash
    python -m quant_etf_api.cli research hypothesis add --strategy <id> --category timing \
@@ -92,7 +90,7 @@ description: >
 
    ```bash
    python -m quant_etf_api.cli research batch --strategy <基线> --variants variants.json \
-       --windows 5 --cost-bps 10 --execution-model t_plus_1_close --summary
+       --windows 5 --execution-model t_plus_1_close --summary
    ```
 
    变体文件里每个变体给完整 `config`，或只给 `patch`（改了哪几个参数就写哪几项）：
@@ -101,7 +99,7 @@ description: >
    {"variants": [
      {"label": "topn4", "patch": {"rank.top_n": 4}},
      {"label": "loose_drawdown", "patch": {"filters.rules[1].value": -30}},
-     {"label": "add_breadth", "patch": {"filters.rules[+]": {"factor": "breadth_ma20_pct", "op": "gt", "value": 30}}}
+     {"label": "add_breadth", "patch": {"filters.rules[+]": {"factor": "breadth_ma_pct", "op": "gt", "value": 30}}}
    ]}
    ```
 
@@ -115,15 +113,19 @@ description: >
    输出含逐窗口毛/净口径、多档成本、`vs_baseline`（Δ净年化/Δ净夏普/劣化窗口占比）与口径指纹。
    **`caliber.persisted=false` 的结果只能用来决定"值不值得走正式回测"，不能写进验收结论。**
    想看邻域/消融/池扰动的正式口径时，仍然走第 7 步的 `robustness`。
-   想引入新因子而非微调参数时，优先考虑：`sharpe_60d`（风险调整动量）、
-   `ma60d_deviation`（配 `trend_score` 做趋势强度）、`amount_ratio_20d`（成交额确认）、
-   `drawdown_current`（配 `drawdown_score`）、`pmi_momentum_3m` 与 `breadth_ma20_pct`
-   （市场级因子，放 timing / filters，勿放横截面评分）。
+   想引入新因子而非微调参数时，优先考虑模板（参数在 `factor_aliases` 声明，见
+   `.agents/skills/strategy-builder/references/factors.md`）：`sharpe`（风险调整动量）、
+   `ma_deviation`（配 `trend_score` 做趋势强度）、`amount_ratio`（成交额确认）、
+   `drawdown`（配 `drawdown_score`）、`pmi_momentum` 与 `breadth_ma_pct`
+   （后者是市场级因子，放 timing / filters，勿放横截面评分）。
+   派生因子（`expr`）进入 `research batch` 变体或 `optimization start` 候选前，必须先有
+   `research factor-ic` 或 `research buckets` 的诊断记录，否则命令直接拒绝。
 4. **写候选文件并校验**：完整 config_json 存入 `candidates/` 下的 JSON 文件，`strategy validate --file <path>` 通过后再用。**一轮只改一处、可解释的地方**（打分权重、过滤阈值、top_n、调仓频率、择时等），其余保持不变。
 5. **开会话**：
    `optimization start --strategy <基线> --candidate-file <path> --hypothesis-id <hid> --version <新版本> [--start 2016-01-01 --end 2025-12-31] --folds 4 [--execution-model ...]`
-   （`--hypothesis` 缺省取台账中的假设陈述）。
-   `--version` 必传：promote 时基线版本取该值，不传会沿用旧版本号导致版本不递增。
+   （`--hypothesis` 缺省取台账中的假设陈述；`--start/--end` 缺省覆盖整个研究期）。
+   `--version` 必传：promote 时基线版本取该值；不传时候选继承基线版本号，promote 后版本不变。
+   组合策略（`kind=composite`）不能开优化会话，对成员分别优化。
 6. **评估（并行）**：
    ```bash
    python -m quant_etf_api.cli optimization evaluate <opt_id> --folds 4 --workers 6 --log-dir .optlogs
@@ -138,13 +140,14 @@ description: >
      `--preset standard`）；也可 `--knobs a,b` / `--knobs-file knobs.json` 指定关键旋钮；
    - 消融：`robustness ablate --strategy <基线或候选> --sync --workers 6` 看因子边际贡献；
    - 池扰动：`robustness pool --strategy <基线或候选> --sync --workers 6 --samples 6`；
-   - 汇总与统计：`robustness collect <id>` → `robustness stats <id> [--n-trials N] [--cost-bps 10]`
+   - 汇总与统计：`robustness collect <id>` → `robustness stats <id> [--n-trials N] [--cost-bps <成本>]`
      （PBO / Deflated Sharpe；窗口数 <4 时 PBO 为 null，看 `pbo.reason`）。
    详见 [references/robustness.md](references/robustness.md)。
    **证据必须与本次会话同配置哈希、同执行口径**，否则第 6 项清单不通过（见下）。
-8. **出报告**：`optimization report <opt_id> --file <path>` 生成骨架，补写"分析结论"：假设是否成立、数据支持（含净口径与稳健性数字）、风险、下一步方向。
+8. **出报告与对账**：`optimization report <opt_id> --file <path>` 生成骨架，补写"分析结论"：假设是否成立、数据支持（含净口径与稳健性数字）、风险、下一步方向。准备 accept 前对候选的全区间落库回测跑 `backtest verify <回测ID>`（只读独立对账），逐日记账有差异时不能接受。
 9. **收尾**：对照验收清单（共 10 项，`finish` **默认强制**，只有 `--no-strict` 才跳过）——
-   - 通过 → `optimization finish <opt_id> --verdict accept --report-file <path> --promote`
+   - 通过 → `optimization finish <opt_id> --verdict accept --report-file <path>`；**promote 必须先得到用户明确同意**，
+     同意后再加 `--promote`（或另行执行）。基线处于 LIVE 时配置已冻结，不 promote，状态如何变更由用户决定。
    - 未通过 → `--verdict reject`（不 promote），会话保留作审计。
    - 确需在清单未全过时接受时用 `--no-strict --no-strict-reason "<理由>"`（理由必填，连同未通过项写入
      研究台账），并在报告的"分析结论"里写明哪一项没过、为什么不构成否决。
@@ -189,10 +192,8 @@ description: >
 - **防过拟合**：每轮只测一个假设；以滚动样本外（fold）聚合为准，不能只看全区间；`finish` 默认强制验收清单（`--no-strict` 才跳过）。
   **fold 一致性 ≠ 样本外**：候选是看过全区间结果后提出的，4 折只是同一研究期内的
   一致性检查；真正的样本外只有 2026-01-01 起的验证期，且一旦观察即被消费。
-- **研究期 / 验证期边界（硬约束）**：研究期固定为 2016-01-01 ~ 2025-12-31，
-  2026-01-01 起为验证期。优化属于研究行为，区间越过研究期末端会被**系统直接拒绝**，
-  `optimization start` 的默认 `--end` 即研究期末端。**禁止读验证期结果来调参**：
-  一旦看过，那段数据就不再是样本外。
+- **研究期 / 验证期边界（硬约束）**：规则见 `AGENTS.md`。优化属于研究行为，区间越过研究期末端
+  （2025-12-31）会被系统直接拒绝；**禁止读验证期结果来调参**，一旦看过，那段数据就不再是样本外。
 - **回测区间下限（用户约定）**：所有回测、对比与优化评估的 `--start` 一律取 2016-01-01，不使用 2016 年之前的数据；滚动分段的第一段即 2016-01-01 起。
 - **执行模型是口径，必须两侧一致**：`--execution-model t_plus_1_open|t_plus_1_close`
   （`backtest run` / `optimization start` / `robustness scan|ablate|pool` / `research batch` 均支持，
@@ -200,10 +201,9 @@ description: >
   会话与批次会把该值落库，`evaluate` / `finish` 一律复用会话值，
   探索（`research batch`）、验收（`backtest run`）与邻域证据（`robustness scan`）必须同口径，
   否则比较的是两种执行假设而不是两个配置。**切换执行模型会改变可交易资产域**：
-  缺历史开盘价的指数在 `t_plus_1_open` 下按 `EXECUTION_PRICE_MISSING` 被剔出候选池
-  （实测同一配置候选池中位 34/35 → 25/35）。
-- **净口径成本**：回测汇总为毛收益口径，验收必须同时看净口径指标
-  （成本默认取系统配置 `default_cost_bps`，`backtest run --cost-bps` 可覆盖）。
+  缺历史开盘价的指数在 `t_plus_1_open` 下按 `EXECUTION_PRICE_MISSING` 被剔出候选池，候选池可能明显变小。
+- **净口径成本**：回测汇总为毛收益口径，验收必须同时看净口径指标。成本缺省取 `default_cost_bps`（0.5bp，
+  按单边换手折算的往返成本），`backtest run --cost-bps` 可覆盖；详情另并列 0 / 0.5 / 5 / 10bp 成本阶梯。
   净收益 = 毛收益 − 单边换手 × 成本；换手越高，成本对结论的影响越大。
 - **验收清单默认阈值**（`finish` 默认强制 accept，共 10 项；`--no-strict` 可显式跳过，须给理由）：
   1. 验证窗平均夏普 ≥ 基线；
@@ -211,9 +211,8 @@ description: >
   3. 夏普胜出折数 ≥ 50%（只统计基线/候选两侧都有值的**配对折**）；
   4. 验证窗平均累计收益 ≥ 基线；
   5. **净成本口径**验证窗平均夏普 ≥ 基线；
-  6. **参数邻域**无方向反转且处于平台（需先跑 `robustness scan`，且批次的
-     `baseline_config_hash` 必须等于**本次会话的基线或候选配置哈希**、`execution_model`
-     与会话相同——promote 之后上一轮的旧批次、或另一执行口径下的批次都不再被复用；
+  6. **参数邻域**无方向反转且处于平台（需先跑 `robustness scan`；只接受 `baseline_config_hash` 等于
+     **本次会话的基线或候选配置哈希**、且 `execution_model` 与会话相同的批次，其他批次一律不算；
      未提供匹配证据直接判不通过）；
   7. **分段一致性**：剔除最好折后候选夏普仍不低于基线；
   8. **统计显著性**：候选相对基线的全区间逐日**超额**净收益（候选 − 基线，默认成本）的
@@ -241,12 +240,10 @@ description: >
   该研究线应收尾（关闭假设、换方向），而不是继续调参。`research ledger --strategy <id>`
   的 `budget` 块给出已用 / 剩余。
 - **改动要小且可解释**；候选明显更差时先 reject 换假设，不要在同一轮叠加多个改动。
-- **并行前提与上限**：并发度受 CPU、**内存**（每个子进程各自加载行情与因子缓存）与远端
-  数据库连接预算共同约束；默认自动推导上限 8，可用 `--workers` 或
-  `QUANT_ETF_CLI_WORKERS` 覆盖。别用 `ProcessPoolExecutor`-式的管道并行——受限环境下
+- **并行实现**：并发度见「硬约束」第 2 条。别用 `ProcessPoolExecutor`-式的管道并行——受限环境下
   会被拒绝；本平台的池实现走独立子进程、无管道通信。
 - 命令默认 JSON 输出。
-- 数据库在远程服务器；沙箱内连库失败（`Permission denied` / `WinError 10013`）时用 require_escalated 重跑同一命令。终端中文乱码只是控制台代码页问题，落库数据是 UTF-8。
+- 数据库在远程服务器；Codex 沙箱内连库失败（`Permission denied` / `WinError 10013`）时用 require_escalated 重跑同一命令。终端中文乱码只是控制台代码页问题，落库数据是 UTF-8。
 
 ## 参考
 

@@ -138,7 +138,7 @@ class TestSegmentsAndDrawdown:
 
 
 class TestCostLadder:
-    """多档成本并列（C3）。"""
+    """多档成本并列。"""
 
     def test_zero_bp_equals_gross(self) -> None:
         """0bp 档位等于毛口径。"""

@@ -6,7 +6,7 @@
 .venv/Scripts/python.exe -m quant_etf_api.cli <group> <command> ...
 ```
 
-新命令默认 JSON 输出（`--no-json` 转人类可读文本）。
+命令默认 JSON 输出（`--no-json` 转人类可读文本）；参数与缺省以各命令 `--help` 为准。
 
 > **只跑 CLI**：整条优化闭环只需要 CLI + 数据库，**不需要** uvicorn / `queue worker` /
 > 任何 HTTP 接口。需要并行时用 `--workers N`（本地多进程），不要用 `--async`
@@ -19,9 +19,9 @@
 
 | 取值 | 含义 |
 | --- | --- |
-| `1` | 串行（默认） |
+| `1` | 串行（`robustness scan\|ablate\|pool` 与 `optimization evaluate` 不写时的缺省） |
 | `N` | 并发 N 条回测 |
-| `0` | 按 CPU 与内存自动推导（上限 8，可用 `QUANT_ETF_CLI_WORKERS` 覆盖） |
+| `0` | 先读环境变量 `QUANT_ETF_CLI_WORKERS`，没有再按 CPU 与内存自动推导（上限 8）；`backtest batch` 不写时等同 `0` |
 
 实现是**独立 CLI 子进程池**：父进程派生 `cli backtest execute <id>` 子进程并等待，
 子进程各自连库写自己的回测行，父子之间**没有管道通信**（受限沙箱里管道会被拒绝，
@@ -33,9 +33,7 @@
 - **中断可续跑**：进度与结果都在数据库，重跑 `backtest batch --pending` 会跳过已完成项。
 
 并发度不是越大越好：每个子进程各自加载行情与因子缓存（数百 MB 量级），
-过高会先撞内存与远端数据库连接预算。实测（20 核 / 远端库）：
-`robustness scan --preset quick`（18 条回测）串行 ≈ 32 分钟、`--workers 6` ≈ 15 分钟。
-找本机甜点值就用同一批任务跑 `--workers 4 / 8 / 12` 比墙钟时间。
+过高会先撞内存与远端数据库连接预算；6~8 是常见甜点区，找本机最优值就用同一批任务比较不同 `--workers` 的墙钟时间。
 
 ## strategy
 
@@ -44,7 +42,7 @@
 | `strategy list` | 列出启用策略 |
 | `strategy show <id>` | 策略详情（含 config_json） |
 | `strategy validate --file <path>` | 校验配置（含因子 ID / transform 存在性） |
-| `strategy create --id <sid> --name <name> --file <path> [--draft] [--version] [--lineage <sid>]` | 创建策略；`--lineage` 归入已有策略所在研究线（缺省自成一条） |
+| `strategy create --id <sid> --name <name> --file <path> [--description] [--frequency] [--draft] [--version] [--lineage <sid>]` | 创建策略；`--lineage` 归入已有策略所在研究线（缺省自成一条）；派生策略必须归入原研究线 |
 | `strategy update <id> [--file] [--status active\|draft\|disabled] [--version] [--name] [--description] [--lineage <sid>]` | 更新策略；`--lineage` 改归研究线（仍有成员的研究线根、自身已有试验的成员拒绝改归） |
 | `strategy diff <a> <b>` | 两策略配置的 unified diff |
 | `strategy prune-variants --batch <批次> [--apply] [--force]` | 清理稳健性变体草稿策略；默认预演；变体仍被回测引用时跳过，`--force` 才连带删回测 |
@@ -54,17 +52,21 @@
 
 | 命令 | 说明 |
 | --- | --- |
-| `backtest run --strategy <id> [--start] [--end] [--universe all\|subset] [--index-codes a,b] [--benchmark 000300] [--benchmark-mix 000300:0.6,000905:0.2] [--no-benchmark] [--purpose research\|validation\|monitor] [--purpose-reason] [--cost-bps] [--execution-model t_plus_1_open\|t_plus_1_close] [--async] [--priority N]` | 创建并执行回测；默认同步；`purpose=research` 时 `--end` 缺省为研究期末端（2025-12-31），其他用途缺省为今天；`--start` 缺省为 end 往前 2 年且不早于 2016-01-01；**研究期内任意跨度（1 个月~10 年）都可单次执行，不存在跨度上限，也不再要求分段**；`--execution-model` 缺省 `t_plus_1_close`（T 日信号 T+1 收盘成交，研究与验收统一口径），`t_plus_1_open` 为 T 日信号 T+1 开盘成交 |
+| `backtest run --strategy <id> [--start] [--end] [--universe all\|subset] [--index-codes a,b] [--benchmark 000300] [--benchmark-mix 000300:0.6,000905:0.2] [--no-benchmark] [--purpose research\|validation\|monitor] [--purpose-reason] [--cost-bps] [--execution-model t_plus_1_open\|t_plus_1_close] [--async] [--priority N]` | 创建并执行回测；默认同步；`purpose=research` 时 `--end` 缺省为研究期末端（2025-12-31），其他用途缺省为今天；`--start` 缺省为 end 往前 2 年且不早于 2016-01-01；**研究期内任意跨度（1 个月~10 年）都可单次执行，不存在跨度上限**；`--execution-model` 缺省 `t_plus_1_close`（T 日信号 T+1 收盘成交，研究与验收统一口径），`t_plus_1_open` 为 T 日信号 T+1 开盘成交 |
 
 > **执行模型是口径，不是参数**：两种模型的逐日收益归属不同（收盘口径下信号日不持仓），
 > 指标不可互比；口径指纹见 `backtest show` 的 `stability.execution_model`。缺历史开盘价的指数
 > 在 `t_plus_1_open` 下会被剔出候选池（表现为 `EXECUTION_PRICE_MISSING` 警告与更小的候选池），
 > 因此切换执行模型会同时改变**可交易资产域**，不只是成交时点。
 > 研究与优化命令（`backtest run` / `research batch` / `research buckets` / `robustness` / `optimization start`）
-> 缺省 `t_plus_1_close`；API 与存量记录的系统级缺省仍是 `t_plus_1_open`。
+> 缺省 `t_plus_1_close`；API 与存量记录的系统级缺省是 `t_plus_1_open`。
+
+| 命令 | 说明 |
+| --- | --- |
 | `backtest status <id> [--wait] [--timeout 600]` | 状态与指标；`--wait` 轮询至终态（failed 退出码 1，超时 2） |
-| `backtest show <id> [--cost-bps N] [--cost-ladder 0,10,20,30,50]` | 详情（含 config_snapshot / config_hash / data_cutoff_date / warnings / 口径指纹 / 多档成本） |
-| `backtest list [--status] [--purpose] [--calendar-source] [--order-by] [--asc] [--limit]` | 回测列表过滤（状态/用途/日历来源/排序） |
+| `backtest show <id> [--cost-bps N] [--cost-ladder 0,5,10,20]` | 详情（含 config_snapshot / config_hash / data_cutoff_date / warnings / 口径指纹 / 多档成本）；不给 `--cost-ladder` 时用系统成本阶梯 0 / 0.5 / 5 / 10bp |
+| `backtest verify <id>` | 独立对账（只读）：按记账规格用原始行情复算逐日收益、换手、持仓连续性、累计收益、回撤、基准与汇总指标，有差异时退出码 1；输出 `hint` 说明差异来源的区分方法 |
+| `backtest list [--strategy] [--status] [--purpose] [--calendar-source] [--created-from] [--created-to] [--order-by] [--asc] [--limit]` | 回测列表过滤（策略/状态/用途/日历来源/创建时间/排序） |
 | `backtest cancel <id>` | 取消回测（未开始直接取消，运行中在安全检查点退出） |
 | `backtest execute <id> [--only-pending]` | 执行一条**已落库**回测（并行池的子进程入口）；`--only-pending` 时已是终态则跳过并返回 `executed=false` |
 | `backtest batch [--ids a,b] [--pending] [--strategy <id>] [--created-from] [--purpose] --workers N [--retries R] [--log-dir <dir>]` | **本地多进程批量执行**已落库回测（只用 CLI + 数据库）；`--ids` 与 `--pending` 二选一；失败条目按 `--retries` 重试；耗时/结果全在库里，中断后重跑 `--pending` 自动续跑 |
@@ -80,7 +82,7 @@
 | `optimization start --strategy <基线> --candidate-file <path> (--hypothesis "<假设>" \| --hypothesis-id <hid>) [--start] [--end] [--folds 4] [--candidate-id] [--version] [--execution-model]` | 建草稿候选 + 会话；给 `--hypothesis-id` 时先校验假设未关闭，并把会话挂到假设下（关联行，不重复计入 N）；候选 ID 默认 `<基线>__opt_<会话前8位>`；`--version` 建议必传（promote 用）；执行模型落库，后续 evaluate/finish 复用 |
 | `optimization evaluate <opt_id> [--folds] [--workers N] [--log-dir <dir>] [--async]` | 全区间 + 逐折回测（2+2K 条）；**默认串行，建议 `--workers 6`**：先创建全部回测行再交本地多进程池执行，中断后重跑同一条命令即可续跑（已 success 的不重复执行） |
 | `optimization report <opt_id> [--file <path>]` | 生成 Markdown 报告骨架 |
-| `optimization finish <opt_id> --verdict accept\|reject [--report-file] [--promote] [--no-strict --no-strict-reason "..."]` | 结束会话；accept+promote 把候选配置写回基线（strategy_id 不变、version 取候选版本）。**验收清单默认强制**，`--no-strict` 才跳过且必须给理由（写入研究台账） |
+| `optimization finish <opt_id> --verdict accept\|reject [--report-file] [--promote] [--strict] [--no-strict --no-strict-reason "..."]` | 结束会话；accept+promote 把候选配置写回基线（strategy_id 不变、version 取候选版本，版本历史追加进策略描述），promote 须得到用户明确同意，LIVE 基线配置冻结、不能 promote。**验收清单默认强制**，`--no-strict` 才跳过且必须给理由（写入研究台账） |
 | `optimization show <opt_id>` | 会话详情（含逐折指标、聚合与 `acceptance_checklist`——收尾前就能看到哪一项没过） |
 | `optimization list [--strategy] [--limit]` | 会话列表 |
 
@@ -99,14 +101,14 @@
 | `robustness cancel\|pause\|resume <id>` | 整批取消 / 暂停 / 恢复（运行中的任务在安全检查点退出） |
 | `robustness abandon <id> [--reason "..."]` | 作废批次（把长期 running 的批次显式收口，证据与试验台账保留） |
 | `robustness stats <id> [--n-trials] [--cost-bps] [--block 20] [--bootstrap 2000]` | CSCV-PBO / Deflated Sharpe / 块自助法置信区间；窗口数 <4 时 `pbo.value=null` + `reason` |
-| `research dsr-calibrate [--strategy <id>] [--sims 1000] [--power-sims 500] [--block 20] [--file 报告.md]` | 验收第 8 项门槛校准（只读、战役模式拒绝）：用已评估会话与稳健性批次的超额序列做零假设模拟，输出各门槛的假阳性率与功效；不改门槛 |
+| `research dsr-calibrate [--strategy <id>] [--sims 1000] [--power-sims 500] [--block 20] [--seed] [--file 报告.md]` | 验收第 8 项门槛校准（只读、战役模式拒绝）：用已评估会话与稳健性批次的超额序列做零假设模拟，输出各门槛的假阳性率与功效；不改门槛 |
 | `robustness show <id>` / `robustness list [--limit]` | 批次详情（含 `scan_params` 扫描口径与 `execution_model`）/ 列表（含 `is_stale` 停滞提示） |
 
 ## research（批量变体探索，不落库）
 
 | 命令 | 说明 |
 | --- | --- |
-| `research batch --strategy <id> --variants v.json [--windows 5] [--cost-bps 10] [--cost-ladder 0,10,20,30,50] [--no-baseline] [--summary] [--execution-model] [--timing-attribution] [--hypothesis-id <hid>]` | 同一批变体 × 窗口的离线评估（评估结果不落库，但**每次运行都自动记入研究台账**：非基线、非 `:timing_off` 对照的变体数计入 N，输出 `ledger` 块 / 摘要末行 `[ledger]`）：复用平台执行路径但**不落库**，按窗口共享行情与因子缓存（因此比逐条正式回测快一个量级，是探索阶段的默认工具）；`--summary` 输出「变体 × 指标」排名表（否则是完整 JSON，几十个变体会超输出上限）；`--timing-attribution` 为每个带择时的变体追加「关闭择时、总仓位校准到同一平均实际仓位」的 `:timing_off` 对照并输出择时贡献差值（只做归因时可省略 `--variants`）；带择时的变体聚合块含 `timing_stats` |
+| `research batch --strategy <id> --variants v.json [--windows 5] [--cost-bps <成本>] [--cost-ladder <档位>] [--no-baseline] [--summary] [--execution-model] [--timing-attribution] [--hypothesis-id <hid>]` | 同一批变体 × 窗口的离线评估（评估结果不落库，但**每次运行都自动记入研究台账**：非基线、非 `:timing_off` 对照的变体数计入 N，输出 `ledger` 块 / 摘要末行 `[ledger]`）：复用平台执行路径但**不落库**，按窗口共享行情与因子缓存（因此比逐条正式回测快一个量级，是探索阶段的默认工具）；`--summary` 输出「变体 × 指标」排名表（否则是完整 JSON，几十个变体会超输出上限）；`--timing-attribution` 为每个带择时的变体追加「关闭择时、总仓位校准到同一平均实际仓位」的 `:timing_off` 对照并输出择时贡献差值（只做归因时可省略 `--variants`）；带择时的变体聚合块含 `timing_stats` |
 
 变体文件格式：`{"variants": [{"label": "x", "patch": {"rank.top_n": 4}}, {"label": "y", "config": {...}}]}`。
 `patch` 的路径支持列表下标（`filters.rules[1].value`）与列表追加（`filters.rules[+]` 追加一条规则）；
@@ -140,17 +142,18 @@ optimization / robustness 的台账行只是关联，不重复计数。研究诊
 
 | 命令 | 说明 |
 | --- | --- |
-| `research campaign start --strategy <种子> --objective "..." [--index-codes] [--max-trials 30] [--max-hours 6] [--max-rounds 5] [--max-rejects 3] [--max-diagnostics 30] [--max-step-usd] [--model]` | 开启战役，记录研究线当前 N 作为起点；诊断命令按 `--max-diagnostics` 限次 |
-| `research campaign run <cid> [--max-steps N] [--workers 4] [--step-timeout-hours 3] [--recover]` | 驱动：每步启动一个全新的 `claude -p` 会话（`dontAsk` 权限、`--setting-sources user`，只放行平台 CLI、白名单路径读取与 `candidates/<cid>/` 写入），直到停止；超时 / 中断时结束进程树并把步骤判失败 |
+| `research campaign start --strategy <种子> --objective "..." [--index-codes] [--max-trials 30] [--max-hours 6] [--max-rounds 5] [--max-rejects 3] [--max-diagnostics 30] [--max-step-usd] [--model] [--by]` | 开启战役，记录研究线当前 N 作为起点；诊断命令按 `--max-diagnostics` 限次 |
+| `research campaign run <cid> [--max-steps N] [--workers 4] [--step-timeout-hours 3] [--claude-bin] [--recover]` | 驱动：每步启动一个全新的 `claude -p` 会话（`dontAsk` 权限、`--setting-sources user`，只放行平台 CLI、白名单路径读取与 `candidates/<cid>/` 写入），直到停止；超时 / 中断时结束进程树并把步骤判失败 |
 | `research campaign begin-step <cid> [--orchestrator-session]` / `finalize-step <cid> [--agent-session] [--error]` | 桌面编排模式（Claude Code 桌面会话作编排者，不需要 CLI 登录）：登记步骤并输出给新桌面会话的 `prompt` / 子会话结束后收口；步骤运行期间除编排会话外的 CLI 调用都进入战役模式 |
-| `research campaign next\|status\|report <cid>` / `list` / `stop <cid> --reason` | 预览任务卡 / 进度与花费 / 报告 / 列表 / 人工停止 |
+| `research campaign next\|status\|report <cid>` / `list [--status] [--limit]` / `stop <cid> --reason` | 预览任务卡 / 进度与花费 / 报告 / 列表 / 人工停止 |
 | `research campaign step-done <cid> [--outcome] --summary [--hypothesis-id] [--optimization-id]` | agent 回报本步（研究员：review_requested / rejected / blocked / no_idea） |
 | `research campaign review <cid> --optimization-id --verdict recommend_accept\|reject\|needs_more --reason` | 评审员结论；recommend_accept 后才允许严格模式 `finish --verdict accept` |
 
-战役模式（环境变量 `QUANT_CAMPAIGN_ID`）下 CLI 拒绝 promote、非严格接受、超预算放行、生命周期、
-验证期操作与研究线外的策略。角色手册见 `.claude/skills/research-campaign/`。
+战役模式下的命令拦截规则见 `AGENTS.md`「研究战役」；角色手册见 `.claude/skills/research-campaign/`。
 
-## research 诊断（只读、秒级，取代 candidates/ 手写 pandas 原型）
+## research 诊断（只读、秒级）
+
+做因子 / 信号的预测力诊断时用这些命令，不要在 `candidates/` 里手写 pandas 原型（收益口径、数据清洗与研究期边界都和平台不一致）。
 
 全部命令只读：不写库、不入队、不建策略或回测。`--start/--end` 缺省为研究期全段
 （2016-01-01 ~ 2025-12-31），与 `purpose=research` 回测同一边界——**越过研究期末端直接拒绝**；
@@ -163,7 +166,7 @@ optimization / robustness 的台账行只是关联，不重复计数。研究诊
 | `research signal-lab timing --index <code> --signal <key> [--strategy <id>] [--params JSON] [--start] [--end] [--summary]` | 单指数择时信号评估：IC fwd20 / past20（past20 高说明信号滞后）、翻转频率、持有占比、持仓 vs 基准收益、分年、regime 占比；`existing_composite --strategy <id>` 读取该策略 timing 块走**引擎**逐日计算（与回测同一实现，不接受 `--params`），持仓收益在 `--index` 上评估 |
 | `research signal-lab market [--signal gsisi] [--proxy 000300] [--params JSON] [...]` | 市场级信号（GSISI）在代理指数上的评估，指标同上 |
 | `research signal-lab cross-section --factor <key> [--horizon 5] [--index-codes a,b] [--params JSON] [...]` | 研报截面因子的周频 Rank IC、ICIR、分年 IC、三分组收益、与现有评分因子的相关性 |
-| `research factor-ic (--factor <模板ID> [--params JSON] \| --strategy <id> --ref <别名>) [--forward-days 1] [--min-n 20] [...]` | 因子模板截面 Rank IC（与因子中心 `GET /factors/{id}/ic` 同一实现）：`summary`（ic_mean / ic_ir / t_stat 已按重叠折算 / effective_n / 横截面规模）、`yearly` 分年 IC、`series`（`--summary` 时省略）；观测截止日自动收缩到 `observation_end`，保证前瞻窗口不越过研究期末端 |
+| `research factor-ic (--factor <模板ID> [--params JSON] \| --strategy <id> --ref <别名>) [--aliases JSON] [--forward-days 1] [--min-n 20] [--start] [--end] [--summary]` | 因子模板截面 Rank IC（与因子中心 `GET /factors/{id}/ic` 同一实现）：`summary`（ic_mean / ic_ir / t_stat 已按重叠折算 / effective_n / 横截面规模）、`yearly` 分年 IC、`series`（`--summary` 时省略）；观测截止日自动收缩到 `observation_end`，保证前瞻窗口不越过研究期末端 |
 | `research buckets (--factor <模板ID> [--params JSON] \| --strategy <id> --ref <别名>) [--index <code>] [--return-index <code>] (--edges a,b,c \| --quantiles K) [--horizons 1,5,20] [--basis t_plus_1_open\|t_plus_1_close\|close_to_close] [--split-halves \| --split-date YYYY-MM-DD] [...]` | 按因子值分桶的未来 N 日收益：每桶 `n` / `share` / `mean_pct` / `excess_pct`（相对全样本均值）/ `hit_rate` / `t_stat`（按 `n // N` 折算重叠）/ `t_stat_raw` / `low_sample`（<30），每个持有期给 `spread_pct`（最高桶 − 最低桶）与 `monotonicity`（桶序 vs 桶均值的 Spearman）；分段时追加 `segments` 与 `consistency`（两段桶均值秩相关、超额同号占比、价差是否同号） |
 
 派生因子（`expr` 模板）的诊断：`research factor-ic|buckets --factor expr --params '{"expr": "dev250 - dev60"}' [--strategy <提供别名的策略>] [--aliases '{"dev60": {"template_id": "ma_deviation", "params": {"period": 60}}}']`。
@@ -190,7 +193,7 @@ optimization / robustness 的台账行只是关联，不重复计数。研究诊
 | --- | --- |
 | `queue stats [--window-hours 1]` | 积压 / 吞吐 / 运行中任务 / 并发预算 |
 | `queue jobs [--status] [--job-type] [--limit]` | 任务明细（含心跳时间与已耗时） |
-| `queue worker` | 以独立进程运行队列 worker（前台阻塞；配合 `QUANT_ETF_JOB_QUEUE_EMBEDDED=false`） |
+| `queue worker [--recover-stuck]` | 以独立进程运行队列 worker（前台阻塞；配合 `QUANT_ETF_JOB_QUEUE_EMBEDDED=false`） |
 
 ## lifecycle（上线后监控）
 
@@ -206,10 +209,9 @@ optimization / robustness 的台账行只是关联，不重复计数。研究诊
 
 - 折叠：`[start, end]` 按交易日等分为 K 个连续验证窗，最后一折吸收余数；每折对基线与候选各跑一次回测。建议每折跨度 ≈ 1-2 年（K ≈ 总年数 ÷ 1.5，至少 3）。
 - 区间下限（用户约定）：所有回测/评估的 `--start` 一律取 `2016-01-01`，不使用 2016 年之前的数据。
-- 研究期 / 验证期边界（硬约束）：研究期为 2016-01-01 ~ 2025-12-31，验证期为 2026-01-01 起。
-  `purpose=research` 的回测与优化会话越过研究期末端会被直接拒绝；验证/监控用途允许使用验证期数据，但会进入留痕列表（`GET /backtests/validation-usage`）。
-- 分段原则（C4 起）：研究期内任意跨度都可单次回测，**不存在跨度上限、也不再要求"总跨度 > 5 年必须分段"**。分段只是可选的分析视角（分年度绩效 + 三段一致性），需要逐段比较时再按自然年/等分段跑。
-- 探索与验收分工（D1）：几十个变体的快速筛选用 `research batch`（不落库、分钟级、同一条执行路径），**验收与报告数字必须来自落库回测**（`backtest run` / `robustness`）。
+- 研究期 / 验证期边界见 `AGENTS.md`；验证 / 监控用途使用验证期数据会进入留痕列表（`GET /backtests/validation-usage`）。
+- 分段：研究期内任意跨度都可单次回测。分段只是可选的分析视角（分年度绩效 + 三段一致性），需要逐段比较时再按自然年 / 等分段跑。
+- 探索与验收分工：几十个变体的快速筛选用 `research batch`（不落库、分钟级、同一条执行路径），**验收与报告数字必须来自落库回测**（`backtest run` / `robustness`），接受前对候选全区间回测跑 `backtest verify`。
 - **并行执行两条路，默认选第一条**：
   1. **本地多进程池（推荐，不依赖服务端）**：`--workers N` 派生独立 `cli backtest execute`
      子进程，各自连库写结果，父子无管道通信。适用于 `robustness scan|ablate|pool`、
@@ -219,21 +221,19 @@ optimization / robustness 的台账行只是关联，不重复计数。研究诊
      实际并行度 = min(worker 数, CPU 核心数)；入队后 CLI 可退出、任务继续在服务端执行。
      **没有服务端时不要用**。
 - `fold_summary`：每个指标输出基线/候选的均值、中位数、候选胜出折数；只统计两侧都有值的**配对折**（`paired_folds`），`evaluated_folds` 是实际评估的折数。
-- 验收清单默认阈值（共 10 项）：验证窗平均夏普 Δ≥0；平均最大回撤劣化 ≤ 2pct；夏普胜出折数 ≥ 50%；验证窗平均累计收益 Δ≥0；净成本口径夏普 Δ≥0；参数邻域无方向反转（需先跑 `robustness scan`，且批次的配置哈希**与执行口径**都匹配本次会话）；分段一致性（剔除最好折后候选夏普不低于基线）；统计显著性（候选 − 基线逐日超额净收益的 Deflated Sharpe ≥ 0.95，N 取研究线累计值，N 统计失败判不通过）；分年度一致性（剔除最好年份后年均净夏普 ≥ 基线且胜出年数不少于一半）；差异事件数（逐日净收益差异 ≥ 8 段且 ≥ 40 天）。**`finish` 默认强制全部满足**，`--no-strict` 才跳过。
-- 验收清单现在随 `optimization show` 一起返回（`acceptance_checklist`），不必先 `finish` 就能看到哪一项没过；`metrics_full` / `metrics_folds` 也带净口径（`net_sharpe_ratio` / `net_annualized_return_pct` / `annualized_turnover`）。
-- `optimization start` 的 `--start` 缺省为**研究期起点**（不是"最近两年"）；`finish --promote` 会把版本历史追加进策略描述。
+- 验收清单共 10 项，各项门槛见 [SKILL.md](../SKILL.md)「关键约束」；**`finish` 默认强制全部满足**，`--no-strict` 才跳过。
+- `optimization show` 返回 `acceptance_checklist`，不必先 `finish` 就能看到哪一项没过；`metrics_full` / `metrics_folds` 带净口径（`net_sharpe_ratio` / `net_annualized_return_pct` / `annualized_turnover`）。
+- `optimization start` 的 `--start/--end` 缺省覆盖整个研究期；`finish --promote` 会把版本历史追加进策略描述。
 
 ## 回测快照与会话
 
-- `backtest_run` 创建时写入 `config_snapshot`（元数据 + config_json）与 `config_hash`（sha256）；执行时优先用快照重建配置，保证结果可复现，旧行无快照时回退实时配置。
+- `backtest_run` 创建时写入 `config_snapshot`（元数据 + config_json）与 `config_hash`（sha256）；执行时优先用快照重建配置，保证结果可复现；无快照的存量回测按当前配置执行。
 - `strategy_optimization` 表保存会话级审计：基线/候选 ID 与哈希、回测 ID、逐折指标、聚合统计、报告全文与 accept/reject 结论。
 
 ## 环境注意
 
-- 数据库在远程 PostgreSQL（见 `.env` 的 DATABASE_URL）；沙箱内连库失败（`Permission denied` / `WinError 10013`）时用 require_escalated 重跑同一命令。
+- 数据库在远程 PostgreSQL（见 `.env` 的 DATABASE_URL）；Codex 沙箱内连库失败（`Permission denied` / `WinError 10013`）时用 require_escalated 重跑同一命令。
 - 终端中文乱码是控制台代码页问题，不影响落库数据（UTF-8）。
 - 单条回测用 `backtest status <id> --wait` 等待终态，避免高频轮询；
   批量执行看 `backtest batch` / `robustness collect` 的汇总，不要逐条轮询。
-- 并发子进程数受 CPU、内存与远端数据库连接预算共同约束；默认自动推导上限 8，
-  也可用 `QUANT_ETF_CLI_WORKERS` 固定。
-- 并行命令的输出**不要接管道**（会被缓冲到结束才显示）；要进度就重定向到文件或 `--log-dir`。
+- 并发度与输出注意事项见本文「并行执行」。

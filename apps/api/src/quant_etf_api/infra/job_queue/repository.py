@@ -163,7 +163,7 @@ class JobRepository:
                 job.status = "running"
                 job.attempts = (job.attempts or 0) + 1
                 job.started_at = now
-                # 认领即写入首次心跳，僵尸扫描据此判断活性（B7）
+                # 认领即写入首次心跳，僵尸扫描据此判断活性
                 job.heartbeat_at = now
                 # 在 Session 关闭前复制字段为快照，避免游离实例访问过期属性
                 claimed.append(_snapshot(job))
@@ -271,7 +271,7 @@ class JobRepository:
         """请求取消单个任务。
 
         未开始（pending/paused）的任务直接置为 cancelled；
-        运行中的任务只打取消标记，由处理器在安全检查点协作退出（B2）。
+        运行中的任务只打取消标记，由处理器在安全检查点协作退出。
 
         Args:
             job_id: 任务标识。
@@ -419,7 +419,7 @@ class JobRepository:
         """查找运行时间超过上限的 running 任务（心跳正常但耗时异常）。
 
         与 ``find_stale_running`` 互补：心跳仍新鲜但已运行过久（例如卡在
-        数据库锁上），同样需要回收，避免单条任务永久占用 worker（B7）。
+        数据库锁上），同样需要回收，避免单条任务永久占用 worker。
 
         Args:
             max_runtime_seconds: 单任务最长运行时间（秒）。

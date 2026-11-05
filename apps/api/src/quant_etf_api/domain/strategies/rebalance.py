@@ -5,7 +5,7 @@
 可跨自然周、跨自然月，不受固定天数窗口限制。
 领域层仅依赖 TradingCalendarLike 协议，不依赖任何 infra 实现。
 
-严格口径（C1）：交易日历为**必填依赖**，不再提供"未注入时降级为周末判断"
+严格口径：交易日历为**必填依赖**，不再提供"未注入时降级为周末判断"
 的兜底实现。日历不可用时异常直接上抛，避免同一配置在不同环境下产生
 两套调仓日历、进而产生两套回测结果。
 """
@@ -175,7 +175,7 @@ class DefaultRebalanceScheduler:
             delta = (current_date.weekday() - target_day) % 7
             target_date = current_date - timedelta(days=delta)
             if not _matches_week_parity(target_date, schedule.week_parity):
-                # 非命中周：回到上一周（必为命中周）的目标日。此前前移 14 天会落到
+                # 非命中周：回到上一周（必为命中周）的目标日。若前移 14 天会落到
                 # 同奇偶的非命中周，使命中周目标日休市后的顺延调仓被整体跳过
                 target_date -= timedelta(days=7)
             return self._is_carried_target(current_date, target_date)
@@ -241,7 +241,7 @@ def select_active_legs(
     口径（与回测/实时两侧共用）：
 
     - ``rebalance`` 为 None（未配置调仓模块）→ 两腿都视为"每日"，即每日重建；
-    - 两腿频率一致（旧配置升级后的默认形态）→ 与改造前的单腿口径完全一致；
+    - 两腿频率一致（平铺写法的存量配置升级后即此形态）→ 等价于单腿口径；
     - 两腿频率不同 → 只在各自到期的交易日生效，未到期的腿返回 False。
 
     Args:

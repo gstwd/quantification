@@ -41,7 +41,7 @@ class BenchmarkIndexRepository(BaseRepository):
         - ``delisting_date IS NULL``：退市日未知（历史停用行未登记日期），
           一律纳入，交由逐日行情缺口判定实际可交易区间；
         - ``delisting_date >= start_date``：退市日晚于区间起点的指数在回测
-          窗口内仍然存续，必须纳入——旧实现只取 is_active=True，把这些指数
+          窗口内仍然存续，必须纳入——只取 is_active=True 会把这些指数
           整段剔除，等价于"只回测活到今天的资产"（幸存者偏差）。
 
         Args:

@@ -429,7 +429,7 @@
         <AttributionPanel :backtest-id="store.current.backtest_id" :status="store.current.status" />
       </div>
 
-      <!-- 有效候选池时间线（C6） -->
+      <!-- 有效候选池时间线 -->
       <div v-if="candidatePool" class="metrics-section">
         <div class="section-label">
           有效候选池
@@ -636,7 +636,7 @@ const regimeLabelMinDays = computed(() => Math.max(1, Math.ceil(regimeTimeline.v
 /** 结构化警告列表（内联展示） */
 const warnings = computed(() => store.current?.warnings ?? [])
 
-/** 多档成本并列（C3） */
+/** 多档成本并列 */
 const costLadder = computed(() => store.current?.stability?.cost_ladder ?? [])
 
 /** 切换净口径主成本档位：仅影响本次展示，不重跑回测 */
@@ -645,7 +645,7 @@ async function selectCostBps(costBps: number) {
   await store.refreshOne(props.backtestId, costBps)
 }
 
-/** 调仓日历来源中文标签（C1） */
+/** 调仓日历来源中文标签 */
 const calendarSourceLabel = computed(() => {
   const source = store.current?.stability?.calendar_source
   const map: Record<string, string> = {
@@ -656,7 +656,7 @@ const calendarSourceLabel = computed(() => {
   return source ? map[source] ?? source : '未知（早于口径指纹）'
 })
 
-/** 换手口径中文标签（C2） */
+/** 换手口径中文标签 */
 const turnoverModelLabel = computed(() => {
   const model = store.current?.stability?.turnover_model
   if (model === 'delta_w_v2') return '含清仓/建仓腿（当前口径）'
@@ -682,7 +682,7 @@ const isLegacyAccounting = computed(
   () => (store.current?.stability?.accounting_model ?? 'constant_mix_v0') === 'constant_mix_v0',
 )
 
-/** 有效候选池时间线（C6） */
+/** 有效候选池时间线 */
 const candidatePool = computed(() => store.current?.stability?.candidate_pool ?? null)
 
 /** 择时专项统计（未配置择时或存量回测为 null） */
@@ -1165,7 +1165,7 @@ onMounted(async () => {
 
 .stability-note { margin-top: 8px; font-size: 12px; color: var(--text-muted); }
 
-/* 历史换手口径提示（C2）：净口径指标偏低，需重跑后可比 */
+/* 历史换手口径提示：净口径指标偏低，需重跑后可比 */
 .legacy-warning {
   margin-top: 6px;
   padding: 6px 10px;
@@ -1175,7 +1175,7 @@ onMounted(async () => {
   font-size: 12px;
 }
 
-/* 成本档位主口径行高亮（C3） */
+/* 成本档位主口径行高亮 */
 .annual-table tr.row-active td {
   background: rgba(59, 130, 246, 0.1);
   font-weight: 600;

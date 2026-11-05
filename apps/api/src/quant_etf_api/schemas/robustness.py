@@ -107,7 +107,7 @@ class RobustnessListResponse(BaseModel):
 
 
 class RobustnessControlResponse(BaseModel):
-    """批次控制（取消 / 暂停 / 恢复）结果（B2）。
+    """批次控制（取消 / 暂停 / 恢复）结果。
 
     Attributes:
         robustness_id: 批次 ID。

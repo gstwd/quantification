@@ -155,7 +155,7 @@ class BacktestMetrics(BaseModel):
     annualized_excess_return_pct: float | None = None
     # 基准上涨日占比：signal_accuracy_pct 的市场基准率参照
     benchmark_up_days_pct: float | None = None
-    # B10：数据缺口统计
+    # 数据缺口统计
     data_gap_days: int = 0
     # 净口径指标（按单边换手率折算成本），默认成本 10bp，明细见 stability 块
     net_annualized_return_pct: float | None = None
@@ -183,8 +183,8 @@ class BacktestStability(BaseModel):
         accounting_model: 记账口径（drift_v1=持仓随行情漂移、调仓日两段复利、
             收益行情前向填充、无终端 0 收益行；constant_mix_v0=历史口径，
             等价于每日再平衡到目标权重）。不同记账口径的指标不可直接比较。
-        cost_ladder: 多档成本并列的净口径指标（C3）。
-        candidate_pool: 逐日有效候选池时间线（C6），存量回测为 None。
+        cost_ladder: 多档成本并列的净口径指标。
+        candidate_pool: 逐日有效候选池时间线，存量回测为 None。
         warmup_trading_days: 回测前段因子预热交易日数（长周期因子数据不足），
             0 表示无预热期；仅作提示，指标仍包含该段行情。
         annualized_turnover: 年化单边换手率（倍）。
@@ -244,7 +244,7 @@ class BacktestStability(BaseModel):
 
 
 class CostLadderEntry(BaseModel):
-    """单个成本档位下的净口径指标（C3）。
+    """单个成本档位下的净口径指标。
 
     Attributes:
         cost_bps: 该档位的往返交易成本（基点，按单边换手折算），0 表示毛口径。
@@ -264,7 +264,7 @@ class CostLadderEntry(BaseModel):
 
 
 class CandidatePoolSegment(BaseModel):
-    """有效候选池规模的游程段（C6）。
+    """有效候选池规模的游程段。
 
     Attributes:
         start_date: 该段起始交易日（含）。
@@ -280,7 +280,7 @@ class CandidatePoolSegment(BaseModel):
 
 
 class CandidatePoolExclusion(BaseModel):
-    """因数据缺失被剔除的指数—日期区间（C6）。
+    """因数据缺失被剔除的指数—日期区间。
 
     Attributes:
         index_code: 指数代码。
@@ -299,7 +299,7 @@ class CandidatePoolExclusion(BaseModel):
 
 
 class BacktestCandidatePool(BaseModel):
-    """回测逐日"有效候选池"时间线（C6）。
+    """回测逐日"有效候选池"时间线。
 
     回测只在 warnings 里给一条汇总提示时，看不出"早期实际可交易池只有 13~16 个"；
     本结构给出逐日规模（游程编码）与剔除区间，用于判断早期结论是否建立在
@@ -329,7 +329,7 @@ class BacktestCandidatePool(BaseModel):
 
 
 class DanglingReferenceItem(BaseModel):
-    """一条悬挂引用（C5）：持有者引用的回测已不存在。
+    """一条悬挂引用：持有者引用的回测已不存在。
 
     Attributes:
         holder: 持有者类型（robustness_run.variants / strategy_optimization /
@@ -346,7 +346,7 @@ class DanglingReferenceItem(BaseModel):
 
 
 class DanglingReferenceReport(BaseModel):
-    """悬挂引用审计报告（C5）。
+    """悬挂引用审计报告。
 
     Attributes:
         total: 悬挂引用条数（按回测 ID 计）。
@@ -358,7 +358,7 @@ class DanglingReferenceReport(BaseModel):
 
 
 class BacktestDeleteResponse(BaseModel):
-    """回测删除结果（C5）。
+    """回测删除结果。
 
     Attributes:
         backtest_id: 被删除的回测 ID。
@@ -374,7 +374,7 @@ class BacktestDeleteResponse(BaseModel):
 
 
 class BacktestPruneResponse(BaseModel):
-    """JSONB 悬挂引用清理结果（C5）。
+    """JSONB 悬挂引用清理结果。
 
     Attributes:
         dry_run: 是否为预演（True 时不写库）。
@@ -406,7 +406,7 @@ class ValidationUsageItem(BaseModel):
         start_date: 回测起始日期。
         end_date: 回测截止日期。
         created_at: 回测创建时间（UTC）。
-        strategy_validation_consumed_at: 该策略验证期数据首次被消费的时间（D-5），
+        strategy_validation_consumed_at: 该策略验证期数据首次被消费的时间，
             与回测级记录并列，用于判断"验证期是否已被研究者消费"。
         strategy_validation_consumed_note: 验证期消费说明（首次消费来源或人工备注）。
     """
@@ -488,7 +488,7 @@ class BacktestSummary(BaseModel):
 
 
 class BacktestCancelResponse(BaseModel):
-    """回测取消请求的处理结果（B2）。
+    """回测取消请求的处理结果。
 
     Attributes:
         backtest_id: 回测标识。
@@ -676,7 +676,7 @@ class BacktestDailyResult(BaseModel):
         positions: 持仓明细（资产配置模式），index_code → 权重。
         benchmark_return: 基准日收益率（%）。
         turnover: 当日换手率。
-        missing_bar_count: 当日受数据缺口影响的持仓资产数（B10）。
+        missing_bar_count: 当日受数据缺口影响的持仓资产数。
         rolling_sharpe_252: 截至当日的 252 交易日滚动夏普比率，样本不足时为 None。
         rolling_sortino_252: 截至当日的 252 交易日滚动索提诺比率，样本不足时为 None。
     """

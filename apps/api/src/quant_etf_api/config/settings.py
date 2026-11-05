@@ -48,7 +48,7 @@ class Settings(BaseSettings):
         description="AI 舆情分析触发时间（HH:MM），默认夜里 23:30，覆盖当天全部新闻",
     )
 
-    # 后台任务队列（B1/B6：按任务类别分 lane，各自绑定独立的并发预算）
+    # 后台任务队列（按任务类别分 lane，各自绑定独立的并发预算）
     # 回测是 CPU + 数据库混合型任务，实测单进程内并发 4 条比串行慢约 20 倍，
     # 因此回测 lane 默认并发 1（串行），且与摄取/其它任务互不抢占 worker。
     job_queue_workers: int = Field(
@@ -118,17 +118,17 @@ class Settings(BaseSettings):
         default="2026-01-01", description="验证期起始日（含），仅允许验证/监控类回测使用"
     )
 
-    # 回测与监控的默认交易成本（单边，基点）：系统回测为毛收益口径，
+    # 回测与监控的默认交易成本（基点，按单边换手折算的往返成本）：系统回测为毛收益口径，
     # 净口径指标按"单边换手率 × cost_bps"在读取路径折算
     default_cost_bps: float = Field(
         default=0.5, ge=0.0, description="默认往返交易成本（基点，按单边换手折算），用于净口径指标折算"
     )
-    # 净口径多档并列（C3）：读取路径按该梯子现算，无需重跑回测；0 表示毛口径
+    # 净口径多档并列：读取路径按该梯子现算，无需重跑回测；0 表示毛口径
     stability_cost_ladder: list[float] = Field(
         default_factory=lambda: [0.0, 0.5, 5.0, 10.0],
         description=("回测详情并列展示的净口径成本档位（基点，JSON 数组）；0 表示毛口径"),
     )
-    # 有效候选池时间线（C6）：剔除明细最多保留多少条指数区间
+    # 有效候选池时间线：剔除明细最多保留多少条指数区间
     candidate_pool_exclusion_limit: int = Field(
         default=50,
         ge=1,

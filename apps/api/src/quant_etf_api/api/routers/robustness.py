@@ -2,7 +2,7 @@
 
 批次创建与统计计算由 CLI（``python -m quant_etf_api.cli robustness ...``）驱动，
 因为一次批次会派生出数十个回测任务；HTTP 侧提供只读查询，以及批次级
-取消/暂停/恢复（B2），便于在批次积压时及时止损。
+取消/暂停/恢复，便于在批次积压时及时止损。
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def get_robustness_run(
 def cancel_robustness_run(
     robustness_id: str, db: Session = Depends(get_db)
 ) -> RobustnessControlResponse:
-    """取消整批稳健性回测（B2）。
+    """取消整批稳健性回测。
 
     未开始的任务直接取消；运行中的任务打协作取消标记，由回测主循环在
     安全检查点退出。批次状态落为 cancelled。
@@ -72,7 +72,7 @@ def cancel_robustness_run(
 def pause_robustness_run(
     robustness_id: str, db: Session = Depends(get_db)
 ) -> RobustnessControlResponse:
-    """暂停批次中尚未开始的任务（B2），运行中的任务自然结束。"""
+    """暂停批次中尚未开始的任务，运行中的任务自然结束。"""
     try:
         result = RobustnessService(db).pause(robustness_id)
     except ValueError as e:
@@ -88,7 +88,7 @@ def pause_robustness_run(
 def resume_robustness_run(
     robustness_id: str, db: Session = Depends(get_db)
 ) -> RobustnessControlResponse:
-    """恢复批次中被暂停的任务（B2）。"""
+    """恢复批次中被暂停的任务。"""
     try:
         result = RobustnessService(db).resume(robustness_id)
     except ValueError as e:
@@ -106,7 +106,7 @@ def abandon_robustness_run(
     reason: str | None = Query(default=None, description="作废原因，写入批次 error_message"),
     db: Session = Depends(get_db),
 ) -> RobustnessControlResponse:
-    """作废批次：把长期 running 的批次显式收口（F-4），证据与试验台账保留。"""
+    """作废批次：把长期 running 的批次显式收口，证据与试验台账保留。"""
     try:
         result = RobustnessService(db).abandon(robustness_id, reason=reason)
     except ValueError as e:

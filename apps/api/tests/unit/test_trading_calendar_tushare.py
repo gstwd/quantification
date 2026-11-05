@@ -50,7 +50,7 @@ def test_upstream_prefers_tushare_when_configured(monkeypatch) -> None:
 
 
 def test_upstream_returns_none_when_both_fail(monkeypatch) -> None:
-    """上游两个数据源都失败时返回 (None, None)——不再降级为周末判断（C1）。"""
+    """上游两个数据源都失败时返回 (None, None)——不再降级为周末判断。"""
     monkeypatch.setattr(calendar_module, "_load_from_tushare", lambda: None)
     monkeypatch.setattr(calendar_module, "_load_from_akshare", lambda: None)
     assert calendar_module._load_from_upstream() == (None, None)

@@ -1,4 +1,4 @@
-"""后台任务队列可观测性 schemas（B3）。"""
+"""后台任务队列可观测性 schemas。"""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ class QueueBacklogItem(BaseModel):
 
 
 class QueueCapacity(BaseModel):
-    """当前 worker 并发预算与异常回收阈值（B1/B6/B7）。
+    """当前 worker 并发预算与异常回收阈值。
 
     Attributes:
         general_workers: 通用 lane worker 线程数。

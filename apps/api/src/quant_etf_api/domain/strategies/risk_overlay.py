@@ -234,8 +234,7 @@ def resolve_day_target(
 ) -> DayTarget:
     """合成当日最终目标：偏离触发再平衡 → 风控叠加层 → 小额换手跳过。
 
-    未启用偏离调仓与叠加层时原样返回（``positions=composed``、成交与否只看日历腿），
-    与改造前口径逐位一致。
+    未启用偏离调仓与叠加层时原样返回（``positions=composed``、成交与否只看日历腿）。
 
     Args:
         composed: 两腿合成后的当日目标。

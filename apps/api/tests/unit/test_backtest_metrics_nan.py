@@ -88,7 +88,7 @@ def test_sanitize_metrics_dict() -> None:
 
 
 class TestSummaryMetricsDataGap:
-    """汇总指标中的数据缺口天数（B10）。"""
+    """汇总指标中的数据缺口天数。"""
 
     def test_data_gap_days_in_metrics(self) -> None:
         """data_gap_days 应透传到汇总指标。"""

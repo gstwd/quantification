@@ -305,7 +305,7 @@ class TestIcDecayOverlapHandling:
         assert evidence["confirmed"] is True
 
     def test_step_one_matches_legacy_behaviour(self) -> None:
-        """前瞻期为 1 天（日频）时序列本身非重叠，结果与改造前一致。"""
+        """前瞻期为 1 天（日频）时序列本身非重叠，结果与不折算时相同。"""
         values = self._decaying(80)
         assert ic_decay_evidence(values) == ic_decay_evidence(values, overlap_step=1)
 

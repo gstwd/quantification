@@ -94,7 +94,7 @@ class TestNestedRuleGroups:
         assert any(r.group_path == "0" for r in detail_a.rule_results)
 
     def test_flat_filter_unchanged(self) -> None:
-        """无子组时行为与改造前一致（AND 短路）。"""
+        """无子组时按平铺规则求值（AND 短路）。"""
         flat = FilterConfig(rules=[_rule("x", "gt", 0), _rule("y", "gt", 0)])
         context = EngineContext(
             trade_date=TRADE_DATE, universe=["A"], asset_factors={("A", "x"): -1.0}

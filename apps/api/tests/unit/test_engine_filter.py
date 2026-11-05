@@ -285,7 +285,7 @@ class TestDefaultFilterEngine:
 
 
 class TestFilterMissingStrategy:
-    """B6：过滤规则因子缺失时的 missing_strategy 行为。"""
+    """过滤规则因子缺失时的 missing_strategy 行为。"""
 
     def test_default_is_fail(self) -> None:
         """默认 missing_strategy=fail，缺失资产被过滤，与历史行为一致。"""

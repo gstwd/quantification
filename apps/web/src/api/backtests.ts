@@ -30,7 +30,7 @@ export interface BacktestListFilters {
   purpose?: string
   createdFrom?: string
   createdTo?: string
-  /** 调仓日历来源过滤（C1）：upstream / database / not_required */
+  /** 调仓日历来源过滤：upstream / database / not_required */
   calendarSource?: string
 }
 
@@ -73,7 +73,7 @@ export async function fetchQueueStats(windowHours = 1): Promise<QueueStatsRespon
 
 /** 获取回测详情（含配置、口径指纹、多档成本与候选池时间线）
  *
- * costBps 可覆盖净口径主成本档位（C3）：多档成本仍并列返回在 stability.cost_ladder。
+ * costBps 可覆盖净口径主成本档位：多档成本仍并列返回在 stability.cost_ladder。
  */
 export async function fetchBacktest(
   backtestId: string,
@@ -85,7 +85,7 @@ export async function fetchBacktest(
   return data
 }
 
-/** 删除回测记录（C5）；存在 JSONB 引用时需 force=true */
+/** 删除回测记录；存在 JSONB 引用时需 force=true */
 export async function deleteBacktest(
   backtestId: string,
   force = false,
@@ -97,7 +97,7 @@ export async function deleteBacktest(
   return data
 }
 
-/** 审计指向已删除回测的悬挂引用（C5） */
+/** 审计指向已删除回测的悬挂引用 */
 export async function fetchBacktestOrphans(limit = 200): Promise<DanglingReferenceReport> {
   const { data } = await apiClient.get<DanglingReferenceReport>('/backtests/orphans', {
     params: { limit },

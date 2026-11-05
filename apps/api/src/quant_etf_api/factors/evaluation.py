@@ -489,7 +489,7 @@ def analyze_backtest_score_ic(
         if trade_date not in selection_dates:
             continue
         universe_counts[trade_date] = universe_counts.get(trade_date, 0) + 1
-        # 缺少 scored 字段的历史/兼容对象按"已评分"处理，保持改造前口径
+        # 缺少 scored 字段的存量记录按"已评分"处理
         if getattr(row, "scored", True) is False:
             unscored_rows += 1
             continue

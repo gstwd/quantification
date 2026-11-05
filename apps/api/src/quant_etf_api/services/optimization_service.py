@@ -433,9 +433,8 @@ class OptimizationService:
                 StrategyConfigUpdate(
                     config_json=candidate.config_json,
                     version=session.candidate_version,
-                    # 版本历史写在 description 里（F-17）：旧实现 promote 只写
-                    # config_json + version，描述会停留在旧配置，
-                    # 人和 agent 读到的第一手说明与实际配置不一致
+                    # 版本历史写进 description：只写 config_json + version 时，描述会停留在
+                    # 被替换的配置上，人和 agent 读到的第一手说明与实际配置不一致
                     description=_append_version_history(
                         getattr(baseline, "description", "") or "",
                         session.candidate_version,
@@ -458,7 +457,7 @@ class OptimizationService:
     def show(self, optimization_id: str) -> dict[str, Any] | None:
         """返回会话详情；异步回测全部完成后自动补齐指标汇总。
 
-        额外返回 ``missing_backtest_ids``（C5）：会话引用的回测若已被删除，
+        额外返回 ``missing_backtest_ids``：会话引用的回测若已被删除，
         指标会静默变成 None，这里显式列出，避免把"数据缺失"读成"指标为 0"。
         """
         session = self._repo.find_by_id(optimization_id)
@@ -469,8 +468,8 @@ class OptimizationService:
             session = self._repo.find_by_id(optimization_id)
         payload = self._to_dict(session)
         payload["missing_backtest_ids"] = self._missing_backtest_ids(session)
-        # 验收清单随详情返回（F-15）：7 项清单此前只在 finish（会改状态、不可逆）
-        # 内部计算，agent 想在收尾前知道"哪一项没过、差多少"只能先结束会话
+        # 验收清单随详情返回：finish 会改状态、不可逆，收尾前就要能看到
+        # "哪一项没过、差多少"
         payload["acceptance_checklist"] = (
             self._acceptance_checklist(session) if session.fold_summary is not None else []
         )
@@ -566,7 +565,7 @@ class OptimizationService:
         lines.append("")
         missing_ids = self._missing_backtest_ids(session)
         if missing_ids:
-            # C5：回测被删除后指标会静默变成 None，报告里必须显式标注，
+            # 回测被删除后指标会静默变成 None，报告里必须显式标注，
             # 否则复核者会把"数据缺失"误读为"指标为 0/未改善"
             lines.append("## ⚠ 缺失引用")
             lines.append("")
@@ -788,9 +787,9 @@ class OptimizationService:
     def _collect_metrics(self, backtest_id: str | None) -> dict[str, Any] | None:
         """读取回测汇总指标（含净成本口径），未成功或缺失时返回 None。
 
-        净口径字段（F-16）：``net_sharpe_ratio`` / ``net_annualized_return_pct`` /
-        ``annualized_turnover`` 由逐日结果现算后并入——旧实现只落毛口径，
-        会话输出里这些字段恒为 null，报告要写净口径数字只能另跑脚本。
+        净口径字段：``net_sharpe_ratio`` / ``net_annualized_return_pct`` /
+        ``annualized_turnover`` 由逐日结果现算后并入（落库汇总只有毛口径），
+        报告可直接引用净口径数字。
 
         Args:
             backtest_id: 回测 ID。
@@ -814,7 +813,7 @@ class OptimizationService:
         return metrics
 
     def _net_metrics(self, backtest_id: str, cost_bps: float | None = None) -> dict[str, Any]:
-        """现算单条回测的净成本口径指标（F-16）。
+        """现算单条回测的净成本口径指标。
 
         Args:
             backtest_id: 回测 ID。
@@ -1315,7 +1314,7 @@ def _append_version_history(
     hypothesis: str,
     fold_summary: dict[str, Any] | None,
 ) -> str:
-    """把本次 promote 的版本号、假设与关键指标追加进策略描述（F-17）。
+    """把本次 promote 的版本号、假设与关键指标追加进策略描述。
 
     策略的版本历史一直写在 ``description`` 里（人和 agent 的第一手说明），
     但 promote 只回写 config_json 与 version，导致"描述写 ma_10d 与 ma_17d、

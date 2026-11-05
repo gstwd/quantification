@@ -11,7 +11,7 @@
   - `campaign_hypotheses`：本战役已检验过的假设与结论；
   - `ledger_recent_closed` 与 `python -m quant_etf_api.cli research ledger --strategy <strategy_id>`：研究线上的结论与 N；
   - `limits` / `lineage_budget`：剩余试验次数。剩余很少时只做最有把握的检验。
-- 已否决的方向不要换个说法重试；在旧结论上细化时登记子假设（`--parent`）。
+- 已否决的方向不要换个说法重试；在已有结论上细化时登记子假设（`--parent <父假设ID>`）。
 - 想不出值得检验、且有依据的新方向时，直接回报 `no_idea`（战役会结束），不要硬凑。
 
 ## 2. 先诊断，再登记

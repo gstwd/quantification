@@ -1,12 +1,12 @@
-"""F 类修复的稳健性服务单元测试（F-1 / F-3 / F-4 / F-5 / F-13）。
+"""稳健性服务的回归测试。
 
 用最小替身构造 RobustnessService，覆盖：
 
-- F-1：汇总只按"所有变体都有数据的共同窗口"比较，窗口数不一致时不再直接相减；
-- F-3：没有任何变体结果时邻域判定为 None，不再默认"通过"；
-- F-4：被删除的回测归入 missing_windows，失败窗口单独列出；abandon 可显式收口；
-- F-5：批次行先落库（含变体映射），执行阶段之前即可被查询/取消；
-- F-13：同步模式可指定本地并发进程数，且与入队模式互斥。
+- 汇总只按"所有变体都有数据的共同窗口"比较，窗口数不一致时不再直接相减；
+- 没有任何变体结果时邻域判定为 None，不再默认"通过"；
+- 被删除的回测归入 missing_windows，失败窗口单独列出；abandon 可显式收口；
+- 批次行先落库（含变体映射），执行阶段之前即可被查询/取消；
+- 同步模式可指定本地并发进程数，且与入队模式互斥。
 """
 
 from __future__ import annotations
@@ -120,7 +120,7 @@ def _make_service(
 
 
 class TestCommonWindowComparison:
-    """F-1：只在共同窗口集上比较变体与基线。"""
+    """只在共同窗口集上比较变体与基线。"""
 
     def test_means_use_common_windows_only(self) -> None:
         """基线缺 W0 时，变体也只用 W1/W2 求均值。"""
@@ -141,7 +141,7 @@ class TestCommonWindowComparison:
         variant = next(item for item in summary["variants"] if item["label"] == "rand80_00")
         assert summary["coverage"]["common_windows"] == ["W1", "W2"]
         assert summary["coverage"]["comparable"] is True
-        # F-1 的现场：旧口径拿"变体 3 个窗口的均值 0.0"减"基线 2 个窗口的均值 1.5"，
+        # 错误做法：拿"变体 3 个窗口的均值 0.0"减"基线 2 个窗口的均值 1.5"，
         # 会得到"变体变差 -1.5"的假结论；共同窗口下两者相等
         assert variant["windows"] == 2
         assert variant["windows_available"] == 3
@@ -167,7 +167,7 @@ class TestCommonWindowComparison:
         assert all(item["delta_sharpe"] is None for item in summary["variants"])
 
     def test_empty_variant_results_do_not_report_plateau(self) -> None:
-        """F-3：没有任何变体结果时 is_plateau 必须是 None，而不是 True。"""
+        """没有任何变体结果时 is_plateau 必须是 None，而不是 True。"""
         variants = [
             {"label": "baseline", "kind": "baseline", "backtest_ids": {"W0": "b0"}},
             {"label": "k1", "kind": "knob", "backtest_ids": {"W0": "missing"}},
@@ -186,7 +186,7 @@ class TestCommonWindowComparison:
 
 
 class TestCollectWindowClassification:
-    """F-4：缺失（被删除）与失败（跑挂了）分开报告。"""
+    """缺失（被删除）与失败（跑挂了）分开报告。"""
 
     def test_deleted_backtest_goes_to_missing_windows(self) -> None:
         """回测行不存在时归入 missing_windows，不混进 failed_windows。"""
@@ -223,7 +223,7 @@ class TestCollectWindowClassification:
 
 
 class TestAbandonAndStale:
-    """F-4：作废批次与停滞判定。"""
+    """作废批次与停滞判定。"""
 
     def test_abandon_marks_batch_and_cancels_jobs(self, monkeypatch) -> None:
         """abandon 应作废批次、落原因，并取消批次内队列任务。"""
@@ -257,7 +257,7 @@ class TestAbandonAndStale:
 
 
 class TestCreateGuards:
-    """F-13：本地并发参数只对同步模式生效。"""
+    """本地并发参数只对同步模式生效。"""
 
     def test_parallel_requires_sync_mode(self) -> None:
         """入队模式下指定 --parallel 应直接报错，避免误解为队列并发。"""

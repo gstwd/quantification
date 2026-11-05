@@ -62,7 +62,7 @@
       <p class="description">{{ store.current.description || '暂无描述' }}</p>
       <div v-if="store.actionError && !showEdit" class="error-tip">{{ store.actionError }}</div>
 
-      <!-- 页签：策略配置 / 稳健性验证（D-3） -->
+      <!-- 页签：策略配置 / 稳健性验证 -->
       <div class="debug-tabs page-tabs">
         <button
           :class="['debug-tab', { active: activeTab === 'config' }]"
@@ -448,7 +448,7 @@
               </div>
               <div v-if="legsAreIdentical" class="config-row">
                 <span class="config-key">口径</span>
-                <span class="config-val">两腿同频：每个调仓日重建成分并应用择时目标仓位（等价改造前的单腿口径）</span>
+                <span class="config-val">两腿同频：每个调仓日重建成分并应用择时目标仓位（等价于单腿口径）</span>
               </div>
               <div v-else class="config-row">
                 <span class="config-key">口径</span>
@@ -473,7 +473,7 @@
 
       </div>
 
-      <!-- 稳健性验证面板（D-3）：批次列表 + 邻域 Δ / 消融边际贡献 / PBO / DSR -->
+      <!-- 稳健性验证面板：批次列表 + 邻域 Δ / 消融边际贡献 / PBO / DSR -->
       <div v-else class="robustness-panel">
         <div class="section-header-row">
           <h2 class="section-title">稳健性验证</h2>
@@ -1351,7 +1351,7 @@ const rebalanceConfig = computed(() => configJson.value.rebalance as (RebalanceS
   band?: { min_turnover?: number | null; max_drift?: number | null } | null
 }) | undefined)
 
-/** 两条腿的日程是否等价（等价时展示为改造前的单腿口径） */
+/** 两条腿的日程是否等价（等价时按单腿口径展示） */
 const legsAreIdentical = computed((): boolean => {
   const rebalance = rebalanceConfig.value
   if (!rebalance) return true
@@ -1393,7 +1393,7 @@ watch(showEdit, (val) => {
   }
 })
 
-// ── 稳健性验证面板（D-3） ────────────────────────────────────────────────
+// ── 稳健性验证面板 ────────────────────────────────────────────────
 
 /** 当前页签 */
 const activeTab = ref<'config' | 'robustness'>('config')
@@ -2043,7 +2043,7 @@ onUnmounted(() => disposeCharts())
 
 .description { color: var(--text-muted); font-size: 14px; line-height: 1.7; max-width: 700px; }
 
-/* 稳健性验证面板（D-3） */
+/* 稳健性验证面板 */
 .page-tabs { margin-top: -8px; }
 .robustness-panel { display: flex; flex-direction: column; gap: 12px; }
 .robustness-hint { color: var(--text-muted); font-size: 12px; line-height: 1.7; max-width: 900px; }

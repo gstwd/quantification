@@ -75,7 +75,7 @@ def list_orphan_references(
     limit: int = Query(default=200, ge=1, le=2000, description="明细条数上限"),
     db: Session = Depends(get_db),
 ) -> DanglingReferenceReport:
-    """审计指向已删除回测的悬挂引用（C5）。
+    """审计指向已删除回测的悬挂引用。
 
     稳健性变体的窗口映射与优化会话的折窗口存放在 JSONB 中，无法加外键；
     删除回测后这些引用会变成"静默 None"，本端点把它们显式列出来。
@@ -103,11 +103,11 @@ def list_backtests(
     descending: bool = Query(default=True, description="是否倒序"),
     calendar_source: Literal["upstream", "database", "not_required"] | None = Query(
         default=None,
-        description="调仓日历来源过滤（C1）：用于审计同一配置是否跑在两套日历上",
+        description="调仓日历来源过滤：用于审计同一配置是否跑在两套日历上",
     ),
     db: Session = Depends(get_db),
 ) -> PaginatedResponse[BacktestSummary]:
-    """分页返回回测列表，支持状态/用途/策略/时间范围/日历来源筛选（B4/C1）。"""
+    """分页返回回测列表，支持状态/用途/策略/时间范围/日历来源筛选。"""
     if created_from and created_to and created_from > created_to:
         raise HTTPException(status_code=422, detail="创建日期起点不能晚于终点")
     items, total = BacktestService(db).list_backtests(
@@ -214,7 +214,7 @@ def delete_backtest(
     force: bool = Query(default=False, description="存在 JSONB 引用时是否强制删除"),
     db: Session = Depends(get_db),
 ) -> BacktestDeleteResponse:
-    """删除回测记录（C5）。
+    """删除回测记录。
 
     日结果/对比记录由外键级联清理，优化与生命周期上的回测列置空；
     稳健性变体与优化折窗口的 JSONB 引用无法加外键，因此存在引用时
@@ -234,7 +234,7 @@ def delete_backtest(
     status_code=202,
 )
 def cancel_backtest(backtest_id: str, db: Session = Depends(get_db)) -> BacktestCancelResponse:
-    """请求取消回测（B2）。
+    """请求取消回测。
 
     未开始的回测直接落为 cancelled；运行中的回测只打协作取消标记，
     由回测主循环在安全检查点退出（已提交的日结果保留）。

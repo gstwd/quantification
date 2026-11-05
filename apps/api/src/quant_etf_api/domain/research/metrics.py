@@ -156,7 +156,7 @@ def compute_performance_metrics(
     sharpe = calc_sharpe_ratio(daily_returns, trading_days_per_year, annual_risk_free_rate_pct)
     sortino = _calc_sortino_ratio(daily_returns, trading_days_per_year, annual_risk_free_rate_pct)
     calmar = _calc_calmar_ratio(annualized_return_pct, max_drawdown_pct)
-    # 胜率使用持仓期口径：空仓 0 收益日不参与分母（B11）
+    # 胜率使用持仓期口径：空仓 0 收益日不参与分母
     win_returns = active_returns if active_returns else daily_returns
     win_rate_pct = _calc_win_rate(win_returns)
     profit_loss_ratio = _calc_profit_loss_ratio(daily_returns)
@@ -323,8 +323,8 @@ def _calc_calmar_ratio(annualized_return_pct: float, max_drawdown_pct: float) ->
 def _calc_win_rate(daily_returns: list[float]) -> float:
     """计算胜率（正收益日占比，%）。
 
-    B11 起由调用方传入持仓日收益序列，空仓 0 收益日不再计入分母；
-    传入全期序列时退化为全期口径（兼容旧调用）。
+    调用方传入持仓日收益序列（空仓 0 收益日不计入分母，持仓日判定见
+    ``domain.portfolio.accounting.has_positive_weight``）；传入全期序列时按全期口径计算。
     """
     if not daily_returns:
         return 0.0

@@ -1,4 +1,4 @@
-"""稳健性批次控制（取消/暂停/恢复）与部分汇总单元测试（B2/B7）。
+"""稳健性批次控制（取消/暂停/恢复）与部分汇总单元测试。
 
 用最小替身对象构造 RobustnessService，验证：
 - ``collect(allow_partial=True)`` 只按已完成窗口汇总并写入 coverage；
@@ -108,7 +108,7 @@ def _variants_with_two_windows() -> list[dict[str, Any]]:
 
 
 class TestCollectPartial:
-    """B7：批次因个别窗口卡死/失败时仍可部分收口。"""
+    """批次因个别窗口卡死/失败时仍可部分收口。"""
 
     def test_collect_reports_running_while_windows_pending(self) -> None:
         """未显式允许部分汇总时，仍有未完成窗口应返回 running。"""
@@ -172,7 +172,7 @@ class TestCollectPartial:
 
 
 class TestBatchControl:
-    """B2：批次取消。"""
+    """批次取消。"""
 
     def test_cancel_marks_leftover_pending_backtests(self, monkeypatch) -> None:
         """取消批次时应把任务已取消、永远不会再跑的 pending 回测落为 cancelled。"""

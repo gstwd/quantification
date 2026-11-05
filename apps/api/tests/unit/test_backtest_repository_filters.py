@@ -1,4 +1,4 @@
-"""回测仓库过滤表达式的编译校验（C1）。
+"""回测仓库过滤表达式的编译校验。
 
 ``backtest_run.params`` 在 ORM 中是通用 ``JSON`` 列，其比较器没有 PostgreSQL
 专有的 ``astext``（历史缺陷：`params["key"].astext` 直接 AttributeError，

@@ -571,7 +571,7 @@ const datasets = computed<DataSetHealthSummary[]>(() => overview.value?.datasets
 /** 是否有维护任务正在执行（提交中或轮询中）。 */
 const busy = computed(() => submitting.value || polling.value)
 
-/** 是否尚未生成任何健康快照（字段缺失时按 false 处理，回退旧逻辑）。 */
+/** 是否尚未生成任何健康快照（字段缺失时按 false 处理）。 */
 const hasNoSnapshot = computed(() => overview.value?.snapshot_count === 0)
 
 /** 当前选中的数据集摘要。 */

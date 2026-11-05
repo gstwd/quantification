@@ -68,7 +68,7 @@ class TestPbo:
         assert result.pbo > 0.5
 
     def test_insufficient_candidates_returns_zero(self) -> None:
-        """有效候选少于 3 个时返回 pbo=None 并说明原因（F-14）。"""
+        """有效候选少于 3 个时返回 pbo=None 并说明原因。"""
         result = compute_pbo(
             {"A": [1.0, 2.0, 3.0, 4.0], "B": [2.0, 1.0, 2.5, 3.5]}
         )
@@ -172,7 +172,7 @@ class TestNeighborhood:
         assert summary.delta_max == pytest.approx(0.4)
 
     def test_empty_variants(self) -> None:
-        """无有效变体时不报错，且不能把"没算出东西"判成参数高原（F-3）。"""
+        """无有效变体时不报错，且不能把"没算出东西"判成参数高原。"""
         summary = summarize_neighborhood(0.5, [])
         assert summary.n_variants == 0
         assert summary.is_plateau is None
@@ -229,7 +229,7 @@ class TestVariantGeneration:
         assert build_ablation_variants(config) == []
 
     def test_ablation_labels_unique_for_same_factor_rules(self) -> None:
-        """同一因子的多条过滤规则必须派生不同标签（F-2）。
+        """同一因子的多条过滤规则必须派生不同标签。
 
         历史缺陷：标签只含因子名，v8 的两条 ``close_price`` 规则
         （ma_10d / ma_17d）派生同一个变体 ID，第二个消融静默复用了第一份配置，
@@ -311,7 +311,7 @@ class TestVariantGeneration:
 
 
 class TestKnobPriorityAndPresets:
-    """D-2：截断顺序按业务重要性，支持关键旋钮清单与轻量体检预设。"""
+    """截断顺序按业务重要性，支持关键旋钮清单与轻量体检预设。"""
 
     _CONFIG = {
         "schema_version": "1",

@@ -181,7 +181,7 @@ def test_industry_daily_ingest_chain_removed() -> None:
 
 
 def test_industry_stock_quality_helpers_removed() -> None:
-    """行业/个股的平行质量实现已删除，质量只由数据管理服务写入。"""
+    """行业 / 个股质量只由数据管理服务写入，没有平行实现。"""
     from quant_etf_api.services.industry_data_service import IndustryDataService
     from quant_etf_api.services.stock_data_service import StockDataService
 

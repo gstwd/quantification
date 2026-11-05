@@ -439,7 +439,7 @@ def _evaluate_rule_group(
             "missing": missing,
         }
         if path:
-            # 嵌套子组里的规则带上子组路径，顶层规则明细与改造前一致
+            # 嵌套子组里的规则带上子组路径，顶层规则明细不带路径
             item["group"] = path
         results.append(item)
 

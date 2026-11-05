@@ -57,7 +57,7 @@ def resolve_effective_date(trade_date: date | None = None) -> date:
     当 trade_date 为 None 时，使用今天；若今天为非交易日（周末/节假日），
     则回退至最近一个交易日。确保调仓日判断和分配管线基于真实交易日执行。
 
-    严格口径（C1）：日历不可用时抛 ``TradingCalendarUnavailableError``，
+    严格口径：日历不可用时抛 ``TradingCalendarUnavailableError``，
     由 HTTP 层转换为 503；调用方可显式传入 trade_date 绕过日历。
 
     Args:
@@ -501,7 +501,7 @@ class StrategyDecisionService:
         starred_rows = self._config_svc._repo.find_starred()
 
         items: list[StarredStrategyItem] = []
-        # 严格口径（C1）：解析出真实日历后注入调度器；不可用时上抛由 HTTP 层转 503
+        # 严格口径：解析出真实日历后注入调度器；不可用时上抛由 HTTP 层转 503
         scheduler = DefaultRebalanceScheduler(resolve_trading_calendar(self._db)[0])
 
         for row in starred_rows:

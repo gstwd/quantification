@@ -1030,7 +1030,7 @@
       <div v-show="rebalanceEnabled && expanded.rebalance" class="module-body">
         <div class="module-desc">
           启用调仓模块时两条腿同时生效：<b>选股腿</b>重建成分，<b>风险腿</b>只把现有成分等比缩放到择时目标仓位。
-          两腿日程一致时等价于"每个调仓日重建成分 + 应用择时仓位"（与旧配置行为一致）。
+          两腿日程一致时等价于"每个调仓日重建成分 + 应用择时仓位"（即单腿口径）。
         </div>
 
         <div class="sub-field">
@@ -1081,7 +1081,7 @@
             <input type="checkbox" v-model="riskSameAsSelection" />
             风险腿与选股腿同频
           </label>
-          <span class="threshold-hint">勾选时两腿日程一致（推荐，等价改造前的单腿口径）；取消勾选可让仓位与成分按不同频率调整。</span>
+          <span class="threshold-hint">勾选时两腿日程一致（推荐，等价于单腿口径）；取消勾选可让仓位与成分按不同频率调整。</span>
         </div>
 
         <template v-if="!riskSameAsSelection">

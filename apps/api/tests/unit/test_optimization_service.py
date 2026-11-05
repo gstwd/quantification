@@ -418,7 +418,7 @@ class TestFinish:
         svc._config_svc = MagicMock()
         svc._config_svc.get_config.return_value = SimpleNamespace(
             config_json=dict(_CANDIDATE_CONFIG),
-            # F-17：promote 时会把版本历史追加进基线描述，替身必须带该字段
+            # promote 时会把版本历史追加进基线描述，替身必须带该字段
             description="基线描述",
         )
 

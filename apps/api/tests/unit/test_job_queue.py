@@ -1,4 +1,4 @@
-"""后台任务队列单元测试（B1/B2/B3/B6/B7）。
+"""后台任务队列单元测试。
 
 使用内存版 FakeJobRepository 验证入队、去重、lane 隔离、优先级、认领、执行、
 失败重试、批次取消/暂停、心跳超时回收与统计口径，不依赖真实数据库。
@@ -535,7 +535,7 @@ class TestJobQueue:
 
 
 class TestLaneIsolation:
-    """B1/B6：回测 lane 与通用 lane 的 worker 不能互相抢任务。"""
+    """回测 lane 与通用 lane 的 worker 不能互相抢任务。"""
 
     def test_lane_for_classifies_backtest_types(self) -> None:
         """回测与对比任务归入回测 lane，其余归入通用 lane。"""
@@ -565,7 +565,7 @@ class TestLaneIsolation:
         assert [job.job_id for job in claimed] == ["j2"]
 
     def test_priority_preempts_earlier_job(self) -> None:
-        """高优先级任务应抢在更早入队的低优先级任务之前执行（B2）。"""
+        """高优先级任务应抢在更早入队的低优先级任务之前执行。"""
         repo = FakeJobRepository()
         queue = _make_queue(repo)
         queue.enqueue("backtest", {"backtest_id": "low"})
@@ -577,7 +577,7 @@ class TestLaneIsolation:
 
 
 class TestBatchControl:
-    """B2：批次优先级 / 取消 / 暂停。"""
+    """批次优先级 / 取消 / 暂停。"""
 
     def test_cancel_pending_job_marks_cancelled(self) -> None:
         """未开始的任务被取消后直接落为 cancelled。"""
@@ -660,7 +660,7 @@ class TestBatchControl:
 
 
 class TestZombieScan:
-    """B7：心跳超时与超长运行任务的回收。"""
+    """心跳超时与超长运行任务的回收。"""
 
     def test_scan_recovers_stale_running_job_as_failed(self) -> None:
         """心跳超时且尝试次数用尽的任务应被判失败，避免永久占用 worker。"""
@@ -725,7 +725,7 @@ class TestZombieScan:
 
 
 class TestObservability:
-    """B3：队列统计与排队位置。"""
+    """队列统计与排队位置。"""
 
     def test_stats_reports_backlog_and_capacity(self) -> None:
         """统计应给出状态分布、按类型积压、运行中任务与并发预算。"""

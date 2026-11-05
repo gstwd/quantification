@@ -1,4 +1,4 @@
-"""后台任务队列可观测性路由（B3）。"""
+"""后台任务队列可观测性路由。"""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def get_queue_stats(
     """返回队列积压、吞吐、运行中任务与并发预算。
 
     用于替代"手工连库查 pg_stat_activity / background_job"来判断
-    "卡住了还是在跑"（B3）。
+    "卡住了还是在跑"。
     """
     stats = get_job_queue().stats(window_hours=window_hours)
     return QueueStatsResponse(

@@ -1,6 +1,6 @@
 """A 股交易日历模块。
 
-严格口径（C1）：只接受**真实日历**，数据来源按优先级为
+严格口径：只接受**真实日历**，数据来源按优先级为
 1. 上游数据源：Tushare Pro（trade_cal）优先，未配置 Token 或失败时回退 AkShare；
 2. 本地 `trading_calendar` 表快照（由数据管理页同步写入）。
 
@@ -485,7 +485,7 @@ def resolve_trading_calendar(
     *,
     required_range: tuple[date, date] | None = None,
 ) -> tuple[TradingCalendarLike, str]:
-    """严格解析交易日历（C1）。
+    """严格解析交易日历。
 
     优先级：上游数据源 → 本地 `trading_calendar` 表快照 → 抛错。
     不存在任何"按星期近似"的降级路径。

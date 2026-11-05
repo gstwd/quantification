@@ -279,7 +279,7 @@ class IngestService:
         - 按配置优先级依次调用各 SDK 客户端，任一源抛错或返回空数据时继续降级；
         - 请求窗口内开盘/最高/最低/收盘任一缺失（NaN/非正值）即视为该源不合格；
         - 成交量缺失或为 0 的交易日超过 1% 也视为不合格（AkShare 历史行情不提供
-          成交量，曾导致主要指数整段成交量为 0）；
+          成交量，只看 OHLC 会选出整段成交量为 0 的来源）；
         - 首个 OHLC 完整且成交量基本完整的数据源直接采用；
         - 所有源均不合格时按 (OHLC 缺失日数, 成交量缺失日数) 取最少者，同分时
           保持配置优先级，并告警（尽量保证有数据可用）；
@@ -434,7 +434,7 @@ class IngestService:
         if latest is not None:
             bars = [b for b in bars if b.trade_date > latest]
 
-        # 非交易日行情过滤（F-7）：上游偶尔把上一交易日的收盘价打在假期日期上
+        # 非交易日行情过滤：上游偶尔把上一交易日的收盘价打在假期日期上
         # （实测 2018-06-18 端午节有 7 个指数日线），入库前按交易日历剔除
         bars, dropped = self._drop_non_trading_bars(bars)
         if dropped:
@@ -457,7 +457,7 @@ class IngestService:
         return count
 
     def _drop_non_trading_bars(self, bars: list[Any]) -> tuple[list[Any], list[Any]]:
-        """剔除不属于交易日的行情（F-7）。
+        """剔除不属于交易日的行情。
 
         `index_daily_bar` 没有对交易日历的约束，上游把假期日期打上行情时
         会被照单全收，随后回测把它当交易日，多出一个假调仓日与假收益。

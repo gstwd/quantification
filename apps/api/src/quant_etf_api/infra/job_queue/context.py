@@ -2,7 +2,7 @@
 
 回测等长任务会在安全检查点（每日循环起点 / checkpoint 提交）调用
 ``ensure_not_cancelled()``；取消标记只在数据库里，因此这里按任务做短 TTL
-缓存，避免长循环里每个交易日都产生一次查询（B2）。
+缓存，避免长循环里每个交易日都产生一次查询。
 """
 
 from __future__ import annotations

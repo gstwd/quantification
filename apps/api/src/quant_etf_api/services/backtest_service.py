@@ -394,7 +394,7 @@ class BacktestService:
         self._engine = StrategyEngine()
         self._backtest_repo = backtest_repo or BacktestRepository(db)
         self._index_bar_repo = index_bar_repo or IndexDailyBarRepository(db)
-        # 严格口径（C1）：调仓调度器不再自带"周末降级"日历，
+        # 严格口径：调仓调度器不再自带"周末降级"日历，
         # 而是在 _run_backtest_loop 里按回测区间解析真实日历后注入；
         # 每日调仓（或未配置 rebalance）不要求日历，此处保持为 None。
         self._rebalance_scheduler: DefaultRebalanceScheduler | None = None
@@ -432,7 +432,7 @@ class BacktestService:
             ValueError: 策略不存在、配置校验失败，或回测区间不符合用途边界时抛出。
         """
         backtest_id = str(uuid4())
-        # created_at 和 started_at/finished_at 一样是 timestamptz，写入必须带时区（B5）
+        # created_at 和 started_at/finished_at 一样是 timestamptz，写入必须带时区
         now = utcnow_aware()
 
         # 研究期/验证期硬约束：研究类回测越过研究期末端直接拒绝
@@ -456,7 +456,7 @@ class BacktestService:
                 )
             raise ValueError(f"策略 {req.strategy_id} 配置不存在或解析失败，无法执行回测")
 
-        # P4：回测创建前复用配置校验，未知/停用因子或非法变换函数直接拒绝
+        # 回测创建前复用配置校验，未知/停用因子或非法变换函数直接拒绝
         config_validation = config_svc.validate_parsed(strategy_config)
         if not config_validation.valid:
             raise ValueError(
@@ -494,7 +494,7 @@ class BacktestService:
         if req.benchmark_mix:
             # 混合基准（恒定比例，现金收益 0）；存量回测无该键，按单指数买入持有解释
             params["_benchmark_mix"] = [item.model_dump() for item in req.benchmark_mix]
-        # 换手口径指纹（C2）：存量回测无该键，读取时按历史口径（legacy_v1）标注，
+        # 换手口径指纹：存量回测无该键，读取时按历史口径（legacy_v1）标注，
         # 避免"含清仓/建仓腿"与"未含"的净口径指标被直接比较
         params["_turnover_model"] = TURNOVER_MODEL_DELTA_W
 
@@ -545,7 +545,7 @@ class BacktestService:
             logger.exception("create_backtest DB insert failed: backtest_id=%s", backtest_id)
             raise
 
-        # 验证期消费留痕（D-5）：只要创建了使用验证期数据的回测，该策略的
+        # 验证期消费留痕：只要创建了使用验证期数据的回测，该策略的
         # "验证期样本外"身份即被消费，此后这段数据只能用于否决。留痕挂在策略
         # 元数据上（strategy_config），因为消费发生在研究阶段、可能早于上线。
         if req.purpose in ("validation", "monitor"):
@@ -591,7 +591,7 @@ class BacktestService:
         include_net: bool = True,
         cost_bps: float | None = None,
     ) -> tuple[list[BacktestSummary], int]:
-        """分页返回回测列表，支持状态/用途/时间范围/日历来源筛选（B4/C1）。
+        """分页返回回测列表，支持状态/用途/时间范围/日历来源筛选。
 
         Args:
             offset: 偏移量。
@@ -604,7 +604,7 @@ class BacktestService:
             order_by: 排序字段：created_at / started_at / finished_at。
             descending: 是否倒序，默认 True。
             calendar_source: 调仓日历来源过滤（upstream/database/not_required），
-                用于审计"同一配置是否跑在两种调仓日历上"（C1）。
+                用于审计"同一配置是否跑在两种调仓日历上"。
             include_net: 是否现算净成本口径指标（F-12，默认 True）。
                 历史实现只给 `backtest show` 现算净口径，列表里
                 `net_sharpe_ratio` 恒为 null，无法在列表层比较"成本吃掉多少超额"。
@@ -644,7 +644,7 @@ class BacktestService:
     def _net_metrics_by_backtest(
         self, rows: list[BacktestRunModel], cost_bps: float | None
     ) -> dict[str, dict[str, Any]]:
-        """批量现算每条回测的净成本口径指标（F-12）。
+        """批量现算每条回测的净成本口径指标。
 
         与 `backtest show` 使用同一套口径（`domain.research.stability`
         的成本折算），只是把结果并进列表摘要，避免"列表看毛、详情看净"。
@@ -703,7 +703,7 @@ class BacktestService:
         return datetime.combine(value, time.min, tzinfo=CHINA_TZ).astimezone(timezone.utc)
 
     def _queue_info(self, backtest_ids: list[str]) -> dict[str, dict[str, Any]]:
-        """批量查询回测任务的排队位置与等待/执行耗时（B3）。
+        """批量查询回测任务的排队位置与等待/执行耗时。
 
         队列信息属于增强可观测性：任何查询失败都不应影响回测列表本身。
 
@@ -813,7 +813,7 @@ class BacktestService:
             return None
 
     def cancel_backtest(self, backtest_id: str) -> dict[str, Any]:
-        """请求取消一条回测（B2）。
+        """请求取消一条回测。
 
         未开始（pending）的回测直接落为 cancelled；运行中的回测只打协作取消
         标记，由回测主循环在安全检查点退出。同步执行（不走队列）的回测没有
@@ -877,7 +877,7 @@ class BacktestService:
         }
 
     def find_dangling_references(self, limit: int = 200) -> DanglingReferenceReport:
-        """审计全部悬挂回测引用（C5）。
+        """审计全部悬挂回测引用。
 
         Args:
             limit: 明细条数上限。
@@ -948,7 +948,7 @@ class BacktestService:
         )
 
     def prune_dangling_references(self, *, dry_run: bool = True) -> BacktestPruneResponse:
-        """清理 JSONB 中的悬挂回测引用（C5）。
+        """清理 JSONB 中的悬挂回测引用。
 
         - ``robustness_run.variants[*].backtest_ids``：移除指向已删除回测的窗口，
           并把窗口标签写入同一变体的 ``deleted_windows``（保留"曾经有这些窗口"
@@ -1043,11 +1043,11 @@ class BacktestService:
         """从已落库的逐日结果现算稳健性指标与净成本口径。
 
         成本默认取创建回测时固化的 ``params["_cost_bps"]``，缺失时回退系统默认值；
-        调用方可传 ``cost_bps`` 覆盖主口径（C3：想看 20/30/50bp 无需重跑回测），
+        调用方可传 ``cost_bps`` 覆盖主口径（想看 20/30/50bp 无需重跑回测），
         并始终并列输出多档成本（``cost_ladder``）。执行模型、数据质量口径、
         基准、调仓日历来源与换手口径一并写入结果，作为指标口径指纹，避免
-        不同口径的回测指标被相互比较（历史上 warn/strict 口径分叉、周末降级
-        日历、换手未计清仓腿都曾导致同一配置出现两套结果）。
+        不同口径的回测指标被相互比较（数据质量口径、调仓日历来源或换手口径不同时，
+        同一配置会得出不同结果）。
 
         Args:
             row: 回测 ORM 行。
@@ -1076,7 +1076,7 @@ class BacktestService:
             positions=[getattr(r, "positions", None) for r in daily_rows],
             cost_bps=float(effective_cost_bps),
         )
-        # 多档成本并列（C3）：只重算与成本有关的量，读取路径零可感额外成本
+        # 多档成本并列：只重算与成本有关的量，读取路径零可感额外成本
         ladder_config = (
             cost_ladder
             if cost_ladder is not None
@@ -1160,7 +1160,7 @@ class BacktestService:
             return ValidationUsageResponse()
 
         items: list[ValidationUsageItem] = []
-        # 策略级验证期消费留痕（D-5）：与"跑过验证期回测"的回测级记录并列输出，
+        # 策略级验证期消费留痕：与"跑过验证期回测"的回测级记录并列输出，
         # 便于判断"该策略的验证期是否已经被研究者消费过"
         consumed: dict[str, tuple[datetime | None, str | None]] = {}
         strategy_ids = {row.strategy_id for row in rows}
@@ -1321,7 +1321,7 @@ class BacktestService:
                     trade_date=r.trade_date,
                     index_code=r.index_code,
                     signal_score=r.signal_score,
-                    # 迁移 0053 之前的历史行没有该列，按"已评分"回退保持旧口径
+                    # 缺该列的存量行按"已评分"处理
                     scored=getattr(r, "scored", True),
                     selection_rebalanced=getattr(r, "selection_rebalanced", True),
                     signal_level=r.signal_level,
@@ -1390,7 +1390,7 @@ class BacktestService:
 
         except JobCancelledError:
             # 协作取消：回滚当前未提交分段后把回测落成 cancelled，
-            # 并向上抛出以便队列把 background_job 也标记为已取消（B2）
+            # 并向上抛出以便队列把 background_job 也标记为已取消
             self._db.rollback()
             logger.info("回测已按请求取消: backtest_id=%s", backtest_id)
             try:
@@ -1475,7 +1475,7 @@ class BacktestService:
 
         流程：
         1. 准备数据（标的、交易日、行情、估值，回望窗口按因子 lookback 推导）
-        2. 解析交易日历并注入口径指纹（C1）
+        2. 解析交易日历并注入口径指纹
         3. 预计算全区间因子值
         4. 逐决策日执行引擎管线，由 ``BacktestExecutor`` 结算持仓、收益与换手
            （毛收益，不扣除交易成本；记账口径见 ``domain.portfolio.execution``）
@@ -1489,7 +1489,7 @@ class BacktestService:
 
         ``persist=False`` 时保留完全相同的计算路径，只是不写 ``backtest_daily_result``
         / ``backtest_index_result``、不提交、不落最终状态，并把逐日结果原样返回，
-        供研究批量评估（D-1）在内存里算净口径与稳健性指标。**这是同一条执行路径**，
+        供研究批量评估在内存里算净口径与稳健性指标。**这是同一条执行路径**，
         因此指标口径与落库回测一致；但它不构成验收凭证——验收必须用
         ``backtest run`` 生成可审计的落库回测。
 
@@ -1513,7 +1513,7 @@ class BacktestService:
         # 回测使用一次性行情快照；关闭 checkpoint commit 后的 ORM 对象过期，
         # 避免收尾数据质量扫描访问行情字段时逐条触发隐式 SELECT。
         self._db.expire_on_commit = False
-        # 严格口径（C1）：周度/月度调仓强依赖真实交易日历，解析失败即失败；
+        # 严格口径：周度/月度调仓强依赖真实交易日历，解析失败即失败；
         # 每日调仓（或未配置 rebalance）与日历无关，记为 not_required。
         self._resolve_rebalance_calendar(row, config)
         universe, index_codes, trading_dates, all_bars, all_valuation, all_macro = (
@@ -1523,7 +1523,7 @@ class BacktestService:
         # 全市场行情：先浅拷贝，避免一个变体的补充数据泄漏进其他变体的缓存
         all_bars = dict(all_bars)
         all_valuation = dict(all_valuation)
-        # 非交易日行情过滤（F-7）：上游偶尔把行情打在假期日期上，直接当交易日
+        # 非交易日行情过滤：上游偶尔把行情打在假期日期上，直接当交易日
         # 会多出假调仓日与假收益；日历不可用时保持原行为并留痕
         trading_dates, non_trading_dates = self._filter_non_trading_dates(
             row.start_date, row.end_date, trading_dates
@@ -1539,8 +1539,8 @@ class BacktestService:
         if non_trading_dates:
             run_params["_non_trading_bar_dates"] = [d.isoformat() for d in non_trading_dates]
 
-        # 策略显式限定资产范围时，必须在因子预计算前收窄回测池。此前仅在主循环
-        # 构建上下文时过滤，会让扩散等成分面板因子为无关指数加载数据并产生缺失告警。
+        # 策略显式限定资产范围时，必须在因子预计算前收窄回测池；只在主循环构建上下文时
+        # 过滤，会让扩散等成分面板因子为无关指数加载数据并产生缺失告警。
         if config.index_codes:
             configured_codes = set(config.index_codes)
             universe = [item for item in universe if item["index_code"] in configured_codes]
@@ -1669,7 +1669,7 @@ class BacktestService:
             benchmark_index_code if enable_benchmark else "禁用",
         )
 
-        # 不落库模式（D-1）下保留全部逐日结果，供净口径与稳健性指标现算
+        # 不落库模式下保留全部逐日结果，供净口径与稳健性指标现算
         memory_rows: list[BacktestDailyResultModel] = []
         # 指数级结果缓冲：按 checkpoint 批量 INSERT，避免逐行构造 ORM 对象
         index_buffer: list[dict[str, Any]] = []
@@ -1677,13 +1677,13 @@ class BacktestService:
         accumulator = BacktestDayAccumulator()
         # 执行器：维护漂移后的实际持仓，按执行模型结算收益与换手
         executor = BacktestExecutor(execution_model)
-        # 数据缺口天数：至少一个持仓资产当日收益受缺失行情影响的交易日数（B10）
+        # 数据缺口天数：至少一个持仓资产当日收益受缺失行情影响的交易日数
         data_gap_days = 0
         # 数据缺口剔除记录：两种数据质量口径共用同一候选池，因此剔除集合一致，
         # 仅提示详细程度不同（strict 逐指数、warn 汇总）
         exclusion_dates: dict[str, list[date]] = {}
         exclusion_reasons: dict[str, set[str]] = {}
-        # 有效候选池逐日规模（C6）：用于还原"早期实际可交易池只有 N 个"这类事实
+        # 有效候选池逐日规模：用于还原"早期实际可交易池只有 N 个"这类事实
         pool_sizes: list[int] = []
         last_progress = 0
         total_dates = len(decision_dates)
@@ -1706,7 +1706,7 @@ class BacktestService:
         timing_state: TimingState | None = None
         all_index_codes = set(index_codes)
         # 路径依赖：风控叠加层状态、最近一次成交目标与收益面板（未启用时保持 None，
-        # 当日目标与成交判定与改造前逐位一致）
+        # 当日目标与成交判定只由调仓日历决定）
         risk_cfg = config.risk
         band_cfg = config.rebalance.band if config.rebalance else None
         overlay_state = (
@@ -1724,7 +1724,7 @@ class BacktestService:
             row.params = dict(run_params)
 
         for i, trade_date in enumerate(decision_dates):
-            # 协作取消检查点（B2）：取消标记有短 TTL 缓存，不会每个交易日都查库
+            # 协作取消检查点：取消标记有短 TTL 缓存，不会每个交易日都查库
             ensure_not_cancelled()
             next_date = trading_dates[i + 1]
 
@@ -1752,7 +1752,7 @@ class BacktestService:
             )
 
             # 两条腿独立到期：选股腿改成分，风险腿仅按择时等比缩放总仓位。
-            # 两腿同频（旧配置升级后的默认形态）时，两腿同日命中，合成为改造前的
+            # 两腿同频（平铺写法的存量配置升级后即此形态）时，两腿同日命中，合成为
             # "新成分 + 择时目标仓位"。
             legs = self._select_legs(config, trade_date)
 
@@ -2271,7 +2271,7 @@ class BacktestService:
 
         说明（已知取舍）：条件 1~3 只用当日信息，条件 4 需要"次日行情是否存在"，
         属 ex-ante 可执行域约束——若不剔除，缺次日行情的资产会以 0 收益参与组合，
-        反而系统性低估波动。剔除明细逐日记录在候选池时间线（C6）中，可审计。
+        反而系统性低估波动。剔除明细逐日记录在候选池时间线中，可审计。
 
         T+1 收盘执行下成交价是次日收盘（条件 4 已检查），成交后首个收益窗口还需
         T+2 收盘价。这里**不**再向前多看一天：收益结算使用前向填充行情
@@ -2349,7 +2349,7 @@ class BacktestService:
         return result, reasons
 
     def _resolve_rebalance_calendar(self, row: BacktestRunModel, config: StrategyConfig) -> str:
-        """解析调仓所需的交易日历，并把来源写入口径指纹（C1）。
+        """解析调仓所需的交易日历，并把来源写入口径指纹。
 
         严格口径：周度/月度调仓必须有真实交易日历（上游数据源或本地
         `trading_calendar` 表快照），解析失败直接抛
@@ -2842,7 +2842,7 @@ class BacktestService:
             } & {"weekly", "biweekly", "monthly"}
             if needed:
                 raise ValueError(
-                    "调仓调度器未初始化：周度/月度/双周调仓前必须先解析交易日历（C1）"
+                    "调仓调度器未初始化：周度/月度/双周调仓前必须先解析交易日历"
                 )
             # 两腿均为每日调仓：无需日历，直接短路避免构造调度器
             return RebalanceLegs(selection=True, risk=True)
@@ -2866,7 +2866,7 @@ class BacktestService:
             benchmark_returns: 基准日收益率序列。
             total_in_pos_count: 持仓指数总次数（主循环累积）。
             total_in_pos_positive: 持仓指数正收益总次数（主循环累积）。
-            data_gap_days: 至少一个持仓资产受数据缺口影响的交易日数（B10）。
+            data_gap_days: 至少一个持仓资产受数据缺口影响的交易日数。
             annual_risk_free_rate_pct: 年化无风险利率（%），默认 0（历史口径）。
         """
         if not accumulator.daily_returns:
@@ -2983,13 +2983,13 @@ class BacktestService:
     def _filter_non_trading_dates(
         self, start: date, end: date, trading_dates: list[date]
     ) -> tuple[list[date], list[date]]:
-        """剔除"行情里有数据、日历判定为非交易日"的日期（F-7）。
+        """剔除"行情里有数据、日历判定为非交易日"的日期。
 
-        上游数据源偶尔把上一交易日的收盘价打在假期日期上（实测 2018-06-18
-        端午节有 7 个指数日线），旧实现直接把它当交易日，于是回测多出一个
+        上游数据源偶尔把上一交易日的收盘价打在假期日期上（例如 2018-06-18
+        端午节有 7 个指数日线）；若直接当作交易日，回测会多出一个
         假调仓日、一段假收益，还会连带一批 DATA_GAP / BENCHMARK_MISSING 警告。
 
-        日历解析失败时**保持原有行为**（不静默改变历史结果口径），
+        日历解析失败时不做过滤（不静默改变已有结果的口径），
         并通过 ``_non_trading_bar_policy=skipped_no_calendar`` 留痕。
 
         Args:

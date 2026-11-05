@@ -2,9 +2,8 @@
 
 > **只跑 CLI**：稳健性验证只需要 CLI + 数据库。**用 `--sync --workers N` 走本地多进程**，
 > 不要用默认的入队模式（那需要服务端 worker 消费）。
-> `--workers`：`1`=串行、`N`=并发 N 条、`0`=按 CPU 与内存自动推导（上限 8）。
-> 实测（20 核 / 远端库）：`scan --preset quick`（18 条回测）串行 ≈ 32 分钟、
-> `--workers 6` ≈ 15 分钟。并发过高会先撞内存与数据库连接预算，6~8 是常见甜点区。
+> `--workers`：缺省 `1`（串行）、`N`=并发 N 条、`0`=先读 `QUANT_ETF_CLI_WORKERS`，没有再按 CPU 与内存
+> 自动推导（上限 8）。并发过高会先撞内存与数据库连接预算，6~8 是常见甜点区。
 > 并行命令的输出**不要接管道**（会被缓冲到结束），要进度就 `*> run.log` 后 tail。
 
 ## 命令
@@ -12,11 +11,11 @@
 ```bash
 # 1) 单旋钮邻域扰动：检查参数是否处于平台而非尖峰
 #    --preset quick    = 轻量体检（2 窗口 / 8 旋钮 / 18 条回测），写进验收清单第 6 项
-#    --preset standard = 完整（4 窗口 / 30 旋钮，等同旧默认）
+#    --preset standard = 完整（4 窗口 / 30 旋钮）
 #    --knobs a,b       = 只扫指定的关键旋钮；--knobs-file knobs.json 同上
 #    --sync --workers N = 本地多进程并行（回测是 CPU+DB 混合任务，线程会被 GIL 限制）
 python -m quant_etf_api.cli robustness scan --strategy <id> [--preset quick|standard] \
-    [--windows 4] [--max-knobs 30] [--knobs timing.thresholds.offensive_score] [--knobs-file k.json] \
+    [--windows 4] [--max-knobs 30] [--knobs timing.thresholds.offensive] [--knobs-file k.json] \
     --sync --workers 6 [--execution-model t_plus_1_open]   # 缺省 t_plus_1_close
 
 # 2) 因子消融：逐个移除评分因子与过滤条件，看边际贡献
@@ -29,7 +28,7 @@ python -m quant_etf_api.cli robustness pool --strategy <id> --windows 4 --sample
 python -m quant_etf_api.cli robustness collect <robustness_id>
 
 # 5) 统计显著性：CSCV-PBO / Deflated Sharpe / 块自助法置信区间
-python -m quant_etf_api.cli robustness stats <robustness_id> [--n-trials N] [--cost-bps 10]
+python -m quant_etf_api.cli robustness stats <robustness_id> [--n-trials N] [--cost-bps <成本>]
 
 # 6) 清理本批次派生出来的变体草稿策略（默认预演；变体仍被回测引用时需 --force）
 python -m quant_etf_api.cli strategy prune-variants --batch <robustness_id> [--apply] [--force]
@@ -45,18 +44,19 @@ python -m quant_etf_api.cli robustness abandon <robustness_id> --reason "回测�
 本地并行执行跑完后批次状态即终态；若父进程被中断，用
 `backtest batch --pending` 续跑该批次剩余的回测（已 success 的不会重复执行）。
 
-## 扫哪些旋钮（D2）
+## 扫哪些旋钮
 
-`scan` 的截断顺序按**业务重要性**而不是路径字母序：择时阈值 → 过滤阈值 → 评分权重 →
-风险/仓位 → 调仓。历史行为按字母序截断时，`timing.thresholds.*`（最容易被调到"刚好"
-的参数）永远排在最后被截掉，导致"扫过邻域"结论其实没覆盖最可疑的参数。
+旋钮超过上限时，`scan` 按业务上最容易被拟合的参数优先保留（`services/robustness_service._KNOB_PRIORITY`）：
+因子模板参数 `factor_aliases.*` → 择时阈值 → 择时代理 → 其余择时参数与路径依赖风控 / 偏离调仓阈值
+（`risk.drawdown_stop|trailing_stop|vol_target`、`rebalance.band`）→ 过滤规则 → 评分权重 → 风险 → 组合 → 排名 → 调仓。
+单个旋钮的全部 ±1 档变体 |Δ夏普| ≤ 0.1（`robustness_neighborhood_tolerance`）记为平台，两侧都超过容差记为方向反转。
 
 默认规模与吞吐不匹配时用 `--preset quick`：2 个窗口 × 8 个旋钮 ≈ 18 条回测，
 足以回答"参数是平台还是尖峰"；需要写进报告的完整结论再用 `standard`。
 本次实际扫描口径随批次落库（`robustness_run.scan_params`），
 `robustness show <id>` 与前端"稳健性验证"页签都能看到 preset / knobs / windows。
 
-## 探索路径与验收路径（D1）
+## 探索路径与验收路径
 
 | 目的 | 命令 | 是否落库 | 能否作为验收依据 |
 | --- | --- | --- | --- |
@@ -66,7 +66,7 @@ python -m quant_etf_api.cli robustness abandon <robustness_id> --reason "回测�
 `research batch` 与平台回测共用同一条执行路径（只关闭落库并按窗口共享行情/因子缓存），
 所以口径一致；但"没落库"意味着它不可审计，结论必须回到落库回测复核。
 
-## 变体清理与试验台账（D4/D5）
+## 变体清理与试验台账
 
 - 稳健性批次会派生 `<基线>__rbXXXX_*` 草稿策略，带 `is_variant` / `source_batch_id` 元数据：
   `strategy prune-variants --batch <批次>` 预演 → `--apply` 删除；
@@ -105,16 +105,15 @@ N **按研究线汇总**（基线 + 优化候选 + 稳健性变体 + 手工归�
 
 ## 验收清单第 6 项的证据匹配
 
-`optimization finish` 的"参数邻域"项只接受与**当前配置**对应的 scan 批次：
-`robustness_run.baseline_config_hash` 必须等于会话的基线哈希或候选哈希，
-或者批次直接跑在候选策略上（`strategy_id == candidate_strategy_id`）。
-promote 之后基线配置已变，上一轮的批次不再复用——忘了跑 scan 会直接判不通过。
+`optimization finish` 的"参数邻域"项只接受与**当前配置**对应、成功完成、执行口径与会话相同的 scan 批次：
+批次跑在基线策略上且 `robustness_run.baseline_config_hash` 等于会话的基线哈希，或批次的哈希等于会话的候选哈希。
+策略 ID 相同而配置哈希不同的批次不算——没有匹配批次时直接判不通过。
 
 ## 写进优化报告的要求
 
 优化报告必须包含：
 
-1. 毛口径与净口径（默认 10bp 单边）两套验证窗指标对比；
+1. 毛口径与净口径（缺省 `default_cost_bps` = 0.5bp，按单边换手折算的往返成本；成本敏感时另给更高档位）两套验证窗指标对比；
 2. 参数邻域的 Δ 范围与是否存在方向反转；
 3. 消融结果（哪个因子贡献最小）；
 4. `stats` 的 PBO 与 Deflated Sharpe 数值，以及本次计入的 N；

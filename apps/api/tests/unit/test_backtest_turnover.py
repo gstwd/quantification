@@ -1,8 +1,7 @@
-"""换手率计入清仓/建仓腿（C2）单元测试。
+"""换手率计入清仓/建仓腿单元测试。
 
-历史口径在 ``prev`` 或 ``new`` 为空时把换手记为 0，导致清仓型调仓腿的成本
-被系统性低估；现在统一按 ``Σ|Δw|/2`` 计入，并用 ``_turnover_model`` 指纹区分
-存量回测（legacy_v1）与新回测（delta_w_v2）。
+``prev`` 或 ``new`` 为空时同样按 ``Σ|Δw|/2`` 计入换手（否则清仓型调仓腿的成本会被系统性
+低估），并用 ``_turnover_model`` 指纹区分存量回测（legacy_v1）与当前口径（delta_w_v2）。
 """
 
 from __future__ import annotations
@@ -130,7 +129,7 @@ class TestTurnoverInLoop:
     """主循环落库的换手值。"""
 
     def test_liquidation_leg_records_turnover(self) -> None:
-        """建仓日与清仓日的换手都必须落库（旧口径会把清仓日记为 0/None）。"""
+        """建仓日与清仓日的换手都必须落库（清仓日不能记为 0/None）。"""
         svc, ctx = _stub_loop_service([{"000300": 1.0}, {}, {}])
         svc._run_backtest_loop("bt-turnover", ctx["row"], _config())
         rows = ctx["collected"]
@@ -138,7 +137,7 @@ class TestTurnoverInLoop:
         assert len(rows) == len(DATES) - 1
         # 第 1 日：空仓 → 满仓（建仓腿）
         assert rows[0].turnover == 0.5
-        # 第 2 日：满仓 → 空仓（清仓腿，旧口径为 None）
+        # 第 2 日：满仓 → 空仓（清仓腿）
         assert rows[1].turnover == 0.5
 
 

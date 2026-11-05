@@ -178,7 +178,7 @@ class TestStrategyEngine:
         ["absolute", "rank", "zscore"],
     )
     def test_all_missing_asset_not_selected(self, scoring_mode: str) -> None:
-        """B7：全缺失资产在三种评分模式下均不进入排名与组合。"""
+        """全缺失资产在三种评分模式下均不进入排名与组合。"""
         engine = StrategyEngine()
         config = StrategyConfig(
             strategy_id="test_b7",

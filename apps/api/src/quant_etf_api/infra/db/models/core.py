@@ -368,7 +368,7 @@ class BacktestRunModel(Base):
     )
     candidate_pool: Mapped[dict | None] = mapped_column(
         JSONB,
-        comment="逐日有效候选池时间线（游程编码）与数据缺口剔除区间（C6），由回测成功收尾时写入",
+        comment="逐日有效候选池时间线（游程编码）与数据缺口剔除区间，由回测成功收尾时写入",
     )
 
 
@@ -417,7 +417,7 @@ class BacktestDailyResultModel(Base):
         nullable=False,
         default=0,
         server_default="0",
-        comment="当日受数据缺口影响的持仓资产数（B10）",
+        comment="当日受数据缺口影响的持仓资产数",
     )
     benchmark_return: Mapped[float | None] = mapped_column(
         Float, comment="基准指数当日收益率，单位 %"
@@ -636,7 +636,7 @@ class StrategyConfigModel(Base):
     )
     source_batch_id: Mapped[str | None] = mapped_column(
         String(64),
-        comment="派生来源批次 ID（稳健性验证批次），手工策略为 NULL（D-4）",
+        comment="派生来源批次 ID（稳健性验证批次），手工策略为 NULL",
     )
     lineage_id: Mapped[str | None] = mapped_column(
         String(64),
@@ -645,7 +645,7 @@ class StrategyConfigModel(Base):
     )
     validation_consumed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
-        comment="验证期（2026-01-01 起）数据首次被消费的时间，NULL 表示尚未消费（D-5）",
+        comment="验证期（2026-01-01 起）数据首次被消费的时间，NULL 表示尚未消费",
     )
     validation_consumed_note: Mapped[str | None] = mapped_column(
         Text, comment="验证期消费说明（首次消费来源或人工备注，D-5）"
@@ -1156,8 +1156,8 @@ class BackgroundJobModel(Base):
     所有后台任务（数据摄取、因子计算、回测、对比回测、AI 分析、补数等）
     统一通过本表入队，由按 lane 划分的 worker 线程池认领执行。
     job_key 在 pending/running 状态下唯一，用于幂等去重。
-    heartbeat_at 由 worker 周期更新，供运行期僵尸任务扫描判断活性（B7）；
-    batch_id 承载批次标识（如稳健性 robustness_id），支持整批取消/暂停（B2）。
+    heartbeat_at 由 worker 周期更新，供运行期僵尸任务扫描判断活性；
+    batch_id 承载批次标识（如稳健性 robustness_id），支持整批取消/暂停。
     """
 
     __tablename__ = "background_job"
@@ -1300,7 +1300,7 @@ class RobustnessRunModel(Base):
     )
     scan_params: Mapped[dict | None] = mapped_column(
         JSONB,
-        comment="本次扫描口径：预设（quick/standard）、关键旋钮清单、窗口数（D-2）",
+        comment="本次扫描口径：预设（quick/standard）、关键旋钮清单、窗口数",
     )
     trial_count: Mapped[int] = mapped_column(
         Integer,

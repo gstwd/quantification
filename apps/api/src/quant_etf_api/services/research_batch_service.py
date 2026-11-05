@@ -1,4 +1,4 @@
-"""研究批量评估：同一批变体的"秒级"离线评估路径（D-1）。
+"""研究批量评估：同一批变体的"秒级"离线评估路径。
 
 为什么需要这个服务：一次探索性诊断（消融 + 池扰动 + 参数邻域 + 简化）动辄
 几十个变体 × 若干窗口，走平台回测意味着几百条落库回测（队列排期 + 逐日结果
@@ -118,7 +118,7 @@ class ResearchBatchResult:
         }
 
     def to_summary_table(self) -> str:
-        """输出"变体 × 指标"排名表（F-9）。
+        """输出"变体 × 指标"排名表。
 
         几十个变体的完整 JSON 动辄几万 token，且没有排序视图，人和 agent
         都难以直接回答"到底哪个变体更好"；这里只保留决策需要的列。
@@ -887,7 +887,7 @@ def _caliber_digest(
         "start_date": windows_list[0]["start"] if windows_list else None,
         "end_date": windows_list[-1]["end"] if windows_list else None,
         "persisted": False,
-        # 拼接口径标记（F-10）：aggregate 是把各窗口的逐日结果首尾相接后重算的，
+        # 拼接口径标记：aggregate 是把各窗口的逐日结果首尾相接后重算的，
         # 与"整段一次性回测"不等价（窗口起点会重置仓位、每窗各自预热），
         # 报告里禁止拿它与 backtest show 的整段数字直接比较
         "aggregate_mode": "window_stitched",

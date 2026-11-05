@@ -1,4 +1,4 @@
-"""策略层审查问题修复的回归测试。
+"""策略层的回归测试。
 
 覆盖：
 - 排名只按综合得分：sort_by 非 score、枚举写错（order/logic 等）在解析期被拒绝；
@@ -89,7 +89,7 @@ class TestConfigEnumsRejected:
         ],
     )
     def test_enum_typos_rejected(self, builder: Any) -> None:
-        """历史上 order="DESC" 会按升序选出最差资产、logic="and" 会按 OR 过滤。"""
+        """枚举大小写写错（order="DESC"、logic="and"）在解析期被拒绝，否则会选出最差资产或按 OR 过滤。"""
         with pytest.raises(ValidationError):
             builder()
 

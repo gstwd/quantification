@@ -1,21 +1,22 @@
 # 策略配置模型参考
 
-> **维护状态：辅助示例，非 schema 契约。** 创建或修改配置前，必须以 `engine/config.py`、策略校验接口或 CLI `strategy validate` 的当前结果为准。
+字段、缺省值与校验规则以 `apps/api/src/quant_etf_api/engine/config.py` 为准；创建或修改配置前用 `strategy validate --file`
+（或 `POST /api/strategies/validate`）校验。创建时 `strategy_id`、`display_name` 等元数据在请求顶层，引擎配置在 `config_json` 内。
 
-策略配置 JSON 的完整结构。创建时 `strategy_id`、`display_name` 等元数据在 API 请求顶层，引擎配置在 `config_json` 字段内。
-
-## 顶层 StrategyConfig 字段 (config_json 内)
+## 顶层 StrategyConfig 字段（config_json 内）
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `index_codes` | list[str] | 否 | `[]` | 限定指数范围，如 `["000300","000905"]`。非空时仅在这些指数上运行 |
+| `index_codes` | list[str] | 否 | `[]` | 限定指数范围，如 `["000300","000905"]`；非空时只在这些指数上运行，并覆盖回测请求的标的范围 |
+| `factor_aliases` | dict[str, {template_id, params}] | 否 | `{}` | 别名 → 模板 + 参数；未声明的引用名按模板 ID + 默认参数解释（见 `factors.md`） |
 | `timing` | TimingConfig | 否 | null | 择时配置，null = 不择时 |
 | `score` | ScoreConfig | **是** | - | 评分配置 |
 | `filters` | FilterConfig | 否 | null | 过滤配置，null = 不过滤 |
-| `rank` | RankConfig | 否 | `RankConfig()` | 排名配置 |
-| `portfolio` | PortfolioConfig | 否 | null | 组合配置，null = 仅信号模式 |
+| `rank` | RankConfig | 否 | `RankConfig()` | 排名配置（缺省全部入选） |
+| `portfolio` | PortfolioConfig | 否 | `{"method": "equal_weight"}` | 组合配置；不能写 null。无择时时总仓位取 `default_exposure`（缺省 **0.5**） |
 | `risk` | RiskConfig | 否 | null | 风控配置 |
-| `rebalance` | RebalanceConfig | 否 | null | 调仓频率配置 |
+| `rebalance` | RebalanceConfig | 否 | null | 调仓配置，null = 每个交易日调仓 |
+| `regime_rules` | dict[regime, {score, filters, rank, portfolio}] | 否 | `{}` | 按 regime 覆盖选股与组合逻辑（如进攻时追动量、防守时看估值），覆盖块与顶层同等校验 |
 
 ## ScoreConfig
 
@@ -46,36 +47,36 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `factor` | str | **是** | 因子 ID |
+| `factor` | str | **是** | 因子引用名（别名或模板 ID） |
 | `op` | str | **是** | 操作符: `gt`/`lt`/`gte`/`lte`/`eq`/`neq`/`between` |
 | `value` | float 或 [float,float] | 条件* | 阈值，`between` 时传 `[min,max]`。与 `compare_to` 二选一 |
-| `compare_to` | str | 条件* | 被比较因子 ID，用于跨因子比较（如 `ma_5d > ma_20d`）。与 `value` 二选一 |
+| `compare_to` | str | 条件* | 被比较的因子引用名，用于同一资产的跨因子比较。与 `value` 二选一 |
+| `missing_strategy` | str | 否 | 因子缺失时：`fail`（缺省，规则不通过）/ `pass`（规则通过）/ `exclude`（剔除资产；AND 逻辑下 fail / exclude 的因子是决策必需因子，评分前剔除） |
 
 > *`value` 和 `compare_to` 必须恰好提供一个，不能同时设置也不能同时为空。
 
 #### 跨因子比较
 
-`compare_to` 字段允许将同一资产的两个因子值直接比较，无需固定阈值：
+`compare_to` 让同一资产的两个因子值直接比较，无需固定阈值（别名先在 `factor_aliases` 声明）：
 
 ```json
-// 金叉：短均线 > 长均线
-{"factor": "ma_5d", "op": "gt", "compare_to": "ma_20d"}
+// 金叉：短均线 > 长均线（sma5 / sma20 为 sma 模板的别名）
+{"factor": "sma5", "op": "gt", "compare_to": "sma20"}
 
 // 价格在均线之上
-{"factor": "close_price", "op": "gt", "compare_to": "ma_60d"}
+{"factor": "close_price", "op": "gt", "compare_to": "sma60"}
 ```
 
 **注意事项**：
 - `between` 操作符不支持跨因子比较
-- 比较的两个因子应属于同一维度（如同为价格类、同为百分比类），否则结果无意义
-- 任一因子值为 None 时规则自动失败
+- 比较的两个因子应属于同一量纲（价格对价格、百分比对百分比），否则结果无意义
+- 任一因子缺失时按 `missing_strategy` 处理
 
 ### 过滤器行为注意
 
 - 过滤器在**评分之后、排名之前**执行
-- 过滤的是**因子原始值**（非变换后的得分），因为直接从 `asset_factors` 取值
-- 因子值为 None 时自动失败（返回 False）
-- 所有资产都被过滤后 → 空字典 → 排名为空 → 仓位为空 → 空仓
+- 过滤的是**因子原始值**（非变换后的得分）
+- 所有资产都被过滤后没有入选资产 → 空仓（常用于表达"条件不满足时空仓"）
 
 ## RankConfig
 
@@ -92,9 +93,9 @@
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `method` | str | **是** | - | 权重方法 |
+| `method` | str | 写 portfolio 时**是** | - | 权重方法（不写整个 portfolio 时为 equal_weight） |
 | `timing_exposure` | dict[str,float] | 否 | null | 择时 regime → 总仓位映射 |
-| `default_exposure` | float | 否 | 0.50 | 无择时时的默认总仓位 |
+| `default_exposure` | float | 否 | 0.50 | 无择时时的总仓位（想满仓要显式写 1.0） |
 | `vol_factor` | str | inverse_vol 必填 | null | 波动率因子引用（volatility / return_std 别名）；缺失的资产评分前剔除 |
 | `cov_window` | int | 否 | 60 | risk_parity 协方差窗口（20-250 交易日） |
 
@@ -176,7 +177,7 @@
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `max_asset_weight` | float | 0.30 | 单资产仓位上限 (0-1] |
-| `max_portfolio_exposure` | float | 1.0 | 组合总仓位上限 |
+| `max_portfolio_exposure` | float | 1.0 | 组合总仓位上限；不能大于 1 − `min_cash_ratio` |
 | `min_cash_ratio` | float | 0.0 | 最低现金比例 [0-1) |
 | `vol_target` | {target, window=60, floor=0} | null | 事前波动率目标：协方差估算组合年化波动超过 target 时等比降仓（只降不加） |
 | `drawdown_stop` | {threshold, exposure=0, cooldown_days=20} | null | 策略净值回撤 ≥ threshold 后总仓位压到 exposure，冷却期后恢复并重置峰值 |
@@ -187,16 +188,28 @@
 
 ## RebalanceConfig
 
+两条腿各有一份日程：**选股腿 `selection`** 重建成分与权重，**风险腿 `risk`** 只把现有成分等比缩放到择时目标总仓位。
+
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `frequency` | str | `"daily"` | `daily`/`weekly`/`monthly` |
-| `day_of_week` | int | null | 周度：目标星期 (0=周一)。默认周五(4) |
-| `day_of_month` | int | null | 月度：目标日 (1-31)。默认 1 号 |
+| `selection` / `risk` | RebalanceScheduleConfig | `{"frequency": "daily"}` | 只给一条腿时，另一条按相同日程补齐 |
+| `band` | {min_turnover, max_drift} | null | 偏离调仓，至少一项，见下 |
 
-非交易日自动顺延至下一交易日。
+RebalanceScheduleConfig：
 
-`band`（可选）：`{min_turnover, max_drift}`，至少一项。`min_turnover`：日历调仓日所需单边换手低于该值则跳过；
-`max_drift`：非调仓日任一资产实际权重偏离最近一次目标超过该值时按最近目标再平衡（不重新选股）。
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `frequency` | str | `"daily"` | `daily` / `weekly` / `biweekly` / `monthly` |
+| `day_of_week` | int | null | 周度 / 双周：目标星期（0 = 周一 … 4 = 周五），缺省周五 |
+| `week_parity` | str | null | 双周**必填**：`odd` / `even`，以 2016-01-04 所在周为第 1 周连续计数 |
+| `day_of_month` | int | null | 月度：目标日（1-31），缺省 1 号；超出当月天数按最后一日 |
+
+- 调仓日 = 目标日（含）之后的第一个交易日，可跨周、跨月顺延；同一周期内至多调仓一次。
+- 直接在 `rebalance` 下写 `frequency` / `day_of_week` / `day_of_month` 的平铺写法按两腿同频解释。
+- 两腿同频时每个调仓日按"新成分 + 择时目标仓位"重建；两腿异频时选股腿日只换成分、维持当前总仓位，总仓位只在风险腿日调整；
+  空仓时风险腿不建仓。未配置择时时风险腿只缩放到 `portfolio.default_exposure`。
+- `band.min_turnover`：日历调仓日所需单边换手低于该值则跳过（止损强制成交不跳过）；`band.max_drift`：非调仓日任一资产实际权重
+  偏离最近一次目标超过该值时回到该目标（不重新选股）。
 
 ## 派生因子时序函数（expr 模板）
 

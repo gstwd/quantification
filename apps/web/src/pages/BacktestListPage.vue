@@ -311,7 +311,7 @@ async function cancelRun(backtestId: string): Promise<void> {
   }
 }
 
-/** 删除回测记录（C5）：存在 JSONB 引用时后端返回 409，确认后带 force 重试。 */
+/** 删除回测记录：存在 JSONB 引用时后端返回 409，确认后带 force 重试。 */
 async function removeRun(item: BacktestSummary): Promise<void> {
   if (!window.confirm(`确认删除回测 ${item.backtest_id}？日结果与对比记录会一并清理。`)) return
   deletingId.value = item.backtest_id

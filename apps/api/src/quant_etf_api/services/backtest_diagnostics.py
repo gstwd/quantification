@@ -15,7 +15,7 @@ from quant_etf_api.config.settings import get_settings
 from quant_etf_api.domain.common.numeric import price_invalid
 from quant_etf_api.schemas.backtest import BacktestWarning
 
-# 因行情价格字段缺失被剔除的原因 → 展示用标签（F-8）
+# 因行情价格字段缺失被剔除的原因 → 展示用标签
 _PRICE_EXCLUSION_LABELS: dict[str, str] = {
     "MISSING_OPEN": "缺开盘价",
     "MISSING_HIGH_LOW": "缺最高/最低价",
@@ -70,7 +70,7 @@ def execution_price_warning(
     exclusion_dates: dict[str, list[date]],
     exclusion_reasons: dict[str, set[str]],
 ) -> BacktestWarning | None:
-    """构造"缺开盘价或最高/最低价被剔除"的警告（F-8）。
+    """构造"缺开盘价或最高/最低价被剔除"的警告。
 
     执行模型是 T+1 开盘价时，缺开盘价的指数当期无法建仓；策略使用 ATR、
     唐奇安、RSRS 等需要最高/最低价的因子时，缺最高/最低价的指数同样会被
@@ -136,7 +136,7 @@ def build_candidate_pool_timeline(
     exclusion_reasons: dict[str, set[str]],
     exclusion_limit: int | None = None,
 ) -> dict[str, Any]:
-    """构建逐日有效候选池时间线（C6）。
+    """构建逐日有效候选池时间线。
 
     - 逐日规模做**游程编码**（连续相同规模合并为一段），避免把 2400 个交易日
       逐条落库；
@@ -254,7 +254,7 @@ def collect_missing_factor_warnings(
 ) -> list[BacktestWarning]:
     """按因子聚合回测区间内的缺失情况，生成 MISSING_FACTOR 警告。
 
-    计数口径（F-6）：``缺失天数`` 仍是"任一指数缺值即算一天"，但**必须
+    计数口径：``缺失天数`` 仍是"任一指数缺值即算一天"，但**必须
     同时给出按指数排序的明细**——历史实现只列字母序前 5 个指数，导致
     "只有一只后上市指数缺数据"被读成"整个资产池数据损坏"。
 
@@ -377,7 +377,7 @@ def estimate_warmup_trading_days(
 ) -> int:
     """估算回测前段因子数据不足的预热交易日数。
 
-    口径（F-6）：对每个 (因子, 指数) 组合，从**该指数自己的首根 K 线**
+    口径：对每个 (因子, 指数) 组合，从**该指数自己的首根 K 线**
     开始数"该因子还没有有效值"的天数，取最大值作为预热期——这才是
     真正影响策略的可交易起点。
 
@@ -438,7 +438,7 @@ def collect_run_warnings(
         结构化告警列表（顺序与历史实现一致）。
     """
     warnings: list[BacktestWarning] = []
-    # 口径提示（C1）：使用本地日历表快照而非上游数据源时显式告知，
+    # 口径提示：使用本地日历表快照而非上游数据源时显式告知，
     # 便于判断"同一配置两条回测的调仓日历是否来自同一来源"
     if diagnostics.calendar_source == "database":
         warnings.append(
@@ -451,7 +451,7 @@ def collect_run_warnings(
                 ),
             )
         )
-    # 非交易日行情（F-7）：行情表里存在日历判定为非交易日的日期时
+    # 非交易日行情：行情表里存在日历判定为非交易日的日期时
     # 显式告知，避免"回测多出一个假调仓日"被当成正常波动
     non_trading = diagnostics.non_trading_dates
     if non_trading:
@@ -495,7 +495,7 @@ def collect_run_warnings(
                 ),
             )
         )
-    # 有效候选池时间线（C6）：缩水到理论池以下时补一条信息级提示
+    # 有效候选池时间线：缩水到理论池以下时补一条信息级提示
     pool = diagnostics.candidate_pool
     if pool and pool["min_size"] < pool["base_size"]:
         shrunk = next(
@@ -588,7 +588,7 @@ def _exclusion_warnings(diagnostics: RunDiagnostics) -> list[BacktestWarning]:
         return []
     exclusion_reasons = diagnostics.exclusion_reasons
     warnings: list[BacktestWarning] = []
-    # 价格字段缺失导致的剔除单列（F-8）：t_plus_1_open 下缺开盘价、
+    # 价格字段缺失导致的剔除单列：t_plus_1_open 下缺开盘价、
     # 使用高低价因子时缺最高/最低价的指数会被静默排除在候选池之外，
     # 实际资产域可能远小于配置的资产池；这里显式列出全部受影响资产、
     # 被排除的天数与原因

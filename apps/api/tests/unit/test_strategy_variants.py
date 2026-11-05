@@ -1,8 +1,8 @@
-"""变体策略清理（D-4）与验证期消费留痕（D-5）单元测试。
+"""变体策略清理与验证期消费留痕单元测试。
 
-- D-4：稳健性批次派生的 ``<基线>__rbXXXX_*`` 草稿策略带 ``source_batch_id``
+- 稳健性批次派生的 ``<基线>__rbXXXX_*`` 草稿策略带 ``source_batch_id``
   元数据，可按批次预演/清理；仍被回测引用时必须显式 ``force``。
-- D-5：验证期（2026-01-01 起）数据一旦被消费，就记在策略元数据上——
+- 验证期（2026-01-01 起）数据一旦被消费，就记在策略元数据上——
   回测级留痕只能证明"跑过验证期回测"，无法说明该策略的验证期是否已被消费。
 """
 
@@ -104,7 +104,7 @@ def _service(rows: list[StrategyConfigModel], backtests: dict[str, list[str]]) -
 
 
 class TestPruneVariants:
-    """D-4：按批次清理变体草稿策略。"""
+    """按批次清理变体草稿策略。"""
 
     def test_dry_run_reports_without_deleting(self) -> None:
         """默认预演：只报告将删除的策略，不写库。"""
@@ -179,7 +179,7 @@ class TestPruneVariants:
 
 
 class TestValidationConsumed:
-    """D-5：验证期消费留痕。"""
+    """验证期消费留痕。"""
 
     def test_first_mark_records_time_then_appends_note(self) -> None:
         """首次标记写入时间；再次标记只追加说明，不覆盖首次时间。"""
@@ -333,7 +333,7 @@ class TestModelColumns:
     """迁移 0049 新增列的 ORM 侧一致性（防模型与迁移漂移）。"""
 
     def test_strategy_config_has_research_metadata_columns(self) -> None:
-        """strategy_config 必须含 D-4/D-5 的四个元数据列。"""
+        """strategy_config 必须含变体来源与验证期消费的四个元数据列。"""
         columns = set(StrategyConfigModel.__table__.columns.keys())
         assert {"is_variant", "source_batch_id"} <= columns
         assert {"validation_consumed_at", "validation_consumed_note"} <= columns

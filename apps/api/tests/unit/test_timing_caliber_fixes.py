@@ -262,7 +262,7 @@ class TestSelectTimingProxyValues:
         assert selection.mixed is True
 
     def test_single_proxy_matches_legacy_caliber(self) -> None:
-        """单代理配置下与旧口径一致：有值取值、缺值为 None。"""
+        """单代理配置：有值取值、缺值为 None。"""
         table = {("000300", "a"): 10.0}
         selection = select_timing_proxy_values(["000300"], ["a", "b"], self._lookup(table))
         assert selection.values == {"a": 10.0, "b": None}
@@ -379,7 +379,7 @@ class TestOnDegraded:
         assert result.timing_target_exposure == 0.3
 
     def test_neutral_fallback_confidence_unchanged(self) -> None:
-        """neutral 回退的确信度与改造前一致（20）。"""
+        """neutral 回退的确信度为 20。"""
         config = _strategy(timing=TimingConfig(factors={"t": 1.0}))
         result = StrategyEngine().run(config, _context({"t": None}), include_details=False)
         assert result.timing is not None
@@ -418,7 +418,7 @@ class TestBacktestTimingWarnings:
     """回测的择时降级与部分缺失告警。"""
 
     def test_neutral_degraded_message_unchanged(self) -> None:
-        """默认策略的 TIMING_DEGRADED 文案与改造前一致。"""
+        """默认策略（neutral 回退）的 TIMING_DEGRADED 文案。"""
         warnings = collect_run_warnings(
             RunDiagnostics(timing_degraded_dates=[date(2025, 1, 2), date(2025, 1, 3)])
         )

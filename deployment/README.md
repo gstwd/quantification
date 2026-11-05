@@ -146,7 +146,11 @@ alembic upgrade head
 
 ### 后端环境变量 (`.env`)
 
-| 变量 | 说明 | 默认值 |
+`setup-server.sh` 生成 `/opt/quant-etf/.env`，systemd 通过 `EnvironmentFile` 加载。下表"生产值"为该模板写入的值；
+未列出的配置项取代码缺省值，完整清单与缺省值见 `apps/api/src/quant_etf_api/config/settings.py`（环境变量统一加
+`QUANT_ETF_` 前缀）。
+
+| 变量 | 说明 | 生产值 |
 |------|------|--------|
 | `QUANT_ETF_DATABASE_URL` | PostgreSQL 连接串 | `postgresql+psycopg://...` |
 | `QUANT_ETF_APP_ENV` | 运行环境 | `production` |
@@ -154,8 +158,19 @@ alembic upgrade head
 | `QUANT_ETF_APP_PORT` | 监听端口 | `8000` |
 | `QUANT_ETF_CORS_ORIGINS` | CORS 允许来源 | `["http://localhost"]` |
 | `QUANT_ETF_LOG_FILE` | 日志文件路径 | `/var/log/quant-etf/api.log` |
-| `QUANT_ETF_SCHEDULE_ENABLED` | 启用定时数据摄取 | `true` |
-| `QUANT_ETF_SCHEDULE_TIME` | 每日摄取时间 | `17:30` |
+| `QUANT_ETF_SCHEDULE_ENABLED` | 启用每日全局数据同步 | `true` |
+| `QUANT_ETF_SCHEDULE_TIME` | 每日同步时间（北京时间） | `17:30` |
+
+常需手动补充的配置项：
+
+| 变量 | 说明 |
+|------|------|
+| `QUANT_ETF_TUSHARE_TOKEN` | Tushare Token；个股数据只取自 Tushare，未配置时个股同步失败，指数等数据集改用兜底来源 |
+| `QUANT_ETF_AI_ANALYSIS_ENABLED` / `QUANT_ETF_AI_SCHEDULE_TIME` | AI 舆情分析开关与调度时间；关闭时 AI 调度器不启动 |
+| `QUANT_ETF_LLM_API_KEY` / `QUANT_ETF_LLM_BASE_URL` / `QUANT_ETF_LLM_MODEL` | AI 舆情使用的 LLM 接入 |
+| `QUANT_ETF_LIFECYCLE_AUTO_REFRESH_ENABLED` | 每日同步后自动刷新 LIVE 策略健康快照 |
+| `QUANT_ETF_JOB_QUEUE_EMBEDDED` | API 进程是否内嵌后台任务 worker；设为 `false` 时只入队，需另起 `python -m quant_etf_api.worker` 消费 |
+| `QUANT_ETF_JOB_QUEUE_WORKERS` / `QUANT_ETF_JOB_QUEUE_BACKTEST_WORKERS` | 通用任务与回测任务的并发数 |
 
 ### Nginx 配置
 

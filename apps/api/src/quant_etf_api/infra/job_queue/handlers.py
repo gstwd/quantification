@@ -99,7 +99,7 @@ def handle_backtest(payload: dict) -> None:
 
 
 def abandon_backtest(payload: dict, reason: str) -> None:
-    """把被回收的异常回测任务对应回测标记为失败（B7）。
+    """把被回收的异常回测任务对应回测标记为失败。
 
     僵尸扫描只负责回收队列任务；若不同步回测记录，`backtest_run` 会
     永远停留在 running，批次汇总也就无法收口。
@@ -147,7 +147,7 @@ def abandon_backtest(payload: dict, reason: str) -> None:
 
 
 def abandon_comparison(payload: dict, reason: str) -> None:
-    """把被回收的对比回测任务对应记录标记为失败（B7）。
+    """把被回收的对比回测任务对应记录标记为失败。
 
     Args:
         payload: 任务载荷（含 comparison_id）。
@@ -188,7 +188,7 @@ def handle_comparison(payload: dict) -> None:
         return
     backtest_a_id, backtest_b_id = children
     queue = get_job_queue()
-    # 子回测沿用对比 ID 作为批次号，便于整批取消（B2）
+    # 子回测沿用对比 ID 作为批次号，便于整批取消
     queue.enqueue(
         "backtest",
         {"backtest_id": backtest_a_id, "comparison_id": comparison_id},
@@ -328,7 +328,7 @@ def handle_lifecycle_refresh_all(payload: dict) -> None:
 def handle_warm_calendar(payload: dict) -> None:
     """预热交易日历缓存，避免首个请求触发慢速加载。
 
-    严格口径（C1）：刷新后仍拿不到有效日历时抛错，让任务在 ``queue jobs``
+    严格口径：刷新后仍拿不到有效日历时抛错，让任务在 ``queue jobs``
     中显式落为失败，而不是"预热成功但日历为空"。
     """
     from quant_etf_api.infra.trading_calendar import TradingCalendar
@@ -380,7 +380,7 @@ def abandon_run(payload: dict, reason: str) -> None:
         db.close()
 
 
-# 异常任务回收回调（B7）：僵尸扫描把任务判失败时，同步把业务侧记录收口，
+# 异常任务回收回调：僵尸扫描把任务判失败时，同步把业务侧记录收口，
 # 否则 backtest_run / backtest_comparison / research_run 会永远停在 running。
 JOB_ABANDON_HANDLERS: dict[str, Callable[[dict, str], None]] = {
     "backtest": abandon_backtest,

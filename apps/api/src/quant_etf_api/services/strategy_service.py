@@ -176,7 +176,7 @@ class StrategyService:
         return self._config_svc().validate_config(config_json)
 
     def list_variants(self, batch_id: str) -> list[StrategySummary]:
-        """列出某稳健性验证批次派生的变体草稿策略（D-4）。
+        """列出某稳健性验证批次派生的变体草稿策略。
 
         Args:
             batch_id: 稳健性验证批次 ID。
@@ -191,7 +191,7 @@ class StrategyService:
     def prune_variants(
         self, batch_id: str, *, dry_run: bool = True, force: bool = False
     ) -> dict[str, Any]:
-        """清理某稳健性验证批次派生的变体草稿策略（D-4）。
+        """清理某稳健性验证批次派生的变体草稿策略。
 
         Args:
             batch_id: 稳健性验证批次 ID。
@@ -206,7 +206,7 @@ class StrategyService:
         return self._config_svc().prune_variants(batch_id, dry_run=dry_run, force=force)
 
     def mark_validation_consumed(self, strategy_id: str, note: str | None = None) -> bool:
-        """记录"该策略的验证期数据已被消费"（D-5）。
+        """记录"该策略的验证期数据已被消费"。
 
         Args:
             strategy_id: 策略标识。

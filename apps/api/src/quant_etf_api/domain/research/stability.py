@@ -184,7 +184,7 @@ def compute_stability_metrics(
 
 @dataclass(frozen=True)
 class CostLadderEntry:
-    """单个成本档位下的净口径指标（C3）。
+    """单个成本档位下的净口径指标。
 
     Attributes:
         cost_bps: 该档位的往返交易成本（基点，按单边换手折算），0 表示毛口径。
@@ -210,7 +210,7 @@ def compute_cost_ladder(
     benchmark_returns: list[float | None] | None = None,
     trading_days_per_year: int = DEFAULT_TRADING_DAYS_PER_YEAR,
 ) -> list[CostLadderEntry]:
-    """按多档成本并列计算净口径指标（C3）。
+    """按多档成本并列计算净口径指标。
 
     只重算与成本有关的量（成本序列、累计/年化/夏普/超额），**不重算**
     年集中度、分段一致性与回撤结构——那些指标与成本无关，重复计算是浪费。

@@ -161,7 +161,7 @@ def _emit(data: Any, as_json: bool) -> None:
 
 
 def _parse_cost_ladder(raw: str | None) -> list[float] | None:
-    """解析逗号分隔的成本档位参数（C3）。
+    """解析逗号分隔的成本档位参数。
 
     Args:
         raw: 形如 "0,10,20,30,50" 的字符串；为空时返回 None。
@@ -212,7 +212,7 @@ def _read_json_any(path: str) -> Any:
 
 
 def _resolve_knobs(args: argparse.Namespace) -> list[str] | None:
-    """汇总 ``--knobs`` 与 ``--knobs-file`` 给出的关键旋钮清单（D-2）。
+    """汇总 ``--knobs`` 与 ``--knobs-file`` 给出的关键旋钮清单。
 
     关键旋钮清单让"最可疑的拟合参数"优先被扫描，而不是被
     ``--max-knobs`` 按业务重要性截断后遗漏。
@@ -408,7 +408,7 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
         "--calendar-source",
         dest="calendar_source",
         choices=["upstream", "database", "not_required"],
-        help="按调仓日历来源过滤（C1）：审计同一配置是否跑在两套日历上",
+        help="按调仓日历来源过滤：审计同一配置是否跑在两套日历上",
     )
     p.add_argument("--created-from", type=date.fromisoformat, help="创建日期起点（含）")
     p.add_argument("--created-to", type=date.fromisoformat, help="创建日期终点（含）")
@@ -490,7 +490,7 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_json_flag(p)
 
-    p = sub.add_parser("pool", help="查看有效候选池逐日时间线与剔除区间（C6）")
+    p = sub.add_parser("pool", help="查看有效候选池逐日时间线与剔除区间")
     p.add_argument("backtest_id")
     _add_json_flag(p)
 
@@ -502,7 +502,7 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("backtest_id")
     _add_json_flag(p)
 
-    p = sub.add_parser("orphans", help="审计指向已删除回测的悬挂引用（C5）")
+    p = sub.add_parser("orphans", help="审计指向已删除回测的悬挂引用")
     p.add_argument("--limit", type=int, default=200, help="明细条数上限")
     _add_json_flag(p)
 
@@ -592,7 +592,7 @@ def _build_robustness_group(subparsers: argparse._SubParsersAction) -> None:
             )
             p.add_argument(
                 "--knobs",
-                help="关键旋钮清单（逗号分隔的配置路径，如 timing.thresholds.offensive_score）",
+                help="关键旋钮清单（逗号分隔的配置路径，如 timing.thresholds.offensive）",
             )
             p.add_argument(
                 "--knobs-file",
@@ -1118,8 +1118,14 @@ def _build_optimization_group(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_hypothesis_id_flag(p)
     _add_over_budget_flag(p)
-    p.add_argument("--start", type=date.fromisoformat, help="评估起始日期，默认今天往前 2 年")
-    p.add_argument("--end", type=date.fromisoformat, help="评估截止日期，默认今天")
+    p.add_argument(
+        "--start", type=date.fromisoformat, help="评估起始日期（缺省研究期起点 2016-01-01）"
+    )
+    p.add_argument(
+        "--end",
+        type=date.fromisoformat,
+        help="评估截止日期（缺省研究期末端 2025-12-31；越过研究期末端直接拒绝）",
+    )
     p.add_argument("--folds", type=int, default=4, help="验证窗口数量，默认 4")
     p.add_argument("--candidate-id", dest="candidate_strategy_id", help="候选策略 ID")
     p.add_argument("--version", dest="candidate_version", help="候选版本，默认继承基线")
@@ -2555,9 +2561,8 @@ def _run_optimization(args: argparse.Namespace) -> None:
             settings = get_settings()
             research_end = date.fromisoformat(settings.research_period_end)
             end = args.end or research_end
-            # 起点缺省必须是研究期起点（F-18）：旧实现缺省 end - 730 天，
-            # 忘了写 --start 时会把"十年研究期评估"静默变成"最近两年"，
-            # 而验收清单照常输出"通过"。
+            # 起点缺省为研究期起点：若缺省为 end - 730 天，忘了写 --start 时
+            # "十年研究期评估"会静默变成"最近两年"，而验收清单照常输出"通过"。
             start = args.start or date.fromisoformat(settings.research_period_start)
             ledger = ResearchLedgerService(db)
             hypothesis_text = args.hypothesis
@@ -2721,7 +2726,7 @@ def main() -> None:
         parser.print_help()
         return
 
-    # 严格口径（C1）：交易日历不可用时统一转为可读错误（退出码 1），
+    # 严格口径：交易日历不可用时统一转为可读错误（退出码 1），
     # 不打印 traceback，也不允许任何"按星期近似"的降级结果流出
     from quant_etf_api.domain.common.trading_calendar import (  # noqa: PLC0415
         TradingCalendarUnavailableError,

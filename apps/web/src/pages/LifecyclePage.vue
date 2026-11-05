@@ -436,7 +436,7 @@ const retiredItems = computed(() => items.value.filter(item => item.lifecycle_st
 // 最新一次体检快照
 const latest = computed(() => detail.value?.snapshots?.[0] ?? null)
 
-/** 回测引用文案（C5）：外键置空后显示"已删除或未记录"，避免看着像"无数据"。 */
+/** 回测引用文案：外键置空后显示"已删除或未记录"，避免看着像"无数据"。 */
 function backtestRefLabel(backtestId?: string | null): string {
   if (!backtestId) return '未记录（或已被删除）'
   return backtestId

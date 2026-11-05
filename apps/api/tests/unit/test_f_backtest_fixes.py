@@ -1,10 +1,10 @@
-"""F 类修复的回测服务单元测试（F-6 / F-7 / F-8 / F-12）。
+"""回测服务的回归测试。
 
-- F-6：预热期按"各指数自身首根 K 线"起算，单只后上市指数不再把整段回测标成预热；
+- 预热期按"各指数自身首根 K 线"起算，单只后上市指数不再把整段回测标成预热；
   MISSING_FACTOR 警告给出按指数排序的缺失明细；
-- F-7：日历判定为非交易日的行情日期被剔除，日历不可用时保持原行为；
-- F-8：缺开盘价被剔除的资产在警告里单列（不再只有一条 info 汇总）；
-- F-12：列表路径可批量现算净成本口径指标。
+- 日历判定为非交易日的行情日期被剔除，日历不可用时保持原行为；
+- 缺开盘价被剔除的资产在警告里单列（不再只有一条 info 汇总）；
+- 列表路径可批量现算净成本口径指标。
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ def _make_service() -> BacktestService:
 
 
 class TestWarmupPerAsset:
-    """F-6：预热期口径。"""
+    """预热期口径。"""
 
     def test_late_listed_index_does_not_inflate_warmup(self) -> None:
         """后上市指数只按自己的首根 K 线起算，不把前面整段算成预热。"""
@@ -75,7 +75,7 @@ class TestWarmupPerAsset:
 
 
 class TestMissingFactorWarningDetail:
-    """F-6：缺失因子警告给出按指数排序的明细。"""
+    """缺失因子警告给出按指数排序的明细。"""
 
     def test_lists_index_by_missing_days(self) -> None:
         """明细应按缺失天数排序，让人一眼看出是哪只指数在缺。"""
@@ -114,7 +114,7 @@ class _StubCalendar:
 
 
 class TestNonTradingDateFilter:
-    """F-7：剔除行情里的非交易日。"""
+    """剔除行情里的非交易日。"""
 
     def test_drops_holiday_bar_date(self) -> None:
         """日历判定非交易日的日期（如 2018-06-18 端午节）应被剔除。"""
@@ -149,7 +149,7 @@ class TestNonTradingDateFilter:
 
 
 class TestIngestNonTradingGuard:
-    """F-7：摄取侧也要拦住非交易日行情。"""
+    """摄取侧也要拦住非交易日行情。"""
 
     def test_ingest_drops_holiday_bars(self) -> None:
         """非交易日行情在入库前被剔除并计数。"""
@@ -190,7 +190,7 @@ class TestIngestNonTradingGuard:
 
 
 class TestExecutionPriceWarning:
-    """F-8：缺开盘价导致的剔除必须显式可见。"""
+    """缺开盘价导致的剔除必须显式可见。"""
 
     def test_lists_excluded_assets_by_days(self) -> None:
         """按剔除天数排序列出资产与原因。"""
@@ -254,7 +254,7 @@ class _FakeBacktestRepo:
 
 
 class TestListNetMetrics:
-    """F-12：列表摘要带净成本口径。"""
+    """列表摘要带净成本口径。"""
 
     def test_net_metrics_follow_turnover_cost(self) -> None:
         """净夏普低于毛夏普，且成本越高折损越大。"""

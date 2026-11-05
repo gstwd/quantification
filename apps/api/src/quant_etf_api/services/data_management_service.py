@@ -544,7 +544,7 @@ class DataManagementService:
     ) -> dict[str, Any]:
         """调用既有服务执行同步、补数或安全重拉。
 
-        与旧实现不同：分区级失败只写入 errors 不中断后续分区；低频数据
+        分区级失败只写入 errors，不中断后续分区；低频数据
         集在未到刷新周期且未 force 时跳过上游拉取（skipped=True）。
 
         Args:

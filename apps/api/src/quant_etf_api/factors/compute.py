@@ -412,7 +412,7 @@ class FactorComputeService:
             panel_dates=panel_dates,
             include_panels=include_panels,
         )
-        # 求值轴：不含时序函数时即目标日（与改造前一致）；含时序函数时向前扩展
+        # 求值轴：不含时序函数时即目标日；含时序函数时向前扩展
         eval_dates = (
             _series_axis(target_dates, series_window, calculation_dates, context, index_codes)
             if series_window

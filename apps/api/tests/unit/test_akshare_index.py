@@ -46,7 +46,7 @@ class TestSourceName:
 
 
 class TestCalcPercentile:
-    """统一百分位算法（B8）纯逻辑测试。"""
+    """统一百分位算法纯逻辑测试。"""
 
     @staticmethod
     def _series(values: list[float]) -> list[tuple]:

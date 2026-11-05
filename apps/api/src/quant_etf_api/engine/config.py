@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 # 引擎配置 schema 版本：配置模型演进时递增并做兼容迁移检测（7.4#3）
 #
-# v2 起，策略中的因子引用既可以是 factor_aliases 中声明的别名，
+# schema v2：策略中的因子引用既可以是 factor_aliases 中声明的别名，
 # 也可以是模板 ID 本身（使用模板默认参数）。
 SUPPORTED_SCHEMA_VERSIONS = {"2"}
 
@@ -604,7 +604,7 @@ class RiskConfig(BaseModel):
 
     前三项为静态约束（逐日裁剪目标权重）；``vol_target`` / ``drawdown_stop`` /
     ``trailing_stop`` 为路径依赖叠加层，在回测主循环合成当日目标后施加（实时决策通过
-    回放重建状态），缺省 None 表示不启用、口径与改造前一致。
+    回放重建状态），缺省 None 表示不启用，其余口径不变。
 
     Attributes:
         max_asset_weight: 单资产仓位上限。
@@ -632,10 +632,10 @@ class RebalanceScheduleConfig(BaseModel):
     """单个调仓腿的频率配置。
 
     严格校验（避免静默失效）：
-    - ``frequency`` 只接受 daily / weekly / biweekly / monthly——历史上未知频率会在
+    - ``frequency`` 只接受 daily / weekly / biweekly / monthly——未知频率若放行会在
       调度器末尾 ``return True``，静默退化为每日调仓（换手与成本最大）；
     - ``day_of_week`` 0-4（周一至周五）；``day_of_month`` 1-31，超出当月天数时按
-      当月最后一日处理（不再整月不调仓）；
+      当月最后一日处理（不会整月不调仓）；
     - ``biweekly`` 必须显式声明 ``week_parity``：以 2016-01-04（周一）所在周为第 1 周
       连续计数，奇偶决定"哪一周调仓"；不使用 ISO 周号，避免第 53 周与次年第 1 周同为
       奇数周导致连续两周调仓。不提供默认值以免"以为配了双周、实际按另一个奇偶周执行"。
@@ -704,7 +704,7 @@ class RebalanceConfig(BaseModel):
     - ``selection`` 选股腿：重建组合成分与权重；
     - ``risk`` 风险腿：只把**现有成分**等比缩放到择时目标总仓位，不引入新成分。
 
-    两腿频率一致时（旧配置升级后即如此）行为与改造前完全一致：每个调仓日都按
+    两腿频率一致时（平铺写法的存量配置升级后即如此）等价于单腿口径：每个调仓日都按
     "新成分 + 择时目标仓位"重建；只有两腿频率不同时才会出现"仅换成分保持仓位"
     或"仅缩放仓位"的差异化日程。
 
@@ -745,7 +745,7 @@ class RebalanceConfig(BaseModel):
             normalized["risk"] = normalized["selection"]
         return normalized
 
-    # 兼容旧的服务调用与外部代码；新代码应使用 selection / risk。
+    # 兼容平铺写法的调用方与外部代码；新代码使用 selection / risk。
     @property
     def frequency(self) -> str:
         return self.selection.frequency
@@ -793,7 +793,7 @@ class StrategyConfig(BaseModel):
         score: 评分配置（必填）。
         filters: 过滤配置，None 表示无过滤。
         rank: 排名配置。
-        portfolio: 组合配置；兼容旧配置时缺失字段自动补为默认等权配置。
+        portfolio: 组合配置；缺失时自动补为默认等权配置（兼容存量配置）。
         risk: 风控配置，None 表示无风控。
         rebalance: 调仓配置，None 表示每日调仓。
         factor_aliases: 因子别名声明，key=别名，value=模板与参数。
@@ -868,7 +868,7 @@ def iter_factor_refs(config: StrategyConfig) -> list[tuple[str, str, str]]:
     """列出策略各模块引用的全部因子（不去重），作为引用收集的唯一实现。
 
     因子加载、配置校验（引用存在性与 usage 匹配）、未使用别名提示都依赖同一份
-    引用清单；此前各处各写一遍遍历，新增模块时极易漏掉某一处。
+    引用清单；集中在这里实现，避免各处各写一遍遍历、新增模块时漏掉某一处。
 
     Args:
         config: 已解析的策略配置。

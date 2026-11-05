@@ -1,7 +1,7 @@
 """择时多档仓位（timing.tiers）的回归测试。
 
 覆盖：
-- 默认口径不变：未配置档位时信号、明细、目标仓位与择时统计和改造前一致；
+- 默认口径：未配置档位时信号、明细、目标仓位与择时统计按 regime 仓位表、不含档位字段；
 - 加权模式：综合分分段映射仓位的边界（≥ 下限命中、低于全部下限回退 regime 仓位表）；
 - 规则模式：按顺序首个命中、灰区未命中回退中性、逐档明细、全部缺失降级；
 - 状态层：沿用前 regime 时沿用上一档位、同 regime 内换档当日生效、降级回退；
@@ -144,7 +144,7 @@ def _run_sequence(timing: TimingConfig, values: list[float | None]) -> list[Timi
 
 
 class TestDefaultUnchanged:
-    """未配置档位时与改造前完全一致。"""
+    """未配置档位时按 regime 仓位表、不含档位字段。"""
 
     @pytest.mark.parametrize(
         "timing",

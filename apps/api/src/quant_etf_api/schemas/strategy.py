@@ -23,11 +23,11 @@ class StrategySummary(BaseModel):
         status: 状态。
         is_starred: 是否星标关注。
         index_codes: 策略绑定的指数代码列表，空列表表示全指数通用。
-        is_variant: 是否为稳健性验证派生的变体草稿策略（D-4）。
-        source_batch_id: 派生来源批次 ID（稳健性验证批次），手工策略为 None（D-4）。
+        is_variant: 是否为稳健性验证派生的变体草稿策略。
+        source_batch_id: 派生来源批次 ID（稳健性验证批次），手工策略为 None。
         lineage_id: 研究线 ID（研究线根策略 ID）；试验次数 N、试验预算与验证期消费按研究线汇总。
-        validation_consumed_at: 验证期（2026-01-01 起）数据首次被消费的时间（D-5）。
-        validation_consumed_note: 验证期消费说明（D-5）。
+        validation_consumed_at: 验证期（2026-01-01 起）数据首次被消费的时间。
+        validation_consumed_note: 验证期消费说明。
     """
 
     strategy_id: str
@@ -77,8 +77,8 @@ class StrategyConfigCreate(BaseModel):
         frequency: 运行频率。
         config_json: 完整策略配置 JSON。
         status: 初始状态，active=启用，draft=优化候选草稿（不出现在启用列表）。
-        is_variant: 是否为稳健性验证派生的变体草稿策略（D-4）。
-        source_batch_id: 派生来源批次 ID（D-4）。
+        is_variant: 是否为稳健性验证派生的变体草稿策略。
+        source_batch_id: 派生来源批次 ID。
         lineage_id: 归入的研究线：给已有策略 ID 时归入该策略所在研究线，缺省自成一条研究线。
     """
 

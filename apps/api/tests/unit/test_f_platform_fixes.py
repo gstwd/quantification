@@ -1,11 +1,11 @@
-"""F 类修复的接口/会话层单元测试（F-9 / F-11 / F-15 / F-16 / F-17 / F-18）。
+"""接口 / 会话层的回归测试。
 
-- F-9：research batch 输出「变体 × 指标」排名表；
-- F-11：策略详情的顶层 index_codes 与 config_json 一致；
-- F-15：optimization show 直接返回 7 项验收清单；
-- F-16：优化会话指标里带净成本口径；
-- F-17：promote 时把版本历史追加进策略描述；
-- F-18：optimization start 的区间缺省覆盖整个研究期。
+- research batch 输出「变体 × 指标」排名表；
+- 策略详情的顶层 index_codes 与 config_json 一致；
+- optimization show 直接返回 7 项验收清单；
+- 优化会话指标里带净成本口径；
+- promote 时把版本历史追加进策略描述；
+- optimization start 的区间缺省覆盖整个研究期。
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from quant_etf_api.services.strategy_config_service import StrategyConfigService
 
 
 class TestResearchSummaryTable:
-    """F-9：变体排名表。"""
+    """变体排名表。"""
 
     def test_table_lists_variants_with_net_delta(self) -> None:
         """表格包含净口径、Δ 与劣化窗口比例，且不输出完整 JSON。"""
@@ -80,7 +80,7 @@ class TestResearchSummaryTable:
 
 
 class TestStrategyDetailIndexCodes:
-    """F-11：详情顶层 index_codes。"""
+    """详情顶层 index_codes。"""
 
     def test_detail_fills_index_codes_from_config(self) -> None:
         """详情返回的 index_codes 必须与 config_json 一致。"""
@@ -144,7 +144,7 @@ def _make_session(**overrides: object) -> StrategyOptimizationModel:
 
 
 class TestOptimizationShowChecklist:
-    """F-15：详情里直接给出验收清单。"""
+    """详情里直接给出验收清单。"""
 
     def test_show_includes_acceptance_checklist(self, monkeypatch) -> None:
         """show 返回 7 项清单（含净成本与邻域项），不必先调用 finish。"""
@@ -188,7 +188,7 @@ class TestOptimizationShowChecklist:
 
 
 class TestOptimizationNetMetrics:
-    """F-16：会话指标带净口径。"""
+    """会话指标带净口径。"""
 
     def test_collect_metrics_merges_net_fields(self) -> None:
         """逐折指标里应出现净夏普、净年化与年化换手。"""
@@ -216,7 +216,7 @@ class TestOptimizationNetMetrics:
 
 
 class TestPromoteVersionHistory:
-    """F-17：promote 同步更新策略描述。"""
+    """promote 同步更新策略描述。"""
 
     def test_append_version_history_contains_version_and_wins(self) -> None:
         """追加的版本记录包含版本号、假设与逐折胜出情况。"""
@@ -275,7 +275,7 @@ class TestPromoteVersionHistory:
 
 
 class TestOptimizationDefaultPeriod:
-    """F-18：optimization start 的区间缺省。"""
+    """optimization start 的区间缺省。"""
 
     def test_start_defaults_to_research_period(self, monkeypatch) -> None:
         """不传 --start/--end 时，会话区间应覆盖整个研究期。"""

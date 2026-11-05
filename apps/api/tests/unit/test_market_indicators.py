@@ -73,7 +73,7 @@ class TestErpRateSource:
         )
 
     def test_default_lpr_payload_unchanged(self) -> None:
-        """缺省 LPR：数值与 payload 键与改造前一致。"""
+        """缺省 LPR：沿用 LPR 口径的数值与 payload 键。"""
         value = ERPComputer().compute("000300", _D, self._ctx())
         assert value.numeric == pytest.approx(8.0 - 3.1)
         assert set(value.payload) >= {"lpr_1y", "lpr_period"}

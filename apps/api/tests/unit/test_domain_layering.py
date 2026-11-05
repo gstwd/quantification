@@ -1,4 +1,4 @@
-"""领域层下沉测试（C6 / 7.5 收敛）。
+"""领域层纯规则测试。
 
 覆盖：
 - 调仓调度器（纯领域实现，交易日历协议注入）
@@ -74,7 +74,7 @@ class TestTurnoverAndReturns:
         assert compute_turnover(prev, curr) == pytest.approx(0.3)
 
     def test_compute_turnover_includes_open_close_legs(self) -> None:
-        """C2：建仓腿与清仓腿同样计入换手（不再因一侧为空而记 0）。"""
+        """建仓腿与清仓腿同样计入换手（不再因一侧为空而记 0）。"""
         assert compute_turnover({}, {"a": 1.0}) == pytest.approx(0.5)
         assert compute_turnover({"a": 1.0}, {}) == pytest.approx(0.5)
 
@@ -103,7 +103,7 @@ class TestTurnoverAndReturns:
         )
 
     def test_count_missing_allocation_assets(self) -> None:
-        """持仓中缺行情的资产计数（B10）。"""
+        """持仓中缺行情的资产计数。"""
         bars = {
             ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
             ("a", date(2025, 1, 16)): SimpleNamespace(close_price=103.0),
@@ -120,7 +120,7 @@ class TestTurnoverAndReturns:
         )
 
     def test_count_missing_rebalance_assets(self) -> None:
-        """调仓日旧/新仓位任一腿缺失都计数（B10）。"""
+        """调仓日旧/新仓位任一腿缺失都计数。"""
         bars = {
             ("a", date(2025, 1, 15)): SimpleNamespace(close_price=100.0),
             ("a", date(2025, 1, 16)): SimpleNamespace(open_price=float("nan"), close_price=102.0),

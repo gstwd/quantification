@@ -170,10 +170,10 @@ class StockDataService:
 
         Raises:
             RuntimeError: 未配置 Tushare Token 或返回空名单时抛出；个股数据
-                已改为 Tushare 独占，不再回退交易所/AkShare。
+                只取自 Tushare，没有其他兜底来源。
         """
         if not self._tushare_client.is_configured():
-            raise RuntimeError("未配置 TUSHARE_TOKEN，个股数据已切换为 Tushare 独占")
+            raise RuntimeError("未配置 TUSHARE_TOKEN，个股数据只取自 Tushare")
         rows = self._tushare_client.fetch_stock_basics()
         if not rows:
             raise RuntimeError("Tushare stock_basic 返回空名单，拒绝更新 stock_universe")
@@ -611,7 +611,7 @@ class StockDataService:
         """
         selected = self._normalize_datasets(datasets)
         if not self._tushare_client.is_configured():
-            raise RuntimeError("未配置 TUSHARE_TOKEN，个股数据已切换为 Tushare 独占")
+            raise RuntimeError("未配置 TUSHARE_TOKEN，个股数据只取自 Tushare")
         records = {key: 0 for key in selected}
         errors: list[str] = []
         empty: list[str] = []

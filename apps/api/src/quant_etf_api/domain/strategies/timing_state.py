@@ -55,7 +55,7 @@ class TimingState:
             "pending_days": self.pending_days,
         }
         if self.exposure is not None:
-            # 只在档位决定仓位时输出，未启用档位的明细与改造前一致
+            # 只在档位决定仓位时输出，未启用档位时明细不含该字段
             detail["exposure"] = self.exposure
         return detail
 

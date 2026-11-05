@@ -19,7 +19,7 @@ from quant_etf_api.infra.time import utcnow_aware
 
 
 def calendar_source_filter(value: str) -> Any:
-    """构造"调仓日历来源等于指定值"的过滤表达式（C1）。
+    """构造"调仓日历来源等于指定值"的过滤表达式。
 
     ``backtest_run.params`` 在 ORM 中声明为通用 ``JSON``，其比较器没有
     PostgreSQL 专有的 ``astext``，因此用 ``->>`` 操作符取文本值；该表达式
@@ -50,7 +50,7 @@ class BacktestRepository(BaseRepository):
         descending: bool = True,
         calendar_source: str | None = None,
     ) -> tuple[list[BacktestRunModel], int]:
-        """分页查询回测记录，支持状态/用途/时间范围/日历来源筛选（B4/C1）。
+        """分页查询回测记录，支持状态/用途/时间范围/日历来源筛选。
 
         Args:
             offset: 偏移量。
@@ -63,7 +63,7 @@ class BacktestRepository(BaseRepository):
             order_by: 排序字段，可选 created_at / started_at / finished_at。
             descending: 是否倒序。
             calendar_source: 调仓日历来源过滤（upstream/database/not_required），
-                用于找出"调仓日历口径不同"的存量回测（C1）。
+                用于找出"调仓日历口径不同"的存量回测。
 
         Returns:
             (items, total) 元组。
@@ -151,7 +151,7 @@ class BacktestRepository(BaseRepository):
     def find_return_turnover_pairs(
         self, backtest_ids: list[str]
     ) -> dict[str, list[tuple[float | None, float | None, float | None]]]:
-        """批量读取多条回测的 (组合日收益, 单边换手率, 基准日收益) 序列（F-12）。
+        """批量读取多条回测的 (组合日收益, 单边换手率, 基准日收益) 序列。
 
         列表页需要净口径指标，但净口径必须由逐日序列现算（C3 的设计：
         不落库、不重跑）。这里只取三列且不构造 ORM 对象，避免为几十条
@@ -294,7 +294,7 @@ class BacktestRepository(BaseRepository):
             backtest_id: 回测标识。
             metrics: 汇总绩效指标。
             warnings: 执行过程中的结构化提示列表（BacktestWarning 的 dict 形式）。
-            candidate_pool: 有效候选池时间线（C6），None 表示不写入。
+            candidate_pool: 有效候选池时间线，None 表示不写入。
         """
         # 如果 session 处于 pending rollback 状态，先回滚以恢复可用状态
         if self._db.is_active is False:

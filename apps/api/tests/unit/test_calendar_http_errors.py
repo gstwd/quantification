@@ -1,4 +1,4 @@
-"""交易日历不可用时的 HTTP 语义（C1）。
+"""交易日历不可用时的 HTTP 语义。
 
 严格口径下日历不可用必须显式报错，不能返回近似日期或空数组：
 - ``GET /ai-factors/previous-trading-day`` → 503
@@ -44,7 +44,7 @@ class TestCalendarUnavailableHttp:
 
 
 class TestQualityCaliberEndpoints:
-    """质量口径端点收敛：旧口径下线，新口径为数据管理页快照。"""
+    """质量口径只来自数据管理页健康快照，没有单独的质量端点。"""
 
     def test_legacy_quality_endpoints_are_gone(self, client: TestClient) -> None:
         """``/system/data-quality`` 与单指数 data-quality 端点应返回 404。"""

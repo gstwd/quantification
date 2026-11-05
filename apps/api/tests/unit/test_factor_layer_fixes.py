@@ -222,7 +222,7 @@ class TestERPPercentile:
         return FactorContext(index_valuation=valuation, macro_indicators={"lpr1y": lpr})
 
     def test_historical_lpr_changes_percentile(self) -> None:
-        """历史 LPR 不同会改变百分位（旧实现套用当前 LPR，利率不起作用）。"""
+        """历史 LPR 不同会改变百分位（各日使用当日已公布的 LPR）。"""
         trade_date = date(2024, 6, 28)
         flat = self._ctx({"2019-08-20": 3.45})
         stepped = self._ctx({"2019-08-20": 5.0, "2024-03-20": 3.45})

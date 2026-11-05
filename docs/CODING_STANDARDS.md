@@ -7,7 +7,8 @@
 ## 通用原则
 
 - **注释语言**：所有注释、文档字符串一律使用**中文**
-- **重构规则**：修改现有代码时只能**更新**注释，严禁删除注释
+- **注释维护**：修改代码时同步改写相关注释；过时注释必须改写或删除，不保留描述过时行为的文字
+- **只写现状**：注释、文档字符串、CLI 帮助与文档只写现状和原因，不写迭代经过（"改造前""此前""旧实现""现在统一"），不引用审查轮次编号；变更经过写进提交信息或[决策记录](architecture/决策记录.md)
 - **命名约定**：Python `snake_case`，TypeScript/Vue `camelCase`，Vue 组件文件名 `PascalCase`
 - **类型标注**：所有公开函数/方法必须标注参数类型和返回类型，禁止使用 `any`（前端）
 - **行长度**：Python 100 字符（ruff 已配置），TypeScript/Vue 120 字符
@@ -16,11 +17,12 @@
 
 系统必须明确区分“时间戳”和“业务日期”，不得混用：
 
-- **时间戳**表示一个全球绝对时刻，统一使用 UTC。后端生成时间戳必须使用
-  `quant_etf_api.infra.time.utcnow()`；禁止使用 `datetime.now()`、`datetime.utcnow()`
+- **时间戳**表示一个全球绝对时刻，统一使用 UTC。后端生成时间戳只用
+  `quant_etf_api.infra.time` 中的函数：`timestamptz` 列（新增时间戳列一律用
+  `DateTime(timezone=True)`）写 `utcnow_aware()`，存量 `timestamp without time zone`
+  列写 `utcnow()`（UTC naive）；禁止使用 `datetime.now()`、`datetime.utcnow()`
   或依赖服务器本地时区的时间函数。
-- 数据库连接时区固定为 UTC。现有 `timestamp without time zone` 字段按“存储 UTC
-  naive datetime”的兼容约定使用；新增 API 时间字段必须使用
+- 数据库连接时区固定为 UTC。API 时间字段使用
   `quant_etf_api.schemas.types.UtcDatetime`，确保 JSON 输出带 `+00:00`。
 - **业务日期**（交易日、行情日期、回测起止日期、数据截止日期）属于 A 股市场日期，
   统一按北京时间 `Asia/Shanghai` 计算。后端使用
@@ -54,20 +56,19 @@
 
 **类：**
 ```python
-class IngestService:
-    """行情数据摄取服务，负责从外部接口拉取并持久化指数日线、估值和宏观指标。
+class BacktestReconcileService:
+    """回测独立对账服务：读取落库回测与原始行情，交给领域层独立复算后比对。
 
-    首次请求时从外部 API 获取数据写入数据库，后续请求直接读库。
-    使用 threading.Lock 防止并发冷启动时重复拉取。
+    只读：不写库、不入队、不修改回测记录。
     """
 ```
 
 **函数/方法（含 Args / Returns / Raises）：**
 ```python
-def fetch_index_daily_bars(self, index_code: str, start: date, end: date) -> list[DailyBar]:
-    """获取指定指数的日线行情数据。
+def find_index_daily_bars(self, index_code: str, start: date, end: date) -> list[DailyBar]:
+    """读取指定指数区间内的日线行情。
 
-    优先从数据库读取，若无数据则从 AkShare 指数接口拉取并持久化。
+    只读查询：未命中返回空列表，不触发外部拉取或入队补数（补数统一走数据管理入口）。
 
     Args:
         index_code: 指数代码，如 "000300"。
@@ -98,13 +99,11 @@ raw = resp.get("qfqday") or resp.get("day", [])  # 接口返回键名不稳定�
 
 ### 错误处理
 
-**服务层**：捕获具体异常，记录日志，向上抛出业务异常或返回 `None`：
+**服务层**：数据库查询放在 repository，服务层捕获具体异常、记录日志，向上抛出业务异常或返回 `None`：
 ```python
 try:
-    return self._db.query(BenchmarkIndexModel).filter_by(index_code=index_code).one()
-except NoResultFound:
-    return None
-except Exception:
+    return self._index_repo.find_by_code(index_code)  # 未命中返回 None
+except SQLAlchemyError:
     logger.exception("查询指数 %s 失败", index_code)
     raise
 ```
@@ -118,7 +117,8 @@ if index is None:
 
 - `404`：资源不存在
 - `409`：冲突（如重复创建）
-- `422`：参数校验失败（Pydantic 自动处理，无需手动抛出）
+- `422`：参数校验失败（Pydantic 自动处理；研究期 / 验证期越界等业务校验同样返回 422）
+- `503`：依赖不可用（如交易日历不可用时的 `TradingCalendarUnavailableError`）
 - `500`：不可预期的服务端错误（不要在路由层 catch all）
 
 ### 导入顺序
@@ -142,7 +142,9 @@ from quant_etf_api.api.deps import get_db
 - 测试文件命名：`test_<module>.py`，放在对应的 `unit/` 或 `integration/` 目录
 - 测试类命名：`Test<被测类或功能>`，方法命名：`test_<场景描述>`
 - 优先使用 `@pytest.mark.parametrize` 覆盖边界值，避免重复代码
-- 不 mock 数据库（集成测试使用真实 DB 连接）；外部 HTTP 接口可 mock
+- 单元测试用替身隔离数据库会话与外部 HTTP；依赖 SQL 语义的查询需在真实数据库上验证
+- 口径类行为（记账、执行模型、日历、研究期）要有能定位到具体字段的回归测试；冻结口径由
+  `test_caliber_golden.py` 与 `test_backtest_reconcile.py` 守卫
 
 ```python
 @pytest.mark.parametrize("volume,expected", [
@@ -168,7 +170,7 @@ def test_volume_probability(volume: float, expected: float) -> None:
  * 指数详情页面。
  *
  * 展示单只指数的基本信息、日线行情图及估值历史。
- * 数据通过 useIndexStore 统一管理，组件不直接调用 API。
+ * 数据通过 src/api/market_data.ts 的封装函数读取。
  */
 
 // 当前指数代码，从路由参数中读取
@@ -191,18 +193,16 @@ const isLoading = ref(false)
 function formatNavChartData(rawData: NavRecord[], benchmarkCode: string): EChartsSeries[] {
 ```
 
-**Pinia Store**：
+**Pinia Store**（只用于跨页面共享的状态，现有 `stores/backtests`、`stores/strategies`、`stores/toast`）：
 ```typescript
-export const useIndexStore = defineStore('index', () => {
-  // 已加载的指数元数据缓存，避免重复请求
-  const cache = ref<Map<string, IndexDetail>>(new Map())
+export const useStrategyStore = defineStore('strategies', () => {
+  // 策略列表缓存：列表页与详情页共享，避免重复请求
+  const items = ref<StrategySummary[]>([])
 
   /**
-   * 加载单只指数的完整详情，优先读取缓存。
-   *
-   * @param code - 指数代码
+   * 重新加载策略列表。
    */
-  async function loadOne(code: string): Promise<void> {
+  async function loadAll(): Promise<void> {
 ```
 
 ### 类型标注
@@ -213,7 +213,7 @@ export const useIndexStore = defineStore('index', () => {
 
 ### 错误处理
 
-**API 层**：不吞掉错误，让 store 决定如何处理：
+**API 层**（`src/api/*.ts`）：不吞掉错误，由调用方（页面或 store）决定如何处理：
 ```typescript
 export async function fetchIndexDetail(code: string): Promise<IndexDetail> {
   const { data } = await apiClient.get<IndexDetail>(`/indexes/${code}`)
@@ -221,7 +221,7 @@ export async function fetchIndexDetail(code: string): Promise<IndexDetail> {
 }
 ```
 
-**Store 层**：捕获错误，存入 `error` 状态，供组件展示：
+**调用方**（页面或 store）：捕获错误，存入 `error` 状态并展示：
 ```typescript
 const error = ref<string | null>(null)
 
@@ -239,11 +239,11 @@ async function loadOne(code: string): Promise<void> {
 }
 ```
 
-**组件层**：展示 store 中的错误状态：
+**模板**：展示错误状态：
 ```vue
 <template>
-  <div v-if="store.error" class="error-tip">{{ store.error }}</div>
-  <div v-else-if="store.isLoading">加载中...</div>
+  <div v-if="error" class="error-tip">{{ error }}</div>
+  <div v-else-if="isLoading">加载中...</div>
   <div v-else><!-- 正常内容 --></div>
 </template>
 ```
@@ -274,10 +274,10 @@ import { useRouter } from 'vue-router'
 // 2. 第三方库
 import { defineStore } from 'pinia'
 
-// 3. 本项目 API / stores / types
-import { fetchIndexDetail } from '@/api/market_data'
-import { useSignalStore } from '@/stores/signals'
-import type { IndexDetail } from '@/types/api'
+// 3. 本项目 API / stores / types（项目未配置路径别名，使用相对路径）
+import { fetchIndexDetail } from '../api/market_data'
+import { useStrategyStore } from '../stores/strategies'
+import type { IndexDetail } from '../types/api'
 ```
 
 ---
@@ -287,10 +287,9 @@ import type { IndexDetail } from '@/types/api'
 - **研发生命周期**：因子中心=正式因子（可配置可回测）；因子中心菜单下的
   研究页=独立实验、只共享只读数据。新因子必须遵循
   [`docs/architecture/因子研发与集成指引.md`](architecture/因子研发与集成指引.md)。
-- **元数据三轴必填**：每个 `FactorSpec`/`factor_definition` 必须声明
-  `value_shape`（asset/market）、
-  `usage`（timing/score/filter/rank/rotation_input）；参数化因子必须声明
-  `default_params` 并在值表携带 `params_hash`。
+- **元数据必填**：每个 `FactorTemplate` 必须声明 `value_shape`（asset/market）与
+  `usage`（timing/score/filter/rank 的子集）；参数化模板用 `parameter_schema` 声明参数并给出
+  `default_params`，回望窗口由 `base_lookback_days` / `compute_lookback_days` 给出。
 - **位置限制生效**：配置校验按 usage 拒绝错位引用；
   前端策略表单各模块的因子下拉必须与后端 usage 同步过滤。
 - **前端同步**：后端新增任何策略配置能力时，必须同步策略表单与详情展示；
@@ -308,11 +307,11 @@ import type { IndexDetail } from '@/types/api'
 - [ ] 复杂逻辑有行内中文注释说明原因
 - [ ] 所有参数和返回值有类型标注
 - [ ] 路由层使用语义化 HTTP 状态码
-- [ ] 重构时已更新（而非删除）原有注释
+- [ ] 过时注释已改写或删除；注释只写现状与原因，无审查编号
 
 **TypeScript / Vue：**
 - [ ] 每个 TypeScript 函数有中文 JSDoc 注释
 - [ ] Vue 组件 `<script setup>` 顶部有组件用途说明
 - [ ] 无 `any` 类型
-- [ ] Store 有 `error` 状态，组件有错误展示
-- [ ] 重构时已更新（而非删除）原有注释
+- [ ] 发起请求的页面或 store 有 `error` 状态，模板有错误展示
+- [ ] 过时注释已改写或删除；注释只写现状与原因，无审查编号

@@ -26,8 +26,8 @@ python -m quant_etf_api.cli backtest verify <候选全区间回测ID>     # 独�
 2. **事先登记的标准**是否满足；不满足时，即使清单全过也不能推荐接受。
 3. **只改了一处**：`strategy diff` 显示的改动与假设一致，没有夹带其他修改。
 4. **对账**：`backtest verify` 必须 `ok: true`；有差异时不能推荐接受，评审理由里写明差异字段和
-   日期。2026-11-05 之前创建的回测若只在 `metrics.active_days` / `metrics.win_rate_pct` 上有差异，
-   是已修复的持仓日缺陷：落库胜率不能当证据；必须依赖胜率判断时给 `needs_more`，写明要重跑哪个回测。
+   日期。若差异只在 `metrics.active_days` / `metrics.win_rate_pct` 上（输出的 `hint` 会说明这是存量回测的持仓日
+   统计问题），落库胜率不能当证据；必须依赖胜率判断时给 `needs_more`，写明要重跑哪个回测。
 5. **红旗**：回测警告（如 `EXECUTION_PRICE_MISSING`、数据缺口）、改善集中在单一年份或少数事件
    （第 9、10 项证据）、换手显著上升、回撤明显加深、DSR 勉强过线而 N 正在快速增长。
 

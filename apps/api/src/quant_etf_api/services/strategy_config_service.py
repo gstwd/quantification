@@ -144,7 +144,7 @@ class StrategyConfigService:
             status=row.status,
             is_starred=row.is_starred,
             config_json=row.config_json,
-            # 详情顶层 index_codes 必须与 config_json 一致（F-11）：
+            # 详情顶层 index_codes 必须与 config_json 一致：
             # 之前详情不填这个字段，调用方读到的永远是 []，
             # 而列表接口返回的是真实资产池，两边口径不一致
             index_codes=(row.config_json or {}).get("index_codes", []),
@@ -430,7 +430,7 @@ class StrategyConfigService:
             self._db.rollback()
             raise
 
-    # ── 变体策略清理（D-4） ────────────────────────────────────────────────
+    # ── 变体策略清理 ────────────────────────────────────────────────
 
     def list_variants(self, batch_id: str) -> list[StrategySummary]:
         """列出某个稳健性验证批次派生的变体草稿策略。
@@ -449,8 +449,7 @@ class StrategyConfigService:
         """清理某个稳健性验证批次派生的变体草稿策略。
 
         一次 ``robustness scan`` 会批量创建 ``<基线>__rbXXXX_*`` 形式的草稿策略，
-        历史上只能按 ID 前缀人工猜测（D-4）。现在变体带 ``source_batch_id``
-        元数据，可以整批精确清理：
+        变体带 ``source_batch_id`` 元数据，可以按批次精确清理（不靠 ID 前缀猜测）：
 
         - 默认预演（``dry_run=True``），只返回将被删除的策略；
         - 变体仍被回测引用时不删（避免留下指向不存在策略的回测记录），
@@ -579,10 +578,10 @@ class StrategyConfigService:
             return f"删除策略失败：{exc}"
         return None if deleted else f"策略 {strategy_id} 不存在"
 
-    # ── 验证期消费留痕（D-5） ──────────────────────────────────────────────
+    # ── 验证期消费留痕 ──────────────────────────────────────────────
 
     def mark_validation_consumed(self, strategy_id: str, note: str | None = None) -> bool:
-        """记录"该策略的验证期数据已被消费"（D-5）。
+        """记录"该策略的验证期数据已被消费"。
 
         验证期数据只能用于否决、不能用于确认。回测级留痕（``backtests`` 接口）
         只能证明"跑过验证期回测"，无法说明"验证期是否已被研究者消费"；

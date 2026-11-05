@@ -10,14 +10,14 @@ description: >
 
 # 研究战役
 
-> **当前契约优先**：先读仓库根目录 `AGENTS.md`；命令参数以 `python -m quant_etf_api.cli <命令> --help` 为准。
-> 本系统只输出研究结果，不构成投资建议；promote、上线与验证期使用都由人工决定。
+> 先读仓库根目录 `AGENTS.md`（「研究战役」一节是平台规则的唯一来源）；命令参数以
+> `python -m quant_etf_api.cli <命令> --help` 为准。本系统只输出研究结果，不构成投资建议；promote、上线与验证期使用都由人工决定。
 
 ## 战役是什么
 
 平台持有规则，agent 负责判断：
 
-- **平台**：战役状态、限额（试验增量、研究线预算、时长、轮数、连续否决）、停止条件、命令拦截。
+- **平台**：战役状态、限额（试验增量、研究线预算、时长、轮数、连续否决、连续失败）、停止条件、命令拦截。
 - **agent**：每一步由驱动器（headless）或编排会话（桌面编排模式）启动一个**全新的**会话执行。
   你看不到之前会话的内容，只能依据任务卡与平台数据（台账、优化会话、回测、稳健性批次）。
 
@@ -36,14 +36,16 @@ description: >
 1. 只用 `python -m quant_etf_api.cli ...`，工作目录就是仓库根目录，**不要 cd**、不要用其他 shell 命令。
 2. 文件只能写在任务卡的 `workspace`（`candidates/<战役>/`），文件名带轮次前缀（如 `r02_candidate.json`）。
    只能读 `AGENTS.md`、`README.md`、`docs/`、`.claude/skills/`、`.agents/skills/`、`apps/api/src/` 与本战役目录；
-   `candidates/` 下其他目录（旧研究产物）不可读，结论以研究台账为准。
-3. 战役模式下 CLI 会拒绝：`--promote`、`--no-strict`、`--over-budget`、`lifecycle`、`consume-validation`、
-   非 research 用途的回测、研究线外的策略 / 批次 / 回测、其他战役登记的假设、把策略改为 active、
-   改归研究线、修改基线或启用策略。新建策略必须 `strategy create ... --draft --lineage <strategy_id>`。
+   `candidates/` 下其他目录（其他研究的产物）不可读，结论以研究台账为准。
+3. 战役模式下 CLI 只放行研究所需命令（`strategy` / `backtest` / `research` / `robustness` / `optimization` 的研究子命令与
+   `queue stats|jobs`），会拒绝：`--promote`、`--no-strict`、`--over-budget`、`lifecycle`、`consume-validation`、
+   `research dsr-calibrate`、非 research 用途的回测、研究线外的策略 / 批次 / 回测、其他战役登记的假设、把策略改为 active、
+   改归研究线、修改基线或启用策略、组合策略，以及 `research campaign start|run|begin-step|finalize-step|next|stop`。
+   新建策略必须 `strategy create ... --draft --lineage <strategy_id>`。完整规则见 `AGENTS.md`「研究战役」。
    被拒绝时不要绕路，把原因写进本步摘要。
    诊断命令（`research factor-ic|buckets|signal-lab`）整个战役共用 `limits.max_diagnostics` 次配额
    （`limits.diagnostics_used` 为已用），用完即拒绝：先想清楚要验证什么再诊断，不要拿诊断批量筛方向。
-4. 研究期固定 2016-01-01 ~ 2025-12-31，执行模型统一 `t_plus_1_close`（CLI 缺省即是），不碰 2026 数据。
+4. 研究期 2016-01-01 ~ 2025-12-31、执行模型 `t_plus_1_close`（CLI 缺省即是），不碰 2026 年起的验证期数据（规则见 `AGENTS.md`）。
 5. 并行回测进程数用环境变量 `QUANT_ETF_CLI_WORKERS`（命令里写 `--workers 0` 即自动读取；
    需要显式值时取任务卡外驱动器设定的数，不要超过它）。
 6. 本步结束前**必须**回报：研究员 `research campaign step-done`；评审员先 `research campaign review`

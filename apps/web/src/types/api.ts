@@ -9,15 +9,15 @@ export interface StrategySummary {
   is_starred: boolean
   /** 策略绑定的指数代码列表，空数组表示全指数通用 */
   index_codes: string[]
-  /** 是否为稳健性验证派生的变体草稿策略（D-4） */
+  /** 是否为稳健性验证派生的变体草稿策略 */
   is_variant?: boolean
-  /** 派生来源批次 ID（稳健性验证批次），手工策略为 null（D-4） */
+  /** 派生来源批次 ID（稳健性验证批次），手工策略为 null */
   source_batch_id?: string | null
   /** 研究线 ID（研究线根策略 ID）；试验次数 N、试验预算与验证期消费按研究线汇总 */
   lineage_id?: string | null
-  /** 验证期（2026-01-01 起）数据首次被消费的时间（D-5） */
+  /** 验证期（2026-01-01 起）数据首次被消费的时间 */
   validation_consumed_at?: string | null
-  /** 验证期消费说明（D-5） */
+  /** 验证期消费说明 */
   validation_consumed_note?: string | null
 }
 
@@ -334,7 +334,7 @@ export interface BacktestMetrics {
   annualized_turnover?: number | null
 }
 
-/** 单个成本档位下的净口径指标（C3） */
+/** 单个成本档位下的净口径指标 */
 export interface CostLadderEntry {
   /** 往返交易成本（基点，按单边换手折算），0 表示毛口径 */
   cost_bps: number
@@ -350,7 +350,7 @@ export interface CostLadderEntry {
   cost_drag_pct_per_year: number
 }
 
-/** 有效候选池规模的游程段（C6） */
+/** 有效候选池规模的游程段 */
 export interface CandidatePoolSegment {
   start_date: string
   end_date: string
@@ -358,7 +358,7 @@ export interface CandidatePoolSegment {
   size: number
 }
 
-/** 因数据缺失被剔除的指数—日期区间（C6） */
+/** 因数据缺失被剔除的指数—日期区间 */
 export interface CandidatePoolExclusion {
   index_code: string
   first_date: string
@@ -367,7 +367,7 @@ export interface CandidatePoolExclusion {
   reasons: string[]
 }
 
-/** 回测逐日有效候选池时间线（C6） */
+/** 回测逐日有效候选池时间线 */
 export interface BacktestCandidatePool {
   /** 回测标的池的理论规模 */
   base_size: number
@@ -398,9 +398,9 @@ export interface BacktestStability {
   turnover_model?: string | null
   /** 指标口径指纹：记账口径（drift_v1 持仓漂移+两段复利+行情前向填充；constant_mix_v0 历史每日再平衡口径） */
   accounting_model?: string | null
-  /** 多档成本并列的净口径指标（C3） */
+  /** 多档成本并列的净口径指标 */
   cost_ladder?: CostLadderEntry[]
-  /** 逐日有效候选池时间线（C6），存量回测为 null */
+  /** 逐日有效候选池时间线，存量回测为 null */
   candidate_pool?: BacktestCandidatePool | null
   /** 回测前段因子预热交易日数（0=无预热期；指标仍包含该段） */
   warmup_trading_days?: number
@@ -509,7 +509,7 @@ export interface BacktestCancelResponse {
   message: string
 }
 
-/** 一条悬挂引用：持有者引用的回测已不存在（C5） */
+/** 一条悬挂引用：持有者引用的回测已不存在 */
 export interface DanglingReferenceItem {
   /** 持有者类型：robustness_run.variants / strategy_optimization / strategy_optimization.fold_backtests */
   holder: string
@@ -521,13 +521,13 @@ export interface DanglingReferenceItem {
   missing_backtest_ids: string[]
 }
 
-/** 悬挂引用审计报告（C5） */
+/** 悬挂引用审计报告 */
 export interface DanglingReferenceReport {
   total: number
   items: DanglingReferenceItem[]
 }
 
-/** 回测删除结果（C5） */
+/** 回测删除结果 */
 export interface BacktestDeleteResponse {
   backtest_id: string
   deleted: boolean
@@ -1293,7 +1293,7 @@ export interface StarredStrategyItem {
   rebalance_day_of_month: number | null
   /** 选股腿日程（frequency/day_of_week/week_parity/day_of_month） */
   selection_rebalance_schedule: Record<string, unknown> | null
-  /** 风险腿日程（两腿日程一致时等价于改造前的单腿口径） */
+  /** 风险腿日程（两腿日程一致时等价于单腿口径） */
   risk_rebalance_schedule: Record<string, unknown> | null
   /**
    * 当日计划类型：full=两腿同日重建，selection_only=只换成分维持现有总仓位，
@@ -1445,7 +1445,7 @@ export interface ValidationUsageItem {
   created_at: string
   /** 该策略验证期数据首次被消费的时间（D-5，策略级留痕） */
   strategy_validation_consumed_at?: string | null
-  /** 验证期消费说明（D-5） */
+  /** 验证期消费说明 */
   strategy_validation_consumed_note?: string | null
 }
 
@@ -1520,7 +1520,7 @@ export interface RobustnessPool {
   delta_max: number | null
 }
 
-/** 部分汇总覆盖率（B7） */
+/** 部分汇总覆盖率 */
 export interface RobustnessCoverage {
   expected_windows: number
   completed_windows: number
@@ -1555,7 +1555,7 @@ export interface RobustnessStatistics {
   n_windows: number
   cost_bps: number
   pbo: {
-    /** 分块不足时为 null，此时看 reason（F-14） */
+    /** 分块不足时为 null，此时看 reason */
     value: number | null
     n_candidates: number
     n_splits: number
@@ -1587,7 +1587,7 @@ export interface RobustnessDetail extends RobustnessSummary {
   summary: RobustnessSummaryBody | null
   statistics: RobustnessStatistics | null
   missing_backtest_ids: string[]
-  /** 本次扫描口径：预设、关键旋钮清单、窗口数（D-2） */
+  /** 本次扫描口径：预设、关键旋钮清单、窗口数 */
   scan_params?: Record<string, unknown>
 }
 

@@ -68,7 +68,7 @@ def evaluate_timing(
     配置了多档仓位（``tiers``）时，有效档位跟随有效 regime（见
     :func:`resolve_effective_tier`）：状态层接受当日判定时用当日命中档位，沿用前
     regime 时沿用上一档位；有效档位写入状态、信号的 ``tier`` / ``exposure`` 与明细
-    ``tier``。未配置档位时信号与明细和改造前完全一致。
+    ``tier``。未配置档位时信号与明细不含档位字段。
 
     Args:
         calculator: 原始择时判定计算器。
@@ -229,7 +229,7 @@ def _tier_detail(
         "matched_index": matched if isinstance(matched, int) else None,
     }
     if tier_config is not None and tier_config.is_dynamic:
-        # 动态档位额外给出仓位方式（维持 / 增减），固定档位明细与改造前一致
+        # 动态档位额外给出仓位方式（维持 / 增减），固定档位不输出该字段
         detail["mode"] = tier_config.exposure_text()
     return detail
 

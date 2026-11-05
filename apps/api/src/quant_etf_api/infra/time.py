@@ -15,7 +15,7 @@ def utcnow() -> datetime:
 
 
 def utcnow_aware() -> datetime:
-    """返回当前 UTC 时间的 aware datetime，供 timestamptz 列使用（B5）。
+    """返回当前 UTC 时间的 aware datetime，供 timestamptz 列使用。
 
     队列与回测的 started_at/finished_at 等列已迁移为 timestamptz，
     写入时携带时区信息可避免"应用写 naive、SQL 侧 now() 带时区"混用

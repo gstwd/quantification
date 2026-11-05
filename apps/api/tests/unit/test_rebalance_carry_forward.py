@@ -155,7 +155,7 @@ class TestGuards:
         assert scheduler.should_rebalance(cfg, date(2025, 5, 10)) is False
 
     def test_calendar_error_propagates(self) -> None:
-        """日历不可用时上抛，而不是退化为按星期比较（C1）。"""
+        """日历不可用时上抛，而不是退化为按星期比较。"""
         scheduler = DefaultRebalanceScheduler(_BrokenCalendar())
         cfg = RebalanceScheduleConfig(frequency="weekly", day_of_week=1)
 
@@ -202,7 +202,7 @@ class TestRebalanceConfigValidation:
 
 
 class TestLegNormalization:
-    """两腿必选：旧配置与单腿配置的归一化。"""
+    """两腿必选：平铺写法与单腿配置的归一化。"""
 
     def test_legacy_flat_config_becomes_two_identical_legs(self) -> None:
         """旧平铺配置升级为两腿同频，从而保持历史回测口径。"""
@@ -326,7 +326,7 @@ class TestSelectActiveLegs:
         assert legs.risk is True
 
     def test_identical_legs_fire_together(self) -> None:
-        """两腿同频（旧配置升级后的形态）在同一天一起到期。"""
+        """两腿同频（平铺写法升级后的形态）在同一天一起到期。"""
         config = RebalanceConfig(frequency="weekly", day_of_week=4)
         scheduler = self._scheduler()
 

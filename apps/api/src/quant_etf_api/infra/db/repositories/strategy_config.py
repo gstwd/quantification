@@ -60,7 +60,7 @@ class StrategyConfigRepository(BaseRepository):
         )
 
     def find_variants(self, batch_id: str) -> list[StrategyConfigModel]:
-        """按派生批次查询稳健性变体草稿策略（D-4）。
+        """按派生批次查询稳健性变体草稿策略。
 
         Args:
             batch_id: 稳健性验证批次 ID（``strategy_config.source_batch_id``）。
