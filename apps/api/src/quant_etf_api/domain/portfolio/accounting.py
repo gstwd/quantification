@@ -7,7 +7,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+
+
+def has_positive_weight(positions: Mapping[str, float] | None) -> bool:
+    """判断一组持仓里是否至少有一个正权重（"当日是否持仓"的唯一判定）。
+
+    择时把总仓位降到 0 时，执行器持仓可能是 ``{"000852": 0.0}`` 这类零权重字典；
+    用 ``bool(持仓)`` 判断会把空仓日算作持仓日，使 ``active_days`` 偏大、按持仓日
+    统计的胜率分母混入空仓日（2026-11-05 独立对账发现，见决策记录）。
+
+    Args:
+        positions: 持仓权重，None 视为空仓。
+
+    Returns:
+        至少一个资产权重大于 0 时为 True。
+    """
+    return any(weight > 0 for weight in (positions or {}).values())
 
 
 @dataclass
@@ -37,7 +54,7 @@ class BacktestDayAccumulator:
 
         Args:
             portfolio_return: 当日组合收益率（百分比）。
-            has_positions: 当日是否持仓。
+            has_positions: 当日是否持仓，调用方须用 :func:`has_positive_weight` 判定。
         """
         self.daily_returns.append(portfolio_return)
         if has_positions:

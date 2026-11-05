@@ -34,7 +34,10 @@ from quant_etf_api.domain.common.enums import (
 )
 from quant_etf_api.domain.common.signal_level import determine_signal_level
 from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
-from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
+from quant_etf_api.domain.portfolio.accounting import (
+    BacktestDayAccumulator,
+    has_positive_weight,
+)
 from quant_etf_api.domain.portfolio.attribution import (
     AttributionBucket,
     AttributionDay,
@@ -1826,7 +1829,10 @@ class BacktestService:
             if day.missing_bar_count > 0:
                 data_gap_days += 1
 
-            accumulator.apply_day(day.portfolio_return, bool(day.executed_positions))
+            # 择时降到零仓位时持仓可能是零权重字典，不能按 bool(持仓) 判定持仓日
+            accumulator.apply_day(
+                day.portfolio_return, has_positive_weight(day.executed_positions)
+            )
             day_total_exposure = round(sum(day.positions.values()), 4)
             positions = _round_weights(day.positions)
             executed_positions = _round_weights(day.executed_positions)
@@ -2651,7 +2657,7 @@ class BacktestService:
         index_buffer: list[dict[str, Any]] = []
         in_count = in_positive = 0
         for day in blended:
-            accumulator.apply_day(day.portfolio_return, bool(day.positions))
+            accumulator.apply_day(day.portfolio_return, has_positive_weight(day.positions))
             exposure = round(sum(day.positions.values()), 4)
             bench = benchmark_by_date.get(day.trade_date)
             if enable_benchmark:

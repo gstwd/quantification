@@ -31,6 +31,7 @@ from quant_etf_api.domain.research.ledger import CLOSED_STATUSES as HYPOTHESIS_V
 from quant_etf_api.domain.research.ledger import HYPOTHESIS_CATEGORIES
 from quant_etf_api.engine.config import FactorAliasConfig
 from quant_etf_api.schemas.strategy import StrategyConfigCreate, StrategyConfigUpdate
+from quant_etf_api.services.backtest_reconcile_service import BacktestReconcileService
 from quant_etf_api.services.backtest_service import BacktestService
 from quant_etf_api.services.dsr_calibration_service import DsrCalibrationService
 from quant_etf_api.services.dsr_calibration_service import render_markdown as render_dsr_markdown
@@ -490,6 +491,14 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
     _add_json_flag(p)
 
     p = sub.add_parser("pool", help="查看有效候选池逐日时间线与剔除区间（C6）")
+    p.add_argument("backtest_id")
+    _add_json_flag(p)
+
+    p = sub.add_parser(
+        "verify",
+        help="独立对账：按记账规格用原始行情复算逐日收益、换手、基准与汇总指标并比对"
+        "（只读，有差异时退出码 1）",
+    )
     p.add_argument("backtest_id")
     _add_json_flag(p)
 
@@ -1762,6 +1771,14 @@ def _run_backtest(args: argparse.Namespace) -> None:
                 },
                 not args.no_json,
             )
+        elif args.subcommand == "verify":
+            try:
+                verified = BacktestReconcileService(db).verify(args.backtest_id)
+            except LookupError as exc:
+                _fail(str(exc))
+            _emit(verified, not args.no_json)
+            if not verified["ok"]:
+                sys.exit(1)
         elif args.subcommand == "orphans":
             report = svc.find_dangling_references(limit=args.limit)
             _emit(report.model_dump(), not args.no_json)

@@ -58,7 +58,18 @@ _ALLOWED_COMMANDS: dict[str, frozenset[str] | None] = {
         {"list", "show", "validate", "diff", "create", "update", "prune-variants"}
     ),
     "backtest": frozenset(
-        {"run", "list", "status", "show", "results", "pool", "batch", "execute", "cancel"}
+        {
+            "run",
+            "list",
+            "status",
+            "show",
+            "results",
+            "pool",
+            "verify",
+            "batch",
+            "execute",
+            "cancel",
+        }
     ),
     "research": None,
     "robustness": None,

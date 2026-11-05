@@ -93,6 +93,7 @@ npx vue-tsc --noEmit
 python -m quant_etf_api.cli strategy list
 python -m quant_etf_api.cli backtest run --strategy <id>
 python -m quant_etf_api.cli backtest show <id> --cost-ladder 0,10,20,30,50
+python -m quant_etf_api.cli backtest verify <id>   # 独立对账：用原始行情复算逐日收益、换手与汇总指标
 python -m quant_etf_api.cli robustness scan --strategy <id> --preset quick
 python -m quant_etf_api.cli optimization start --strategy <id> --candidate-file candidates.json --hypothesis "..."
 python -m quant_etf_api.cli research ledger --strategy <id>

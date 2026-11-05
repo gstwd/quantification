@@ -13,6 +13,7 @@ python -m quant_etf_api.cli research hypothesis show <hid>        # 事先登记
 python -m quant_etf_api.cli research ledger --strategy <strategy_id>   # 研究线 N、预算、近期结论
 python -m quant_etf_api.cli strategy diff <strategy_id> <候选策略ID>    # 实际改了什么
 python -m quant_etf_api.cli backtest show <候选全区间回测ID>       # 口径指纹、警告、候选池
+python -m quant_etf_api.cli backtest verify <候选全区间回测ID>     # 独立对账，只读、不增加 N
 ```
 
 需要时再看 `robustness show <rid>`、`backtest results <id>`。不要发起新的回测或探索（那是研究员的事，
@@ -24,7 +25,10 @@ python -m quant_etf_api.cli backtest show <候选全区间回测ID>       # 口�
    执行口径是否为 `t_plus_1_close`）。
 2. **事先登记的标准**是否满足；不满足时，即使清单全过也不能推荐接受。
 3. **只改了一处**：`strategy diff` 显示的改动与假设一致，没有夹带其他修改。
-4. **红旗**：回测警告（如 `EXECUTION_PRICE_MISSING`、数据缺口）、改善集中在单一年份或少数事件
+4. **对账**：`backtest verify` 必须 `ok: true`；有差异时不能推荐接受，评审理由里写明差异字段和
+   日期。2026-11-05 之前创建的回测若只在 `metrics.active_days` / `metrics.win_rate_pct` 上有差异，
+   是已修复的持仓日缺陷：落库胜率不能当证据；必须依赖胜率判断时给 `needs_more`，写明要重跑哪个回测。
+5. **红旗**：回测警告（如 `EXECUTION_PRICE_MISSING`、数据缺口）、改善集中在单一年份或少数事件
    （第 9、10 项证据）、换手显著上升、回撤明显加深、DSR 勉强过线而 N 正在快速增长。
 
 ## 3. 给结论并处理

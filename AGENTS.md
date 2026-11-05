@@ -23,7 +23,7 @@
 
 - **冻结**：只有用户在对话中明确决定才能改，并在决策记录的「冻结项变更」登记。改变数值口径时必须升口径版本号（如 `constant_mix_v0` → `drift_v1`），保留旧口径的可解释性，再重写金样本基准。
   - 分层与依赖方向（由 `tests/unit/test_layer_imports.py` 守卫）；引擎管线六阶段划分；路径依赖只由 `risk_overlay` 在回测主循环施加。
-  - 回测计算口径（由 `tests/unit/test_caliber_golden.py` 守卫）：`drift_v1` 记账、执行模型语义与两个缺省值、基准按决策日归因、汇总为毛收益且成本只在读取路径折算。
+  - 回测计算口径（由 `tests/unit/test_caliber_golden.py` 与 `tests/unit/test_backtest_reconcile.py` 守卫）：`drift_v1` 记账、执行模型语义与两个缺省值、基准按决策日归因、汇总为毛收益且成本只在读取路径折算。
   - 研究治理：研究期与验证期边界、研究台账与 N 统计、研究线归属、Deflated Sharpe、10 项验收清单及门槛。
   - 数据与因子：因子不落库、一个计算逻辑一个模板；`data_health_snapshot` 是唯一质量口径，`operations` 是唯一同步入口；`job_queue` 是唯一后台队列。
   - 安全边界：战役模式守卫与白名单；LIVE 策略不自动调参、不自动 promote、不自动上线。
@@ -78,6 +78,7 @@ alembic revision --autogenerate -m "description"
 alembic upgrade head
 python -m quant_etf_api.cli strategy list
 python -m quant_etf_api.cli backtest run --strategy <id>
+python -m quant_etf_api.cli backtest verify <backtest_id>
 python -m quant_etf_api.cli robustness scan --strategy <id> --preset quick
 ```
 
@@ -128,6 +129,7 @@ HTTP → api/routers → services → engine
 - 研究与优化统一按 `t_plus_1_close` 口径：CLI 的 `backtest run`、`research batch`、`research buckets`（`--basis`）、`robustness scan|ablate|pool` 与 `optimization start` 缺省都是 `t_plus_1_close`（`RESEARCH_DEFAULT_EXECUTION_MODEL`）。系统级缺省（API 请求体、存量回测 / 会话行缺失执行模型时的解释）仍为 `t_plus_1_open`（`DEFAULT_EXECUTION_MODEL`），不得改动以免改变历史记录的口径含义。不同执行模型、日历来源或候选池口径的结果不可直接比较。
 - T+1 收盘下先成交昨日指令，再以成交后持仓合成今日双腿目标；仅风险腿不得恢复旧成分，明确清仓与无指令必须区分。
 - 回测记账口径为 `drift_v1`（`params._accounting_model`，见 `domain/portfolio/execution.py`）：持仓在调仓间随行情漂移、换手按漂移后的实际持仓计；T+1 开盘调仓日隔夜段与日内段复利衔接；收益结算用前向填充行情（缺口后补回涨跌，候选池/因子/缺口统计仍用原始行情）；最后一个交易日无收益窗口、不落逐日行。存量回测按 `constant_mix_v0` 标注，两种口径不可直接比较。
+- 回测独立对账：`domain/portfolio/reconcile.py` 按 `drift_v1` 规格从原始行情独立复算逐日收益、换手、累计收益、回撤、基准与汇总指标，**不得导入 `quant_etf_api` 下任何模块**（由测试守卫），否则会和执行器一起错、一起"对上"；`backtest verify <id>` 对落库回测做只读对账。修改记账口径时必须同步修改对账规格。
 - 回测 `params` 是普通 JSON 列，不追踪原地修改：写口径元数据必须拷贝成新 dict 后整体赋值。
 - 研究台账：假设记在 `research_hypothesis`（先登记判定标准再检验，关闭后不再接收试验），检验动作记在 `research_trial`。Deflated Sharpe 的试验次数 N = 稳健性批次变体 + 已评估优化会话 + `research batch` 变体（每次运行自动记录）+ 人工 / 补录试验；不得绕过台账统计 N。N 统计失败时必须失败即不通过（异常上抛、验收项判不通过），不得退回兜底值放行。
 - 研究线：`strategy_config.lineage_id` 把基线与其优化候选、稳健性变体、手工归入的派生策略归为一组；N、试验预算（`research_trial_budget`）与验证期消费留痕按研究线汇总。派生新策略时必须归入原研究线，不得用另建策略的方式重置 N；仍有成员的研究线根、以及自身已有试验的成员不能改归其他研究线（试验按策略归属，移出等于拿走 N）。

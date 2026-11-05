@@ -112,7 +112,8 @@ def count_missing_allocation_assets(
 
     与 BacktestExecutor 的缺口语义一致：bar 缺失、收盘价
     None/NaN/0 均视为缺失（该资产当日收益按 0 处理），用于回测每日
-    missing_bar_count 记录与数据缺口天数统计。
+    missing_bar_count 记录与数据缺口天数统计。零权重资产不承担收益，
+    不计入（择时降到零仓位时持仓可能是零权重字典）。
 
     Args:
         positions: 持仓权重。
@@ -127,8 +128,8 @@ def count_missing_allocation_assets(
         return 0
     return sum(
         1
-        for code in positions
-        if get_index_return(code, trade_date, next_date, all_bars) is None
+        for code, weight in positions.items()
+        if weight > 0 and get_index_return(code, trade_date, next_date, all_bars) is None
     )
 
 
@@ -144,6 +145,7 @@ def count_missing_rebalance_assets(
     与 BacktestExecutor 调仓日的缺口语义一致：旧仓位隔夜段或
     新仓位日内段任一因缺失（bar 缺失、open/close 为 None/NaN/0）无法
     计算，即视为该资产当日受数据缺口影响（相关段收益按 0 处理）。
+    零权重资产不承担对应段的收益，不计入。
 
     Args:
         old_positions: 调仓前持仓权重。
@@ -159,11 +161,11 @@ def count_missing_rebalance_assets(
         return 0
     count = 0
     for code in sorted(set(old_positions) | set(new_positions)):
-        overnight, intraday = get_index_rebalance_legs(
-            code, trade_date, next_date, all_bars
-        )
-        if (code in old_positions and overnight is None) or (
-            code in new_positions and intraday is None
-        ):
+        in_old = old_positions.get(code, 0.0) > 0
+        in_new = new_positions.get(code, 0.0) > 0
+        if not (in_old or in_new):
+            continue
+        overnight, intraday = get_index_rebalance_legs(code, trade_date, next_date, all_bars)
+        if (in_old and overnight is None) or (in_new and intraday is None):
             count += 1
     return count

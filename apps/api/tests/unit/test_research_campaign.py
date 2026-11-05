@@ -189,6 +189,7 @@ class TestCommandAllowlist:
             ("research", "campaign", {"campaign_action": "step-done"}),
             ("optimization", "finish", {"strict": True, "verdict": "accept"}),
             ("backtest", "run", {"purpose": "research"}),
+            ("backtest", "verify", {}),
             ("strategy", "create", {"draft": True}),
             ("research", "factor-ic", {}),
         ],

@@ -8,7 +8,8 @@
   共享行情缓存不被就地污染、指数结果按 checkpoint 批量写入；
 - 创建回测写库失败时上抛、不留验证期消费痕迹；
 - 回撤持续天数不把"持平于峰值"的空仓日计入；
-- 引擎回测模式跳过管线调试详情。
+- 引擎回测模式跳过管线调试详情；
+- 零权重持仓不算持仓日、不计入数据缺口资产数。
 """
 
 from __future__ import annotations
@@ -20,12 +21,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from quant_etf_api.domain.portfolio.accounting import has_positive_weight
 from quant_etf_api.domain.portfolio.execution import (
     ACCOUNTING_MODEL_DRIFT,
     ACCOUNTING_MODEL_LEGACY,
     BacktestExecutor,
     drift_weights,
     forward_fill_return_bars,
+)
+from quant_etf_api.domain.portfolio.returns import (
+    count_missing_allocation_assets,
+    count_missing_rebalance_assets,
 )
 from quant_etf_api.domain.research.metrics import compute_performance_metrics
 from quant_etf_api.engine.base import EngineContext, EngineResult
@@ -468,3 +474,61 @@ class TestEngineBacktestMode:
         engine = StrategyEngine()
         assert engine.run(config, context, include_details=False).pipeline_detail is None
         assert engine.run(config, context, include_details=True).pipeline_detail is not None
+
+
+class TestZeroWeightHoldings:
+    """零权重持仓不算持仓日（2026-11-05 独立对账发现的缺陷，见决策记录）。"""
+
+    @pytest.mark.parametrize(
+        ("positions", "expected"),
+        [
+            (None, False),
+            ({}, False),
+            ({"a": 0.0}, False),
+            ({"a": 0.0, "b": 0.3}, True),
+            ({"a": 1.0}, True),
+        ],
+    )
+    def test_has_positive_weight(self, positions: dict[str, float] | None, expected: bool) -> None:
+        """只有至少一个正权重才算持仓。"""
+        assert has_positive_weight(positions) is expected
+
+    def test_missing_bar_count_skips_zero_weight(self) -> None:
+        """零权重资产碰上行情缺口不计入数据缺口资产数。"""
+        bars = {("a", D0): _bar(100.0), ("b", D0): _bar(100.0), ("b", D1): _bar(101.0)}
+        assert count_missing_allocation_assets({"a": 0.0, "b": 1.0}, D0, D1, bars) == 0
+        assert count_missing_allocation_assets({"a": 0.5, "b": 0.5}, D0, D1, bars) == 1
+        assert count_missing_rebalance_assets({"a": 0.0}, {"b": 1.0}, D0, D1, bars) == 0
+        assert count_missing_rebalance_assets({"a": 1.0}, {"b": 1.0}, D0, D1, bars) == 1
+
+    def test_loop_excludes_zero_weight_days_from_active_days(self) -> None:
+        """引擎给出 {"a": 0.0} 的空仓日不进入 active_days 与胜率分母。"""
+        svc, row, _rows = _loop_service([D0, D1, D2, D3], TestLoopFixes()._bars())
+
+        def _run_engine(
+            config: StrategyConfig, context: EngineContext, include_details: bool = False
+        ) -> EngineResult:
+            """D1 决策降到零仓位，其余日满仓 a。"""
+            weight = 0.0 if context.trade_date == D1 else 1.0
+            return EngineResult(
+                trade_date=context.trade_date,
+                strategy_id=config.strategy_id,
+                timing=None,
+                scores={"a": 1.0},
+                rankings=[],
+                positions={"a": weight},
+                total_exposure=weight,
+                cash_ratio=1.0 - weight,
+                strategy_results=[],
+                timing_target_exposure=weight,
+            )
+
+        svc._engine.run.side_effect = _run_engine
+        row.params = {**row.params, "_execution_model": "t_plus_1_close"}
+        svc._run_backtest_loop("bt-drift", row, _config())
+        metrics = svc._backtest_repo.mark_success.call_args.args[1]
+        assert metrics["total_trading_days"] == 3
+        # T+1 收盘：D0 行空仓；D1 行持有 D0 指令 {"a": 1.0} 吃 +10%；D2 行持有 D1 指令
+        # {"a": 0.0}，是空仓日。修复前 D2 被算作持仓日，active_days=2、胜率 50%
+        assert metrics["active_days"] == 1
+        assert metrics["win_rate_pct"] == 100.0

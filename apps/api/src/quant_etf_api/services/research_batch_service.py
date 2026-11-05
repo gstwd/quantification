@@ -903,12 +903,16 @@ def _accumulator_from_rows(daily_rows: list[Any]) -> Any:
     Returns:
         BacktestDayAccumulator。
     """
-    from quant_etf_api.domain.portfolio.accounting import BacktestDayAccumulator
+    from quant_etf_api.domain.portfolio.accounting import (
+        BacktestDayAccumulator,
+        has_positive_weight,
+    )
 
     accumulator = BacktestDayAccumulator()
     for row in daily_rows:
         positions = getattr(row, "executed_positions", None) or getattr(row, "positions", None)
-        accumulator.apply_day(row.portfolio_return, bool(positions))
+        # 与回测主循环同一判定：零权重持仓不算持仓日
+        accumulator.apply_day(row.portfolio_return, has_positive_weight(positions))
     return accumulator
 
 

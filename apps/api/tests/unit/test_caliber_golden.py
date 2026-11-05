@@ -148,8 +148,8 @@ def _synthetic_bars(days: list[date]) -> dict[tuple[str, date], Any]:
     return bars
 
 
-def _cases() -> dict[str, tuple[StrategyConfig, str]]:
-    """三条代表性策略配置及其执行模型。"""
+def cases() -> dict[str, tuple[StrategyConfig, str]]:
+    """三条代表性策略配置及其执行模型（独立对账测试同样复用）。"""
     aliases = {
         "mom20": {"template_id": "return", "params": {"period": 20}},
         "vol20": {"template_id": "volatility", "params": {"period": 20}},
@@ -233,6 +233,24 @@ def _run_case(config: StrategyConfig, execution_model: str) -> dict[str, Any]:
     Returns:
         包含口径元数据、汇总指标与逐日结果的字典。
     """
+    outcome, _bars = run_outcome(config, execution_model)
+    return _snapshot(outcome)
+
+
+def run_outcome(
+    config: StrategyConfig, execution_model: str
+) -> tuple[dict[str, Any], dict[tuple[str, date], Any]]:
+    """在内存里用真实计算链路跑一条回测，返回主循环原始结果与所用的合成行情。
+
+    独立对账测试（``test_backtest_reconcile.py``）复用这里的数据与策略。
+
+    Args:
+        config: 策略配置。
+        execution_model: 执行模型。
+
+    Returns:
+        (``_run_backtest_loop`` 的返回值, 含预热期的原始行情)。
+    """
     days = _trading_days()
     test_days = days[_WARMUP_DAYS:]
     bars = _synthetic_bars(days)
@@ -269,7 +287,7 @@ def _run_case(config: StrategyConfig, execution_model: str) -> dict[str, Any]:
         return_value=(_SetCalendar(set(days)), "database"),
     ):
         outcome = svc._run_backtest_loop(row.backtest_id, row, config, persist=False)
-    return _snapshot(outcome)
+    return outcome, bars
 
 
 def _snapshot(outcome: dict[str, Any]) -> dict[str, Any]:
@@ -381,7 +399,7 @@ def _load_golden() -> dict[str, Any]:
 def golden() -> dict[str, Any]:
     """模块级基准：更新模式下先全部重算并写回文件。"""
     if os.environ.get(UPDATE_ENV) == "1":
-        data = {name: _run_case(cfg, model) for name, (cfg, model) in _cases().items()}
+        data = {name: _run_case(cfg, model) for name, (cfg, model) in cases().items()}
         GOLDEN_PATH.parent.mkdir(parents=True, exist_ok=True)
         GOLDEN_PATH.write_text(
             json.dumps(data, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
@@ -394,13 +412,13 @@ def golden() -> dict[str, Any]:
 class TestCaliberGolden:
     """回测主链路的口径金样本。"""
 
-    @pytest.mark.parametrize("case", sorted(_cases()))
+    @pytest.mark.parametrize("case", sorted(cases()))
     def test_matches_golden(self, case: str, golden: dict[str, Any]) -> None:
         """当前实现的逐日结果与汇总指标必须与基准一致。"""
         assert case in golden, (
             f"基准文件缺少用例 {case}：确认口径后用 {UPDATE_ENV}=1 生成，并登记决策记录"
         )
-        config, model = _cases()[case]
+        config, model = cases()[case]
         _assert_matches(_run_case(config, model), golden[case], case)
 
     def test_cases_are_not_degenerate(self, golden: dict[str, Any]) -> None:
