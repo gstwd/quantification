@@ -111,6 +111,7 @@ python -m quant_etf_api.cli research campaign run <campaign_id>
 - [稳健性评估与生命周期监控](docs/architecture/策略稳健性评估与生命周期监控实施说明.md)
 - [用户手册](docs/用户手册.md)
 - [开发约定](AGENTS.md)
+- [决策记录（冻结基线与已否决提议）](docs/architecture/决策记录.md)
 
 方法论文件解释研究原则，不替代接口或运行口径：
 
