@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
 
@@ -15,7 +15,7 @@ from quant_etf_api.domain.portfolio.benchmark import (
     compute_mix_benchmark,
 )
 from quant_etf_api.schemas.backtest import BacktestCreateRequest
-from quant_etf_api.services.backtest_service import BacktestService
+from quant_etf_api.services.backtest_service import BacktestService, IndexDetailPrunedError
 
 _D = [date(2025, 3, 3) + timedelta(days=i) for i in range(4)]
 
@@ -90,6 +90,22 @@ class TestAttributionService:
             svc.get_attribution("bt")
         svc._backtest_repo.find_by_id.return_value = None
         assert svc.get_attribution("bt") is None
+
+    def test_pruned_backtest_raises_instead_of_residual(self) -> None:
+        """逐指数明细已瘦身：抛 IndexDetailPrunedError，不把缺失明细算成残差。"""
+        svc = BacktestService(db=mock.MagicMock())
+        svc._backtest_repo = mock.MagicMock()
+        svc._backtest_repo.find_by_id.return_value = SimpleNamespace(
+            status="success",
+            params={},
+            index_detail_pruned_at=datetime(2026, 11, 6, tzinfo=timezone.utc),
+        )
+        with pytest.raises(IndexDetailPrunedError, match="2026-11-06"):
+            svc.get_attribution("bt")
+        svc._backtest_repo.find_held_index_returns.assert_not_called()
+        with pytest.raises(IndexDetailPrunedError):
+            svc.get_index_results("bt")
+        svc._backtest_repo.find_index_results.assert_not_called()
 
 
 class TestBenchmarkMix:

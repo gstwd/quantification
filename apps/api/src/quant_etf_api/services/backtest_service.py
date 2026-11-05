@@ -175,6 +175,30 @@ from quant_etf_api.services.strategy_config_service import (
 logger = logging.getLogger(__name__)
 
 
+class IndexDetailPrunedError(RuntimeError):
+    """回测的逐指数明细已被研究数据瘦身删除。
+
+    不继承 ``ValueError``：路由与 CLI 对 ``ValueError`` 的既有映射（409 / 失败退出）
+    不适用于"明细已清理"，需要单独映射为 410。
+    """
+
+    def __init__(self, backtest_id: str, pruned_at: Any, action: str) -> None:
+        """构造异常。
+
+        Args:
+            backtest_id: 回测 ID。
+            pruned_at: 瘦身时间。
+            action: 被拒绝的读取动作（如"归因"）。
+        """
+        day = pruned_at.strftime("%Y-%m-%d") if hasattr(pruned_at, "strftime") else str(pruned_at)
+        super().__init__(
+            f"回测 {backtest_id} 的逐指数明细已于 {day} 瘦身清理，无法{action}；"
+            "需要时用同一配置重跑回测"
+        )
+        self.backtest_id = backtest_id
+        self.pruned_at = pruned_at
+
+
 @dataclass
 class BacktestRunCaches:
     """同一批变体共享的行情快照与因子缓存（D-1 研究批量评估）。
@@ -1248,12 +1272,16 @@ class BacktestService:
 
         Raises:
             ValueError: 回测未成功完成时抛出。
+            IndexDetailPrunedError: 逐指数明细已被瘦身删除。
         """
         row = self._backtest_repo.find_by_id(backtest_id)
         if row is None:
             return None
         if row.status != "success":
             raise ValueError(f"回测 {backtest_id} 状态为 {row.status}，只有成功的回测可以归因")
+        pruned_at = getattr(row, "index_detail_pruned_at", None)
+        if pruned_at is not None:
+            raise IndexDetailPrunedError(backtest_id, pruned_at, "归因")
         params = row.params or {}
         execution_model = str(params.get("_execution_model", "t_plus_1_open"))
         daily = self._backtest_repo.find_daily_results(backtest_id)
@@ -1313,7 +1341,14 @@ class BacktestService:
 
         口径与实时信号保持一致：signal_score 为综合得分，target_weight 为信号目标仓位权重。
         scored=False 的行未参与评分，signal_score 为占位 0.0。
+
+        Raises:
+            IndexDetailPrunedError: 逐指数明细已被瘦身删除（不能返回空列表冒充"无数据"）。
         """
+        run = self._backtest_repo.find_by_id(backtest_id)
+        pruned_at = getattr(run, "index_detail_pruned_at", None) if run is not None else None
+        if pruned_at is not None:
+            raise IndexDetailPrunedError(backtest_id, pruned_at, "查看逐指数结果")
         try:
             rows = self._backtest_repo.find_index_results(backtest_id, index_code)
             return [
@@ -3211,6 +3246,7 @@ class BacktestService:
             data_cutoff_date=getattr(row, "data_cutoff_date", None),
             optimization_id=getattr(row, "optimization_id", None),
             purpose_reason=getattr(row, "purpose_reason", None),
+            index_detail_pruned_at=getattr(row, "index_detail_pruned_at", None),
         )
 
 

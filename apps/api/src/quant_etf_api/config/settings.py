@@ -37,6 +37,21 @@ class Settings(BaseSettings):
         ge=1,
         description="每条 LIVE 策略保留的定时监控回测条数（手动刷新产生的不清理）",
     )
+    # 研究数据瘦身与历史留存（只删逐指数明细、已结束任务与已读告警，不动台账与 N）
+    campaign_auto_cleanup_enabled: bool = Field(
+        default=True,
+        description="研究战役结束时是否自动清理：已结束任务记录、步骤日志与回测逐指数明细",
+    )
+    job_history_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description="每日数据同步后删除早于该天数的已结束后台任务记录",
+    )
+    alert_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description="每日数据同步后删除早于该天数的已读站内告警（未读告警不删除）",
+    )
     schedule_time: str = Field(
         default="17:30", description="每日全局数据自动同步触发时间（HH:MM），默认收盘后 17:30"
     )

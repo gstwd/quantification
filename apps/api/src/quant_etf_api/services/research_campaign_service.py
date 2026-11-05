@@ -29,6 +29,7 @@ from quant_etf_api.infra.db.repositories.optimization import OptimizationReposit
 from quant_etf_api.infra.db.repositories.research_campaign import ResearchCampaignRepository
 from quant_etf_api.infra.time import utcnow_aware
 from quant_etf_api.services.research_ledger_service import ResearchLedgerService
+from quant_etf_api.services.retention_service import RetentionService
 from quant_etf_api.services.strategy_config_service import StrategyConfigService
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ class ResearchCampaignService:
         self._ledger = ResearchLedgerService(db)
         self._config_svc = StrategyConfigService(db)
         self._opt_repo = OptimizationRepository(db)
+        self._cleanup = RetentionService(db)
 
     # ------------------------------------------------------------------
     # 战役生命周期
@@ -175,9 +177,11 @@ class ResearchCampaignService:
             status: 终态（stopped / completed）。
 
         Returns:
-            战役字典。
+            战役字典；本次调用真正结束了战役且开启自动清理时附带 ``cleanup``
+            （已结束任务、步骤日志与逐指数明细的清理结果）。
         """
         row = self.require(campaign_id)
+        cleanup: dict[str, Any] | None = None
         if row.status == rules.STATUS_RUNNING:
             now = utcnow_aware()
             running = self._repo.find_running_step(campaign_id)
@@ -191,7 +195,44 @@ class ResearchCampaignService:
             row.updated_at = now
             self._db.commit()
             logger.info("研究战役 %s 结束（%s）：%s", campaign_id, status, reason)
-        return self._campaign_dict(row)
+            if get_settings().campaign_auto_cleanup_enabled:
+                cleanup = self._run_auto_cleanup(campaign_id)
+        result = self._campaign_dict(row)
+        if cleanup is not None:
+            result["cleanup"] = cleanup
+        return result
+
+    def sweep_finished(self, campaign_id: str) -> dict[str, Any] | None:
+        """对已结束的战役再执行一次自动清理（驱动器收尾时调用，可重复执行）。
+
+        战役可能在 agent 进程内结束（研究员回报无新方向），其后完成的回测或
+        中途失败的清理在这里补齐。
+
+        Args:
+            campaign_id: 战役 ID。
+
+        Returns:
+            清理结果；战役仍在运行或未开启自动清理时返回 None。
+        """
+        row = self._repo.find(campaign_id)
+        if row is None or row.status == rules.STATUS_RUNNING:
+            return None
+        if not get_settings().campaign_auto_cleanup_enabled:
+            return None
+        return self._run_auto_cleanup(campaign_id)
+
+    def _run_auto_cleanup(self, campaign_id: str) -> dict[str, Any]:
+        """执行战役结束清理；任何异常只记日志，不影响战役状态。"""
+        try:
+            cleanup = self._cleanup.cleanup_after_campaign(
+                campaign_id, _REPO_ROOT / "candidates" / campaign_id
+            )
+        except Exception as exc:  # noqa: BLE001 — 清理失败不能让停止失败
+            logger.exception("研究战役 %s 结束清理失败", campaign_id)
+            self._db.rollback()
+            return {"errors": [str(exc)]}
+        logger.info("研究战役 %s 结束清理: %s", campaign_id, cleanup)
+        return cleanup
 
     # ------------------------------------------------------------------
     # 下一步与步骤
@@ -280,8 +321,12 @@ class ResearchCampaignService:
             return {"action": "wait", "step_id": running.step_id, "role": running.role}
         progress = self.progress(campaign_id)
         if progress["stop_reason"]:
-            self.stop(campaign_id, progress["stop_reason"])
-            return {"action": "stop", "reason": progress["stop_reason"]}
+            stopped = self.stop(campaign_id, progress["stop_reason"])
+            return {
+                "action": "stop",
+                "reason": progress["stop_reason"],
+                "cleanup": stopped.get("cleanup"),
+            }
         return {"action": "run", "card": self._task_card(row, progress)}
 
     def begin_step(

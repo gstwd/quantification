@@ -660,6 +660,62 @@ class BacktestDetail(BacktestSummary):
     stability: BacktestStability | None = None
     purpose_reason: str | None = None
     timing_stats: BacktestTimingStats | None = None
+    index_detail_pruned_at: UtcDatetime | None = None
+
+
+class BacktestDetailSlimRequest(BaseModel):
+    """研究数据瘦身执行请求（每次请求处理一批回测，控制单次耗时）。
+
+    Attributes:
+        max_backtests: 本批最多瘦身的回测数。
+    """
+
+    max_backtests: int = Field(20, ge=1, le=200)
+
+
+class BacktestDetailSlimFailure(BaseModel):
+    """单条回测瘦身失败的记录。"""
+
+    backtest_id: str
+    error: str
+
+
+class BacktestDetailSlimResult(BaseModel):
+    """研究数据瘦身结果（预演或执行）。
+
+    瘦身只删除逐指数明细；回测汇总、逐日结果、批次、会话、台账与草稿保留，N 不变。
+
+    Attributes:
+        scope: 范围类型：lineage=策略所在研究线，campaign=已结束战役期间。
+        scope_id: 范围标识（策略 ID 或战役 ID）。
+        lineage_id: 研究线 ID。
+        strategy_count: 范围内的成员策略数。
+        dry_run: 是否为预演。
+        total_backtests: 范围内回测总数。
+        already_pruned: 已瘦身的回测数。
+        protected: 各保护原因下的回测数。
+        eligible_backtests: 可瘦身的回测数。
+        slimmed_backtests: 本次实际瘦身的回测数。
+        remaining_backtests: 本次之后仍可瘦身的回测数。
+        index_rows_deleted: 本次删除的逐指数明细行数。
+        failed: 失败的回测。
+        note: 保留范围与磁盘空间说明。
+    """
+
+    scope: Literal["lineage", "campaign"]
+    scope_id: str
+    lineage_id: str
+    strategy_count: int
+    dry_run: bool
+    total_backtests: int
+    already_pruned: int
+    protected: dict[str, int] = Field(default_factory=dict)
+    eligible_backtests: int
+    slimmed_backtests: int = 0
+    remaining_backtests: int = 0
+    index_rows_deleted: int = 0
+    failed: list[BacktestDetailSlimFailure] = Field(default_factory=list)
+    note: str = ""
 
 
 class BacktestDailyResult(BaseModel):

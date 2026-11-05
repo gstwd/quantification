@@ -155,10 +155,11 @@ description: >
      会话 verdict 是一个候选的结论，假设结论要综合全部试验；配置写不出来时用
      `blocked_by_schema`（schema 补齐后 `research hypothesis reopen`）。关闭后的假设不再接收试验。
 10. **确认落地**：`strategy show <基线>` 验证 promote 生效，必要时用 `strategy update --version` 补版本号。
-11. **收尾清理**：这一轮产生的稳健性变体草稿策略（`<基线>__rbXXXX_*`）用
-    `strategy prune-variants --batch <批次>` 预演、确认后 `--apply` 清理（变体已被回测引用时
-    需 `--force` 才连带删除回测）。**不要删除 `robustness_run` 批次行**——它是 Deflated Sharpe
-    的试验次数台账。
+11. **收尾清理**：需要腾空间时用 `backtest slim --strategy <基线>` 预演、确认后 `--apply`，
+    只删除研究线回测的逐指数明细，台账、会话、批次、草稿与 N 不变。`strategy prune-variants`
+    会删除变体草稿（`--force` 连带删除回测，之后该批次不能再 collect / stats 或参与 DSR 校准），
+    只在人工确认后使用；两者在战役模式下都拒绝执行。**不要删除 `robustness_run` 批次行**——它是
+    Deflated Sharpe 的试验次数台账。
 
 ## 并行执行（多方向 / 多段加速）
 

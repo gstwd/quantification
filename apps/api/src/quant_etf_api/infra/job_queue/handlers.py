@@ -252,11 +252,12 @@ def handle_data_management_operation(payload: dict) -> dict[str, Any]:
 
 
 def handle_data_sync_all(payload: dict) -> None:
-    """执行每日全局同步，之后记录同步失败告警并入队 LIVE 策略定时体检。
+    """执行每日全局同步，之后记录同步失败告警、入队 LIVE 策略定时体检并做历史留存。
 
     因子值在实时分配与因子查询时按策略实际参数现算，不做批量预计算，
     因此同步完成后无需再驱动任何因子链路。体检只做诊断与站内告警，
     不改配置、不改生命周期状态；``lifecycle_auto_refresh_enabled=False`` 时不入队。
+    历史留存只删除过期的已结束任务记录与已读告警，失败不影响同步结果。
     """
     from quant_etf_api.config.settings import get_settings
     from quant_etf_api.infra.job_queue.queue import get_job_queue
@@ -271,6 +272,25 @@ def handle_data_sync_all(payload: dict) -> None:
             {"trigger_date": today},
             job_key=f"lifecycle_refresh_all:{today}",
         )
+    _prune_history()
+
+
+def _prune_history() -> None:
+    """删除超过留存天数的已结束任务记录与已读告警（异常只记日志）。"""
+    from quant_etf_api.infra.db.base import SessionLocal
+    from quant_etf_api.services.retention_service import RetentionService
+
+    db = SessionLocal()
+    try:
+        svc = RetentionService(db)
+        jobs = svc.prune_job_history()
+        alerts = svc.prune_read_alerts()
+        logger.info("历史留存清理完成: 任务记录 %d 条，已读告警 %d 条", jobs, alerts)
+    except Exception:  # noqa: BLE001 — 留存清理失败不能让同步失败
+        logger.exception("历史留存清理失败")
+        db.rollback()
+    finally:
+        db.close()
 
 
 def _alert_sync_failures(result: dict[str, Any] | None, today: str) -> None:

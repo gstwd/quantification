@@ -33,7 +33,6 @@ from quant_etf_api.infra.db.models.core import StrategyConfigModel, StrategyLife
 from quant_etf_api.infra.db.repositories.factor_definition import FactorDefinitionRepository
 from quant_etf_api.infra.db.repositories.research_ledger import ResearchLedgerRepository
 from quant_etf_api.infra.db.repositories.strategy_config import StrategyConfigRepository
-from quant_etf_api.infra.db.repositories.strategy_research import StrategyResearchRepository
 from quant_etf_api.infra.time import utcnow_aware
 from quant_etf_api.schemas.strategy import (
     StrategyConfigCreate,
@@ -97,7 +96,6 @@ class StrategyConfigService:
         """
         self._db = db
         self._repo = StrategyConfigRepository(db)
-        self._research_repo = StrategyResearchRepository(db)
         self._ledger_repo = ResearchLedgerRepository(db)
 
     def list_configs(self) -> list[StrategySummary]:
@@ -394,41 +392,52 @@ class StrategyConfigService:
     def delete_config(self, strategy_id: str) -> bool:
         """删除策略配置。
 
+        下列情况拒绝删除，避免试验从研究线 N 中消失或监控对象被静默移除：
+
+        - 策略处于上线（LIVE）或暂停（SUSPENDED）状态；
+        - 策略是研究线根且仍有其他成员（成员的 N 按根汇总）；
+        - 策略自身已有试验（稳健性批次 / 已评估会话 / 台账计入项）。
+
         Args:
             strategy_id: 策略标识。
 
         Returns:
-            是否成功删除。
+            是否成功删除（策略不存在返回 False）。
+
+        Raises:
+            ValueError: 命中上述任一保护条件。
         """
+        existing = self._repo.find_by_id(strategy_id)
+        if existing is None:
+            return False
+        lifecycle = self._db.get(StrategyLifecycleModel, strategy_id)
+        if lifecycle is not None and lifecycle.lifecycle_status in ("LIVE", "SUSPENDED"):
+            raise ValueError(
+                f"策略 {strategy_id} 处于 {lifecycle.lifecycle_status} 状态，不能删除；"
+                "需要时先在生命周期中退役"
+            )
+        lineage_id = getattr(existing, "lineage_id", None) or existing.strategy_id
+        if lineage_id == strategy_id:
+            others = [
+                row.strategy_id
+                for row in self._repo.find_lineage_members(lineage_id)
+                if row.strategy_id != strategy_id
+            ]
+            if others:
+                raise ValueError(
+                    f"策略 {strategy_id} 是研究线根，仍有成员 {', '.join(others[:5])}，"
+                    "删除会让研究线的试验次数 N 失去归属，不能删除"
+                )
+        own_trials = self._own_trial_count(strategy_id)
+        if own_trials > 0:
+            raise ValueError(
+                f"策略 {strategy_id} 已产生 {own_trials} 次试验，删除会把这些试验从研究线 "
+                f"{lineage_id} 的 N 中拿走，不能删除；需要腾空间时用研究数据瘦身"
+            )
         result = self._repo.delete_by_id(strategy_id)
         if result:
             self._db.commit()
         return result
-
-    def clear_research_data(self, strategy_id: str) -> dict[str, int] | None:
-        """原子地清理策略及关联 draft 策略的研究数据，保留基线策略配置。"""
-        if self._repo.find_by_id(strategy_id) is None:
-            return None
-        try:
-            strategy_ids = {strategy_id}
-            draft_strategy_ids: set[str] = set()
-            while True:
-                discovered = self._research_repo.find_related_draft_strategy_ids(strategy_ids)
-                new_drafts = discovered - strategy_ids
-                if not new_drafts:
-                    break
-                strategy_ids.update(new_drafts)
-                draft_strategy_ids.update(new_drafts)
-
-            deleted = self._research_repo.delete_by_strategies(strategy_ids)
-            deleted["draft_strategy_config"] = self._research_repo.delete_draft_strategy_configs(
-                draft_strategy_ids
-            )
-            self._db.commit()
-            return deleted
-        except Exception:
-            self._db.rollback()
-            raise
 
     # ── 变体策略清理 ────────────────────────────────────────────────
 

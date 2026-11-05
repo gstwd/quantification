@@ -28,7 +28,7 @@ from quant_etf_api.schemas.backtest import (
 )
 from quant_etf_api.schemas.pagination import PaginatedResponse
 from quant_etf_api.services.backtest_comparison_service import BacktestComparisonService
-from quant_etf_api.services.backtest_service import BacktestService
+from quant_etf_api.services.backtest_service import BacktestService, IndexDetailPrunedError
 
 router = APIRouter(tags=["backtests"])
 
@@ -259,6 +259,8 @@ def get_backtest_attribution(backtest_id: str, db: Session = Depends(get_db)) ->
     """收益归因：资产贡献与择时 / 选择 / 残差分解（读取路径现算，只读）。"""
     try:
         result = BacktestService(db).get_attribution(backtest_id)
+    except IndexDetailPrunedError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if result is None:
@@ -272,5 +274,8 @@ def get_backtest_index_results(
     index_code: str | None = None,
     db: Session = Depends(get_db),
 ) -> list[BacktestIndexResult]:
-    """返回回测每日每指数信号与实际收益，可按指数代码过滤。"""
-    return BacktestService(db).get_index_results(backtest_id, index_code=index_code)
+    """返回回测每日每指数信号与实际收益，可按指数代码过滤（明细已瘦身时返回 410）。"""
+    try:
+        return BacktestService(db).get_index_results(backtest_id, index_code=index_code)
+    except IndexDetailPrunedError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc

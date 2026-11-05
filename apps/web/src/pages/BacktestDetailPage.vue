@@ -426,7 +426,11 @@
 
       <!-- 收益归因（读取路径现算） -->
       <div v-if="store.current" class="metrics-section">
-        <AttributionPanel :backtest-id="store.current.backtest_id" :status="store.current.status" />
+        <AttributionPanel
+          :backtest-id="store.current.backtest_id"
+          :status="store.current.status"
+          :pruned-at="store.current.index_detail_pruned_at"
+        />
       </div>
 
       <!-- 有效候选池时间线 -->
@@ -1142,9 +1146,11 @@ onMounted(async () => {
     await startPolling()
   }
   if (store.current?.status === 'success') {
+    // 逐指数明细已瘦身时接口返回 410，不能让它拖垮整个 Promise.all（图表依赖逐日结果）
+    const indexDetailPruned = Boolean(store.current.index_detail_pruned_at)
     await Promise.all([
       store.loadDailyResults(props.backtestId),
-      store.loadIndexResults(props.backtestId),
+      indexDetailPruned ? Promise.resolve() : store.loadIndexResults(props.backtestId),
     ])
     await initCharts()
   }

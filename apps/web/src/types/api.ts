@@ -27,10 +27,36 @@ export interface StrategyDetail extends StrategySummary {
   updated_at: string | null
 }
 
-/** 策略研究数据清理的各表删除数量。 */
-export interface StrategyResearchDataCleanupResponse {
-  strategy_id: string
-  deleted: Record<string, number>
+/** 研究数据瘦身的保护原因。 */
+export type SlimProtectReason =
+  | 'unfinished'
+  | 'non_research'
+  | 'lifecycle'
+  | 'pending_decision'
+  | 'latest_research'
+
+/** 单条回测瘦身失败记录。 */
+export interface BacktestDetailSlimFailure {
+  backtest_id: string
+  error: string
+}
+
+/** 研究数据瘦身结果（预演或执行）：只删除逐指数明细，台账、会话、批次与 N 不变。 */
+export interface BacktestDetailSlimResult {
+  scope: 'lineage' | 'campaign'
+  scope_id: string
+  lineage_id: string
+  strategy_count: number
+  dry_run: boolean
+  total_backtests: number
+  already_pruned: number
+  protected: Partial<Record<SlimProtectReason, number>>
+  eligible_backtests: number
+  slimmed_backtests: number
+  remaining_backtests: number
+  index_rows_deleted: number
+  failed: BacktestDetailSlimFailure[]
+  note: string
 }
 
 export interface StrategyConfigCreate {
@@ -662,6 +688,8 @@ export interface BacktestDetail extends BacktestSummary {
   purpose_reason?: string | null
   /** 择时专项统计（未配置择时或存量回测为 null） */
   timing_stats?: BacktestTimingStats | null
+  /** 逐指数明细被研究数据瘦身删除的时间（UTC），null 表示明细完整 */
+  index_detail_pruned_at?: string | null
 }
 
 export interface BacktestDailyResult {

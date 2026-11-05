@@ -73,8 +73,11 @@ python -m quant_etf_api.cli research campaign stop <cid> --reason "<原因>"
 ```
 
 评审推荐接受的优化会话会以严格模式 `finish --verdict accept`（不 promote），报告的「待人工确认」
-列出它们；是否 promote、另建策略或上线由人决定。agent 会话的完整记录在
-`candidates/<cid>/steps/`，也可用 `claude --resume <agent_session_id>` 复查。
+列出它们；是否 promote、另建策略或上线由人决定。agent 会话日志在战役运行期间位于
+`candidates/<cid>/steps/`；战役结束时平台自动清理（删除 `steps/`、本战役回测的已结束任务记录，
+并瘦身战役期间回测的逐指数明细，`report.md` 与候选配置保留），之后用
+`claude --resume <agent_session_id>` 复查会话。数据清理命令（`backtest slim|delete`、
+`strategy prune-variants`）在战役模式下拒绝执行。
 
 ## 桌面编排模式（不需要 CLI 登录）
 

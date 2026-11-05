@@ -52,8 +52,12 @@
             {{ allocating ? '计算中...' : '计算当日配置' }}
           </button>
           <button class="btn-secondary" @click="showEdit = true">编辑</button>
-          <button class="btn-danger" @click="handleClearResearchData" :disabled="clearingResearchData">
-            {{ clearingResearchData ? '清理中...' : '清理研究数据' }}
+          <button
+            class="btn-secondary"
+            title="删除研究线回测的逐指数明细以腾出空间；台账、会话、批次、草稿与试验次数 N 不变"
+            @click="openSlimDialog"
+          >
+            研究数据瘦身
           </button>
           <button class="btn-danger" @click="handleDelete">删除</button>
         </div>
@@ -1076,6 +1080,46 @@
         <pre class="json-block mono">{{ formattedJson }}</pre>
       </details>
 
+      <!-- 研究数据瘦身弹窗 -->
+      <div v-if="showSlim" class="modal-overlay" @click.self="closeSlimDialog">
+        <div class="modal">
+          <h2 class="modal-title">研究数据瘦身</h2>
+          <p class="slim-hint">
+            删除本策略所在研究线回测的逐指数明细（归因与逐指数结果将不再可用）。回测汇总、逐日结果、
+            稳健性批次、优化会话、研究台账与草稿策略全部保留，试验次数 N 与验收清单不变。
+          </p>
+          <div v-if="slimLoading" class="slim-hint">正在统计…</div>
+          <template v-else-if="slimPreview">
+            <table class="slim-table">
+              <tbody>
+                <tr><td>研究线</td><td class="mono">{{ slimPreview.lineage_id }}（{{ slimPreview.strategy_count }} 个策略）</td></tr>
+                <tr><td>回测总数</td><td>{{ slimPreview.total_backtests }}</td></tr>
+                <tr><td>已瘦身</td><td>{{ slimPreview.already_pruned }}</td></tr>
+                <tr><td>可瘦身</td><td><strong>{{ slimPreview.remaining_backtests }}</strong></td></tr>
+                <tr v-for="(count, reason) in slimPreview.protected" :key="reason">
+                  <td>保护：{{ slimProtectLabel(reason) }}</td><td>{{ count }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="slim-hint">{{ slimPreview.note }}</p>
+            <p v-if="slimDone > 0" class="slim-hint">
+              已瘦身 {{ slimDone }} 条回测，删除逐指数明细 {{ slimRowsDeleted }} 行。
+            </p>
+          </template>
+          <div v-if="slimError" class="error-tip">{{ slimError }}</div>
+          <div class="modal-actions">
+            <button class="btn-secondary" @click="closeSlimDialog" :disabled="slimRunning">关闭</button>
+            <button
+              class="btn-danger"
+              @click="handleApplySlim"
+              :disabled="slimRunning || slimLoading || !slimPreview || slimPreview.remaining_backtests === 0"
+            >
+              {{ slimRunning ? '瘦身中...' : '确认瘦身' }}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- 编辑弹窗 -->
       <div v-if="showEdit" class="modal-overlay" @click.self="showEdit = false">
         <div class="modal">
@@ -1153,13 +1197,14 @@ import {
   fetchRobustnessDetail,
   fetchRobustnessRuns,
 } from '../api/robustness'
-import { clearStrategyResearchData, runAllocation } from '../api/strategies'
+import { applyResearchSlim, fetchResearchSlimPreview, runAllocation } from '../api/strategies'
 import StrategyConfigForm from '../components/StrategyConfigForm.vue'
 import CompositeStrategyForm from '../components/CompositeStrategyForm.vue'
 import { useStrategyStore } from '../stores/strategies'
 import { toast } from '../stores/toast'
 import type {
   AllocationResponse,
+  BacktestDetailSlimResult,
   CompositeConfigJson,
   DailyBar,
   FactorSpec,
@@ -1180,6 +1225,7 @@ import {
   frequencyLabel,
   REGIME_LABELS,
   regimeLabel,
+  slimProtectLabel,
   strategyStatusLabel,
 } from '../utils/labels'
 import { fetchLifecycles } from '../api/lifecycle'
@@ -1212,7 +1258,13 @@ const todayStr = todayCn()
 /** 用户选择的交易日，默认今天 */
 const selectedDate = ref(todayStr)
 const allocating = ref(false)
-const clearingResearchData = ref(false)
+const showSlim = ref(false)
+const slimLoading = ref(false)
+const slimRunning = ref(false)
+const slimPreview = ref<BacktestDetailSlimResult | null>(null)
+const slimError = ref<string | null>(null)
+const slimDone = ref(0)
+const slimRowsDeleted = ref(0)
 const runError = ref('')
 const allocation = ref<AllocationResponse | null>(null)
 
@@ -1969,19 +2021,51 @@ async function handleDelete(): Promise<void> {
   }
 }
 
-/** 清理本策略的回测、对比、稳健性与优化研究数据，保留策略配置。 */
-async function handleClearResearchData(): Promise<void> {
-  if (!confirm('确定清理此策略及关联 draft 策略的全部研究数据？将删除回测、对比、稳健性验证、优化记录和 draft 策略，且不可撤销。')) return
-  clearingResearchData.value = true
+/** 打开研究数据瘦身弹窗并加载预演（只读）。 */
+async function openSlimDialog(): Promise<void> {
+  showSlim.value = true
+  slimError.value = null
+  slimDone.value = 0
+  slimRowsDeleted.value = 0
+  slimPreview.value = null
+  slimLoading.value = true
   try {
-    const result = await clearStrategyResearchData(props.strategyId)
-    const total = Object.values(result.deleted).reduce((sum, count) => sum + count, 0)
-    toast.info(`研究数据已清理（共 ${total} 条记录）`)
-    robustnessRuns.value = []
+    slimPreview.value = await fetchResearchSlimPreview(props.strategyId)
   } catch (e) {
-    toast.error(getErrorMessage(e, '清理研究数据失败'))
+    slimError.value = getErrorMessage(e, '瘦身预演失败')
   } finally {
-    clearingResearchData.value = false
+    slimLoading.value = false
+  }
+}
+
+/** 关闭瘦身弹窗（执行中不允许关闭）。 */
+function closeSlimDialog(): void {
+  if (slimRunning.value) return
+  showSlim.value = false
+}
+
+/** 分批执行瘦身：顺序请求，直到没有剩余、本批无进展或出现失败。 */
+async function handleApplySlim(): Promise<void> {
+  if (!slimPreview.value) return
+  slimRunning.value = true
+  slimError.value = null
+  try {
+    for (;;) {
+      const result = await applyResearchSlim(props.strategyId)
+      slimDone.value += result.slimmed_backtests
+      slimRowsDeleted.value += result.index_rows_deleted
+      slimPreview.value = result
+      if (result.failed.length > 0) {
+        slimError.value = `${result.failed.length} 条回测瘦身失败：${result.failed[0].error}`
+        break
+      }
+      if (result.remaining_backtests === 0 || result.slimmed_backtests === 0) break
+    }
+    if (!slimError.value) toast.info(`研究数据瘦身完成：${slimDone.value} 条回测`)
+  } catch (e) {
+    slimError.value = getErrorMessage(e, '研究数据瘦身失败')
+  } finally {
+    slimRunning.value = false
   }
 }
 
@@ -2226,6 +2310,10 @@ onUnmounted(() => disposeCharts())
   gap: 16px;
 }
 .modal-title { font-size: 18px; font-weight: 600; }
+.slim-hint { font-size: 13px; color: var(--text-muted); line-height: 1.6; }
+.slim-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.slim-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.slim-table td:first-child { color: var(--text-muted); width: 45%; }
 
 .form-group { display: flex; flex-direction: column; gap: 6px; }
 .form-label { font-size: 12px; color: var(--text-muted); font-weight: 500; }

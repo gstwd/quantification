@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import and_, false, func, or_
 from sqlalchemy.orm import Session
 
+from quant_etf_api.domain.research.retention import FINISHED_JOB_STATUSES
 from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.infra.db.models.core import BackgroundJobModel
 from quant_etf_api.infra.time import utcnow_aware
@@ -679,6 +680,76 @@ class JobRepository:
             if stuck:
                 db.commit()
             return len(stuck)
+        finally:
+            db.close()
+
+    def delete_finished_before(self, cutoff: datetime) -> int:
+        """删除早于截止时间的已结束任务记录（历史留存）。
+
+        只匹配 success/failed/cancelled；pending/running/paused 永不删除。
+        结束时间缺失的存量行按创建时间判定。
+
+        Args:
+            cutoff: 截止时间（UTC，timestamptz）。
+
+        Returns:
+            删除的任务数。
+        """
+        db = self._session_factory()
+        try:
+            deleted = (
+                db.query(BackgroundJobModel)
+                .filter(
+                    BackgroundJobModel.status.in_(FINISHED_JOB_STATUSES),
+                    or_(
+                        BackgroundJobModel.finished_at < cutoff,
+                        and_(
+                            BackgroundJobModel.finished_at.is_(None),
+                            BackgroundJobModel.created_at < cutoff,
+                        ),
+                    ),
+                )
+                .delete(synchronize_session=False)
+            )
+            db.commit()
+            return int(deleted or 0)
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def delete_finished_by_keys(self, job_keys: Sequence[str]) -> int:
+        """按去重键删除已结束的任务记录（战役结束清理）。
+
+        Args:
+            job_keys: 任务去重键（如 ``backtest:<id>``）。
+
+        Returns:
+            删除的任务数。
+        """
+        keys = list(dict.fromkeys(job_keys))
+        if not keys:
+            return 0
+        db = self._session_factory()
+        try:
+            deleted = 0
+            for start in range(0, len(keys), 500):
+                chunk = keys[start : start + 500]
+                deleted += int(
+                    db.query(BackgroundJobModel)
+                    .filter(
+                        BackgroundJobModel.status.in_(FINISHED_JOB_STATUSES),
+                        BackgroundJobModel.job_key.in_(chunk),
+                    )
+                    .delete(synchronize_session=False)
+                    or 0
+                )
+            db.commit()
+            return deleted
+        except Exception:
+            db.rollback()
+            raise
         finally:
             db.close()
 

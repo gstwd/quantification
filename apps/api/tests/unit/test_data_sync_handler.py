@@ -34,6 +34,10 @@ def _patch_sync_env(monkeypatch, items: list[dict]) -> MagicMock:
         handlers, "_alert_sync_failures", lambda result, today: alerts.append((result, today))
     )
     fake_queue.alerts = alerts
+    # 历史留存清理写库由单独测试覆盖，这里只记录调用
+    prunes: list[bool] = []
+    monkeypatch.setattr(handlers, "_prune_history", lambda: prunes.append(True))
+    fake_queue.prunes = prunes
     return fake_queue
 
 
@@ -241,3 +245,24 @@ def test_retired_data_fill_job_is_a_noop(monkeypatch) -> None:
 
     monkeypatch.setattr("quant_etf_api.infra.db.base.SessionLocal", _fail_session)
     handlers.JOB_HANDLERS["data_fill"]({"resource": "index_bars", "code": "000300"})
+
+
+def test_sync_runs_history_retention(monkeypatch) -> None:
+    """每日同步完成后执行一次历史留存清理。"""
+    fake_queue = _patch_sync_env(monkeypatch, [_item("index_daily_bar")])
+    handlers.handle_data_sync_all({})
+    assert fake_queue.prunes == [True]
+
+
+def test_history_retention_failure_is_swallowed(monkeypatch) -> None:
+    """留存清理失败只记日志并回滚，不让同步失败。"""
+    fake_db = MagicMock()
+    monkeypatch.setattr("quant_etf_api.infra.db.base.SessionLocal", lambda: fake_db)
+    fake_svc = MagicMock()
+    fake_svc.prune_job_history.side_effect = RuntimeError("db down")
+    monkeypatch.setattr(
+        "quant_etf_api.services.retention_service.RetentionService", lambda db: fake_svc
+    )
+    handlers._prune_history()
+    fake_db.rollback.assert_called_once()
+    fake_db.close.assert_called_once()

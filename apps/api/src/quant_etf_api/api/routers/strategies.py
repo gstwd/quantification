@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from quant_etf_api.api.deps import get_db
+from quant_etf_api.schemas.backtest import BacktestDetailSlimRequest, BacktestDetailSlimResult
 from quant_etf_api.schemas.lifecycle import (
     HealthSnapshotSchema,
     LifecycleDetail,
@@ -22,10 +23,10 @@ from quant_etf_api.schemas.strategy import (
     StrategyConfigCreate,
     StrategyConfigUpdate,
     StrategyDetail,
-    StrategyResearchDataCleanupResponse,
     StrategySummary,
     StrategyValidationResult,
 )
+from quant_etf_api.services.retention_service import RetentionService
 from quant_etf_api.services.strategy_lifecycle_service import StrategyLifecycleService
 from quant_etf_api.services.strategy_service import StrategyService
 
@@ -92,8 +93,12 @@ def update_strategy(
 
 @router.delete("/strategies/{strategy_id}", status_code=204)
 def delete_strategy(strategy_id: str, db: Session = Depends(get_db)) -> None:
-    """删除策略配置。"""
-    if not StrategyService(db).delete_config(strategy_id):
+    """删除策略配置（上线中、仍有成员的研究线根或已有试验的策略返回 409）。"""
+    try:
+        deleted = StrategyService(db).delete_config(strategy_id)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if not deleted:
         raise HTTPException(status_code=404, detail="策略不存在")
 
 
@@ -144,18 +149,40 @@ def unstar_strategy(strategy_id: str, db: Session = Depends(get_db)) -> None:
         raise HTTPException(status_code=404, detail="策略不存在")
 
 
-@router.delete(
-    "/strategies/{strategy_id}/research-data",
-    response_model=StrategyResearchDataCleanupResponse,
+@router.get(
+    "/strategies/{strategy_id}/research-slim",
+    response_model=BacktestDetailSlimResult,
 )
-def clear_strategy_research_data(
+def preview_strategy_research_slim(
     strategy_id: str, db: Session = Depends(get_db)
-) -> StrategyResearchDataCleanupResponse:
-    """清理某策略及关联 draft 策略的研究数据，保留基线策略配置。"""
-    deleted = StrategyService(db).clear_research_data(strategy_id)
-    if deleted is None:
+) -> BacktestDetailSlimResult:
+    """预演研究数据瘦身（只读）：统计研究线回测中可删除逐指数明细的数量与保护原因。"""
+    result = RetentionService(db).slim_backtest_details(strategy_id=strategy_id, dry_run=True)
+    if result is None:
         raise HTTPException(status_code=404, detail="策略不存在")
-    return StrategyResearchDataCleanupResponse(strategy_id=strategy_id, deleted=deleted)
+    return result
+
+
+@router.post(
+    "/strategies/{strategy_id}/research-slim",
+    response_model=BacktestDetailSlimResult,
+)
+def apply_strategy_research_slim(
+    strategy_id: str,
+    req: BacktestDetailSlimRequest | None = None,
+    db: Session = Depends(get_db),
+) -> BacktestDetailSlimResult:
+    """执行一批研究数据瘦身：删除研究线回测的逐指数明细，台账、会话、批次与 N 不变。
+
+    每次最多处理 ``max_backtests`` 条，返回 ``remaining_backtests`` 供调用方继续下一批。
+    """
+    body = req or BacktestDetailSlimRequest()
+    result = RetentionService(db).slim_backtest_details(
+        strategy_id=strategy_id, dry_run=False, max_backtests=body.max_backtests
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="策略不存在")
+    return result
 
 
 # ── 策略生命周期（上线后监控与诊断）────────────────────────────────────

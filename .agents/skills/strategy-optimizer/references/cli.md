@@ -45,7 +45,8 @@
 | `strategy create --id <sid> --name <name> --file <path> [--description] [--frequency] [--draft] [--version] [--lineage <sid>]` | 创建策略；`--lineage` 归入已有策略所在研究线（缺省自成一条）；派生策略必须归入原研究线 |
 | `strategy update <id> [--file] [--status active\|draft\|disabled] [--version] [--name] [--description] [--lineage <sid>]` | 更新策略；`--lineage` 改归研究线（仍有成员的研究线根、自身已有试验的成员拒绝改归） |
 | `strategy diff <a> <b>` | 两策略配置的 unified diff |
-| `strategy prune-variants --batch <批次> [--apply] [--force]` | 清理稳健性变体草稿策略；默认预演；变体仍被回测引用时跳过，`--force` 才连带删回测 |
+| `strategy prune-variants --batch <批次> [--apply] [--force]` | 清理稳健性变体草稿策略；默认预演；变体仍被回测引用时跳过，`--force` 才连带删回测；只供人工，战役模式拒绝 |
+| `backtest slim --strategy <id> \| --campaign <cid> [--apply] [--max-backtests N]` | 研究数据瘦身：只删回测逐指数明细，汇总、逐日结果、批次、会话、台账与草稿保留，N 不变；默认预演；战役模式拒绝 |
 | `strategy consume-validation <id> [--note "..."]` | 标记"该策略的验证期数据已被消费"（此后验证期证据只能用于否决） |
 
 ## backtest

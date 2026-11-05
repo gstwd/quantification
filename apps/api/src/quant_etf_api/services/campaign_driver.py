@@ -354,7 +354,7 @@ def run_campaign(
         echo: 进度输出函数。
 
     Returns:
-        {"campaign_id", "steps_run", "last_action", "status"}。
+        {"campaign_id", "steps_run", "last_action", "stop_reason", "status", "cleanup"}。
     """
     if os.environ.get("QUANT_CAMPAIGN_ID"):
         raise ValueError("驱动器不能在战役模式内启动（禁止 agent 嵌套驱动战役）")
@@ -444,10 +444,12 @@ def run_campaign(
                 timeout=config.step_timeout_hours * 3600,
             )
             exit_code = proc.returncode
-            log_base.with_suffix(".json").write_text(proc.stdout or "", encoding="utf-8")
-            if proc.stderr:
-                log_base.with_suffix(".stderr.txt").write_text(proc.stderr, encoding="utf-8")
             result = parse_result(proc.stdout)
+            # 战役可能已在 agent 进程内结束并清理了 steps/：此时不再写步骤日志
+            if log_base.parent.is_dir():
+                log_base.with_suffix(".json").write_text(proc.stdout or "", encoding="utf-8")
+                if proc.stderr:
+                    log_base.with_suffix(".stderr.txt").write_text(proc.stderr, encoding="utf-8")
             if result.get("is_error"):
                 error = f"agent 报错：{str(result.get('result'))[:500]}"
         except subprocess.TimeoutExpired:
@@ -470,7 +472,10 @@ def run_campaign(
 
     db = session_factory()
     try:
-        status = ResearchCampaignService(db).require(campaign_id).status
+        svc = ResearchCampaignService(db)
+        status = svc.require(campaign_id).status
+        # 战役已结束时补一次自动清理（agent 进程内结束时的残留、之后完成的回测）
+        cleanup = svc.sweep_finished(campaign_id)
     finally:
         db.close()
     return {
@@ -479,4 +484,5 @@ def run_campaign(
         "last_action": last.get("action"),
         "stop_reason": last.get("reason"),
         "status": status,
+        "cleanup": cleanup,
     }

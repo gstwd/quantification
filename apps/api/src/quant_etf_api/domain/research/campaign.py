@@ -54,9 +54,8 @@ MAX_CONSECUTIVE_FAILURES = 2
 
 # 战役模式下允许的命令：{命令组: 允许的子命令集合}；None 表示整组放行
 _ALLOWED_COMMANDS: dict[str, frozenset[str] | None] = {
-    "strategy": frozenset(
-        {"list", "show", "validate", "diff", "create", "update", "prune-variants"}
-    ),
+    # prune-variants 会删除变体草稿（--force 时连带回测，即 DSR 校准的输入），只供人工执行
+    "strategy": frozenset({"list", "show", "validate", "diff", "create", "update"}),
     "backtest": frozenset(
         {
             "run",

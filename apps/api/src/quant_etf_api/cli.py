@@ -32,7 +32,7 @@ from quant_etf_api.domain.research.ledger import HYPOTHESIS_CATEGORIES
 from quant_etf_api.engine.config import FactorAliasConfig
 from quant_etf_api.schemas.strategy import StrategyConfigCreate, StrategyConfigUpdate
 from quant_etf_api.services.backtest_reconcile_service import BacktestReconcileService
-from quant_etf_api.services.backtest_service import BacktestService
+from quant_etf_api.services.backtest_service import BacktestService, IndexDetailPrunedError
 from quant_etf_api.services.dsr_calibration_service import DsrCalibrationService
 from quant_etf_api.services.dsr_calibration_service import render_markdown as render_dsr_markdown
 from quant_etf_api.services.factor_admin_service import FactorAdminService
@@ -516,6 +516,18 @@ def _build_backtest_group(subparsers: argparse._SubParsersAction) -> None:
         help="清理 JSONB 中的悬挂回测引用（C5，默认预演）",
     )
     p.add_argument("--apply", action="store_true", help="实际写库（默认仅预演）")
+    _add_json_flag(p)
+
+    p = sub.add_parser(
+        "slim",
+        help="研究数据瘦身：删除研究线（或某次已结束战役期间）回测的逐指数明细；默认预演；"
+        "汇总、逐日结果、批次、会话、台账与草稿保留，N 不变",
+    )
+    scope = p.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--strategy", help="按策略所在研究线瘦身")
+    scope.add_argument("--campaign", help="按已结束战役期间产生的回测瘦身")
+    p.add_argument("--apply", action="store_true", help="实际删除（默认仅预演）")
+    p.add_argument("--max-backtests", type=int, default=None, help="本次最多瘦身的回测数")
     _add_json_flag(p)
 
     p = sub.add_parser("results", help="查看回测明细结果")
@@ -1796,6 +1808,20 @@ def _run_backtest(args: argparse.Namespace) -> None:
         elif args.subcommand == "prune-dangling-refs":
             result = svc.prune_dangling_references(dry_run=not args.apply)
             _emit(result.model_dump(), not args.no_json)
+        elif args.subcommand == "slim":
+            from quant_etf_api.services.retention_service import RetentionService
+
+            slim = RetentionService(db).slim_backtest_details(
+                strategy_id=args.strategy,
+                campaign_id=args.campaign,
+                dry_run=not args.apply,
+                max_backtests=args.max_backtests,
+            )
+            if slim is None:
+                _fail(f"策略 {args.strategy} 不存在")
+            _emit(slim.model_dump(), not args.no_json)
+            if slim.failed:
+                sys.exit(1)
         elif args.subcommand == "results":
             detail = svc.get_backtest(args.backtest_id)
             if detail is None:
@@ -1804,9 +1830,13 @@ def _run_backtest(args: argparse.Namespace) -> None:
             if args.daily:
                 data["daily"] = [r.model_dump() for r in svc.get_daily_results(args.backtest_id)]
             if args.index:
-                data["index_results"] = [
-                    r.model_dump() for r in svc.get_index_results(args.backtest_id)
-                ]
+                try:
+                    data["index_results"] = [
+                        r.model_dump() for r in svc.get_index_results(args.backtest_id)
+                    ]
+                except IndexDetailPrunedError as exc:
+                    data["index_results"] = None
+                    data["index_results_note"] = str(exc)
             _emit(data, not args.no_json)
     except ValueError as exc:
         _fail(str(exc))

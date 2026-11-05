@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -175,6 +176,9 @@ class TestCommandAllowlist:
             ("strategy", "create", {}),
             ("strategy", "create", {"draft": False, "lineage": "base"}),
             ("research", "dsr-calibrate", {}),
+            ("strategy", "prune-variants", {}),
+            ("backtest", "slim", {}),
+            ("backtest", "delete", {}),
         ],
     )
     def test_denied(self, command: str, sub: str | None, flags: dict[str, Any]) -> None:
@@ -287,6 +291,8 @@ def _service(
     svc._config_svc.lineage_of.side_effect = lambda sid: "base" if sid.startswith("base") else sid
     svc._config_svc.is_composite.return_value = False
     svc._opt_repo = MagicMock()
+    svc._cleanup = MagicMock()
+    svc._cleanup.cleanup_after_campaign.return_value = {"jobs_deleted": 1, "errors": []}
     return svc
 
 
@@ -348,6 +354,58 @@ class TestCampaignService:
         assert task["action"] == "stop"
         assert campaign.status == "stopped"
         assert "新增试验" in campaign.stop_reason
+
+    def test_next_task_stop_includes_cleanup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """停止任务卡带回战役结束清理结果。"""
+        monkeypatch.setattr(
+            "quant_etf_api.services.research_campaign_service.utcnow_aware",
+            lambda: _NOW + timedelta(hours=1),
+        )
+        svc = _service(_campaign(), used=40)
+        task = svc.next_task("c1")
+        assert task["action"] == "stop"
+        assert task["cleanup"] == {"jobs_deleted": 1, "errors": []}
+
+    def test_stop_cleans_up_once(self) -> None:
+        """只有真正把战役从运行中停止的那次调用触发清理。"""
+        campaign = _campaign()
+        svc = _service(campaign)
+        first = svc.stop("c1", "人工停止")
+        assert first["cleanup"]["jobs_deleted"] == 1
+        second = svc.stop("c1", "再次停止")
+        assert "cleanup" not in second
+        svc._cleanup.cleanup_after_campaign.assert_called_once()
+        args = svc._cleanup.cleanup_after_campaign.call_args.args
+        assert args[0] == "c1" and args[1].parts[-2:] == ("candidates", "c1")
+
+    def test_stop_skips_cleanup_when_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """关闭 campaign_auto_cleanup_enabled 时停止不清理。"""
+        monkeypatch.setattr(
+            "quant_etf_api.services.research_campaign_service.get_settings",
+            lambda: SimpleNamespace(campaign_auto_cleanup_enabled=False),
+        )
+        svc = _service(_campaign())
+        result = svc.stop("c1", "人工停止")
+        assert "cleanup" not in result
+        svc._cleanup.cleanup_after_campaign.assert_not_called()
+
+    def test_stop_survives_cleanup_failure(self) -> None:
+        """清理抛异常时战役仍然停止，错误进入返回值。"""
+        campaign = _campaign()
+        svc = _service(campaign)
+        svc._cleanup.cleanup_after_campaign.side_effect = RuntimeError("boom")
+        result = svc.stop("c1", "人工停止")
+        assert campaign.status == "stopped"
+        assert result["cleanup"] == {"errors": ["boom"]}
+
+    def test_sweep_finished_only_for_ended_campaigns(self) -> None:
+        """驱动器收尾补清理：运行中的战役不清理，已结束的可重复清理。"""
+        running = _campaign()
+        svc = _service(running)
+        assert svc.sweep_finished("c1") is None
+        running.status = "stopped"
+        assert svc.sweep_finished("c1") == {"jobs_deleted": 1, "errors": []}
+        assert svc.sweep_finished("c1") == {"jobs_deleted": 1, "errors": []}
 
     def test_begin_step_refuses_parallel_campaigns(self) -> None:
         """同一时间只允许一个战役在跑。"""
@@ -783,6 +841,53 @@ class TestDriver:
         assert "--strict-mcp-config" in calls[0]
         assert fake.finalize_step.call_args.kwargs["cost_usd"] == 0.5
         assert (tmp_path / "candidates" / "c1" / "claude-settings.json").exists()
+        # 收尾时对已结束战役补一次自动清理
+        fake.sweep_finished.assert_called_once_with("c1")
+        assert result["cleanup"] is fake.sweep_finished.return_value
+
+    def test_skips_step_log_when_steps_dir_removed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """战役在 agent 进程内结束并清理了 steps/ 时，驱动器不写日志但照常记录花费。"""
+        monkeypatch.delenv("QUANT_CAMPAIGN_ID", raising=False)
+        monkeypatch.setattr(driver, "REPO_ROOT", tmp_path)
+        fake = MagicMock()
+        fake.next_task.side_effect = [
+            {
+                "action": "run",
+                "card": {
+                    "campaign_id": "c1",
+                    "workspace": "candidates/c1/",
+                    "next": {"role": "researcher", "round": 1},
+                },
+            },
+            {"action": "stop", "reason": "研究员判定无新方向"},
+        ]
+        fake.require.return_value = SimpleNamespace(model=None, max_step_usd=None, status="completed")
+        fake.begin_step.return_value = {"step_id": "abcdef1234"}
+        fake.finalize_step.return_value = {"status": "done", "outcome": None, "cost_usd": 0.7}
+        monkeypatch.setattr(driver, "ResearchCampaignService", lambda db: fake)
+        steps_dir = tmp_path / "candidates" / "c1" / "steps"
+
+        def _runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if cmd[1:] == ["auth", "status"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout='{"loggedIn": true}', stderr="")
+            shutil.rmtree(steps_dir)  # 模拟 agent 进程内 stop() 的清理
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout='{"is_error": false, "total_cost_usd": 0.7}', stderr="err"
+            )
+
+        driver.run_campaign(
+            "c1",
+            driver.DriverConfig(),
+            runner=_runner,
+            session_factory=MagicMock,
+            echo=lambda _msg: None,
+        )
+        assert not steps_dir.exists()
+        kwargs = fake.finalize_step.call_args.kwargs
+        assert kwargs["cost_usd"] == 0.7
+        assert not kwargs.get("error")
 
 
 class TestDesktopOrchestration:

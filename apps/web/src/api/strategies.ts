@@ -1,11 +1,11 @@
 import { apiClient } from './client'
 import type {
   AllocationResponse,
+  BacktestDetailSlimResult,
   StarredSummaryResponse,
   StrategyConfigCreate,
   StrategyConfigUpdate,
   StrategyDetail,
-  StrategyResearchDataCleanupResponse,
   StrategySummary,
   StrategyValidationResult,
 } from '../types/api'
@@ -42,12 +42,25 @@ export async function deleteStrategy(strategyId: string): Promise<void> {
   await apiClient.delete(`/strategies/${strategyId}`)
 }
 
-/** 清理策略及关联 draft 策略的研究数据，保留基线策略配置。 */
-export async function clearStrategyResearchData(
+/** 预演研究数据瘦身（只读）：统计研究线回测中可删除逐指数明细的数量与保护原因。 */
+export async function fetchResearchSlimPreview(
   strategyId: string,
-): Promise<StrategyResearchDataCleanupResponse> {
-  const { data } = await apiClient.delete<StrategyResearchDataCleanupResponse>(
-    `/strategies/${strategyId}/research-data`,
+): Promise<BacktestDetailSlimResult> {
+  const { data } = await apiClient.get<BacktestDetailSlimResult>(
+    `/strategies/${strategyId}/research-slim`,
+  )
+  return data
+}
+
+/** 执行一批研究数据瘦身（只删逐指数明细），返回剩余可瘦身数量供调用方继续下一批。 */
+export async function applyResearchSlim(
+  strategyId: string,
+  maxBacktests = 20,
+): Promise<BacktestDetailSlimResult> {
+  const { data } = await apiClient.post<BacktestDetailSlimResult>(
+    `/strategies/${strategyId}/research-slim`,
+    { max_backtests: maxBacktests },
+    { timeout: 120_000, toast: false },
   )
   return data
 }

@@ -150,6 +150,15 @@ export const REGIME_LABELS: Record<string, string> = {
   defensive: '防守',
 }
 
+/** 研究数据瘦身的保护原因 */
+export const SLIM_PROTECT_LABELS: Record<string, string> = {
+  unfinished: '未结束（排队 / 运行中）',
+  non_research: '验证 / 监控用途',
+  lifecycle: '生命周期引用',
+  pending_decision: '优化会话待人工决策',
+  latest_research: '策略最新一条研究回测',
+}
+
 export const runTypeLabel = (v: string | null | undefined): string => lookup(RUN_TYPE_LABELS, v)
 export const runStatusLabel = (v: string | null | undefined): string => lookup(RUN_STATUS_LABELS, v)
 export const jobTypeLabel = (v: string | null | undefined): string => lookup(JOB_TYPE_LABELS, v)
@@ -163,3 +172,4 @@ export const lifecycleStatusLabel = (v: string | null | undefined): string => lo
 export const trialKindLabel = (v: string | null | undefined): string => lookup(TRIAL_KIND_LABELS, v)
 export const factorCategoryLabel = (v: string | null | undefined): string => lookup(FACTOR_CATEGORY_LABELS, v)
 export const regimeLabel = (v: string | null | undefined): string => lookup(REGIME_LABELS, v)
+export const slimProtectLabel = (v: string | null | undefined): string => lookup(SLIM_PROTECT_LABELS, v)

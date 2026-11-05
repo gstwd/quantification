@@ -912,7 +912,11 @@ class RobustnessService:
         return candidates
 
     def _most_held_code(self, strategy_id: str) -> str | None:
-        """取研究期回测中持仓天数最多的指数，用于"剔除常持"型扰动。"""
+        """取研究期回测中持仓天数最多的指数，用于"剔除常持"型扰动。
+
+        逐指数明细已被瘦身的回测不参与（研究数据瘦身保护每个策略最新一条成功
+        研究回测，正常情况下读到的就是它）。
+        """
         try:
             backtest = (
                 self._db.query(BacktestRunModel)
@@ -920,6 +924,7 @@ class RobustnessService:
                     BacktestRunModel.strategy_id == strategy_id,
                     BacktestRunModel.purpose == PURPOSE_RESEARCH,
                     BacktestRunModel.status == "success",
+                    BacktestRunModel.index_detail_pruned_at.is_(None),
                 )
                 .order_by(BacktestRunModel.created_at.desc())
                 .first()

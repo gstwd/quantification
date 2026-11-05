@@ -370,6 +370,11 @@ class BacktestRunModel(Base):
         JSONB,
         comment="逐日有效候选池时间线（游程编码）与数据缺口剔除区间，由回测成功收尾时写入",
     )
+    index_detail_pruned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        comment="逐指数明细（backtest_index_result）被研究数据瘦身删除的时间（UTC），"
+        "NULL 表示明细完整",
+    )
 
 
 class BacktestDailyResultModel(Base):

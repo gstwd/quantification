@@ -53,12 +53,16 @@
  */
 import { onMounted, ref, watch } from 'vue'
 import { fetchBacktestAttribution } from '../../api/backtests'
+import { getErrorMessage } from '../../api/client'
+import { formatCnTime } from '../../utils/date'
 import type { BacktestAttribution } from '../../types/api'
 
 const props = defineProps<{
   backtestId: string
   /** 回测状态：只有 success 才请求归因 */
   status: string
+  /** 逐指数明细被研究数据瘦身删除的时间；有值时不再请求归因 */
+  prunedAt?: string | null
 }>()
 
 const data = ref<BacktestAttribution | null>(null)
@@ -77,18 +81,23 @@ async function load(): Promise<void> {
     error.value = '回测完成后可查看归因'
     return
   }
+  if (props.prunedAt) {
+    data.value = null
+    error.value = `逐指数明细已于 ${formatCnTime(props.prunedAt)} 瘦身清理，无法归因；需要时用同一配置重跑回测`
+    return
+  }
   loading.value = true
   error.value = ''
   try {
     data.value = await fetchBacktestAttribution(props.backtestId)
-  } catch {
-    error.value = '归因加载失败'
+  } catch (e) {
+    error.value = getErrorMessage(e, '归因加载失败')
   } finally {
     loading.value = false
   }
 }
 
-watch(() => [props.backtestId, props.status], load)
+watch(() => [props.backtestId, props.status, props.prunedAt], load)
 onMounted(load)
 </script>
 

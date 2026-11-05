@@ -140,16 +140,19 @@ HTTP → api/routers → services → engine
 - 回测汇总是毛收益；成本阶梯在读取路径按换手率折算，不重跑、不篡改历史结果。`cost_bps` 是按单边换手折算的往返交易成本。
 - 每日数据同步完成后入队 `lifecycle_refresh_all`（`lifecycle_auto_refresh_enabled` 控制）：只刷新 LIVE 策略健康快照（`trigger=scheduled`），等级恶化 / 刷新失败 / 同步失败写站内告警 `system_alert`（按 `dedupe_key` 去重），每条策略只保留最近 `lifecycle_scheduled_keep` 条定时监控回测（手动刷新的不清理）；告警不触发任何调参、状态变更或交易动作。
 - LIVE 策略禁止直接更新 `config_json`；生命周期状态仅人工变更，系统不得自动调参、自动 promote 或自动上线。
+- 研究数据清理只做瘦身：日常与自动清理只删除回测逐指数明细 `backtest_index_result` 并记 `backtest_run.index_detail_pruned_at`（被瘦身回测的归因与逐指数结果返回 410）；稳健性批次、优化会话、研究假设与试验、战役记录、草稿策略、回测汇总与逐日结果永不删除，N、验收清单与 DSR 校准不受影响。保护集（未结束、验证 / 监控用途、生命周期引用、待人工决策的会话回测、每个非变体策略最新一条成功研究回测）在 `domain/research/retention.py`，编排在 `services/retention_service.py`；入口是策略详情页「研究数据瘦身」、`backtest slim` 与战役结束自动清理。`backtest delete` 与 `strategy prune-variants` 只供人工执行。每日同步后按 `job_history_retention_days` / `alert_retention_days` 删除过期的已结束任务与已读告警。
+- 删除策略时拒绝：LIVE / SUSPENDED、仍有成员的研究线根、自身已有试验的策略（HTTP 409），删除会把试验从研究线 N 中拿走。
 
 ### 研究战役（自动研究循环）
 
 - `research campaign run` 逐步启动全新的 headless Claude Code 会话（研究员 / 评审员交替），状态记在 `research_campaign` / `research_campaign_step`，战役内假设带 `campaign_id`。规则在 `domain/research/campaign.py`，驱动器在 `services/campaign_driver.py`，角色手册在 `.claude/skills/research-campaign/`（只支持 Claude Code）。
-- 驱动器给 agent 进程设置 `QUANT_CAMPAIGN_ID`，CLI 据此进入战役模式（`_guard_campaign_mode`）：只放行研究所需命令；拒绝 `--promote`、`--no-strict`、`--over-budget`、生命周期、验证期消费、非 research 用途回测、研究线外策略 / 批次 / 回测、其他战役的假设、改为 active、改归研究线、修改基线或启用策略、验收门槛校准（`research dsr-calibrate`）；`strategy create` 必须 `--draft --lineage <战役研究线成员>`；会写文件的命令（`optimization report`、`research campaign report`）只能写到 `candidates/<战役>/`；诊断命令（`research factor-ic|buckets|signal-lab`）按战役 `max_diagnostics` 限次（放行即计数）。新增 CLI 命令时必须同步战役模式白名单与测试。
+- 驱动器给 agent 进程设置 `QUANT_CAMPAIGN_ID`，CLI 据此进入战役模式（`_guard_campaign_mode`）：只放行研究所需命令；拒绝 `--promote`、`--no-strict`、`--over-budget`、生命周期、验证期消费、非 research 用途回测、研究线外策略 / 批次 / 回测、其他战役的假设、改为 active、改归研究线、修改基线或启用策略、验收门槛校准（`research dsr-calibrate`）、数据清理（`backtest slim|delete`、`strategy prune-variants`）；`strategy create` 必须 `--draft --lineage <战役研究线成员>`；会写文件的命令（`optimization report`、`research campaign report`）只能写到 `candidates/<战役>/`；诊断命令（`research factor-ic|buckets|signal-lab`）按战役 `max_diagnostics` 限次（放行即计数）。新增 CLI 命令时必须同步战役模式白名单与测试。
 - 驱动器以 `--setting-sources user --strict-mcp-config` 启动 agent，不合并仓库 `.claude/settings*.json`；权限只放行平台 CLI、白名单路径读取（AGENTS/README/docs/技能/源码/本战役目录，不含 `candidates/` 下其他目录）与本战役目录写入。超时或中断时结束 agent 进程树并把步骤收口为失败。
 - 桌面编排模式（不需要 CLI 登录）：Claude Code 桌面会话作为编排者，`research campaign begin-step` 登记步骤并记下自身 `CLAUDE_CODE_SESSION_ID`（`research_campaign_step.orchestrator_session_id`），每步新开桌面会话执行，结束后 `finalize-step` 收口；流程见技能「桌面编排模式」。步骤运行期间除编排会话外的所有 CLI 调用都按数据库进入战役模式（`ResearchCampaignService.resolve_mode`，判定失败即拒绝执行）；子会话不能 `begin-step|finalize-step|stop`，不在 Claude Code 会话里的终端可以 `stop` 收口。CLI 之外的边界只能靠提示约束，长时间无人值守用 headless 驱动器。
 - `Settings` 总是先读 `apps/api/.env`（再读工作目录 `.env`），从仓库根目录运行 CLI 也连同一个数据库。
 - 战役内接受优化会话的唯一路径：评审员 `research campaign review --verdict recommend_accept` 后，以严格模式 `optimization finish --verdict accept`（不 promote）。promote、另建策略与上线由人工执行。
 - 停止条件（试验增量、研究线预算、时长、轮数、连续否决、连续失败）由平台判定；同一时间只允许一个战役有运行中步骤。
+- 战役从运行中停止时（`campaign_auto_cleanup_enabled`）自动删除本战役回测的已结束任务记录、`candidates/<战役>/steps/` 会话日志，并瘦身战役期间回测的逐指数明细；headless 驱动器收尾时再补一次。清理失败只记日志，不影响停止。
 
 ### AI 舆情模块
 

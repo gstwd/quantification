@@ -69,8 +69,9 @@ python -m quant_etf_api.cli robustness abandon <robustness_id> --reason "回测�
 ## 变体清理与试验台账
 
 - 稳健性批次会派生 `<基线>__rbXXXX_*` 草稿策略，带 `is_variant` / `source_batch_id` 元数据：
-  `strategy prune-variants --batch <批次>` 预演 → `--apply` 删除；
-  变体仍被回测引用时默认跳过（列出引用），确认后 `--force` 连带删除回测。
+  `strategy prune-variants --batch <批次>` 预演 → `--apply` 删除（只供人工，战役模式拒绝）；
+  变体仍被回测引用时默认跳过（列出引用），确认后 `--force` 连带删除回测，之后该批次不能再
+  collect / stats 或参与 DSR 校准。只为腾空间时用 `backtest slim`（只删逐指数明细）。
 - **不要删除 `robustness_run` 批次行**：`trial_count` 累加值就是 Deflated Sharpe 的 N，
   删掉变体策略 ≠ 抹掉历史试验。
 - 只要跑过使用验证期数据的回测，或人工看过验证期结果，策略上会留下
