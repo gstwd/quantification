@@ -20,7 +20,7 @@ from quant_etf_api.domain.common.enums import (
     RESEARCH_DEFAULT_EXECUTION_MODEL,
 )
 from quant_etf_api.factors.catalog import build_default_registry
-from quant_etf_api.infra.clients.akshare_index import _PE_PB_NAME_MAP, _calc_percentile
+from quant_etf_api.infra.clients.akshare_index import _calc_percentile
 from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.infra.db.models.core import IndexValuationModel
 from quant_etf_api.infra.time import today_cn
@@ -79,7 +79,7 @@ def recompute_valuation_percentiles() -> None:
 
     B8 修复的一次性数据修复命令（幂等，可重复执行）：
     - 百分位改用 rank / (n - 1) * 100 的统一算法（含当日、最高值可达 100）；
-    - source 回填为真实来源（legulegu / csindex）。
+    - source 为空的行回填为 csindex（当前唯一 AkShare 估值来源），已有来源保持不变。
     仅基于已入库的 pe/pb 原始值重算，不重新拉取外部数据。
     更新使用 bulk_update_mappings 分批提交，避免远程库逐行 ORM flush 过慢。
     """
@@ -99,8 +99,7 @@ def recompute_valuation_percentiles() -> None:
             by_code.setdefault(row.index_code, []).append(row)
 
         mappings: list[dict[str, Any]] = []
-        for index_code, code_rows in by_code.items():
-            source = "legulegu" if index_code in _PE_PB_NAME_MAP else "csindex"
+        for code_rows in by_code.values():
             pe_series: list[tuple[date, float]] = []
             pb_series: list[tuple[date, float]] = []
             for r in code_rows:
@@ -113,6 +112,7 @@ def recompute_valuation_percentiles() -> None:
             for row in code_rows:
                 new_pe_pct = pe_map.get(row.trade_date)
                 new_pb_pct = pb_map.get(row.trade_date)
+                source = row.source or "csindex"
                 if (
                     row.pe_percentile != new_pe_pct
                     or row.pb_percentile != new_pb_pct

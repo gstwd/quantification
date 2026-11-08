@@ -147,9 +147,9 @@
 - 因子以 `index_code` 为计算单位，不是 ETF 代码。
 - **市场级因子**同一交易日所有指数取值相同：放 `timing`（按择时代理取值）或 `filters`（全市场开关），不要放进 `score`
   配 `rank` / `zscore`，横截面标准化后没有区分度。
-- **估值覆盖**：乐咕乐股覆盖 12 个指数（沪深300、上证50、中证500、中证1000、中证800、上证380、上证180、深证100、创业板50、
-  深证红利、上证红利、中证100），PE 与 PB 都有；其他中证系指数只有 PE；深证系等无估值源的指数为空。行业 / 主题指数的估值因子
-  常为空，用 `missing_factor_strategy` 与过滤的 `missing_strategy` 明确缺失语义。
+- **估值覆盖**：估值主来源是中证官网，中证系指数只有 PE（滚动市盈率）及其分位，`pb_percentile` 基本为空，不要作为主要因子；
+  创业板50、深证系等无估值源的指数为空。行业 / 主题指数的估值因子常为空，用 `missing_factor_strategy`
+  与过滤的 `missing_strategy` 明确缺失语义。
 - **市场宽度**：引用 `breadth_ma_pct` 时回测会加载全市场活跃指数行情，与实时口径一致。
 - **OHLC 依赖**：`rsrs`、`price_position_ir`、`atr`、`donchian_*`、`low_amplitude_momentum` 需要最高 / 最低价（`price_position_ir`
   还需开盘价）。行情缺 OHLC 时这些因子为空，回测候选池会剔除该标的；在 `score` 中引用且这类标的多时会显著压缩横截面。

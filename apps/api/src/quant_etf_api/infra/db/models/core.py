@@ -561,7 +561,8 @@ class IndexValuationModel(Base):
     """指数估值数据（PE/PB 及历史分位），按指数代码 + 日期唯一。
 
     用于构建估值类因子（如 PE 分位、PB 分位），
-    数据来源于 AkShare 的 legulegu PE/PB 接口。
+    主来源为 AkShare 中证官网日线附带的滚动市盈率（无 PB），Tushare 仅为
+    000300/000016/000905 兜底。
     """
 
     __tablename__ = "index_valuation"

@@ -79,23 +79,8 @@ def _calc_percentile(data: list[tuple[date, float]]) -> dict[date, float]:
     return result
 
 
-# 从 index_code 到 legulegu PE/PB 所需中文名的映射
-# AkShare stock_index_pe_lg / stock_index_pb_lg 支持的全部 12 个指数
-_PE_PB_NAME_MAP: dict[str, str] = {
-    "000300": "沪深300",
-    "000016": "上证50",
-    "000905": "中证500",
-    "000852": "中证1000",
-    "000906": "中证800",
-    "000009": "上证380",
-    "000010": "上证180",
-    "399330": "深证100",
-    "399673": "创业板50",
-    "399324": "深证红利",
-    "000015": "上证红利",
-    "000903": "中证100",
-}
-
+# AkShare stock_zh_index_hist_csindex 在官网返回空数据时抛出的 ValueError 片段
+_CSINDEX_EMPTY_MARKER = "Expected axis has 0 elements"
 
 _INDEX_NAME_CACHE: dict[str, str] | None = None
 _EM_INDEX_NAME_CACHE: dict[str, str] | None = None
@@ -721,7 +706,11 @@ class AkShareIndexClient(BaseDataClient):
             index_code: 指数代码
 
         Returns:
-            按日期升序排列的估值数据列表；不支持或无数据时返回空列表
+            按日期升序排列的估值数据列表；官网未覆盖或无 PE 列时返回空列表
+
+        Raises:
+            Exception: 请求或解析失败时抛出原始异常。调用方据此区分"上游没有数据"
+                与"请求失败"，修复缺口不会把请求失败的日期登记为上游缺失。
         """
         endpoint = "stock_zh_index_hist_csindex"
         self._log_request(endpoint, {"index_code": index_code, "purpose": "valuation"})
@@ -785,123 +774,34 @@ class AkShareIndexClient(BaseDataClient):
             elapsed = (time.perf_counter() - start) * 1000
             self._log_response(endpoint, len(results), elapsed)
             return results
+        except ValueError as e:
+            elapsed = (time.perf_counter() - start) * 1000
+            if _CSINDEX_EMPTY_MARKER in str(e):
+                # 官网对未覆盖的指数返回空列表，AkShare 给 0 行表设 16 个列名时抛出
+                # Length mismatch：这是"上游没有该指数"，按空结果处理
+                self._log_response(endpoint, 0, elapsed)
+                return []
+            self._log_error(endpoint, e, elapsed)
+            raise
         except Exception as e:
             elapsed = (time.perf_counter() - start) * 1000
             self._log_error(endpoint, e, elapsed)
-            return []
+            raise
 
     def fetch_index_valuation(self, index_code: str) -> list[IndexValuation]:
-        """拉取指数 PE/PB 估值历史数据。
+        """拉取指数 PE 估值历史数据（中证指数官网单一来源）。
 
-        二级降级策略：
-        1. legulegu（乐股乐源）PE/PB 数据：覆盖 12 个主流指数，含 PE+PB+百分位
-        2. 中证指数官网：覆盖所有中证指数，含 PE+百分位（无 PB）
+        PE 取中证官网日线附带的滚动市盈率，百分位按拉取到的全量历史逐日滚动计算；
+        官网不提供 PB，结果中 PB 与 PB 百分位为空。乐咕乐股接口只返回月度样本且
+        网页经常 504，不能作为日频估值来源，故不再接入。
 
         Args:
             index_code: 指数代码
 
         Returns:
-            按日期升序排列的估值数据列表
+            按日期升序排列的估值数据列表；官网未覆盖（如国证/深证系指数）时为空列表
         """
-        name = _PE_PB_NAME_MAP.get(index_code)
-        if name is None:
-            self._logger.info(
-                "%s 不在 legulegu 覆盖范围，降级到中证指数官网估值源",
-                index_code,
-            )
-            return self._fetch_index_valuation_csi(index_code)
-
-        start = time.perf_counter()
-        self._log_request("stock_index_pe_lg+pb", {"index_code": index_code, "name": name})
-
-        # 重试机制：legulegu.com 偶发 CSRF token 获取失败，最多重试 3 次
-        max_retries = 3
-        pe_df = None
-        pb_df = None
-        last_error = None
-
-        for attempt in range(max_retries):
-            try:
-                pe_df = ak.stock_index_pe_lg(symbol=name)
-                pb_df = ak.stock_index_pb_lg(symbol=name)
-                break
-            except (AttributeError, Exception) as e:
-                last_error = e
-                if attempt < max_retries - 1:
-                    wait_seconds = 2**attempt
-                    self._logger.info(
-                        "指数 %s 估值拉取失败（第 %d 次），%d 秒后重试: %s",
-                        index_code,
-                        attempt + 1,
-                        wait_seconds,
-                        e,
-                    )
-                    time.sleep(wait_seconds)
-
-        if pe_df is None or pb_df is None:
-            elapsed = (time.perf_counter() - start) * 1000
-            self._log_error("stock_index_pe_lg+pb", last_error, elapsed)
-            raise last_error
-
-        # 按日期建立 PB 查找表
-        pb_map: dict[date, float | None] = {}
-        for _, row in pb_df.iterrows():
-            d = row["日期"]
-            if isinstance(d, str):
-                d = datetime.strptime(d, "%Y-%m-%d").date()
-            pb_val = row.get("市净率")
-            pb_map[d] = float(pb_val) if pb_val is not None else None
-
-        # 收集所有 PE 和 PB 值用于计算百分位
-        pe_values: list[tuple[date, float]] = []
-        pb_values: list[tuple[date, float]] = []
-
-        for _, row in pe_df.iterrows():
-            d = row["日期"]
-            if isinstance(d, str):
-                d = datetime.strptime(d, "%Y-%m-%d").date()
-            pe_val = row.get("静态市盈率")
-            if pe_val is not None:
-                try:
-                    pe_values.append((d, float(pe_val)))
-                except (ValueError, TypeError):
-                    pass
-
-        for d, pb_val in pb_map.items():
-            if pb_val is not None:
-                pb_values.append((d, pb_val))
-
-        # 按日期排序
-        pe_values.sort(key=lambda x: x[0])
-        pb_values.sort(key=lambda x: x[0])
-
-        # 计算历史百分位：对于每个交易日，统计之前所有交易日中值小于当前值的比例
-        pe_percentile_map = _calc_percentile(pe_values)
-        pb_percentile_map = _calc_percentile(pb_values)
-
-        # 构建结果
-        results: list[IndexValuation] = []
-        for _, row in pe_df.iterrows():
-            d = row["日期"]
-            if isinstance(d, str):
-                d = datetime.strptime(d, "%Y-%m-%d").date()
-            pe_val = row.get("静态市盈率")
-            pb_val = pb_map.get(d)
-            results.append(
-                IndexValuation(
-                    trade_date=d,
-                    pe=float(pe_val) if pe_val is not None else None,
-                    pe_percentile=pe_percentile_map.get(d),
-                    pb=pb_val,
-                    pb_percentile=pb_percentile_map.get(d),
-                    dividend_yield=None,  # legulegu 源无股息率
-                    source="legulegu",
-                )
-            )
-
-        elapsed = (time.perf_counter() - start) * 1000
-        self._log_response("stock_index_pe_lg+pb", len(results), elapsed)
-        return results
+        return self._fetch_index_valuation_csi(index_code)
 
     # ------------------------------------------------------------------
     # 健康检测

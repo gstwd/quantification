@@ -76,7 +76,7 @@ class _FakeAkShareValuation:
 
 
 class TestValuationPreferred:
-    """指数估值以乐咕乐股（AkShare）为主、Tushare 兜底的编排。"""
+    """指数估值以中证官网（AkShare）为主、Tushare 兜底的编排。"""
 
     def _patch(self, monkeypatch, *, tushare: _FakeTushareValuation, akshare: _FakeAkShareValuation) -> None:
         """替换两个估值客户端。"""
@@ -88,14 +88,14 @@ class TestValuationPreferred:
         )
 
     def test_akshare_preferred_even_when_tushare_available(self, monkeypatch) -> None:
-        """AkShare 成功时采用乐咕乐股，即使 Tushare 覆盖该指数（避免按天混用口径）。"""
+        """AkShare 成功时采用中证官网，即使 Tushare 覆盖该指数（避免按天混用口径）。"""
         self._patch(
             monkeypatch,
             tushare=_FakeTushareValuation(values=_valuation("tushare")),
-            akshare=_FakeAkShareValuation(values=_valuation("legulegu")),
+            akshare=_FakeAkShareValuation(values=_valuation("csindex")),
         )
         result = _service()._fetch_index_valuation_preferred("000300")
-        assert result[0].source == "legulegu"
+        assert result[0].source == "csindex"
 
     def test_akshare_empty_falls_back_to_tushare(self, monkeypatch) -> None:
         """AkShare 返回空时由 Tushare 兜底，并记录降级。"""
@@ -115,7 +115,7 @@ class TestValuationPreferred:
         self._patch(
             monkeypatch,
             tushare=_FakeTushareValuation(values=_valuation("tushare")),
-            akshare=_FakeAkShareValuation(error=RuntimeError("legulegu down")),
+            akshare=_FakeAkShareValuation(error=RuntimeError("csindex down")),
         )
         result = _service()._fetch_index_valuation_preferred("000300")
         assert result[0].source == "tushare"
@@ -127,16 +127,16 @@ class TestValuationPreferred:
         self._patch(
             monkeypatch,
             tushare=_FakeTushareValuation(values=_valuation("tushare"), supported=False),
-            akshare=_FakeAkShareValuation(error=RuntimeError("legulegu down")),
+            akshare=_FakeAkShareValuation(error=RuntimeError("csindex down")),
         )
-        with pytest.raises(RuntimeError, match="legulegu down"):
+        with pytest.raises(RuntimeError, match="csindex down"):
             _service()._fetch_index_valuation_preferred("000852")
 
     def test_primary_source_replaces_tushare_fallback_rows(self, monkeypatch) -> None:
         """主来源恢复后写入时只覆盖 Tushare 兜底写入的行。"""
         svc = _service()
         monkeypatch.setattr(
-            svc, "_fetch_index_valuation_preferred", lambda _code: _valuation("legulegu")
+            svc, "_fetch_index_valuation_preferred", lambda _code: _valuation("csindex")
         )
         insert = MagicMock(return_value=1)
         monkeypatch.setattr(svc, "_insert_index_valuations", insert)
@@ -166,7 +166,7 @@ class TestValuationPreferred:
 
         assert (
             svc._insert_index_valuations(
-                "000300", _valuation("legulegu"), replace_sources={"tushare"}
+                "000300", _valuation("csindex"), replace_sources={"tushare"}
             )
             == 1
         )

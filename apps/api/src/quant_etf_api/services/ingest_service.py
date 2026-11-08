@@ -607,7 +607,7 @@ class IngestService:
         return []
 
     # ==================================================================
-    # 指数估值 PE/PB（乐咕乐股/中证官网优先，Tushare 仅兜底）
+    # 指数估值 PE/PB（中证官网为主来源，Tushare 仅兜底）
     # ==================================================================
 
     def _insert_index_valuations(
@@ -685,11 +685,11 @@ class IngestService:
         return written
 
     def _fetch_index_valuation_preferred(self, index_code: str) -> list[Any]:
-        """按“AkShare（乐咕乐股 → 中证官网）优先、Tushare 兜底”拉取指数估值。
+        """按“AkShare（中证官网）优先、Tushare 兜底”拉取指数估值。
 
-        全部基准指数统一以乐咕乐股口径为主：Tushare index_dailybasic 只覆盖
-        000300/000016/000905，且 PE 取 pe_ttm、百分位按自身历史计算，与乐咕乐股
-        口径不同，两者按天混用会让 PE 与百分位序列出现锯齿。因此 Tushare
+        全部基准指数统一以中证官网滚动市盈率口径为主：Tushare index_dailybasic
+        只覆盖 000300/000016/000905，PE 取 pe_ttm、百分位按自身历史计算，与中证
+        官网口径不同，两者按天混用会让 PE 与百分位序列出现锯齿。因此 Tushare
         只在 AkShare 抛错或返回空时兜底，写入的行 source 为 "tushare"，主来源
         恢复后由 ``_fetch_and_upsert_index_valuation`` 覆盖回主来源口径。
 
@@ -734,7 +734,7 @@ class IngestService:
         *,
         overwrite: bool = False,
     ) -> int:
-        """拉取指数 PE/PB 估值（乐咕乐股优先）并幂等写入 index_valuation。
+        """拉取指数 PE/PB 估值（中证官网优先）并幂等写入 index_valuation。
 
         主来源（非 Tushare）返回时，同时覆盖历史上由 Tushare 兜底写入的行，
         让同一指数的估值序列回到单一来源口径。

@@ -361,14 +361,17 @@ class TestFetchDegradation:
 class TestIndexValuation:
     """指数估值数据拉取。
 
-    估值数据来源于 legulegu.com，仅 沪深300/上证50/中证500 有稳定数据。
+    估值数据来源于中证指数官网（滚动市盈率），只有 PE，没有 PB。
     中证500 在上游偶有返回异常，单独处理。
     """
 
     @pytest.mark.parametrize("index_code", ["000300", "000016"])
     def test_fetch_valuation_stable(self, client: AkShareIndexClient, index_code: str) -> None:
-        """验证沪深300/上证50能稳定拉取 PE/PB 估值。"""
-        valuations = _retry_fetch(lambda: client.fetch_index_valuation(index_code))
+        """验证沪深300/上证50能稳定拉取 PE 估值。"""
+        try:
+            valuations = _retry_fetch(lambda: client.fetch_index_valuation(index_code))
+        except Exception:
+            pytest.skip("上游中证官网暂时不可用")
         assert len(valuations) > 0, f"指数 {index_code} 应返回估值数据"
         latest = valuations[-1]
         assert isinstance(latest, IndexValuation)
@@ -379,34 +382,78 @@ class TestIndexValuation:
         try:
             valuations = client.fetch_index_valuation("000905")
         except Exception:
-            pytest.skip("上游 legulegu.com 中证500 估值暂时不可用")
+            pytest.skip("上游中证官网中证500 估值暂时不可用")
         if len(valuations) == 0:
-            pytest.skip("上游 legulegu.com 中证500 估值返回空")
+            pytest.skip("上游中证官网中证500 估值返回空")
         assert valuations[-1].trade_date is not None
 
     def test_unsupported_index_returns_empty(self, client: AkShareIndexClient) -> None:
         """无估值源的指数（深证系）应返回空列表。
 
         中证系指数已由中证官网兜底返回 PE（如 000688 → csindex），
-        深证系（399xxx）无任何估值源，应返回空列表。
+        深证系（399xxx）无任何估值源，应返回空列表；请求失败会抛错，此时跳过。
         """
-        valuations = client.fetch_index_valuation("399006")
+        try:
+            valuations = client.fetch_index_valuation("399006")
+        except Exception:
+            pytest.skip("上游中证官网暂时不可用")
         assert valuations == []
 
     def test_percentile_calculated(self, client: AkShareIndexClient) -> None:
-        """验证 PE/PB 百分位被正确计算。"""
+        """验证 PE 百分位被正确计算，中证官网来源不带 PB。"""
         try:
             valuations = _retry_fetch(lambda: client.fetch_index_valuation("000300"))
         except Exception:
-            pytest.skip("上游 legulegu.com 暂时不可用")
+            pytest.skip("上游中证官网暂时不可用")
         if len(valuations) < 10:
             pytest.skip("上游返回数据不足")
         # 检查中间某条数据的百分位是否被计算
         mid = valuations[len(valuations) // 2]
         assert mid.pe_percentile is not None, "PE 百分位应被计算"
         assert 0 <= mid.pe_percentile <= 100, "PE 百分位应在 0-100 之间"
-        assert mid.pb_percentile is not None, "PB 百分位应被计算"
-        assert 0 <= mid.pb_percentile <= 100, "PB 百分位应在 0-100 之间"
+        assert mid.pb is None and mid.pb_percentile is None, "中证官网不提供 PB"
+        assert mid.source == "csindex"
+
+    @pytest.mark.parametrize("index_code", ["000300", "000852", "000903", "000015", "399673"])
+    def test_valuation_uses_csindex_only(self, index_code: str) -> None:
+        """估值只走中证官网：原乐咕乐股覆盖的指数也不再调用乐咕接口（离线）。"""
+        fake_client = AkShareIndexClient()
+        expected = [
+            IndexValuation(
+                trade_date=date(2026, 11, 6),
+                pe=12.0,
+                pe_percentile=50.0,
+                pb=None,
+                pb_percentile=None,
+                dividend_yield=None,
+                source="csindex",
+            )
+        ]
+        with (
+            patch.object(fake_client, "_fetch_index_valuation_csi", return_value=expected) as csi,
+            patch("akshare.stock_index_pe_lg") as pe_lg,
+            patch("akshare.stock_index_pb_lg") as pb_lg,
+        ):
+            assert fake_client.fetch_index_valuation(index_code) == expected
+        csi.assert_called_once_with(index_code)
+        pe_lg.assert_not_called()
+        pb_lg.assert_not_called()
+
+    def test_csi_valuation_treats_empty_upstream_as_no_data(self) -> None:
+        """官网未覆盖的指数（AkShare 对空表抛 Length mismatch）按无数据返回空列表（离线）。"""
+        empty = ValueError("Length mismatch: Expected axis has 0 elements, new values have 16 elements")
+        with patch("akshare.stock_zh_index_hist_csindex", side_effect=empty):
+            assert AkShareIndexClient()._fetch_index_valuation_csi("399673") == []
+
+    @pytest.mark.parametrize(
+        "error",
+        [ConnectionError("reset"), ValueError("Expecting value: line 1 column 1"), KeyError("data")],
+    )
+    def test_csi_valuation_raises_on_request_failure(self, error: Exception) -> None:
+        """请求或解析失败必须抛出，修复缺口才不会把失败日期登记为上游缺失（离线）。"""
+        with patch("akshare.stock_zh_index_hist_csindex", side_effect=error):
+            with pytest.raises(type(error)):
+                AkShareIndexClient()._fetch_index_valuation_csi("000300")
 
 
 class TestHealthCheck:

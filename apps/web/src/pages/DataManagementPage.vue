@@ -507,10 +507,14 @@ interface HealthIssueSummary {
   failed_partitions?: number
   /** 落在非交易日的行数（计入异常） */
   non_trading_count?: number
-  /** 已确认上游仅提供收盘价、从异常中豁免的行数（计入告警） */
+  /** 已确认上游仅提供收盘价、从异常中豁免的行数（仅提示，不影响健康状态） */
   close_only_count?: number
   /** 成交量为 0 的行数（仅提示，不影响健康状态） */
   volume_zero_count?: number
+  /** 已确认上游缺失、不计入缺口的交易日数（仅提示，不影响健康状态） */
+  upstream_missing_count?: number
+  /** 个股最新日期之后已确认上游无数据的交易日数（停牌等，仅提示） */
+  upstream_tail_count?: number
   reasons?: string[]
   missing_dates_sample?: string[]
   missing_dates_truncated?: boolean
@@ -671,6 +675,12 @@ function readIssue(item: DataSetHealthSummary): HealthIssueSummary {
   if (typeof raw.non_trading_count === 'number') result.non_trading_count = raw.non_trading_count
   if (typeof raw.close_only_count === 'number') result.close_only_count = raw.close_only_count
   if (typeof raw.volume_zero_count === 'number') result.volume_zero_count = raw.volume_zero_count
+  if (typeof raw.upstream_missing_count === 'number') {
+    result.upstream_missing_count = raw.upstream_missing_count
+  }
+  if (typeof raw.upstream_tail_count === 'number') {
+    result.upstream_tail_count = raw.upstream_tail_count
+  }
   if (typeof raw.last_error === 'string') result.last_error = raw.last_error
   if (typeof raw.reason === 'string') result.reason = raw.reason
   if (typeof raw.missing_dates_truncated === 'boolean') {
@@ -750,10 +760,18 @@ function qualityText(item: DataSetHealthSummary, issue: HealthIssueSummary): str
   if (issue.non_trading_count) numbers.push(`非交易日行 ${issue.non_trading_count.toLocaleString()}`)
   if (issue.warning_count) numbers.push(`告警 ${issue.warning_count.toLocaleString()}`)
   if (issue.close_only_count) {
-    numbers.push(`上游仅收盘价 ${issue.close_only_count.toLocaleString()}`)
+    numbers.push(`上游仅收盘价 ${issue.close_only_count.toLocaleString()}（仅提示）`)
   }
   if (issue.volume_zero_count) {
     numbers.push(`成交量为 0：${issue.volume_zero_count.toLocaleString()}（仅提示）`)
+  }
+  if (issue.upstream_missing_count) {
+    numbers.push(`上游缺失 ${issue.upstream_missing_count.toLocaleString()} 天（仅提示）`)
+  }
+  if (issue.upstream_tail_count) {
+    numbers.push(
+      `最新日期后停牌或上游无数据 ${issue.upstream_tail_count.toLocaleString()} 天（仅提示）`,
+    )
   }
   const reasons = (issue.reasons ?? []).map((reason) => REASON_LABELS[reason] ?? reason)
   return [...numbers, ...reasons].join(' · ')

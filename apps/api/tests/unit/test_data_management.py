@@ -338,6 +338,94 @@ def test_valuation_repair_uses_akshare_when_tushare_omits_target(monkeypatch) ->
     service._record_upstream_missing_dates_batch.assert_not_called()
 
 
+_VALUATION_GAP_DAY = date(2011, 6, 29)
+
+
+def _valuation_repair_service(
+    monkeypatch,
+    akshare_values: list[IndexValuation] | Exception,
+    tushare_values: list[IndexValuation],
+) -> tuple[DataManagementService, MagicMock, MagicMock, date]:
+    """构造单缺口估值修复：AkShare 与 Tushare 的返回由参数决定。"""
+    service = DataManagementService(MagicMock())
+    target = _VALUATION_GAP_DAY
+    service._partitions = lambda _: ["000300"]
+    service._latest_trading_day = lambda **_kwargs: target
+    service._calendar_days_until = lambda *_args, **_kwargs: [target]
+    service._daily_gap_targets_for_repair = MagicMock(return_value={"000300": {target}})
+    service._record_upstream_missing_dates_batch = MagicMock()
+    tushare_fetch = MagicMock(return_value=tushare_values)
+    akshare_fetch = MagicMock(
+        side_effect=akshare_values if isinstance(akshare_values, Exception) else None,
+        return_value=None if isinstance(akshare_values, Exception) else akshare_values,
+    )
+
+    class FakeTushare:
+        def is_configured(self) -> bool:
+            return True
+
+        def supports(self, _code: str) -> bool:
+            return True
+
+        fetch_index_valuation = staticmethod(tushare_fetch)
+
+    class FakeAkShare:
+        fetch_index_valuation = staticmethod(akshare_fetch)
+
+    monkeypatch.setattr(data_management_module, "TushareIndexValuationClient", FakeTushare)
+    monkeypatch.setattr(data_management_module, "AkShareIndexClient", FakeAkShare)
+    ingest = MagicMock()
+    ingest._insert_index_valuations.side_effect = lambda _code, values, **_kw: len(values)
+    return service, ingest, tushare_fetch, target
+
+
+def _valuation(day: date, source: str) -> IndexValuation:
+    """构造一条估值。"""
+    return IndexValuation(
+        trade_date=day,
+        index_code="000300",
+        pe=13.0,
+        pe_percentile=5.0,
+        pb=None,
+        pb_percentile=None,
+        dividend_yield=None,
+        source=source,
+    )
+
+
+def test_valuation_repair_does_not_fill_primary_gaps_from_tushare(monkeypatch) -> None:
+    """主来源成功但没有目标日期时，不用 Tushare 逐日补，日期确认为上游缺失。"""
+    other_day = date(2011, 6, 28)
+    service, ingest, tushare_fetch, target = _valuation_repair_service(
+        monkeypatch,
+        [_valuation(other_day, "csindex")],
+        [_valuation(_VALUATION_GAP_DAY, "tushare")],
+    )
+
+    result = service._repair_index_valuation_gaps(None, ingest, force=False)
+
+    tushare_fetch.assert_not_called()
+    assert result["records"] == 0
+    assert result["upstream_missing_confirmed"] == 1
+    service._record_upstream_missing_dates_batch.assert_called_once_with(
+        "index_valuation", {"000300": {target}}, [target], source="valuation_multi_source"
+    )
+
+
+def test_valuation_repair_falls_back_to_tushare_when_primary_fails(monkeypatch) -> None:
+    """主来源抛错时由 Tushare 兜底写入，且主来源失败不确认上游缺失。"""
+    service, ingest, tushare_fetch, target = _valuation_repair_service(
+        monkeypatch, ConnectionError("reset"), [_valuation(_VALUATION_GAP_DAY, "tushare")]
+    )
+
+    result = service._repair_index_valuation_gaps(None, ingest, force=False)
+
+    tushare_fetch.assert_called_once_with("000300")
+    assert result["records"] == 1
+    assert result["upstream_missing_confirmed"] == 0
+    service._record_upstream_missing_dates_batch.assert_not_called()
+
+
 def test_stock_gap_repair_confirms_only_successful_tushare_negative_results() -> None:
     """成功全市场响应未包含目标证券才写上游豁免；失败响应不得写入。"""
     db = MagicMock()
@@ -795,6 +883,36 @@ def test_index_repair_does_not_confirm_close_only_when_a_source_fails() -> None:
     service._record_upstream_missing_dates_batch.assert_not_called()
 
 
+def test_index_repair_isolates_failed_window_from_other_windows(monkeypatch) -> None:
+    """单个窗口请求失败只作废该窗口；其他窗口全部来源成功时仍登记仅收盘价。"""
+    monkeypatch.setattr(data_management_module, "_INDEX_REPAIR_WINDOW_GAP_DAYS", 0)
+    base_day, middle_day, target_day = date(2004, 12, 31), date(2016, 6, 13), date(2016, 6, 14)
+    service, ingest, _ = _close_only_repair_service([])
+    service._calendar_days_until = lambda *_args, **_kwargs: [base_day, middle_day, target_day]
+    service._daily_gap_targets_for_repair = MagicMock(
+        return_value={"930601": {base_day, target_day}}
+    )
+
+    def fetch(_code: str, _start: str, end: str) -> list[IndexDailyBar]:
+        if end == base_day.strftime("%Y%m%d"):
+            raise KeyError("date")
+        return [_bar(target_day, open_price=None, high_price=None, low_price=None)]
+
+    client = MagicMock(fetch_index_daily=MagicMock(side_effect=fetch))
+    ingest._build_index_daily_sources.return_value = [("akshare", client)]
+
+    result = service._repair_index_daily_gaps(None, ingest, force=False)
+
+    assert result["close_only_confirmed"] == 1
+    assert result["upstream_missing_confirmed"] == 0
+    service._record_upstream_missing_dates_batch.assert_called_once_with(
+        "index_daily_bar",
+        {"930601": {target_day}},
+        [base_day, middle_day, target_day],
+        source="close_only",
+    )
+
+
 def test_calendar_rebuild_replaces_wrong_dates_within_threshold(monkeypatch) -> None:
     """日历重建删除上游没有的本地日期、补入新增日期。"""
     monkeypatch.setattr(
@@ -896,3 +1014,237 @@ def test_nan_prices_are_not_valid_repair_items() -> None:
     assert DataManagementService._close_only_repair_item(nan_close) is False
     nan_change = _bar(date(2016, 1, 4), change_pct=nan)
     assert DataManagementService._valid_repair_item("index_daily_bar", nan_change) is True
+
+
+def test_ohlc_only_condition_treats_null_change_pct_as_valid_close() -> None:
+    """仅收盘价区间首日涨跌幅为空时，SQL 三值逻辑不能让该行漏出"仅开高低缺失"判定。"""
+    from sqlalchemy import case, create_engine, select
+    from sqlalchemy.orm import Session
+
+    from quant_etf_api.infra.db.models.core import IndexDailyBarModel
+
+    engine = create_engine("sqlite://")
+    IndexDailyBarModel.__table__.create(engine)
+    rows = {
+        1: {"close_price": 5443.5, "change_pct": None},  # 区间首日：无前收
+        2: {"close_price": 5448.4, "change_pct": 0.09},  # 普通仅收盘价行
+        3: {"close_price": 5448.4, "change_pct": 45.0},  # 涨跌幅越界仍是硬错误
+        4: {"close_price": None, "change_pct": None},  # 收盘价缺失仍是硬错误
+    }
+    with Session(engine) as session:
+        for row_id, values in rows.items():
+            session.add(
+                IndexDailyBarModel(
+                    id=row_id,
+                    trade_date=date(2016, 6, 13) + timedelta(days=row_id),
+                    index_code="H30022",
+                    open_price=None,
+                    high_price=None,
+                    low_price=None,
+                    source="tushare",
+                    **values,
+                )
+            )
+        session.commit()
+        condition = DataManagementService(session)._ohlc_only_error_condition("index_daily_bar")
+        flags = dict(
+            session.execute(
+                select(IndexDailyBarModel.id, case((condition, True), else_=False)).order_by(
+                    IndexDailyBarModel.id
+                )
+            ).all()
+        )
+    assert flags == {1: True, 2: True, 3: False, 4: False}
+
+
+def test_upstream_missing_day_count_excludes_close_only_ranges() -> None:
+    """上游缺失提示只统计真正没有数据的区间，"上游仅收盘价"另有计数。"""
+    ranges = [
+        {"source": "valuation_multi_source", "trading_day_count": 64},
+        {"source": "index_multi_source", "trading_day_count": 2},
+        {"source": "close_only", "trading_day_count": 1126},
+        "malformed",
+    ]
+    assert DataManagementService._upstream_missing_day_count(ranges) == 66
+    assert DataManagementService._upstream_missing_day_count([]) == 0
+
+
+def test_close_only_rows_are_hint_only_not_warnings(monkeypatch) -> None:
+    """已确认"上游仅收盘价"的行只提示：不计异常、不计告警，分区保持健康。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from quant_etf_api.infra.db.models.core import IndexDailyBarModel
+
+    # SQLite 不支持 CAST(... AS DATE)；trade_date 本身就是 Date 列，测试中直接透传
+    monkeypatch.setattr(data_management_module, "cast", lambda column, _type: column)
+    engine = create_engine("sqlite://")
+    IndexDailyBarModel.__table__.create(engine)
+    days = [date(2016, 6, 13), date(2016, 6, 14), date(2016, 6, 15)]
+    with Session(engine) as session:
+        for row_id, day in enumerate(days, start=1):
+            close_only = day != days[0]
+            session.add(
+                IndexDailyBarModel(
+                    id=row_id,
+                    trade_date=day,
+                    index_code="H30022",
+                    open_price=None if close_only else 100.0,
+                    high_price=None if close_only else 101.0,
+                    low_price=None if close_only else 99.0,
+                    close_price=100.0,
+                    change_pct=0.1,
+                    volume=1000.0,
+                    source="tushare",
+                )
+            )
+        session.commit()
+        service = DataManagementService(session)
+        service._expected_date = lambda *_args, **_kwargs: days[-1]
+        service._calendar_days_until = lambda *_args, **_kwargs: days
+        service._partition_names = lambda *_args: {"H30022": "中证800银行"}
+        service._latest_sources = lambda *_args: {"H30022": "tushare"}
+        service._non_trading_counts = lambda *_args: {}
+        close_only_range = {
+            "source": "close_only",
+            "start_date": "2016-06-14",
+            "end_date": "2016-06-15",
+            "trading_day_count": 2,
+        }
+
+        result = service._inspect_many(
+            _definition("index_daily_bar"),
+            ["H30022"],
+            exact_missing=False,
+            close_only_by_partition={"H30022": [close_only_range]},
+        )["H30022"]
+
+    assert result["health_status"] == "healthy"
+    assert result["invalid_count"] == 0
+    assert result["issue_summary"]["warning_count"] == 0
+    assert result["issue_summary"]["close_only_count"] == 2
+    assert "warnings" not in result["issue_summary"]["reasons"]
+
+
+def test_stock_gap_repair_skips_confirmation_when_market_day_is_empty() -> None:
+    """某交易日全市场一行都没有（上游尚未发布）时，不确认任何证券的上游缺失。"""
+    db = MagicMock()
+    db.query.return_value.filter.return_value.all.return_value = []
+    db.query.return_value.filter.return_value.first.return_value = None
+    service = DataManagementService(db)
+    day = date(2026, 11, 6)
+    service._partitions = lambda _: ["000001", "000002"]
+    service._latest_trading_day = lambda **_kwargs: day
+    service._calendar_days_until = lambda *_args, **_kwargs: [day]
+    service._stock_gap_targets_for_repair = MagicMock(return_value={day: {"000001", "000002"}})
+    service._record_upstream_missing_dates_batch = MagicMock()
+    tushare = MagicMock(
+        sync_trade_date=MagicMock(return_value={"records": {"stock_moneyflow": 0}, "errors": []})
+    )
+
+    result = service._repair_stock_daily_gaps("stock_moneyflow", None, tushare, force=False)
+
+    assert result["upstream_missing_confirmed"] == 0
+    service._record_upstream_missing_dates_batch.assert_not_called()
+
+
+def test_stock_tail_confirmation_requires_every_tail_day() -> None:
+    """个股最新日期之后的尾部全部确认上游无数据才不判过期；其他数据集不适用。"""
+    service = DataManagementService(MagicMock())
+    days = [date(2026, 10, 29), date(2026, 10, 30), date(2026, 11, 2), date(2026, 11, 3)]
+    full = [{"source": "tushare", "start_date": "2026-10-30", "end_date": "2026-11-03"}]
+    partial = [{"source": "tushare", "start_date": "2026-10-30", "end_date": "2026-11-02"}]
+
+    assert service._upstream_tail_confirmation(
+        "stock_daily_close", days[0], days[-1], days, full
+    ) == (3, True)
+    assert service._upstream_tail_confirmation(
+        "stock_daily_close", days[0], days[-1], days, partial
+    ) == (2, False)
+    assert service._upstream_tail_confirmation(
+        "index_daily_bar", days[0], days[-1], days, full
+    ) == (0, False)
+    assert service._upstream_tail_confirmation(
+        "stock_daily_close", days[-1], days[-1], days, full
+    ) == (0, False)
+
+
+def test_confirmed_stock_tail_is_not_stale() -> None:
+    """尾部全部确认时状态为健康；未确认仍按数据已过期判为需关注。"""
+    service = DataManagementService(MagicMock())
+    args = ("stock_daily_close", "002717", 100, date(2026, 10, 12), date(2026, 11, 6), 0, 0, 0)
+    assert service._health_status(*args, upstream_tail_confirmed=True) == "healthy"
+    assert service._health_status(*args) == "warning"
+
+
+def test_exact_missing_keeps_confirmed_stock_tail_and_ignores_unconfirmed_tail() -> None:
+    """精查时个股尾部已确认空档被保留，未确认的尾部不计连续性缺口（由过期表达）。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from quant_etf_api.infra.db.models.core import TradingCalendarModel
+    from quant_etf_api.infra.db.models.industry import StockDailyCloseModel
+
+    engine = create_engine("sqlite://")
+    TradingCalendarModel.__table__.create(engine)
+    StockDailyCloseModel.__table__.create(engine)
+    days = [date(2026, 10, 28), date(2026, 10, 29), date(2026, 10, 30), date(2026, 11, 2)]
+    with Session(engine) as session:
+        for day in days:
+            session.add(TradingCalendarModel(trade_date=day, is_trading_day=True))
+        row_id = 0
+        for code in ("002717", "300237"):
+            for day in days[:2]:
+                row_id += 1
+                session.add(
+                    StockDailyCloseModel(
+                        id=row_id, trade_date=day, stock_code=code, close=1.0, source="tushare"
+                    )
+                )
+        session.commit()
+        service = DataManagementService(session)
+        service._latest_trading_day = lambda **_kwargs: days[-1]
+        confirmed_tail = [
+            {
+                "source": "tushare",
+                "start_date": "2026-10-30",
+                "end_date": "2026-11-02",
+                "trading_day_count": 2,
+            }
+        ]
+
+        result = service._daily_exact_missing_summaries(
+            "stock_daily_close", ["002717", "300237"], days, {"002717": confirmed_tail}
+        )
+
+    kept = result["002717"]["upstream_missing_ranges"]
+    assert [(r["start_date"], r["end_date"]) for r in kept] == [("2026-10-30", "2026-11-02")]
+    assert result["002717"]["missing_count"] == 0
+    assert result["300237"]["missing_count"] == 0
+    assert result["300237"]["upstream_missing_ranges"] == []
+
+
+def test_index_repair_requests_lead_in_days_for_prev_close() -> None:
+    """修复请求起点回退几个交易日，窗口首日才有前一根 bar 计算昨收与涨跌幅；只写回目标日期。"""
+    days = [
+        date(2026, 10, 30),
+        date(2026, 11, 2),
+        date(2026, 11, 3),
+        date(2026, 11, 4),
+        date(2026, 11, 5),
+        date(2026, 11, 6),
+    ]
+    target = days[-1]
+    client = MagicMock(
+        fetch_index_daily=MagicMock(return_value=[_bar(days[-2]), _bar(target, change_pct=0.5)])
+    )
+    service, ingest, _ = _close_only_repair_service([("tushare", client)])
+    service._calendar_days_until = lambda *_args, **_kwargs: days
+    service._daily_gap_targets_for_repair = MagicMock(return_value={"000300": {target}})
+
+    service._repair_index_daily_gaps(None, ingest, force=False)
+
+    client.fetch_index_daily.assert_called_once_with("000300", "20261030", "20261106")
+    written = ingest._insert_index_bars.call_args.args[1]
+    assert [bar.trade_date for bar in written] == [target]
+    assert DataManagementService._repair_request_start(days[1], days) == days[0]

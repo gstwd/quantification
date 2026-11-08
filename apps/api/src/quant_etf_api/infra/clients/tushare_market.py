@@ -183,13 +183,13 @@ class TushareIndexValuationClient(_TushareBaseMixin, BaseDataClient):
 
     覆盖范围：Tushare 指数估值仅支持固定 12 个系列（沪深300/上证50/中证500/
     深证成指/创业板指等），本系统基准指数中只有 000300/000016/000905 在列，
-    其余指数继续由 AkShare（乐咕乐股/中证官网）负责。
+    其余指数继续由 AkShare（中证官网）负责。
 
     兼容口径：
-    - pe 取 pe_ttm（与既有 legulegu 序列的平均差异更小），pb 直接使用；
+    - pe 取 pe_ttm（与中证官网滚动市盈率同为 TTM 口径），pb 直接使用；
     - 百分位沿用 index_valuation 统一的 rank/(n-1)*100 口径，按拉取到的
       全量历史逐日滚动计算，保证新日期可与历史日期比较；
-    - source 标识为 "tushare"，与 legulegu/csindex 行区分。
+    - source 标识为 "tushare"，与 csindex 行区分。
     """
 
     source_name = "tushare_valuation"
