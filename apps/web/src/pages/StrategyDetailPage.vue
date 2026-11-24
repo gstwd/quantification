@@ -349,7 +349,6 @@
                 </span>
               </div>
             </div>
-            <div class="config-desc">别名承载策略语义，模板 ID 与参数承载计算语义；未在此声明的引用按模板 ID 与默认参数解释。</div>
           </div>
         </div>
 
