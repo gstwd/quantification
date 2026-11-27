@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from quant_etf_api.api.deps import get_db
 from quant_etf_api.domain.market_data.indicators import MARKET_INDICATORS
 from quant_etf_api.infra.db.repositories.market_indicator import MarketIndicatorRepository
+from quant_etf_api.infra.time import today_cn
+from quant_etf_api.infra.trading_calendar import TradingCalendar
 from quant_etf_api.schemas.market_data import (
     BenchmarkIndex,
     DailyBar,
@@ -23,6 +25,14 @@ from quant_etf_api.services.ingest_service import IngestService
 from quant_etf_api.services.stock_data_service import StockDataService
 
 router = APIRouter(tags=["market-data"])
+
+
+@router.get("/market-data/previous-trading-day")
+def get_previous_trading_day() -> dict[str, str]:
+    """获取前一交易日，供指数详情页判断数据新鲜度。"""
+    yesterday = today_cn() - timedelta(days=1)
+    previous = TradingCalendar().latest_trading_day(yesterday)
+    return {"trade_date": previous.isoformat()}
 
 
 @router.get("/market-data/indexes", response_model=list[BenchmarkIndex])

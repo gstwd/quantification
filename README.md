@@ -13,7 +13,7 @@
 - 自动研究循环：`research campaign` 交替执行研究员与评审员步骤，可由 headless Claude Code 驱动器运行，也可由 Claude Code 桌面会话编排（`begin-step` / `finalize-step`）；平台负责限额、停止条件与命令拦截。接受需评审推荐且通过全部验收项，promote 由人工执行。
 - 生命周期监控：LIVE/SUSPENDED/RETIRED 仅人工变更；每日同步后自动刷新 LIVE 策略健康快照，等级恶化写站内告警；不自动调参或自动升级策略。
 - 组合与风控扩展：风险平价 / 波动率倒数分配、波动率目标与止损叠加层、排名缓冲带、偏离阈值调仓、多策略持仓级组合；回测收益归因与混合基准。
-- 数据管理：非新闻外部数据通过统一数据管理入口、持久化任务队列和 `data_health_snapshot` 维护。
+- 数据管理：受管外部数据通过统一数据管理入口、持久化任务队列和 `data_health_snapshot` 维护。
 - 研究数据瘦身：只删除回测逐指数明细（策略详情页、`backtest slim`、战役结束自动执行），台账、会话、批次与 N 不受影响；每日同步后清理过期的已结束任务与已读告警。
 
 ## 架构
@@ -51,7 +51,7 @@ T+1 收盘模式先成交昨日指令，再以今日成交后的持仓合成下�
 | 数据维护 | `/data-management`、`/indexes`、`/industries`、`/stocks`、`/macro` |
 | 策略与因子 | `/strategies`、`/factors`、`/lifecycle`、`/tools/rrg-lab`、`/tools/signal-lab` |
 | 回测与研究 | 页面 `/backtests`、`/research`（研究看板：台账、战役、候选）；API `/api/robustness`、`/api/research/*`、`/api/queue`；CLI 提供批量研究和优化命令 |
-| 运营辅助 | `/runs`、`/ai-factors`、`/keyword-tags` |
+| 运营辅助 | `/runs` |
 
 ## 快速启动
 

@@ -27,7 +27,7 @@ router = APIRouter(tags=["runs"])
 #: macro_refresh / cold_start / index_rebuild / index_incremental_fill）已收敛到数据管理
 #: 操作，不再支持重试。前端 utils/labels.ts 的 RETRYABLE_RUN_TYPES 须与此保持一致。
 RETRYABLE_RUN_TYPES: frozenset[str] = frozenset(
-    {"strategy_run", "ai_analysis", "data_sync_all", "data_manage_operation"}
+    {"strategy_run", "data_sync_all", "data_manage_operation"}
 )
 
 #: _enqueue_for_run 的结果：新建任务 / 已有同键活动任务（未新建）/ 不支持的类型
@@ -50,7 +50,7 @@ def _enqueue_for_run(
         run_id: 运行记录 ID。
         strategy_id: 关联策略 ID，仅 strategy_run 有值。
         params: 运行参数。
-        trade_date: 运行对应交易日，用于 AI 任务去重键。
+        trade_date: 运行对应交易日，用于任务去重键。
 
     Returns:
         ENQUEUE_CREATED：已新建队列任务；ENQUEUE_DUPLICATE：同去重键已有活动任务，
@@ -66,10 +66,6 @@ def _enqueue_for_run(
         _, created = queue.enqueue_with_status(
             "strategy_run",
             {"strategy_id": strategy_id, "run_id": run_id, "params": params},
-        )
-    elif run_type == "ai_analysis":
-        _, created = queue.enqueue_with_status(
-            "ai_analysis", {"run_id": run_id}, job_key=f"ai_analysis:{trade_date}"
         )
     elif run_type == "data_sync_all":
         _, created = queue.enqueue_with_status(
@@ -137,7 +133,7 @@ def get_run_items(run_id: str, db: Session = Depends(get_db)) -> list[ResearchRu
 
 # 说明：指数/宏观/行业/个股等全部外部数据的同步、补缺口与全量重拉统一由
 # POST /api/data-management/operations 提交（DataManagementService 编排），
-# 本路由只保留策略运行、AI 分析与数据管理任务本身的触发入口。
+# 本路由只保留策略运行与数据管理任务本身的触发入口。
 
 
 @router.post("/runs/strategies/{strategy_id}/run")

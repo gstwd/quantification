@@ -27,7 +27,7 @@
 - **业务日期**（交易日、行情日期、回测起止日期、数据截止日期）属于 A 股市场日期，
   统一按北京时间 `Asia/Shanghai` 计算。后端使用
   `quant_etf_api.infra.time.today_cn()`，禁止直接使用 `date.today()`。
-- 调度器的配置时间（如 `schedule_time`、`ai_schedule_time`）解释为北京时间，
+- 调度器的配置时间（如 `schedule_time`）解释为北京时间，
   不得依赖操作系统本地时区。
 - 前端展示后端时间戳时必须显式指定 `timeZone: 'Asia/Shanghai'`。日期字符串
   `YYYY-MM-DD` 不得直接交给 `new Date(value)` 解析，也不得用

@@ -55,13 +55,6 @@ class Settings(BaseSettings):
     schedule_time: str = Field(
         default="17:30", description="每日全局数据自动同步触发时间（HH:MM），默认收盘后 17:30"
     )
-    ai_analysis_enabled: bool = Field(
-        default=True, description="是否在日频调度中自动触发 AI 舆情分析"
-    )
-    ai_schedule_time: str = Field(
-        default="23:30",
-        description="AI 舆情分析触发时间（HH:MM），默认夜里 23:30，覆盖当天全部新闻",
-    )
 
     # 后台任务队列（按任务类别分 lane，各自绑定独立的并发预算）
     # 回测是 CPU + 数据库混合型任务，实测单进程内并发 4 条比串行慢约 20 倍，
@@ -182,56 +175,6 @@ class Settings(BaseSettings):
         default=40,
         ge=1,
         description="验收第 10 项：候选与基线逐日收益出现差异的交易日数下限",
-    )
-
-    # LLM 配置（可选，不配置则 AI 分析功能不可用）
-    llm_api_key: str | None = Field(default=None, description="LLM API Key")
-    llm_base_url: str | None = Field(
-        default=None, description="LLM API Base URL（OpenAI 兼容接口）"
-    )
-    llm_model: str = Field(
-        default="deepseek/deepseek-chat", description="默认模型标识（LiteLLM 格式：provider/model）"
-    )
-    llm_max_tokens: int = Field(default=4096, description="AI 分析最大输出 token 数")
-    llm_temperature: float = Field(default=0.3, description="AI 分析温度参数")
-    llm_timeout_seconds: int = Field(default=60, description="LLM 请求超时时间")
-    ai_max_analysis_items: int = Field(
-        default=150,
-        description="单次 AI 分析最大新闻条数，超出部分仅计算关注度不调用 LLM",
-    )
-
-    # ========== 新闻多源搜索配置 ==========
-
-    tavily_api_keys: list[str] = Field(
-        default_factory=list,
-        description="Tavily 搜索 API Key 列表（支持多 Key 轮询）",
-    )
-    bocha_api_keys: list[str] = Field(
-        default_factory=list,
-        description="Bocha AI 搜索 API Key 列表（中文搜索优化）",
-    )
-    brave_api_keys: list[str] = Field(
-        default_factory=list,
-        description="Brave Search API Key 列表",
-    )
-    serpapi_api_keys: list[str] = Field(
-        default_factory=list,
-        description="SerpAPI Key 列表（Google News 搜索）",
-    )
-    anspire_api_keys: list[str] = Field(
-        default_factory=list,
-        description="Anspire Search API Key 列表（实时智能搜索）",
-    )
-    searxng_urls: list[str] = Field(
-        default_factory=list,
-        description="SearXNG 自建实例 URL 列表（无配额兜底搜索）",
-    )
-
-    # ========== 社交媒体情绪配置 ==========
-
-    social_sentiment_api_key: str | None = Field(
-        default=None,
-        description="社交媒体情绪 API Key（api.adanos.org），用于美股情绪分析",
     )
 
     # ========== 多数据源指数日线摄取 ==========

@@ -267,7 +267,7 @@ _DATASET_BY_KEY = {item.key: item for item in DATASETS}
 
 
 class DataManagementService:
-    """编排所有非新闻外部数据集的健康检查与维护操作。"""
+    """编排所有受管外部数据集的健康检查与维护操作。"""
 
     def __init__(self, db: Session) -> None:
         """初始化统一数据管理服务。

@@ -54,9 +54,11 @@ export async function fetchIndexDateRange(indexCode: string): Promise<DateRange>
   return data
 }
 
-/** 获取前一交易日（复用交易日历端点，用于指数详情页的数据新鲜度判断） */
+/** 获取前一交易日（用于指数详情页的数据新鲜度判断） */
 export async function fetchPreviousTradingDay(): Promise<string | null> {
-  const { data } = await apiClient.get<{ trade_date: string | null }>('/ai-factors/previous-trading-day')
+  const { data } = await apiClient.get<{ trade_date: string | null }>(
+    '/market-data/previous-trading-day',
+  )
   return data.trade_date
 }
 

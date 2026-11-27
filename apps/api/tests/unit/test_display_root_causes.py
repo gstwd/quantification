@@ -403,7 +403,7 @@ class TestAbandonRun:
     """被回收任务的运行记录收口。"""
 
     @pytest.mark.parametrize(
-        "job_type", ["strategy_run", "ai_analysis", "data_sync_all", "data_manage_operation"]
+        "job_type", ["strategy_run", "data_sync_all", "data_manage_operation"]
     )
     def test_registered(self, job_type: str) -> None:
         """带 run_id 的任务类型都注册了回收回调。"""

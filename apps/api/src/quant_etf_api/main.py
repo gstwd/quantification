@@ -11,7 +11,6 @@ from fastapi.responses import JSONResponse
 from quant_etf_api.api.middleware import RequestIdMiddleware, RequestLoggingMiddleware
 from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavailableError
 from quant_etf_api.api.routers import (
-    ai_factors,
     alerts,
     backtests,
     data_management,
@@ -19,7 +18,6 @@ from quant_etf_api.api.routers import (
     health,
     indexes,
     industry,
-    keyword_tags,
     market_data,
     queue as queue_router,
     research,
@@ -33,10 +31,7 @@ from quant_etf_api.config.logging_config import setup_logging
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.factors.catalog import FactorTemplateRegistry, get_factor_template_registry
 from quant_etf_api.infra.job_queue.queue import get_job_queue
-from quant_etf_api.infra.scheduler import (
-    get_ai_scheduler,
-    get_scheduler,
-)
+from quant_etf_api.infra.scheduler import get_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +60,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("已禁用 API 进程内 worker（job_queue_embedded=false），请运行独立 worker 进程")
     if settings.schedule_enabled:
         get_scheduler().start()
-    if settings.ai_analysis_enabled:
-        get_ai_scheduler().start()
     # 日历预热为尽力而为：入队失败（如数据库未迁移）不阻塞启动
     try:
         # 预热交易日历缓存，防止首个请求触发慢速加载/并发崩溃
@@ -75,8 +68,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("启动预热任务入队失败，服务继续启动", exc_info=True)
     yield
     get_scheduler().stop()
-    if settings.ai_analysis_enabled:
-        get_ai_scheduler().stop()
     # 停止后台任务队列
     job_queue.stop()
 
@@ -123,8 +114,6 @@ app.include_router(queue_router.router, prefix=settings.api_prefix)
 app.include_router(backtests.router, prefix=settings.api_prefix)
 app.include_router(robustness.router, prefix=settings.api_prefix)
 app.include_router(research.router, prefix=settings.api_prefix)
-app.include_router(ai_factors.router, prefix=settings.api_prefix)
-app.include_router(keyword_tags.router, prefix=settings.api_prefix)
 app.include_router(alerts.router, prefix=settings.api_prefix)
 
 

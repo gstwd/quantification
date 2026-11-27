@@ -26,7 +26,7 @@ router = APIRouter(prefix="/data-management", tags=["data-management"])
 
 @router.get("", response_model=DataManagementOverview)
 def get_overview(db: Session = Depends(get_db)) -> DataManagementOverview:
-    """返回全部非新闻外部数据集的当前健康总览。"""
+    """返回全部受管外部数据集的当前健康总览。"""
     return DataManagementService(db).overview()
 
 

@@ -1,6 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
-import AIFactorsPage from '../pages/AIFactorsPage.vue'
 import BacktestCreatePage from '../pages/BacktestCreatePage.vue'
 import BacktestComparisonCreatePage from '../pages/BacktestComparisonCreatePage.vue'
 import BacktestComparisonDetailPage from '../pages/BacktestComparisonDetailPage.vue'
@@ -10,7 +9,6 @@ import DashboardPage from '../pages/DashboardPage.vue'
 import DataManagementPage from '../pages/DataManagementPage.vue'
 import FactorDetailPage from '../pages/FactorDetailPage.vue'
 import FactorsPage from '../pages/FactorsPage.vue'
-import KeywordTagsPage from '../pages/KeywordTagsPage.vue'
 import RunsPage from '../pages/RunsPage.vue'
 import SignalLabPage from '../pages/SignalLabPage.vue'
 import IndexDetailPage from '../pages/IndexDetailPage.vue'
@@ -40,8 +38,6 @@ const router = createRouter({
     { path: '/strategies/:strategyId', component: StrategyDetailPage, props: true },
     { path: '/lifecycle', component: LifecyclePage },
     { path: '/research', component: ResearchPage },
-    { path: '/ai-factors', component: AIFactorsPage },
-    { path: '/keyword-tags', component: KeywordTagsPage },
     { path: '/factors', component: FactorsPage },
     { path: '/factors/:factorId', component: FactorDetailPage, props: true },
     { path: '/tools/rrg-lab', component: RRGLabPage },

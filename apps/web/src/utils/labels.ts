@@ -16,7 +16,6 @@ export const RUN_TYPE_LABELS: Record<string, string> = {
   data_sync_all: '全局数据同步',
   data_manage_operation: '数据维护',
   strategy_run: '策略运行',
-  ai_analysis: 'AI 舆情分析',
   // 以下类型已下线，仅用于展示历史运行记录
   factor_computation: '因子计算（已下线）',
   industry_universe_refresh: '更新行业信息（已下线）',
@@ -39,7 +38,6 @@ export const RUN_TYPE_LABELS: Record<string, string> = {
 /** 后端支持重试的运行类型（与 api/routers/runs.py 的 _enqueue_for_run 保持一致） */
 export const RETRYABLE_RUN_TYPES: ReadonlySet<string> = new Set([
   'strategy_run',
-  'ai_analysis',
   'data_sync_all',
   'data_manage_operation',
 ])
@@ -59,7 +57,6 @@ export const RUN_STATUS_LABELS: Record<string, string> = {
 /** 后台队列任务类型 */
 export const JOB_TYPE_LABELS: Record<string, string> = {
   strategy_run: '策略运行',
-  ai_analysis: 'AI 舆情分析',
   backtest: '回测',
   comparison: '策略对比',
   data_fill: '数据补齐',

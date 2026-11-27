@@ -6,7 +6,7 @@
       "runtimeExecutable": "cmd",
       "runtimeArgs": [
         "/c",
-        "set QUANT_ETF_JOB_QUEUE_EMBEDDED=false&& set QUANT_ETF_SCHEDULE_ENABLED=false&& set QUANT_ETF_AI_ANALYSIS_ENABLED=false&& cd apps\\api && .venv\\Scripts\\python -m uvicorn quant_etf_api.main:app --port 8000"
+        "set QUANT_ETF_JOB_QUEUE_EMBEDDED=false&& set QUANT_ETF_SCHEDULE_ENABLED=false&& cd apps\\api && .venv\\Scripts\\python -m uvicorn quant_etf_api.main:app --port 8000"
       ],
       "port": 8000
     },

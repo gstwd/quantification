@@ -13,7 +13,7 @@
 - 系统研究 **A 股指数**，仅支持日频；不研究 ETF，不做个股选股、交易执行、账户管理或实盘风控。
 - 策略资产只能是用户维护、且有实际 ETF 对应物的 `benchmark_index` 指数。申万行业和个股只可作为研究及指数级因子的内部输入，不能进入 `index_codes` 或作为回测标的。
 - `quant_etf_api` 包名、环境变量和部分数据库历史名称是兼容遗留，不能据此恢复 ETF 功能。
-- 本系统只输出研究与配置结果；不得把回测或 AI 舆情描述为投资建议、实盘信号或自动交易决策。
+- 本系统只输出研究与配置结果；不得把回测描述为投资建议、实盘信号或自动交易决策。
 
 ## 冻结与变更准入
 
@@ -153,13 +153,6 @@ HTTP → api/routers → services → engine
 - 战役内接受优化会话的唯一路径：评审员 `research campaign review --verdict recommend_accept` 后，以严格模式 `optimization finish --verdict accept`（不 promote）。promote、另建策略与上线由人工执行。
 - 停止条件（试验增量、研究线预算、时长、轮数、连续否决、连续失败）由平台判定；同一时间只允许一个战役有运行中步骤。
 - 战役从运行中停止时（`campaign_auto_cleanup_enabled`）自动删除本战役回测的已结束任务记录、`candidates/<战役>/steps/` 会话日志，并瘦身战役期间回测的逐指数明细；headless 驱动器收尾时再补一次。清理失败只记日志，不影响停止。
-
-### AI 舆情模块
-
-- AI 舆情是独立展示与研究辅助功能，不是策略因子；`ai_sentiment_*`、`ai_attention_*` 和 `ai_topic_momentum` 不在因子模板注册表中，策略配置引用按未知因子拒绝。
-- 链路为新闻采集 → 情绪分析 → 标签分类 → 按标签聚合 → 可选市场综合研判。持久化表为 `news_item`、`ai_sentiment_result`、`daily_sentiment_aggregate`、`market_synthesis`。
-- AI 调度器只入队；`ai_analysis_enabled=False` 时不得启动。LLM 不可用时保留可用的采集/聚合结果，并将研判视为缺失，不能伪造成功结果。
-- `keyword_tag_config` 是关键词到资产标签的可配置映射，DB 映射优先于静态默认值。修改标签语义须同步前端说明与测试。
 
 ## 编码与测试要求
 

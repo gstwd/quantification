@@ -166,8 +166,6 @@ alembic upgrade head
 | 变量 | 说明 |
 |------|------|
 | `QUANT_ETF_TUSHARE_TOKEN` | Tushare Token；个股数据只取自 Tushare，未配置时个股同步失败，指数等数据集改用兜底来源 |
-| `QUANT_ETF_AI_ANALYSIS_ENABLED` / `QUANT_ETF_AI_SCHEDULE_TIME` | AI 舆情分析开关与调度时间；关闭时 AI 调度器不启动 |
-| `QUANT_ETF_LLM_API_KEY` / `QUANT_ETF_LLM_BASE_URL` / `QUANT_ETF_LLM_MODEL` | AI 舆情使用的 LLM 接入 |
 | `QUANT_ETF_LIFECYCLE_AUTO_REFRESH_ENABLED` | 每日同步后自动刷新 LIVE 策略健康快照 |
 | `QUANT_ETF_JOB_QUEUE_EMBEDDED` | API 进程是否内嵌后台任务 worker；设为 `false` 时只入队，需另起 `python -m quant_etf_api.worker` 消费 |
 | `QUANT_ETF_JOB_QUEUE_WORKERS` / `QUANT_ETF_JOB_QUEUE_BACKTEST_WORKERS` | 通用任务与回测任务的并发数 |

@@ -1,13 +1,15 @@
 """交易日历不可用时的 HTTP 语义。
 
 严格口径下日历不可用必须显式报错，不能返回近似日期或空数组：
-- ``GET /ai-factors/previous-trading-day`` → 503
+- ``GET /market-data/previous-trading-day`` → 503
 
 说明：原先的 ``GET /system/data-quality`` 同样返回 503，该端点已随质量口径
 统一（改由数据管理页的 ``data_health_snapshot`` 承担）而删除，相应用例一并移除。
 """
 
 from __future__ import annotations
+
+from datetime import date
 
 import pytest
 from fastapi.testclient import TestClient
@@ -38,9 +40,19 @@ class TestCalendarUnavailableHttp:
             "quant_etf_api.infra.trading_calendar.TradingCalendar.latest_trading_day",
             _raise_unavailable,
         )
-        response = client.get("/api/ai-factors/previous-trading-day")
+        response = client.get("/api/market-data/previous-trading-day")
         assert response.status_code == 503
         assert "交易日历不可用" in response.json()["detail"]
+
+    def test_previous_trading_day_returns_date(self, client: TestClient, monkeypatch) -> None:
+        """交易日历可用时返回前一交易日。"""
+        monkeypatch.setattr(
+            "quant_etf_api.infra.trading_calendar.TradingCalendar.latest_trading_day",
+            lambda *args, **kwargs: date(2026, 11, 27),
+        )
+        response = client.get("/api/market-data/previous-trading-day")
+        assert response.status_code == 200
+        assert response.json() == {"trade_date": "2026-11-27"}
 
 
 class TestQualityCaliberEndpoints:
@@ -56,3 +68,9 @@ class TestQualityCaliberEndpoints:
         paths = set(app.openapi()["paths"])
         assert "/api/data-management" in paths
         assert "/api/data-management/datasets/{dataset_key}" in paths
+
+    def test_ai_sentiment_routes_are_gone(self) -> None:
+        """AI 舆情与关键词配置路由不再注册。"""
+        paths = set(app.openapi()["paths"])
+        assert not any(path.startswith("/api/ai-factors") for path in paths)
+        assert not any(path.startswith("/api/keyword-tags") for path in paths)

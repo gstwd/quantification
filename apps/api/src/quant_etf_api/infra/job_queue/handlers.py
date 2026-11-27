@@ -44,31 +44,6 @@ def handle_strategy_run(payload: dict) -> None:
         db.close()
 
 
-def handle_ai_analysis(payload: dict) -> None:
-    """执行 AI 舆情分析完整链路（采集 → 分析 → 聚合 → 市场研判）。"""
-    from quant_etf_api.ai_factors.service import AIFactorService
-    from quant_etf_api.config.settings import get_settings
-    from quant_etf_api.infra.ai.client import AIClient
-    from quant_etf_api.infra.db.base import SessionLocal
-    from quant_etf_api.services.run_service import RunService
-
-    run_id = payload.get("run_id") or ""
-    db = SessionLocal()
-    try:
-        RunService(db).mark_running(run_id)
-        settings = get_settings()
-        client = AIClient.from_settings(settings)
-        service = AIFactorService(db, client)
-        stats = service.run_full_pipeline(target_date=today_cn())
-        RunService(db).mark_success(run_id, metrics=stats)
-    except Exception as e:
-        logger.exception("AI 分析任务异常: run_id=%s", run_id)
-        RunService(db).mark_failed(run_id, f"AI 分析异常: {type(e).__name__}: {e}")
-        raise
-    finally:
-        db.close()
-
-
 def handle_backtest(payload: dict) -> None:
     """执行单个回测；若属于对比回测，完成后触发对比汇总。"""
     from quant_etf_api.infra.db.base import SessionLocal
@@ -361,7 +336,6 @@ def handle_warm_calendar(payload: dict) -> None:
 
 JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
     "strategy_run": handle_strategy_run,
-    "ai_analysis": handle_ai_analysis,
     "backtest": handle_backtest,
     "comparison": handle_comparison,
     "data_fill": handle_data_fill,
@@ -375,7 +349,7 @@ JOB_HANDLERS: dict[str, Callable[[dict], None]] = {
 def abandon_run(payload: dict, reason: str) -> None:
     """把被回收的异常任务对应的运行记录（research_run）标记为失败。
 
-    策略运行、AI 分析、全局同步与数据维护任务都带 run_id；任务被僵尸扫描回收后
+    策略运行、全局同步与数据维护任务都带 run_id；任务被僵尸扫描回收后
     若不同步运行记录，运行记录页会永远显示执行中并持续轮询。已处于终态的记录不改写。
 
     Args:
@@ -406,7 +380,6 @@ JOB_ABANDON_HANDLERS: dict[str, Callable[[dict, str], None]] = {
     "backtest": abandon_backtest,
     "comparison": abandon_comparison,
     "strategy_run": abandon_run,
-    "ai_analysis": abandon_run,
     "data_sync_all": abandon_run,
     "data_manage_operation": abandon_run,
 }
