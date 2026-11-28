@@ -1911,3 +1911,259 @@ export interface ResearchCandidateDetail extends ResearchCandidate {
   missing_backtest_ids: string[]
   review_reason: string | null
 }
+
+// =============================================================================
+// 每日量化研究简报
+// =============================================================================
+
+/** 新闻与数据的交叉核验状态。 */
+export type DailyReportVerificationStatus = 'verified' | 'partial' | 'unverified' | 'contradicted'
+
+/** 日报结论的证据支持程度。 */
+export type DailyReportClaimStatus = 'supported' | 'partial' | 'unsupported' | 'conflicted'
+
+/** 消息或数据对市场的影响方向。 */
+export type DailyReportImpact = 'bullish' | 'bearish' | 'mixed' | 'neutral'
+
+/** 消息影响的时间范围。 */
+export type DailyReportImpactHorizon = 'immediate' | 'short' | 'medium'
+
+/** 日报中的单个指数快照。 */
+export interface DailyReportIndexSnapshot {
+  code: string
+  name: string
+  close: number
+  change_pct: number
+  /** 最近五个交易日走势，仅用于简报内微型趋势线。 */
+  trend: number[]
+}
+
+/** 市场广度摘要。 */
+export interface DailyReportMarketBreadth {
+  total: number
+  advances: number
+  unchanged: number
+  declines: number
+  advance_ratio_pct: number
+  median_change_pct: number
+  limit_up: number
+  limit_down: number
+}
+
+/** 当日市场快照。 */
+export interface DailyReportMarketSnapshot {
+  trade_date: string
+  indices: DailyReportIndexSnapshot[]
+  turnover_billion: number
+  turnover_vs_20d_pct: number
+  main_net_inflow_billion: number
+  breadth: DailyReportMarketBreadth
+}
+
+/** 连续交易日中的一行市场状态。 */
+export interface DailyReportTimelinePoint {
+  trade_date: string
+  label: string
+  advance_ratio_pct: number
+  turnover_billion: number
+  csi300_pct: number
+  csi1000_pct: number
+  /** 当日情绪温度，0-100，基于过去 252 个交易日分位。 */
+  sentiment_score: number
+}
+
+/** 当日资金与情绪指标。 */
+export interface DailyReportMarketSignal {
+  key: string
+  label: string
+  value: string
+  delta: string
+  note: string
+  tone: 'positive' | 'negative' | 'neutral'
+  impact: DailyReportImpact
+  impact_strength: 1 | 2 | 3
+  affected_sectors: string[]
+}
+
+/** 单个情绪分项及其历史分位。 */
+export interface DailyReportSentimentComponent {
+  key: string
+  label: string
+  display_value: string
+  percentile: number
+  weight_pct: number
+  note: string
+}
+
+/** 当日市场情绪温度。 */
+export interface DailyReportSentiment {
+  score: number
+  state: 'freezing' | 'cold' | 'neutral' | 'hot' | 'boiling'
+  state_label: string
+  summary: string
+  components: DailyReportSentimentComponent[]
+}
+
+/** 单日或多日价格异动。 */
+export interface DailyReportAnomaly {
+  code: string
+  name: string
+  asset_type: 'stock' | 'index'
+  industry: string | null
+  themes: string[]
+  /** 用于计算相对强弱的行业、主题或宽基基准。 */
+  reference_name: string
+  reference_change_pct: number
+  /** 个股相对基准的单日超额收益，单位百分点。 */
+  relative_pct: number
+  change_1d_pct: number
+  change_5d_pct: number
+  volume_ratio: number | null
+  turnover_rate_pct: number | null
+  anomaly_label: string
+  analysis: string
+}
+
+/** 行业或主题的涨跌快照。 */
+export interface DailyReportIndustryMove {
+  code: string
+  name: string
+  change_pct: number
+  /** 前五个交易日累计涨跌幅；跨口径不可直接比较时为空。 */
+  five_day_change_pct: number
+  basis: 'industry' | 'theme_index'
+}
+
+/** 市场风格相对强弱。 */
+export interface DailyReportStylePair {
+  key: string
+  left_label: string
+  right_label: string
+  left_return_pct: number
+  right_return_pct: number
+  spread_pct: number
+  leader: 'left' | 'right'
+}
+
+/** 宏观数据的当前值及发布节奏。 */
+export interface DailyReportMacroItem {
+  key: string
+  label: string
+  value: string
+  previous_value: string
+  delta: string
+  period: string
+  tone: 'positive' | 'negative' | 'neutral'
+  impact: DailyReportImpact
+  impact_strength: 1 | 2 | 3
+  affected_sectors: string[]
+}
+
+/** 下一交易日的验证条件，不构成方向预测。 */
+export interface DailyReportWatchItem {
+  key: string
+  label: string
+  current_state: string
+  confirm_condition: string
+  invalidate_condition: string
+  affected_sectors: string[]
+}
+
+/** 已知日期或明确发布窗口的市场日程。 */
+export interface DailyReportCalendarItem {
+  date: string
+  timing: string
+  category: string
+  title: string
+  implication: string
+  source_url: string | null
+}
+
+/** 日报引用的新闻事件。 */
+export interface DailyReportNewsItem {
+  id: string
+  category: string
+  title: string
+  publisher: string
+  source_tier: string
+  published_at: string
+  url: string
+  verification: DailyReportVerificationStatus
+  verification_note: string
+  excerpt: string
+  impact: DailyReportImpact
+  impact_strength: 1 | 2 | 3
+  impact_horizon: DailyReportImpactHorizon
+  affected_sectors: string[]
+}
+
+/** 一条市场结论与数据、新闻证据的交叉核验记录。 */
+export interface DailyReportClaimCheck {
+  claim: string
+  status: DailyReportClaimStatus
+  data_evidence: string
+  news_evidence: string
+  assessment: string
+}
+
+/** 研究解读中的论点。 */
+export interface DailyReportInsightPoint {
+  title: string
+  detail: string
+  evidence_ids: string[]
+}
+
+/** 可供 CLI、数据库、API 和页面复用的日报内容契约。 */
+export interface DailyReportContent {
+  schema_version: 'daily_report_v1'
+  report_date: string
+  next_trade_date: string
+  readiness_status: 'ready' | 'partial'
+  title: string
+  subtitle: string
+  generated_at: string
+  data_cutoff: string
+  executive_summary: string
+  market_regime: string
+  market_snapshot: DailyReportMarketSnapshot
+  timeline: DailyReportTimelinePoint[]
+  sentiment: DailyReportSentiment
+  market_signals: DailyReportMarketSignal[]
+  stock_anomalies: DailyReportAnomaly[]
+  index_anomalies: DailyReportAnomaly[]
+  watch_items: DailyReportWatchItem[]
+  calendar_items: DailyReportCalendarItem[]
+  structure_basis: string
+  industry_leaders: DailyReportIndustryMove[]
+  industry_laggards: DailyReportIndustryMove[]
+  style_pairs: DailyReportStylePair[]
+  macro_items: DailyReportMacroItem[]
+  news_items: DailyReportNewsItem[]
+  claim_checks: DailyReportClaimCheck[]
+  interpretation: DailyReportInsightPoint[]
+  risks: string[]
+  /** 仅记录会改变当日解读边界的真实数据问题。 */
+  warnings: string[]
+}
+
+/** 已发布日报摘要。 */
+export interface DailyReportSummary {
+  report_id: string
+  report_date: string
+  revision_no: number
+  status: 'published' | 'superseded'
+  title: string
+  market_regime: string
+  readiness_status: 'ready' | 'partial'
+  published_at: string
+}
+
+/** 已发布日报详情。 */
+export interface DailyReportDetail extends DailyReportSummary {
+  content: DailyReportContent
+}
+
+/** 日报列表响应。 */
+export interface DailyReportListResponse {
+  items: DailyReportSummary[]
+}

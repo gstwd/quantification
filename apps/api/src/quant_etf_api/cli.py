@@ -13,6 +13,8 @@ from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, NoReturn
 
+from pydantic import ValidationError
+
 from quant_etf_api.config.logging_config import setup_logging
 from quant_etf_api.config.settings import get_settings
 from quant_etf_api.domain.common.enums import (
@@ -25,6 +27,7 @@ from quant_etf_api.infra.db.base import SessionLocal
 from quant_etf_api.infra.db.models.core import IndexValuationModel
 from quant_etf_api.infra.time import today_cn
 from quant_etf_api.schemas.backtest import BacktestCreateRequest
+from quant_etf_api.schemas.daily_report import DailyReportContent
 from quant_etf_api.domain.research.campaign import DEFAULT_MAX_DIAGNOSTICS
 from quant_etf_api.domain.research.ledger import ALL_STATUSES as HYPOTHESIS_STATUSES
 from quant_etf_api.domain.research.ledger import CLOSED_STATUSES as HYPOTHESIS_VERDICTS
@@ -35,6 +38,7 @@ from quant_etf_api.services.backtest_reconcile_service import BacktestReconcileS
 from quant_etf_api.services.backtest_service import BacktestService, IndexDetailPrunedError
 from quant_etf_api.services.dsr_calibration_service import DsrCalibrationService
 from quant_etf_api.services.dsr_calibration_service import render_markdown as render_dsr_markdown
+from quant_etf_api.services.daily_report_service import DailyReportBlockedError, DailyReportService
 from quant_etf_api.services.factor_admin_service import FactorAdminService
 from quant_etf_api.services.optimization_service import OptimizationService
 from quant_etf_api.services.research_batch_service import ResearchBatchService
@@ -923,6 +927,29 @@ def _build_queue_group(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="启动前把卡在 running 的任务恢复为失败（进程重启场景）",
     )
+
+
+def _build_daily_report_group(subparsers: argparse._SubParsersAction) -> None:
+    """注册日报快照、校验、发布与查询命令。"""
+    group = subparsers.add_parser("daily-report", help="每日量化研究简报")
+    sub = group.add_subparsers(dest="subcommand", required=True)
+
+    p = sub.add_parser("snapshot", help="只读生成日报事实快照")
+    p.add_argument("--date", type=date.fromisoformat, help="交易日，缺省取最近已完成交易日")
+    p.add_argument("--output", help="输出 JSON 文件；缺省打印到标准输出")
+
+    p = sub.add_parser("validate", help="校验完整日报内容与事实快照一致性")
+    p.add_argument("--file", required=True, help="完整日报 JSON")
+
+    p = sub.add_parser("publish", help="校验后直接发布日报新版本")
+    p.add_argument("--file", required=True, help="完整日报 JSON")
+
+    p = sub.add_parser("list", help="列出已发布日报")
+    p.add_argument("--limit", type=int, default=30)
+
+    p = sub.add_parser("show", help="查看已发布日报")
+    p.add_argument("--date", type=date.fromisoformat, required=True)
+    p.add_argument("--revision", type=int)
 
 
 def _add_hypothesis_id_flag(parser: argparse.ArgumentParser) -> None:
@@ -2725,6 +2752,55 @@ def _run_queue(args: argparse.Namespace) -> None:
     _emit({"total": len(items), "items": items}, not args.no_json)
 
 
+def _run_daily_report(args: argparse.Namespace) -> None:
+    """执行日报快照、校验、发布与查询子命令。"""
+    db = SessionLocal()
+    try:
+        service = DailyReportService(db)
+        if args.subcommand == "snapshot":
+            snapshot = service.build_snapshot(args.date)
+            payload = snapshot.model_dump(mode="json")
+            if args.output:
+                with open(args.output, "w", encoding="utf-8") as file:
+                    json.dump(payload, file, ensure_ascii=False, indent=2)
+                print(f"日报快照已写入: {args.output}")
+            else:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return
+        if args.subcommand == "validate":
+            content = DailyReportContent.model_validate(_read_json_file(args.file))
+            facts = service.validate_content(content)
+            _emit(
+                {
+                    "valid": True,
+                    "report_date": content.report_date.isoformat(),
+                    "readiness_status": facts.readiness_status,
+                    "warnings": facts.warnings,
+                },
+                True,
+            )
+            return
+        if args.subcommand == "publish":
+            content = DailyReportContent.model_validate(_read_json_file(args.file))
+            detail = service.publish(content)
+            _emit(detail.model_dump(mode="json"), True)
+            return
+        if args.subcommand == "list":
+            _emit({"items": service.list_reports_cli(args.limit)}, True)
+            return
+        if args.subcommand == "show":
+            detail = service.get_report_cli(args.date, args.revision)
+            if detail is None:
+                _fail(f"{args.date} 没有已发布日报")
+            _emit(detail, True)
+            return
+        raise ValueError(f"未知的 daily-report 子命令: {args.subcommand}")
+    except (DailyReportBlockedError, ValidationError) as exc:
+        _fail(str(exc))
+    finally:
+        db.close()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """构建完整的 CLI 参数解析器（供 main 与单测复用）。"""
     parser = argparse.ArgumentParser(description="量化研究平台 CLI 工具")
@@ -2742,6 +2818,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _build_research_group(subparsers)
     _build_optimization_group(subparsers)
     _build_queue_group(subparsers)
+    _build_daily_report_group(subparsers)
     _build_industry_group(subparsers)
     _build_index_group(subparsers)
     _build_stock_group(subparsers)
@@ -2789,6 +2866,8 @@ def _dispatch(args: argparse.Namespace) -> None:
         _run_optimization(args)
     elif args.command == "queue":
         _run_queue(args)
+    elif args.command == "daily-report":
+        _run_daily_report(args)
     elif args.command == "industry":
         _run_industry(args)
     elif args.command == "index":

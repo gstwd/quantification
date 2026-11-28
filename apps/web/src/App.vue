@@ -1,5 +1,5 @@
 <template>
-  <div class="app-shell">
+  <div class="app-shell" :class="{ 'report-mobile-shell': route.path === '/daily-report' }">
     <aside class="sidebar">
       <div class="logo">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -8,11 +8,15 @@
         </svg>
         <span class="logo-text">Quant</span>
       </div>
-      <AlertBell />
+      <AlertBell class="alert-slot" />
       <nav>
         <RouterLink to="/" class="nav-item">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
           总览
+        </RouterLink>
+        <RouterLink to="/daily-report" class="nav-item">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h11l3 3v13H5z"/><path d="M16 4v3h3"/><path d="M8 11h8M8 15h8M8 7h3"/></svg>
+          每日简报
         </RouterLink>
         <RouterLink to="/strategies" class="nav-item" :class="{ 'nav-active': isUnder('/strategies') }">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
@@ -172,5 +176,68 @@ nav {
   padding: 28px 32px;
   background: var(--bg);
   min-height: 100vh;
+}
+
+@media (max-width: 820px) {
+  .app-shell.report-mobile-shell {
+    display: block;
+  }
+
+  .report-mobile-shell .sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    height: auto;
+    padding: 8px 12px;
+    overflow-x: auto;
+    flex-direction: row;
+    align-items: center;
+    scrollbar-width: none;
+  }
+
+  .report-mobile-shell .sidebar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .report-mobile-shell .logo {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 0 12px 0 2px;
+    border: 0;
+  }
+
+  .report-mobile-shell .logo-text,
+  .report-mobile-shell .alert-slot {
+    display: none;
+  }
+
+  .report-mobile-shell nav {
+    flex-direction: row;
+    gap: 4px;
+    padding: 0;
+  }
+
+  .report-mobile-shell .nav-item {
+    flex: 0 0 auto;
+    padding: 7px 10px;
+    border-bottom: 2px solid transparent;
+    border-left: 0;
+    font-size: 12px;
+  }
+
+  .report-mobile-shell .nav-item-sub {
+    padding-left: 10px;
+    font-size: 12px;
+  }
+
+  .report-mobile-shell .nav-item.router-link-active,
+  .report-mobile-shell .nav-item.nav-active {
+    border-bottom-color: var(--accent);
+    border-left-color: transparent;
+  }
+
+  .report-mobile-shell .content {
+    padding: 14px 12px 28px;
+  }
 }
 </style>

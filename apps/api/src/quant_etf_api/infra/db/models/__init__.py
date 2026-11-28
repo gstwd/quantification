@@ -25,6 +25,7 @@ from .industry import (
     IndustryUniverseModel,
     StockDailyCloseModel,
 )
+from .daily_report import MarketDailyReportModel
 from .stock import StockDailyBasicModel, StockMoneyflowModel, StockUniverseModel
 
 __all__ = [
@@ -41,6 +42,7 @@ __all__ = [
     "IndexValuationModel",
     "MacroIndicatorModel",
     "MarketIndicatorModel",
+    "MarketDailyReportModel",
     "SystemAlertModel",
     "ResearchRunItemModel",
     "ResearchRunModel",

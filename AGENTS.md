@@ -79,6 +79,9 @@ python -m quant_etf_api.cli strategy list
 python -m quant_etf_api.cli backtest run --strategy <id>
 python -m quant_etf_api.cli backtest verify <backtest_id>
 python -m quant_etf_api.cli robustness scan --strategy <id> --preset quick
+python -m quant_etf_api.cli daily-report snapshot --date <交易日> --output <文件>
+python -m quant_etf_api.cli daily-report validate --file <文件>
+python -m quant_etf_api.cli daily-report publish --file <文件>
 ```
 
 使用 CLI 或 API 的完整参数和默认值前先运行 `--help` 或读取当前 schema；不要凭文档记忆猜参数。
@@ -153,6 +156,14 @@ HTTP → api/routers → services → engine
 - 战役内接受优化会话的唯一路径：评审员 `research campaign review --verdict recommend_accept` 后，以严格模式 `optimization finish --verdict accept`（不 promote）。promote、另建策略与上线由人工执行。
 - 停止条件（试验增量、研究线预算、时长、轮数、连续否决、连续失败）由平台判定；同一时间只允许一个战役有运行中步骤。
 - 战役从运行中停止时（`campaign_auto_cleanup_enabled`）自动删除本战役回测的已结束任务记录、`candidates/<战役>/steps/` 会话日志，并瘦身战役期间回测的逐指数明细；headless 驱动器收尾时再补一次。清理失败只记日志，不影响停止。
+
+### 每日量化研究简报
+
+- 日报由 Codex skill `.agents/skills/market-daily-report/` 手动生成。skill 先运行只读 `daily-report snapshot` 获取数据库事实，再检索公开新闻、填写影响标签和交叉核验，最后运行 `daily-report validate|publish`。
+- `market_daily_report` 保存不可变修订；同交易日直接发布新修订时，旧 published 版本转为 superseded。`content_json` 使用 Pydantic 严格校验，事实块必须与发布时的数据库快照一致。
+- 页面 `/daily-report` 和 API `/api/daily-reports` 只读已发布版本，不触发新闻抓取、数据同步、生成任务或重算历史事实。
+- `quant-postgres` MCP 只供开发审计和临时研究，不是日报运行依赖；不恢复已下线的新闻库、舆情分析、独立调度器或后台任务。
+- 日报是研究信息，不生成交易建议、预测概率或自动交易信号；收盘后新闻只能进入下一交易日观察。
 
 ## 编码与测试要求
 

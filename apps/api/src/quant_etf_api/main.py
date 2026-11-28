@@ -13,6 +13,7 @@ from quant_etf_api.domain.common.trading_calendar import TradingCalendarUnavaila
 from quant_etf_api.api.routers import (
     alerts,
     backtests,
+    daily_reports,
     data_management,
     factors,
     health,
@@ -115,6 +116,7 @@ app.include_router(backtests.router, prefix=settings.api_prefix)
 app.include_router(robustness.router, prefix=settings.api_prefix)
 app.include_router(research.router, prefix=settings.api_prefix)
 app.include_router(alerts.router, prefix=settings.api_prefix)
+app.include_router(daily_reports.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

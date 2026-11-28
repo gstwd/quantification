@@ -14,6 +14,7 @@
 - 生命周期监控：LIVE/SUSPENDED/RETIRED 仅人工变更；每日同步后自动刷新 LIVE 策略健康快照，等级恶化写站内告警；不自动调参或自动升级策略。
 - 组合与风控扩展：风险平价 / 波动率倒数分配、波动率目标与止损叠加层、排名缓冲带、偏离阈值调仓、多策略持仓级组合；回测收益归因与混合基准。
 - 数据管理：受管外部数据通过统一数据管理入口、持久化任务队列和 `data_health_snapshot` 维护。
+- 每日量化研究简报：Codex skill 从数据库生成事实快照、交叉核验公开新闻并通过 CLI 发布不可变版本；页面支持历史日期切换。
 - 研究数据瘦身：只删除回测逐指数明细（策略详情页、`backtest slim`、战役结束自动执行），台账、会话、批次与 N 不受影响；每日同步后清理过期的已结束任务与已读告警。
 
 ## 架构
@@ -48,6 +49,7 @@ T+1 收盘模式先成交昨日指令，再以今日成交后的持仓合成下�
 | 范围 | 页面与 API |
 | --- | --- |
 | 总览 | `/`；站内告警 API `/api/alerts`（侧边栏铃铛） |
+| 每日简报 | 页面 `/daily-report`；只读 API `/api/daily-reports`；生成入口为 Codex skill `market-daily-report` |
 | 数据维护 | `/data-management`、`/indexes`、`/industries`、`/stocks`、`/macro` |
 | 策略与因子 | `/strategies`、`/factors`、`/lifecycle`、`/tools/rrg-lab`、`/tools/signal-lab` |
 | 回测与研究 | 页面 `/backtests`、`/research`（研究看板：台账、战役、候选）；API `/api/robustness`、`/api/research/*`、`/api/queue`；CLI 提供批量研究和优化命令 |
@@ -102,6 +104,9 @@ python -m quant_etf_api.cli optimization start --strategy <id> --candidate-file 
 python -m quant_etf_api.cli research ledger --strategy <id>
 python -m quant_etf_api.cli research campaign start --strategy <id> --objective "..." --max-trials 30
 python -m quant_etf_api.cli research campaign run <campaign_id>
+python -m quant_etf_api.cli daily-report snapshot --date <交易日> --output daily-report-snapshot.json
+python -m quant_etf_api.cli daily-report validate --file daily-report.json
+python -m quant_etf_api.cli daily-report publish --file daily-report.json
 ```
 
 默认回测和优化使用研究期边界；如需使用 2026 年起的数据，须明确以 validation 或 monitor 用途运行，系统会留痕。
